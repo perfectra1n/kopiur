@@ -250,7 +250,7 @@ impl RepositoryConnect {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetRef {
-    /// The CR's `apiVersion` (e.g. `kopiur.dev/v1alpha1`).
+    /// The CR's `apiVersion` (e.g. `kopiur.home-operations.com/v1alpha1`).
     pub api_version: String,
     /// The CR kind (`Backup` or `Restore`).
     pub kind: String,
@@ -341,7 +341,7 @@ mod tests {
 
     fn sample_target() -> TargetRef {
         TargetRef {
-            api_version: "kopiur.dev/v1alpha1".into(),
+            api_version: "kopiur.home-operations.com/v1alpha1".into(),
             kind: "Backup".into(),
             name: "mydb-20260601".into(),
             namespace: "prod".into(),
@@ -459,7 +459,7 @@ mod tests {
             "operation": {"snapshotDelete": {"snapshotId": "x"}},
             "identity": {"username": "u", "hostname": "h", "sourcePath": "/p"},
             "repository": {"filesystem": {"path": "/repo"}},
-            "targetRef": {"apiVersion": "kopiur.dev/v1alpha1", "kind": "Backup", "name": "n", "namespace": "ns"}
+            "targetRef": {"apiVersion": "kopiur.home-operations.com/v1alpha1", "kind": "Backup", "name": "n", "namespace": "ns"}
         }"#;
         let spec: MoverWorkSpec = serde_json::from_str(json).unwrap();
         assert_eq!(spec.version, 1);

@@ -21,7 +21,7 @@ stringData:
   # Repository encryption password (kopia repo password).
   KOPIA_PASSWORD: "choose-something-long-and-random"
 ---
-apiVersion: kopiur.dev/v1alpha1
+apiVersion: kopiur.home-operations.com/v1alpha1
 kind: Repository
 metadata:
   name: nas-primary
@@ -43,7 +43,7 @@ spec:
   create:
     enabled: true
 ---
-apiVersion: kopiur.dev/v1alpha1
+apiVersion: kopiur.home-operations.com/v1alpha1
 kind: BackupConfig
 metadata:
   name: postgres-data
@@ -61,7 +61,7 @@ spec:
     keepDaily: 14
     keepWeekly: 4
 ---
-apiVersion: kopiur.dev/v1alpha1
+apiVersion: kopiur.home-operations.com/v1alpha1
 kind: BackupSchedule
 metadata:
   name: postgres-data-nightly

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// (webhook-enforced — the type system cannot express that requirement here).
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[kube(
-    group = "kopiur.dev",
+    group = "kopiur.home-operations.com",
     version = "v1alpha1",
     kind = "ClusterRepository",
     status = "ClusterRepositoryStatus",
@@ -123,7 +123,7 @@ mod tests {
     fn cluster_repository_crd_metadata_is_correct() {
         // `crd()` exercises schema generation; mis-encoded enums panic here.
         let crd = ClusterRepository::crd();
-        assert_eq!(crd.spec.group, "kopiur.dev");
+        assert_eq!(crd.spec.group, "kopiur.home-operations.com");
         assert_eq!(crd.spec.names.kind, "ClusterRepository");
         // Cluster-scoped: this is the load-bearing assertion vs. namespaced CRDs.
         assert_eq!(crd.spec.scope, "Cluster");
@@ -189,12 +189,13 @@ catalog:
 
     #[test]
     fn allowed_namespaces_selector_variant() {
-        let v: AllowedNamespaces =
-            from_yaml("selector:\n  matchLabels: { kopiur.dev/tier: enterprise }\n");
+        let v: AllowedNamespaces = from_yaml(
+            "selector:\n  matchLabels: { kopiur.home-operations.com/tier: enterprise }\n",
+        );
         assert_eq!(v.kind_str(), "Selector");
         let json = serde_json::to_value(&v).unwrap();
         assert_eq!(
-            json["selector"]["matchLabels"]["kopiur.dev/tier"],
+            json["selector"]["matchLabels"]["kopiur.home-operations.com/tier"],
             "enterprise"
         );
     }

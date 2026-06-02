@@ -11,7 +11,7 @@ metadata:
     cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "kopiur.webhook.fullname" . }}
   {{- end }}
 webhooks:
-  - name: validate.kopiur.dev
+  - name: validate.kopiur.home-operations.com
     admissionReviewVersions: ["v1"]
     sideEffects: None
     failurePolicy: {{ .Values.webhook.failurePolicy }}
@@ -26,7 +26,7 @@ webhooks:
         path: /admission
         port: 443
     rules:
-      - apiGroups: ["kopiur.dev"]
+      - apiGroups: ["kopiur.home-operations.com"]
         apiVersions: ["v1alpha1"]
         operations: ["CREATE", "UPDATE"]
         resources:

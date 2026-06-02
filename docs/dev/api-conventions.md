@@ -10,7 +10,7 @@ for *what* the fields are; this file is *how* to encode them in Rust.
 ```rust
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[kube(
-    group = "kopiur.dev",
+    group = "kopiur.home-operations.com",
     version = "v1alpha1",
     kind = "BackupConfig",
     namespaced,                       // OMIT this line for ClusterRepository (cluster-scoped)

@@ -4,7 +4,7 @@
 //! drive reconcile helpers or POST admission reviews directly), these tests
 //! exercise the **fully deployed operator**: the controller + mover images are
 //! built, loaded into an ephemeral `kind` cluster, and installed via the Helm
-//! chart by `scripts/with-e2e.sh`. The tests then create real `kopiur.dev` CRs
+//! chart by `scripts/with-e2e.sh`. The tests then create real `kopiur.home-operations.com` CRs
 //! and assert on the cluster state the operator produces — real mover Jobs, real
 //! kopia snapshots, real restored bytes.
 //!

@@ -2,9 +2,9 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: restores.kopiur.dev
+  name: restores.kopiur.home-operations.com
 spec:
-  group: kopiur.dev
+  group: kopiur.home-operations.com
   names:
     categories:
     - kopiur

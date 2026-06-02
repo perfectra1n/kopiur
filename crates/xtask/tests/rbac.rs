@@ -49,11 +49,11 @@ fn clusterrole_parses_and_grants_expected_rules() {
     let rules = clusterrole.rules.expect("ClusterRole must have rules");
 
     assert!(
-        rule_grants(&rules, "kopiur.dev", "backups"),
-        "must grant backups under kopiur.dev"
+        rule_grants(&rules, "kopiur.home-operations.com", "backups"),
+        "must grant backups under kopiur.home-operations.com"
     );
     assert!(
-        rule_grants(&rules, "kopiur.dev", "clusterrepositories"),
+        rule_grants(&rules, "kopiur.home-operations.com", "clusterrepositories"),
         "cluster role must include cluster-scoped clusterrepositories"
     );
     assert!(
@@ -86,11 +86,11 @@ fn namespaced_role_parses_and_omits_cluster_scoped_bits() {
     let rules = role.rules.expect("Role must have rules");
 
     // Same core grants...
-    assert!(rule_grants(&rules, "kopiur.dev", "backups"));
+    assert!(rule_grants(&rules, "kopiur.home-operations.com", "backups"));
     assert!(rule_grants(&rules, "batch", "jobs"));
     // ...but cluster-scoped bits are dropped in namespaced mode.
     assert!(
-        !rule_grants(&rules, "kopiur.dev", "clusterrepositories"),
+        !rule_grants(&rules, "kopiur.home-operations.com", "clusterrepositories"),
         "namespaced role must NOT include cluster-scoped clusterrepositories"
     );
     assert!(

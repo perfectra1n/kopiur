@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// in-flight or completed runs. ADR §3.5.
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[kube(
-    group = "kopiur.dev",
+    group = "kopiur.home-operations.com",
     version = "v1alpha1",
     kind = "BackupSchedule",
     namespaced,
@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn backup_schedule_crd_metadata_is_correct() {
         let crd = BackupSchedule::crd();
-        assert_eq!(crd.spec.group, "kopiur.dev");
+        assert_eq!(crd.spec.group, "kopiur.home-operations.com");
         assert_eq!(crd.spec.names.kind, "BackupSchedule");
         assert_eq!(crd.spec.scope, "Namespaced");
         assert_eq!(crd.spec.versions[0].name, "v1alpha1");

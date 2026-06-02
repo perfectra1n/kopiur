@@ -5,14 +5,14 @@
 #
 #   # list candidate snapshots for a config, newest last:
 #   kubectl get backup -n billing \
-#     -l kopiur.dev/backup-config=postgres-data \
+#     -l kopiur.home-operations.com/backup-config=postgres-data \
 #     --sort-by=.status.timing.startTime
 #
 # RestoreSource is externally-tagged: `source: { backupRef: {...} }`.
 # RestoreTarget is externally-tagged: `target: { pvc: {...} }` (operator creates
 # the PVC) or `target: { pvcRef: {...} }` (write into an existing PVC).
 ---
-apiVersion: kopiur.dev/v1alpha1
+apiVersion: kopiur.home-operations.com/v1alpha1
 kind: Restore
 metadata:
   name: postgres-restore-yesterday

@@ -53,7 +53,7 @@ imagePullSecrets: []
 # Install scope & CRDs
 # =============================================================================
 
-# -- Install the 7 kopiur.dev CRDs as part of this release.
+# -- Install the 7 kopiur.home-operations.com CRDs as part of this release.
 # When true the CRDs are rendered under templates/ (guarded by this flag) so
 # `helm uninstall` removes them and `installCRDs: false` actually omits them.
 # Trade-off: templated CRDs are subject to Helm's normal apply ordering and
@@ -64,10 +64,10 @@ installCRDs: true
 
 # -- "namespaced" (default) or "cluster".
 #   namespaced — RBAC is a namespace-scoped Role/RoleBinding. The operator
-#     manages kopiur.dev resources only in its own namespace. ClusterRepository
+#     manages kopiur.home-operations.com resources only in its own namespace. ClusterRepository
 #     is NOT reconciled (it is a cluster-scoped kind and out of a Role's reach).
 #   cluster    — RBAC is a ClusterRole/ClusterRoleBinding. The operator manages
-#     kopiur.dev resources cluster-wide AND reconciles ClusterRepository.
+#     kopiur.home-operations.com resources cluster-wide AND reconciles ClusterRepository.
 # Per ADR §4.11 namespaced is the safer default; cluster scope is an explicit
 # opt-in for platform teams running a shared backup tier.
 installScope: namespaced

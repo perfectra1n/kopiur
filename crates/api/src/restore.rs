@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// consumed by a PVC's `spec.dataSourceRef`. ADR §3.6/§4.7.
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[kube(
-    group = "kopiur.dev",
+    group = "kopiur.home-operations.com",
     version = "v1alpha1",
     kind = "Restore",
     namespaced,
@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn restore_crd_metadata_is_correct() {
         let crd = Restore::crd();
-        assert_eq!(crd.spec.group, "kopiur.dev");
+        assert_eq!(crd.spec.group, "kopiur.home-operations.com");
         assert_eq!(crd.spec.names.kind, "Restore");
         assert_eq!(crd.spec.scope, "Namespaced");
         assert_eq!(crd.spec.versions[0].name, "v1alpha1");

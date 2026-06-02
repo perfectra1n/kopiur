@@ -22,7 +22,7 @@ stringData:
   AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
   KOPIA_PASSWORD: "choose-something-long-and-random"
 ---
-apiVersion: kopiur.dev/v1alpha1
+apiVersion: kopiur.home-operations.com/v1alpha1
 kind: ClusterRepository
 metadata:
   name: shared-primary
@@ -54,7 +54,7 @@ spec:
     usernameTemplate: "{{ .Namespace }}-{{ .ConfigName }}"
 ---
 # In the tenant namespace — no need to know the secret name or platform details.
-apiVersion: kopiur.dev/v1alpha1
+apiVersion: kopiur.home-operations.com/v1alpha1
 kind: BackupConfig
 metadata:
   name: postgres-data

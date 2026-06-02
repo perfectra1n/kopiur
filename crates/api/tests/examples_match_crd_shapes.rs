@@ -5,7 +5,7 @@
 //! of the enum `PvcName`), deserialization into the typed struct fails and this
 //! test catches it — without ever touching a cluster.
 //!
-//! Each document is routed by `apiVersion`/`kind`; `kopiur.dev/v1alpha1` docs have
+//! Each document is routed by `apiVersion`/`kind`; `kopiur.home-operations.com/v1alpha1` docs have
 //! their `.spec` deserialized into the corresponding `*Spec` type via the same
 //! YAML -> serde_json::Value -> typed path the cluster uses (see
 //! `crates/api/src/lib.rs::testutil` for why serde_yaml-direct is wrong here).
@@ -26,7 +26,7 @@ fn examples_dir() -> PathBuf {
         .expect("deploy/examples must exist")
 }
 
-/// Deserialize the `.spec` of a kopiur.dev document into a typed spec, asserting it
+/// Deserialize the `.spec` of a kopiur.home-operations.com document into a typed spec, asserting it
 /// matches the real CRD field surface.
 fn check_spec<T: DeserializeOwned>(kind: &str, doc: &serde_json::Value, file: &str) {
     let spec = doc
@@ -65,7 +65,7 @@ fn all_examples_match_crd_field_shapes() {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let kind = json.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-            if api != "kopiur.dev/v1alpha1" {
+            if api != "kopiur.home-operations.com/v1alpha1" {
                 // Secrets / PVCs are core types; not our concern here.
                 continue;
             }
@@ -78,13 +78,13 @@ fn all_examples_match_crd_field_shapes() {
                 "BackupSchedule" => check_spec::<BackupScheduleSpec>(kind, &json, &file),
                 "Restore" => check_spec::<RestoreSpec>(kind, &json, &file),
                 "Maintenance" => check_spec::<MaintenanceSpec>(kind, &json, &file),
-                other => panic!("{file}: unexpected kopiur.dev kind {other}"),
+                other => panic!("{file}: unexpected kopiur.home-operations.com kind {other}"),
             }
         }
     }
     // Sanity: across the 8 files we should have validated a healthy number of CRs.
     assert!(
         kopia_docs >= 12,
-        "expected to validate >=12 kopiur.dev docs, got {kopia_docs}"
+        "expected to validate >=12 kopiur.home-operations.com docs, got {kopia_docs}"
     );
 }

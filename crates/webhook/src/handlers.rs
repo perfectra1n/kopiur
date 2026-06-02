@@ -34,11 +34,11 @@ use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use serde_json::{Value, json};
 
 /// The finalizer that ties a kopia snapshot's lifecycle to its `Backup` CR (ADR §4.5).
-pub const SNAPSHOT_CLEANUP_FINALIZER: &str = "kopiur.dev/snapshot-cleanup";
+pub const SNAPSHOT_CLEANUP_FINALIZER: &str = "kopiur.home-operations.com/snapshot-cleanup";
 
 /// Dispatch a decoded `AdmissionRequest` to the handler for its `kind`.
 ///
-/// Unknown kinds are allowed (the webhook only registers for kopiur.dev kinds; an
+/// Unknown kinds are allowed (the webhook only registers for kopiur.home-operations.com kinds; an
 /// unexpected kind reaching us is not a reason to block the cluster). The `client`
 /// is used only for `ClusterRepository` tenancy resolution; `None` forces those
 /// checks to fail closed.
@@ -220,13 +220,13 @@ fn handle_backup(
     with_patch_or_deny(resp, ops)
 }
 
-/// Resolve a `Backup`'s origin from the `kopiur.dev/origin` label (canonical) or
+/// Resolve a `Backup`'s origin from the `kopiur.home-operations.com/origin` label (canonical) or
 /// `status.origin`, defaulting to `manual` for user-created backups with no marker.
 fn backup_origin(meta: &ObjectMeta, data: &Value) -> Origin {
     let from_label = meta
         .labels
         .as_ref()
-        .and_then(|l| l.get("kopiur.dev/origin"))
+        .and_then(|l| l.get("kopiur.home-operations.com/origin"))
         .map(|s| s.as_str());
     let from_status = data
         .get("status")

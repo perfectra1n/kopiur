@@ -25,7 +25,7 @@ use crate::consts::API_VERSION;
 use crate::error::{Error, Result};
 
 /// The field-manager used for every server-side apply the controller performs.
-pub const FIELD_MANAGER: &str = "kopiur.dev/controller";
+pub const FIELD_MANAGER: &str = "kopiur.home-operations.com/controller";
 
 /// Default key within the encryption password Secret when unset.
 pub const DEFAULT_PASSWORD_KEY: &str = "KOPIA_PASSWORD";

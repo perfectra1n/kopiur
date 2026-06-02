@@ -2,9 +2,9 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: repositories.kopiur.dev
+  name: repositories.kopiur.home-operations.com
 spec:
-  group: kopiur.dev
+  group: kopiur.home-operations.com
   names:
     categories:
     - kopiur
@@ -548,9 +548,9 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: clusterrepositories.kopiur.dev
+  name: clusterrepositories.kopiur.home-operations.com
 spec:
-  group: kopiur.dev
+  group: kopiur.home-operations.com
   names:
     categories:
     - kopiur
@@ -1166,9 +1166,9 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: backupconfigs.kopiur.dev
+  name: backupconfigs.kopiur.home-operations.com
 spec:
-  group: kopiur.dev
+  group: kopiur.home-operations.com
   names:
     categories:
     - kopiur
@@ -11963,9 +11963,9 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: backups.kopiur.dev
+  name: backups.kopiur.home-operations.com
 spec:
-  group: kopiur.dev
+  group: kopiur.home-operations.com
   names:
     categories:
     - kopiur
@@ -12106,7 +12106,7 @@ spec:
                 type: integer
               origin:
                 description: |-
-                  How a `Backup` came to exist. Canonical value mirrored from the `kopiur.dev/origin`
+                  How a `Backup` came to exist. Canonical value mirrored from the `kopiur.home-operations.com/origin`
                   label. Closed enum. ADR §3.4.
                 enum:
                 - scheduled
@@ -12253,9 +12253,9 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: backupschedules.kopiur.dev
+  name: backupschedules.kopiur.home-operations.com
 spec:
-  group: kopiur.dev
+  group: kopiur.home-operations.com
   names:
     categories:
     - kopiur
@@ -12463,9 +12463,9 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: restores.kopiur.dev
+  name: restores.kopiur.home-operations.com
 spec:
-  group: kopiur.dev
+  group: kopiur.home-operations.com
   names:
     categories:
     - kopiur
@@ -12829,9 +12829,9 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: maintenances.kopiur.dev
+  name: maintenances.kopiur.home-operations.com
 spec:
-  group: kopiur.dev
+  group: kopiur.home-operations.com
   names:
     categories:
     - kopiur

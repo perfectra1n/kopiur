@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Not `Eq`: `mover` transitively embeds k8s-openapi types.
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[kube(
-    group = "kopiur.dev",
+    group = "kopiur.home-operations.com",
     version = "v1alpha1",
     kind = "Maintenance",
     namespaced,
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn maintenance_crd_metadata_is_correct() {
         let crd = Maintenance::crd();
-        assert_eq!(crd.spec.group, "kopiur.dev");
+        assert_eq!(crd.spec.group, "kopiur.home-operations.com");
         assert_eq!(crd.spec.names.kind, "Maintenance");
         assert_eq!(crd.spec.scope, "Namespaced");
         assert_eq!(crd.spec.versions[0].name, "v1alpha1");

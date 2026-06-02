@@ -16,7 +16,7 @@ metadata:
   namespace: kopiur-system
 rules:
 - apiGroups:
-  - kopiur.dev
+  - kopiur.home-operations.com
   resources:
   - repositories
   - backupconfigs
@@ -33,7 +33,7 @@ rules:
   - patch
   - delete
 - apiGroups:
-  - kopiur.dev
+  - kopiur.home-operations.com
   resources:
   - repositories/status
   - repositories/finalizers

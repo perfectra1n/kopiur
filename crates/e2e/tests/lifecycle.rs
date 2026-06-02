@@ -37,7 +37,7 @@ const CREDS_SECRET: &str = "kopia-creds";
 
 fn repository_json(name: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kopiur.dev/v1alpha1",
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
         "kind": "Repository",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
@@ -52,7 +52,7 @@ fn repository_json(name: &str) -> serde_json::Value {
 
 fn backup_config_json(name: &str, repo: &str, src_pvc: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kopiur.dev/v1alpha1",
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
         "kind": "BackupConfig",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
@@ -65,7 +65,7 @@ fn backup_config_json(name: &str, repo: &str, src_pvc: &str) -> serde_json::Valu
 
 fn backup_json(name: &str, config: &str, deletion_policy: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kopiur.dev/v1alpha1",
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
         "kind": "Backup",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
@@ -176,7 +176,7 @@ async fn backup_restore_delete_lifecycle() {
 
     // 3. Restore that Backup into a target PVC → Completed.
     let restore = serde_json::json!({
-        "apiVersion": "kopiur.dev/v1alpha1",
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
         "kind": "Restore",
         "metadata": { "name": "e2e-restore", "namespace": E2E_NAMESPACE },
         "spec": {
@@ -249,7 +249,7 @@ async fn schedule_creates_backup() {
         .await;
 
     let sched = serde_json::json!({
-        "apiVersion": "kopiur.dev/v1alpha1",
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
         "kind": "BackupSchedule",
         "metadata": { "name": "e2e-sched", "namespace": E2E_NAMESPACE },
         "spec": {
@@ -270,7 +270,10 @@ async fn schedule_creates_backup() {
         || async {
             let list = backups.list(&Default::default()).await?;
             let found = list.items.iter().any(|b| {
-                b.labels().get("kopiur.dev/origin").map(String::as_str) == Some("scheduled")
+                b.labels()
+                    .get("kopiur.home-operations.com/origin")
+                    .map(String::as_str)
+                    == Some("scheduled")
             });
             Ok(found.then_some(()))
         },
@@ -293,7 +296,7 @@ async fn maintenance_claims_lease() {
         .await;
 
     let maint = serde_json::json!({
-        "apiVersion": "kopiur.dev/v1alpha1",
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
         "kind": "Maintenance",
         "metadata": { "name": "e2e-maint", "namespace": E2E_NAMESPACE },
         "spec": {

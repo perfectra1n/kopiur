@@ -222,7 +222,8 @@ fn scheduled_backup_name(schedule: &str, slot: DateTime<Utc>) -> String {
 async fn active_run_exists(ctx: &Context, namespace: &str, schedule: &str) -> Result<bool> {
     use kopiur_api::BackupPhase;
     let api: Api<Backup> = Api::namespaced(ctx.client.clone(), namespace);
-    let lp = ListParams::default().labels(&format!("kopiur.dev/schedule={schedule}"));
+    let lp =
+        ListParams::default().labels(&format!("kopiur.home-operations.com/schedule={schedule}"));
     let items = api.list(&lp).await?.items;
     Ok(items.iter().any(|b| {
         matches!(
@@ -244,7 +245,10 @@ async fn create_scheduled_backup(
     let owner = io::owner_ref_for(schedule, "BackupSchedule")?;
     let mut labels = std::collections::BTreeMap::new();
     labels.insert(ORIGIN_LABEL.to_string(), "scheduled".to_string());
-    labels.insert("kopiur.dev/schedule".to_string(), schedule.name_any());
+    labels.insert(
+        "kopiur.home-operations.com/schedule".to_string(),
+        schedule.name_any(),
+    );
     labels.insert(
         crate::consts::CONFIG_LABEL.to_string(),
         schedule.spec.config_ref.name.clone(),

@@ -11,7 +11,7 @@
 # Storage actually reclaimed is surfaced ONLY here, in status.{quick,full}
 # .lastContentReclaimedBytes (ADR §3.7/§4.5).
 ---
-apiVersion: kopiur.dev/v1alpha1
+apiVersion: kopiur.home-operations.com/v1alpha1
 kind: Maintenance
 metadata:
   name: nas-primary-maintenance

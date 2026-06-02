@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 /// overrides). For `discovered` backups the spec is empty — every field is optional.
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[kube(
-    group = "kopiur.dev",
+    group = "kopiur.home-operations.com",
     version = "v1alpha1",
     kind = "Backup",
     namespaced,
@@ -48,7 +48,7 @@ pub struct BackupSpec {
     pub deletion_policy: Option<DeletionPolicy>,
 }
 
-/// How a `Backup` came to exist. Canonical value mirrored from the `kopiur.dev/origin`
+/// How a `Backup` came to exist. Canonical value mirrored from the `kopiur.home-operations.com/origin`
 /// label. Closed enum. ADR §3.4.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn backup_crd_metadata_is_correct() {
         let crd = Backup::crd();
-        assert_eq!(crd.spec.group, "kopiur.dev");
+        assert_eq!(crd.spec.group, "kopiur.home-operations.com");
         assert_eq!(crd.spec.names.kind, "Backup");
         assert_eq!(crd.spec.scope, "Namespaced");
         assert_eq!(crd.spec.versions[0].name, "v1alpha1");
