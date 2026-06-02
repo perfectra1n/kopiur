@@ -1,0 +1,26 @@
+# Example 06 — Manual one-shot backup (ADR-0001 §5.6)
+#
+# A Backup CR is the universal trigger: created by a BackupSchedule, by
+# `kubectl create`, or by any external system (Argo Events Sensor, Tekton Task,
+# GitHub Actions, a webhook handler). Trigger is separable from recipe (G17).
+#
+# For scheduled/manual backups the spec carries `configRef`. `deletionPolicy` is
+# a closed enum: Delete (default for produced) | Retain | Orphan (ADR §4.5).
+# `tags` are arbitrary kopia snapshot tags.
+---
+apiVersion: kopia.io/v1alpha1
+kind: Backup
+metadata:
+  name: postgres-data-pre-migration
+  namespace: billing
+spec:
+  configRef:
+    name: postgres-data
+  tags:
+    reason: "pre-schema-migration"
+  # Keep this snapshot even when the next GFS prune runs.
+  deletionPolicy: Retain
+  # Optional per-run failure controls passed through to the mover Job (G6):
+  failurePolicy:
+    backoffLimit: 2
+    activeDeadlineSeconds: 7200

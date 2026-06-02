@@ -1,0 +1,41 @@
+{{- if .Values.webhook.enabled -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "kopiur.fullname" . }}-validating
+  labels:
+    {{- include "kopiur.labels" . | nindent 4 }}
+  {{- if .Values.webhook.certManager.enabled }}
+  annotations:
+    # cert-manager ca-injector populates caBundle on all webhooks below.
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "kopiur.webhook.fullname" . }}
+  {{- end }}
+webhooks:
+  - name: validate.kopia.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+    clientConfig:
+      {{- if not .Values.webhook.certManager.enabled }}
+      caBundle: {{ .Values.webhook.caBundle | quote }}
+      {{- end }}
+      service:
+        name: {{ include "kopiur.webhook.fullname" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /admission
+        port: 443
+    rules:
+      - apiGroups: ["kopia.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources:
+          - repositories
+          - clusterrepositories
+          - backupconfigs
+          - backups
+          - backupschedules
+          - restores
+          - maintenances
+        scope: "*"
+{{- end }}

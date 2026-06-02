@@ -1,0 +1,39 @@
+# The kopiur mover image: the per-Backup/Restore Job binary PLUS the `kopia`
+# binary it invokes (ADR-0003 §4.10). Pinned kopia version for reproducibility
+# and to satisfy the "no :latest" requirement (gap G15).
+#
+# syntax=docker/dockerfile:1
+
+ARG KOPIA_VERSION=0.23.0
+
+FROM rust:1.95-bookworm AS builder
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked --bin kopiur-mover && \
+    cp target/release/kopiur-mover /usr/local/bin/kopiur-mover
+
+# Pull the official kopia release binary at a pinned version.
+FROM debian:bookworm-slim AS kopia
+ARG KOPIA_VERSION
+ARG TARGETARCH
+RUN set -eux; \
+    apt-get update && apt-get install -y --no-install-recommends curl ca-certificates; \
+    case "${TARGETARCH}" in \
+      amd64) KARCH=x64 ;; \
+      arm64) KARCH=arm64 ;; \
+      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/kopia.tar.gz \
+      "https://github.com/kopia/kopia/releases/download/v${KOPIA_VERSION}/kopia-${KOPIA_VERSION}-linux-${KARCH}.tar.gz"; \
+    tar -xzf /tmp/kopia.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/kopia-${KOPIA_VERSION}-linux-${KARCH}/kopia" /usr/local/bin/kopia
+
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+LABEL org.opencontainers.image.source="https://github.com/perfectra1n/kopiur"
+COPY --from=builder /usr/local/bin/kopiur-mover /usr/local/bin/kopiur-mover
+COPY --from=kopia /usr/local/bin/kopia /usr/local/bin/kopia
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/kopiur-mover"]

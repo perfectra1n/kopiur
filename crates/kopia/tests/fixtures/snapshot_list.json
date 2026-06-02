@@ -1,0 +1,3 @@
+[
+ {"id":"edf6ef74ec18dffc79e26907e0c3c7fc","source":{"host":"desktop-8emkv7q","userName":"root","path":"/tmp/claude-0/tmp.Zz62PJwR0o"},"description":"","startTime":"2026-06-02T03:13:59.632259774Z","endTime":"2026-06-02T03:13:59.637544112Z","stats":{"totalSize":12,"excludedTotalSize":0,"fileCount":2,"cachedFiles":0,"nonCachedFiles":2,"dirCount":2,"excludedFileCount":0,"excludedDirCount":0,"ignoredErrorCount":0,"errorCount":0},"rootEntry":{"name":"tmp.Zz62PJwR0o","type":"d","mode":"0700","mtime":"2026-06-02T03:13:59.51363749Z","obj":"k0dfe37ef5502af52b9036a6dfc006f38","summ":{"size":12,"files":2,"symlinks":0,"dirs":2,"maxTime":"2026-06-02T03:13:59.51363749Z","numFailed":0}},"retentionReason":["latest-1","hourly-1","daily-1","weekly-1","monthly-1","annual-1"]}
+]

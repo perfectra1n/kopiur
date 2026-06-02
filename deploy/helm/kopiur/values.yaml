@@ -1,0 +1,217 @@
+# Default values for the kopiur chart.
+# This is a YAML-formatted file. Every key is documented inline.
+# See deploy/helm/kopiur/README.md for install modes and worked examples.
+
+# -- Override the chart name used in resource names (defaults to .Chart.Name = "kopiur").
+nameOverride: ""
+# -- Override the full release-qualified name (defaults to "<release>-kopiur").
+fullnameOverride: ""
+
+# =============================================================================
+# Images
+# =============================================================================
+# Three images ship with kopiur:
+#   * controller — the operator (reconcilers); exposes /metrics.
+#   * webhook    — the axum admission server (validating + mutating).
+#   * mover      — the per-Job image (one Job per Backup/Restore/Maintenance run).
+#
+# Per ADR §G15 the mover image MUST be reproducibly pinned: prefer `digest`
+# over a floating tag in production so a re-pulled `:latest` can never change
+# what runs in a data-protection Job. When `digest` is set it wins over `tag`.
+image:
+  # -- Container registry shared by all three images unless overridden per-image.
+  registry: ghcr.io
+  # -- Default image pull policy for controller and webhook.
+  pullPolicy: IfNotPresent
+  # Controller (operator) image.
+  controller:
+    repository: perfectra1n/kopiur-controller
+    # -- Defaults to .Chart.AppVersion when empty.
+    tag: ""
+    # -- Pin by digest (e.g. "sha256:..."); takes precedence over tag.
+    digest: ""
+  # Admission webhook image.
+  webhook:
+    repository: perfectra1n/kopiur-webhook
+    tag: ""
+    digest: ""
+  # Mover (per-Job) image. The controller reads this reference and stamps it
+  # into every Job it creates. Digest-pinned recommended (ADR §G15).
+  mover:
+    repository: perfectra1n/kopiur-mover
+    tag: ""
+    # -- STRONGLY RECOMMENDED in production. Digest pin for the mover Job image.
+    digest: ""
+    # -- Pull policy used on the mover Job pods.
+    pullPolicy: IfNotPresent
+
+# -- Image pull secrets applied to controller/webhook pods and mover Jobs.
+imagePullSecrets: []
+#  - name: my-registry-creds
+
+# =============================================================================
+# Install scope & CRDs
+# =============================================================================
+
+# -- Install the 7 kopia.io CRDs as part of this release.
+# When true the CRDs are rendered under templates/ (guarded by this flag) so
+# `helm uninstall` removes them and `installCRDs: false` actually omits them.
+# Trade-off: templated CRDs are subject to Helm's normal apply ordering and
+# (unlike the special `crds/` directory) are NOT skipped on `helm upgrade`.
+# That is the behavior we want for an alpha API. If you manage CRDs out of band
+# (GitOps applies deploy/crds/*.yaml directly), set this to false.
+installCRDs: true
+
+# -- "namespaced" (default) or "cluster".
+#   namespaced — RBAC is a namespace-scoped Role/RoleBinding. The operator
+#     manages kopia.io resources only in its own namespace. ClusterRepository
+#     is NOT reconciled (it is a cluster-scoped kind and out of a Role's reach).
+#   cluster    — RBAC is a ClusterRole/ClusterRoleBinding. The operator manages
+#     kopia.io resources cluster-wide AND reconciles ClusterRepository.
+# Per ADR §4.11 namespaced is the safer default; cluster scope is an explicit
+# opt-in for platform teams running a shared backup tier.
+installScope: namespaced
+
+# =============================================================================
+# ServiceAccount
+# =============================================================================
+serviceAccount:
+  # -- Create the ServiceAccount. Disable to bring your own.
+  create: true
+  # -- Name to use; defaults to the chart fullname when empty.
+  name: ""
+  # -- Extra annotations (e.g. IRSA / Workload Identity role bindings).
+  annotations: {}
+
+# =============================================================================
+# Controller deployment
+# =============================================================================
+controller:
+  # -- Number of controller replicas. >1 enables HA via leader election;
+  # only the elected leader reconciles, so deterministic jitter (ADR §4.1)
+  # keeps schedules identical across replicas and across failover.
+  replicaCount: 1
+  # -- Enable leader election. Required when replicaCount > 1; harmless at 1.
+  leaderElection:
+    enabled: true
+  # -- Log level passed to the controller (RUST_LOG style: error|warn|info|debug|trace).
+  logLevel: info
+  # -- Extra CLI args appended to the controller container.
+  extraArgs: []
+  # -- Extra environment variables for the controller container.
+  extraEnv: []
+  # -- Resource requests/limits for the controller pod.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # -- Scheduling controls.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # -- Pod-level priority class.
+  priorityClassName: ""
+  # -- Extra pod labels / annotations.
+  podLabels: {}
+  podAnnotations: {}
+  # -- Liveness/readiness HTTP probe port on the controller (serves /healthz, /readyz, /metrics).
+  probePort: 8080
+
+# =============================================================================
+# Admission webhook
+# =============================================================================
+# Implemented as a SEPARATE Deployment + Service (cleaner than folding it into
+# the controller) per ADR §5.3. The Service maps 443 -> the container's 8443.
+webhook:
+  # -- Deploy the webhook (Deployment + Service + Validating/Mutating configs).
+  # When false, validation falls back to the controller's defensive checks only.
+  enabled: true
+  replicaCount: 1
+  # -- failurePolicy for both webhook configurations: Fail (fail-closed,
+  # recommended for a backup operator — ADR §7.2) or Ignore.
+  failurePolicy: Fail
+  # -- timeoutSeconds for admission requests (1..30).
+  timeoutSeconds: 10
+  # -- Address the webhook server binds to (env KOPIUR_WEBHOOK_ADDR).
+  listenAddr: "0.0.0.0:8443"
+  # -- Port the webhook container listens on (must match listenAddr above).
+  containerPort: 8443
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+  podLabels: {}
+  podAnnotations: {}
+  # TLS for the webhook server. The webhook ALWAYS serves TLS (k8s requires
+  # HTTPS for admission). Two ways to provide the serving cert:
+  tls:
+    # -- Name of the Secret holding tls.crt / tls.key (and optionally ca.crt).
+    # When certManager.enabled is true this is the Secret cert-manager writes.
+    # Otherwise YOU must create this Secret before install (kubernetes.io/tls).
+    secretName: kopiur-webhook-tls
+  certManager:
+    # -- Provision a cert-manager Certificate + self-signed Issuer for the
+    # webhook, and let cert-manager's ca-injector populate caBundle on the
+    # webhook configurations (via the cert-manager.io/inject-ca-from annotation).
+    # When false you must supply webhook.tls.secretName yourself and set
+    # webhook.caBundle (base64 PEM) so the API server trusts the webhook.
+    enabled: false
+    # -- Use an existing Issuer/ClusterIssuer instead of the self-signed Issuer
+    # this chart creates. Leave name empty to use the chart-managed Issuer.
+    issuerRef:
+      name: ""
+      kind: Issuer   # Issuer | ClusterIssuer
+  # -- Base64-encoded PEM CA bundle injected into the webhook configurations
+  # when certManager.enabled is false. Required for the API server to trust a
+  # self-managed serving cert. Ignored when certManager.enabled is true.
+  caBundle: ""
+
+# =============================================================================
+# Metrics & observability
+# =============================================================================
+metrics:
+  # -- Expose a Service for the controller's /metrics endpoint.
+  enabled: true
+  # -- Service port for /metrics.
+  port: 8080
+  serviceMonitor:
+    # -- Create a Prometheus-Operator ServiceMonitor. Requires the CRD to exist.
+    enabled: false
+    # -- Scrape interval.
+    interval: 30s
+    # -- Scrape timeout.
+    scrapeTimeout: 10s
+    # -- Extra labels (e.g. to match your Prometheus serviceMonitorSelector).
+    labels: {}
+    # -- Relabelings / metricRelabelings passed through verbatim.
+    relabelings: []
+    metricRelabelings: []
+
+# =============================================================================
+# Pod security (shared defaults; per-component sections may override)
+# =============================================================================
+# Non-root uid 65534 (nobody) default, per ADR §4.9/§4.11 — distroless:nonroot.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  fsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

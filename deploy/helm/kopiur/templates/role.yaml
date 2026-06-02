@@ -1,0 +1,76 @@
+{{- if eq .Values.installScope "namespaced" -}}
+# RBAC rules SYNCED from `cargo xtask gen-rbac` (deploy/rbac/operator-role.yaml).
+# That xtask is the SOURCE OF TRUTH — it derives the kopia.io rules from the
+# kube-rs Resource traits (ADR §4.12). If you edit kopia.io permissions, edit the
+# xtask and re-run `cargo xtask gen-rbac`, then re-sync these rules. Names/labels
+# are Helm-templated so the chart owns them.
+#
+# Note vs. the ClusterRole: a namespaced Role intentionally omits
+# `clusterrepositories` (a cluster-scoped kind unreachable from a Role) and the
+# cross-namespace `serviceaccounts` rule. ClusterRepository is only reconciled in
+# installScope=cluster.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kopiur.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kopiur.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - kopia.io
+    resources:
+      - repositories
+      - backupconfigs
+      - backups
+      - backupschedules
+      - restores
+      - maintenances
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups:
+      - kopia.io
+    resources:
+      - repositories/status
+      - repositories/finalizers
+      - backupconfigs/status
+      - backupconfigs/finalizers
+      - backups/status
+      - backups/finalizers
+      - backupschedules/status
+      - backupschedules/finalizers
+      - restores/status
+      - restores/finalizers
+      - maintenances/status
+      - maintenances/finalizers
+    verbs: [get, update, patch]
+  - apiGroups: [""]
+    resources:
+      - pods
+      - persistentvolumeclaims
+      - configmaps
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources:
+      - pods/exec
+    verbs: [create, get]
+  - apiGroups: [""]
+    resources:
+      - events
+    verbs: [create, patch]
+  - apiGroups: [""]
+    resources:
+      - secrets
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources:
+      - jobs
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources:
+      - volumesnapshots
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [groupsnapshot.storage.k8s.io]
+    resources:
+      - volumegroupsnapshots
+    verbs: [get, list, watch, create, delete]
+{{- end }}

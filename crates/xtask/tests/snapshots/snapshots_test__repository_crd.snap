@@ -1,0 +1,549 @@
+---
+source: crates/xtask/tests/snapshots_test.rs
+expression: "body(&artifacts, \"repositories\")"
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: repositories.kopia.io
+spec:
+  group: kopia.io
+  names:
+    categories:
+    - kopiur
+    kind: Repository
+    plural: repositories
+    shortNames:
+    - kopiarepo
+    singular: repository
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.backend
+      name: Backend
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for RepositorySpec via `CustomResource`
+        properties:
+          spec:
+            description: |-
+              A kopia repository owned by one namespace: credentials, backend, encryption,
+              and optional catalog-materialization bounds. Many `BackupConfig`s / `Restore`s
+              reference one. ADR §3.1.
+            properties:
+              backend:
+                description: Exactly one backend, enforced at the type level by the `Backend` enum. ADR §3.1.
+                oneOf:
+                - required:
+                  - s3
+                - required:
+                  - azure
+                - required:
+                  - gcs
+                - required:
+                  - b2
+                - required:
+                  - filesystem
+                - required:
+                  - sftp
+                - required:
+                  - webDav
+                - required:
+                  - rclone
+                properties:
+                  azure:
+                    properties:
+                      auth:
+                        description: Credentials for an object-store backend. Always a Secret reference. ADR §3.1.
+                        nullable: true
+                        properties:
+                          secretRef:
+                            description: |-
+                              Reference to an entire `Secret` (the operator reads well-known keys from it,
+                              e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                            nullable: true
+                            properties:
+                              name:
+                                type: string
+                              namespace:
+                                nullable: true
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          workloadIdentity:
+                            description: |-
+                              Advanced auth: workload identity (IRSA/WIF). Structurally present, deprioritized
+                              for the homelab default (ADR §4.11).
+                            nullable: true
+                            properties:
+                              serviceAccountName:
+                                type: string
+                            required:
+                            - serviceAccountName
+                            type: object
+                        type: object
+                      container:
+                        type: string
+                      prefix:
+                        nullable: true
+                        type: string
+                      storageAccount:
+                        nullable: true
+                        type: string
+                    required:
+                    - container
+                    type: object
+                  b2:
+                    properties:
+                      auth:
+                        description: Credentials for an object-store backend. Always a Secret reference. ADR §3.1.
+                        nullable: true
+                        properties:
+                          secretRef:
+                            description: |-
+                              Reference to an entire `Secret` (the operator reads well-known keys from it,
+                              e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                            nullable: true
+                            properties:
+                              name:
+                                type: string
+                              namespace:
+                                nullable: true
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          workloadIdentity:
+                            description: |-
+                              Advanced auth: workload identity (IRSA/WIF). Structurally present, deprioritized
+                              for the homelab default (ADR §4.11).
+                            nullable: true
+                            properties:
+                              serviceAccountName:
+                                type: string
+                            required:
+                            - serviceAccountName
+                            type: object
+                        type: object
+                      bucket:
+                        type: string
+                      prefix:
+                        nullable: true
+                        type: string
+                    required:
+                    - bucket
+                    type: object
+                  filesystem:
+                    properties:
+                      path:
+                        description: Mount path inside the mover pod. Backed by a PVC the operator mounts.
+                        type: string
+                      pvcName:
+                        nullable: true
+                        type: string
+                    required:
+                    - path
+                    type: object
+                  gcs:
+                    properties:
+                      auth:
+                        description: Credentials for an object-store backend. Always a Secret reference. ADR §3.1.
+                        nullable: true
+                        properties:
+                          secretRef:
+                            description: |-
+                              Reference to an entire `Secret` (the operator reads well-known keys from it,
+                              e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                            nullable: true
+                            properties:
+                              name:
+                                type: string
+                              namespace:
+                                nullable: true
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          workloadIdentity:
+                            description: |-
+                              Advanced auth: workload identity (IRSA/WIF). Structurally present, deprioritized
+                              for the homelab default (ADR §4.11).
+                            nullable: true
+                            properties:
+                              serviceAccountName:
+                                type: string
+                            required:
+                            - serviceAccountName
+                            type: object
+                        type: object
+                      bucket:
+                        type: string
+                      prefix:
+                        nullable: true
+                        type: string
+                    required:
+                    - bucket
+                    type: object
+                  rclone:
+                    properties:
+                      configSecretRef:
+                        description: |-
+                          Reference to an entire `Secret` (the operator reads well-known keys from it,
+                          e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                        nullable: true
+                        properties:
+                          name:
+                            type: string
+                          namespace:
+                            nullable: true
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      remotePath:
+                        type: string
+                    required:
+                    - remotePath
+                    type: object
+                  s3:
+                    properties:
+                      auth:
+                        description: Credentials for an object-store backend. Always a Secret reference. ADR §3.1.
+                        nullable: true
+                        properties:
+                          secretRef:
+                            description: |-
+                              Reference to an entire `Secret` (the operator reads well-known keys from it,
+                              e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                            nullable: true
+                            properties:
+                              name:
+                                type: string
+                              namespace:
+                                nullable: true
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          workloadIdentity:
+                            description: |-
+                              Advanced auth: workload identity (IRSA/WIF). Structurally present, deprioritized
+                              for the homelab default (ADR §4.11).
+                            nullable: true
+                            properties:
+                              serviceAccountName:
+                                type: string
+                            required:
+                            - serviceAccountName
+                            type: object
+                        type: object
+                      bucket:
+                        type: string
+                      endpoint:
+                        nullable: true
+                        type: string
+                      prefix:
+                        nullable: true
+                        type: string
+                      region:
+                        nullable: true
+                        type: string
+                      tls:
+                        description: TLS settings for object-store backends. ADR §3.1.
+                        nullable: true
+                        properties:
+                          caBundleRef:
+                            description: Reference to a key within a `ConfigMap` (e.g. a CA bundle). ADR §3.1 `tls.caBundleRef`.
+                            nullable: true
+                            properties:
+                              configMapName:
+                                nullable: true
+                                type: string
+                              key:
+                                nullable: true
+                                type: string
+                            type: object
+                          insecureSkipVerify:
+                            type: boolean
+                        type: object
+                    required:
+                    - bucket
+                    type: object
+                  sftp:
+                    properties:
+                      auth:
+                        description: Credentials for an object-store backend. Always a Secret reference. ADR §3.1.
+                        nullable: true
+                        properties:
+                          secretRef:
+                            description: |-
+                              Reference to an entire `Secret` (the operator reads well-known keys from it,
+                              e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                            nullable: true
+                            properties:
+                              name:
+                                type: string
+                              namespace:
+                                nullable: true
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          workloadIdentity:
+                            description: |-
+                              Advanced auth: workload identity (IRSA/WIF). Structurally present, deprioritized
+                              for the homelab default (ADR §4.11).
+                            nullable: true
+                            properties:
+                              serviceAccountName:
+                                type: string
+                            required:
+                            - serviceAccountName
+                            type: object
+                        type: object
+                      host:
+                        type: string
+                      path:
+                        type: string
+                      port:
+                        format: uint16
+                        maximum: 65535.0
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                      username:
+                        nullable: true
+                        type: string
+                    required:
+                    - host
+                    - path
+                    type: object
+                  webDav:
+                    properties:
+                      auth:
+                        description: Credentials for an object-store backend. Always a Secret reference. ADR §3.1.
+                        nullable: true
+                        properties:
+                          secretRef:
+                            description: |-
+                              Reference to an entire `Secret` (the operator reads well-known keys from it,
+                              e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                            nullable: true
+                            properties:
+                              name:
+                                type: string
+                              namespace:
+                                nullable: true
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          workloadIdentity:
+                            description: |-
+                              Advanced auth: workload identity (IRSA/WIF). Structurally present, deprioritized
+                              for the homelab default (ADR §4.11).
+                            nullable: true
+                            properties:
+                              serviceAccountName:
+                                type: string
+                            required:
+                            - serviceAccountName
+                            type: object
+                        type: object
+                      url:
+                        type: string
+                    required:
+                    - url
+                    type: object
+                type: object
+              cacheDefaults:
+                description: Cache defaults inherited by `Backup`/`Restore` movers unless overridden. ADR §3.1.
+                nullable: true
+                properties:
+                  capacity:
+                    nullable: true
+                    type: string
+                  contentCacheSizeMb:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  metadataCacheSizeMb:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  storageClassName:
+                    nullable: true
+                    type: string
+                type: object
+              catalog:
+                description: 'Bounds on materialization of `origin: discovered` `Backup` CRs. ADR §3.1 `catalog`.'
+                nullable: true
+                properties:
+                  fallbackNamespace:
+                    description: |-
+                      Where to materialize discovered `Backup`s whose identity hostname does not
+                      map to an allowed namespace (ClusterRepository only). ADR §3.2.
+                    nullable: true
+                    type: string
+                  refreshInterval:
+                    nullable: true
+                    type: string
+                  retain:
+                    nullable: true
+                    properties:
+                      maxAgeDays:
+                        format: int64
+                        nullable: true
+                        type: integer
+                      perIdentity:
+                        description: Most-recent N per `username@hostname:path`.
+                        format: int64
+                        nullable: true
+                        type: integer
+                    type: object
+                type: object
+              create:
+                description: Behavior when the repository does not yet exist. ADR §3.1 `create`.
+                nullable: true
+                properties:
+                  enabled:
+                    default: false
+                    type: boolean
+                  encryption:
+                    nullable: true
+                    type: string
+                  hash:
+                    nullable: true
+                    type: string
+                  splitter:
+                    nullable: true
+                    type: string
+                type: object
+              encryption:
+                description: |-
+                  Repository encryption settings. A sub-object so future rotation fields
+                  (`rotation`, `previousPasswords`) slot in without breakage (ADR §4.11).
+                properties:
+                  passwordSecretRef:
+                    description: Always a Secret ref; never inline. ADR §3.1.
+                    properties:
+                      key:
+                        description: Defaults are documented per-field on the consuming struct.
+                        nullable: true
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        nullable: true
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - passwordSecretRef
+                type: object
+            required:
+            - backend
+            - encryption
+            type: object
+          status:
+            nullable: true
+            properties:
+              backend:
+                description: Mirror of `spec.backend` discriminant for the print column.
+                nullable: true
+                type: string
+              catalog:
+                nullable: true
+                properties:
+                  discoveredBackupCount:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  lastRefreshAt:
+                    nullable: true
+                    type: string
+                type: object
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                description: Lifecycle phase of a repository. ADR §3.1 status.
+                enum:
+                - Pending
+                - Initializing
+                - Ready
+                - Degraded
+                - Failed
+                - null
+                nullable: true
+                type: string
+              storageStats:
+                nullable: true
+                properties:
+                  lastObservedAt:
+                    nullable: true
+                    type: string
+                  snapshotCount:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  totalSize:
+                    nullable: true
+                    type: string
+                type: object
+              uniqueId:
+                description: Kopia repository unique ID.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: Repository
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

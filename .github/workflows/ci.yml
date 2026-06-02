@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Fast, hermetic gate: formatting, lints, the full unit/serde/validation suite,
+  # and the codegen drift guard. No cluster, no network beyond crates.io.
+  lint-test:
+    name: fmt · clippy · test · codegen-drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build workspace
+        run: cargo build --workspace --locked
+
+      - name: Test workspace (hermetic)
+        run: cargo test --workspace --locked
+
+      - name: Codegen drift guard (CRDs + RBAC match checked-in)
+        run: cargo xtask gen-all --check
+
+  # Real-dependency tests gated behind the `integration` feature and #[ignore]:
+  # a real kopia binary for the filesystem round-trip, and an ephemeral kind
+  # cluster for CRD admission / reconciler / webhook tests.
+  integration:
+    name: integration (kopia + kind)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+
+      - name: Cache cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: integration
+
+      - name: Install kopia
+        run: |
+          set -euo pipefail
+          KOPIA_VERSION=0.23.0
+          curl -fsSL -o kopia.tar.gz \
+            "https://github.com/kopia/kopia/releases/download/v${KOPIA_VERSION}/kopia-${KOPIA_VERSION}-linux-x64.tar.gz"
+          tar -xzf kopia.tar.gz
+          sudo install -m 0755 "kopia-${KOPIA_VERSION}-linux-x64/kopia" /usr/local/bin/kopia
+          kopia --version
+
+      - name: Create ephemeral kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: kopiur-it
+
+      - name: Generate & apply CRDs
+        # Server-side apply is required: the BackupConfig CRD embeds a full
+        # JobSpec (runJob hook) and exceeds the 256KB last-applied-configuration
+        # annotation that a client-side apply would create.
+        run: |
+          cargo xtask gen-crds
+          kubectl apply --server-side -f deploy/crds/all-crds.yaml
+
+      - name: Run integration tests (feature-gated, ignored-by-default)
+        run: cargo test --workspace --features integration --locked -- --include-ignored
+
+  # Supply-chain / license audit (advisory; does not block merges by default).
+  audit:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

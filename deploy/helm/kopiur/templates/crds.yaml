@@ -1,0 +1,27 @@
+{{- /*
+CRD install toggle.
+
+Helm's special `crds/` directory is installed once and NEVER re-applied on
+`helm upgrade`, and is not removed on `helm uninstall`. For an alpha API whose
+schema still moves, we instead render the CRDs as ordinary templates here,
+gated by `.Values.installCRDs`, so that:
+  * `installCRDs: false` truly omits them (the `crds/` dir cannot be toggled);
+  * `helm upgrade` re-applies the latest schema;
+  * `helm uninstall` removes them.
+
+Trade-off: because these are templates, a `helm uninstall` WILL delete the CRDs
+and therefore every Repository/BackupConfig/Backup/... object in the cluster.
+That is acceptable for alpha and called out in docs/install.md. Teams that want
+CRD lifecycle decoupled from the release should set `installCRDs: false` and
+apply `deploy/crds/*.yaml` out of band (e.g. via GitOps).
+
+The CRD bodies below are the generated artifacts from `cargo xtask gen-crds`
+(checked in at deploy/crds/, copied verbatim into this chart's files/crds/).
+That xtask is the SOURCE OF TRUTH; do not hand-edit the schemas.
+*/ -}}
+{{- if .Values.installCRDs }}
+{{- range $path, $_ := .Files.Glob "files/crds/*.yaml" }}
+---
+{{ $.Files.Get $path }}
+{{- end }}
+{{- end }}

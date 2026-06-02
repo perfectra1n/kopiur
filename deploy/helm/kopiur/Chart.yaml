@@ -1,0 +1,29 @@
+apiVersion: v2
+name: kopiur
+description: |-
+  Kopiur — a Kopia-native Kubernetes backup operator written in Rust.
+  Installs the controller, admission webhook, the 7 kopia.io/v1alpha1 CRDs,
+  and the RBAC required to run them. Implements ADR-0003.
+type: application
+# Chart version — bump on any chart change (SemVer).
+version: 0.1.0
+# Operator/image version this chart deploys by default.
+appVersion: "0.1.0"
+# The CSI volume-populator path (Restore + PVC.dataSourceRef) needs the
+# AnyVolumeDataSource feature, GA-gated machinery available from 1.24+ (ADR §4.7).
+kubeVersion: ">=1.24.0-0"
+home: https://github.com/perfectra1n/kopiur
+sources:
+  - https://github.com/perfectra1n/kopiur
+keywords:
+  - kopia
+  - backup
+  - restore
+  - operator
+  - volume
+  - disaster-recovery
+maintainers:
+  - name: kopiur maintainers
+annotations:
+  category: Storage
+  licenses: Apache-2.0

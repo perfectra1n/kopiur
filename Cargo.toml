@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/api",
+    "crates/kopia",
+    "crates/webhook",
+    "crates/controller",
+    "crates/mover",
+    "crates/xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "Apache-2.0"
+repository = "https://github.com/perfectra1n/kopiur"
+authors = ["kopiur contributors"]
+
+[workspace.dependencies]
+# Internal crates
+kopiur-api = { path = "crates/api" }
+kopiur-kopia = { path = "crates/kopia" }
+kopiur-mover = { path = "crates/mover" }
+
+# Kubernetes / controller-runtime
+kube = { version = "3.1", default-features = false }
+k8s-openapi = { version = "0.27", default-features = false, features = ["schemars"] }
+schemars = "1"
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Async runtime
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "time", "signal"] }
+futures = "0.3"
+
+# Web / webhook
+axum = "0.8"
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+tower = "0.5"
+json-patch = "4"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+prometheus = "0.14"
+
+# Scheduling / templating
+croner = "2"
+tera = "1"
+
+# Errors / utilities
+thiserror = "2"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Dev / test
+serial_test = "3"
+insta = { version = "1", features = ["yaml"] }
+assert-json-diff = "2"

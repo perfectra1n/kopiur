@@ -1,0 +1,57 @@
+# Example 07 — Restore from a discovered (foreign / pre-install) backup (ADR-0001 §5.7)
+#
+# Snapshots the operator did NOT produce (a foreign kopia writer, or snapshots
+# that predate the install) are materialized as Backup CRs with
+# origin=discovered, living in the Repository's namespace. Discovered Backups are
+# forced to deletionPolicy: Retain — the operator never deletes data it did not
+# create (ADR §4.5).
+#
+#   # list discovered snapshots in the repo namespace:
+#   kubectl get backup -n backups -l kopia.io/origin=discovered
+#
+# Two ways to restore one:
+#   A) reference the discovered Backup CR by name (source.backupRef), or
+#   B) reference a raw kopia identity directly (source.identity), which needs an
+#      explicit spec.repository (webhook-enforced) since there is no Backup CR to
+#      derive it from.
+---
+# A) by the discovered Backup CR
+apiVersion: kopia.io/v1alpha1
+kind: Restore
+metadata:
+  name: rescue-restore
+  namespace: billing
+spec:
+  source:
+    backupRef:
+      name: kopia-disc-9c2a1f
+      namespace: backups
+  target:
+    pvc:
+      name: rescue-pvc
+      storageClassName: fast-ssd
+      capacity: 50Gi
+      accessModes:
+        - ReadWriteOnce
+---
+# B) by raw kopia identity (foreign writer / aged-out catalog).
+#    Requires spec.repository. source is externally-tagged: { identity: {...} }.
+apiVersion: kopia.io/v1alpha1
+kind: Restore
+metadata:
+  name: rescue-restore-by-identity
+  namespace: billing
+spec:
+  repository:
+    kind: Repository
+    name: nas-primary
+    namespace: backups
+  source:
+    identity:
+      username: postgres-data
+      hostname: billing
+      sourcePath: /data
+      snapshotID: k1f1ec0a8
+  target:
+    pvcRef:
+      name: rescue-pvc-existing

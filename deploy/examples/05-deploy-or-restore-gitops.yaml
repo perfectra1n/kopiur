@@ -1,0 +1,73 @@
+# Example 05 — Deploy-or-restore, the headline GitOps pattern (ADR-0001 §5.5)
+#
+# Apply everything together. On a FRESH cluster against an EXISTING repo, the PVC
+# restores the latest snapshot before the app starts. On a fresh repo, the PVC
+# comes up empty and gets backed up going forward. Same manifests either way.
+#
+# The pieces:
+#   * BackupConfig   — the recipe.
+#   * BackupSchedule — nightly backups going forward (runOnCreate: false).
+#   * Restore        — PASSIVE (no `target`): source.fromConfig + onMissingSnapshot:
+#                      Continue. A passive Restore is consumed by a PVC's
+#                      dataSourceRef as a volume populator (ADR §4.7).
+#   * PVC            — references the passive Restore via spec.dataSourceRef.
+#
+# `onMissingSnapshot: Continue` is the DEFAULT for fromConfig; shown explicitly.
+---
+apiVersion: kopia.io/v1alpha1
+kind: BackupConfig
+metadata:
+  name: postgres-data
+  namespace: billing
+spec:
+  repository:
+    kind: Repository
+    name: nas-primary
+  sources:
+    - pvc:
+        name: postgres-data
+---
+apiVersion: kopia.io/v1alpha1
+kind: BackupSchedule
+metadata:
+  name: postgres-data-nightly
+  namespace: billing
+spec:
+  configRef:
+    name: postgres-data
+  schedule:
+    cron: "H 2 * * *"
+    jitter: 30m
+    runOnCreate: false
+---
+apiVersion: kopia.io/v1alpha1
+kind: Restore
+metadata:
+  name: postgres-data-restore
+  namespace: billing
+spec:
+  source:
+    fromConfig:
+      name: postgres-data
+      offset: 0                # 0 = latest, 1 = previous, ...
+  policy:
+    onMissingSnapshot: Continue   # default for fromConfig — explicit for clarity
+  # No `target` — PASSIVE populator mode. The PVC below references this Restore.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: billing
+spec:
+  storageClassName: fast-ssd
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  # Volume populator handshake — needs k8s >= 1.24 (AnyVolumeDataSource).
+  dataSourceRef:
+    apiGroup: kopia.io
+    kind: Restore
+    name: postgres-data-restore

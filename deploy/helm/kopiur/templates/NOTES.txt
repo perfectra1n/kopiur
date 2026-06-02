@@ -1,0 +1,60 @@
+kopiur {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Install scope: {{ .Values.installScope }}{{ if eq .Values.installScope "cluster" }} (cluster-wide; ClusterRepository reconciled){{ else }} (namespaced; ClusterRepository NOT reconciled){{ end }}
+CRDs installed by chart: {{ .Values.installCRDs }}
+Webhook: {{ if .Values.webhook.enabled }}enabled (failurePolicy={{ .Values.webhook.failurePolicy }}){{ else }}disabled{{ end }}
+
+1. Verify the controller is running:
+
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "kopiur.controller.fullname" . }}
+{{- if .Values.webhook.enabled }}
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "kopiur.webhook.fullname" . }}
+{{- end }}
+
+2. Confirm the CRDs are registered:
+
+   kubectl get crd -l app.kubernetes.io/part-of=kopiur
+   # repositories, clusterrepositories, backupconfigs, backups,
+   # backupschedules, restores, maintenances (all in group kopia.io)
+
+{{- if and .Values.webhook.enabled (not .Values.webhook.certManager.enabled) }}
+
+   NOTE: webhook.certManager.enabled is false. You must:
+     a) create the TLS Secret "{{ .Values.webhook.tls.secretName }}" (kubernetes.io/tls) in
+        namespace {{ .Release.Namespace }} with the webhook serving cert, and
+     b) set webhook.caBundle (base64 PEM) so the API server trusts it.
+   Otherwise admission of kopia.io objects will fail{{ if eq .Values.webhook.failurePolicy "Fail" }} (failurePolicy=Fail){{ end }}.
+{{- end }}
+
+3. Create your first repository and start backing up a PVC. Minimal example:
+
+   apiVersion: v1
+   kind: Secret
+   metadata: { name: nas-creds, namespace: {{ .Release.Namespace }} }
+   stringData:
+     AWS_ACCESS_KEY_ID: "..."
+     AWS_SECRET_ACCESS_KEY: "..."
+     KOPIA_PASSWORD: "choose-something-long"
+   ---
+   apiVersion: kopia.io/v1alpha1
+   kind: Repository
+   metadata: { name: nas-primary, namespace: {{ .Release.Namespace }} }
+   spec:
+     backend:
+       s3:
+         bucket: my-backups
+         endpoint: s3.us-east-1.amazonaws.com
+         region: us-east-1
+         auth: { secretRef: { name: nas-creds } }
+     encryption: { passwordSecretRef: { name: nas-creds, key: KOPIA_PASSWORD } }
+     create: { enabled: true }
+
+   See deploy/examples/ for 8 runnable walkthroughs (scheduled backup,
+   ClusterRepository, restore, deploy-or-restore GitOps, maintenance, ...).
+
+4. Watch your resources:
+
+   kubectl get repositories,backupconfigs,backupschedules,backups,restores -A
+   kubectl get maintenances -A
+
+Docs: docs/install.md  |  Design: docs/adr/0003-kopiur-rust-operator.md

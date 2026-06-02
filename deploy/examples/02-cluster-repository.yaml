@@ -1,0 +1,72 @@
+# Example 02 — Shared platform repository (ADR-0001 §5.2)
+#
+# A platform team owns a cluster-scoped ClusterRepository; tenant namespaces
+# reference it without knowing the secret name or backend details. Identity
+# defaults are templated per consumer namespace (rendered at admission, pinned
+# to status — ADR §4.2).
+#
+# REQUIRES the operator installed with installScope=cluster (ClusterRepository is
+# a cluster-scoped kind and is only reconciled in cluster scope).
+#
+# Note: because ClusterRepository is cluster-scoped, its Secret references MUST
+# carry an explicit `namespace` (webhook-enforced — ADR §3.2).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kopia-platform-creds
+  namespace: kopiur-system
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopia.io/v1alpha1
+kind: ClusterRepository
+metadata:
+  name: shared-primary
+spec:
+  backend:
+    s3:
+      bucket: org-kopia-repo
+      prefix: ""                       # bucket root, maximum dedup across tenants
+      endpoint: s3.us-east-1.amazonaws.com
+      region: us-east-1
+      auth:
+        secretRef:
+          name: kopia-platform-creds
+          namespace: kopiur-system     # explicit ns required for cluster scope
+  encryption:
+    passwordSecretRef:
+      name: kopia-platform-creds
+      namespace: kopiur-system         # explicit ns required for cluster scope
+      key: KOPIA_PASSWORD
+  # Tenancy gate (externally-tagged: list | selector | all).
+  allowedNamespaces:
+    list:
+      - billing
+      - payments
+      - identity
+  # Jinja2-compatible templates rendered at admission (ADR §4.2).
+  identityDefaults:
+    hostnameTemplate: "{{ .Namespace }}"
+    usernameTemplate: "{{ .Namespace }}-{{ .ConfigName }}"
+---
+# In the tenant namespace — no need to know the secret name or platform details.
+apiVersion: kopia.io/v1alpha1
+kind: BackupConfig
+metadata:
+  name: postgres-data
+  namespace: billing
+spec:
+  repository:
+    kind: ClusterRepository
+    name: shared-primary
+    # NOTE: `namespace` is forbidden here for kind=ClusterRepository (webhook).
+  sources:
+    - pvc:
+        name: postgres-data
+  retention:
+    keepDaily: 14
+# Identity resolves to billing-postgres-data@billing:/pvc/postgres-data.

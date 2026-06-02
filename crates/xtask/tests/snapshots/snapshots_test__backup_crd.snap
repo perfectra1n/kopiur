@@ -1,0 +1,293 @@
+---
+source: crates/xtask/tests/snapshots_test.rs
+expression: "body(&artifacts, \"backups\")"
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backups.kopia.io
+spec:
+  group: kopia.io
+  names:
+    categories:
+    - kopiur
+    kind: Backup
+    plural: backups
+    shortNames:
+    - kopiabak
+    singular: backup
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.origin
+      name: Origin
+      type: string
+    - jsonPath: .status.snapshot.kopiaSnapshotID
+      name: Snapshot
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for BackupSpec via `CustomResource`
+        properties:
+          spec:
+            description: |-
+              A single kopia snapshot represented as a Kubernetes object. ADR §3.4.
+
+              For `scheduled`/`manual` backups the spec carries `configRef` (+ optional
+              overrides). For `discovered` backups the spec is empty — every field is optional.
+            properties:
+              configRef:
+                description: The recipe to run. Absent for `discovered` backups. ADR §3.4.
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                  namespace:
+                    nullable: true
+                    type: string
+                required:
+                - name
+                type: object
+              deletionPolicy:
+                description: |-
+                  Lifecycle of the underlying kopia snapshot when its `Backup` CR is deleted.
+                  Shared by `BackupConfig.spec.defaultDeletionPolicy` and `Backup.spec.deletionPolicy`.
+                  ADR-0003 §4.5 / ADR-0001 §4.5.
+
+                  The reconciler distinguishes the three cases with an exhaustive `match` — Rust
+                  enforces that any new variant added later must be handled in every match site,
+                  preventing the class of bug where a new policy slips into production without a
+                  corresponding reconcile branch.
+                enum:
+                - Delete
+                - Retain
+                - Orphan
+                nullable: true
+                type: string
+              failurePolicy:
+                description: Per-run failure controls passed to the mover `Job`. ADR §3.4 (G6).
+                nullable: true
+                properties:
+                  activeDeadlineSeconds:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  backoffLimit:
+                    format: int32
+                    nullable: true
+                    type: integer
+                type: object
+              tags:
+                additionalProperties:
+                  type: string
+                description: 'Arbitrary kopia snapshot tags (e.g. `reason: scheduled-nightly`). ADR §3.4.'
+                nullable: true
+                type: object
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              job:
+                description: Present for scheduled/manual; absent for discovered. ADR §3.4.
+                nullable: true
+                properties:
+                  attempts:
+                    format: int32
+                    nullable: true
+                    type: integer
+                  name:
+                    nullable: true
+                    type: string
+                type: object
+              logTail:
+                description: Capped at ~4KB; full logs live in the Job pod. ADR §3.4/§4.10.
+                nullable: true
+                type: string
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              origin:
+                description: |-
+                  How a `Backup` came to exist. Canonical value mirrored from the `kopia.io/origin`
+                  label. Closed enum. ADR §3.4.
+                enum:
+                - scheduled
+                - manual
+                - discovered
+                - null
+                nullable: true
+                type: string
+              phase:
+                description: Lifecycle phase of a `Backup`. Closed enum. ADR §3.4 status.
+                enum:
+                - Pending
+                - Running
+                - Succeeded
+                - Failed
+                - Deleting
+                - Discovered
+                - null
+                nullable: true
+                type: string
+              resolved:
+                description: Frozen recipe values at run time (scheduled/manual). ADR §3.4.
+                nullable: true
+                properties:
+                  repository:
+                    description: |-
+                      Discriminated reference from a consumer CR (`BackupConfig`, `Backup`,
+                      `Restore`, `Maintenance`) to a `Repository` or `ClusterRepository`. ADR §3.2.
+
+                      When `kind == ClusterRepository`, `namespace` MUST be absent — enforced by the
+                      admission webhook (`api::validate`), since the type system cannot express
+                      "this field is forbidden only for one variant of a sibling field".
+                    nullable: true
+                    properties:
+                      kind:
+                        default: Repository
+                        description: |-
+                          Which kind of repository a consumer CR references. ADR §3.2/§3.3.
+
+                          This is a closed enum: a consumer's `repository.kind` is always exactly one
+                          of these two values, so reconcilers `match` it exhaustively.
+                        enum:
+                        - Repository
+                        - ClusterRepository
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        description: Cross-namespace `Repository` reference; ignored/forbidden for `ClusterRepository`.
+                        nullable: true
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  sources:
+                    items:
+                      properties:
+                        pvc:
+                          description: '`namespace/name` of the PVC, as kopia sees it. ADR §3.4.'
+                          nullable: true
+                          type: string
+                        sourcePath:
+                          nullable: true
+                          type: string
+                      type: object
+                    type: array
+                type: object
+              snapshot:
+                description: The kopia artifact this CR represents. ADR §3.4.
+                nullable: true
+                properties:
+                  identity:
+                    description: Fully-resolved identity pinned into status; never re-rendered after admission. ADR §4.2.
+                    properties:
+                      hostname:
+                        type: string
+                      sourcePath:
+                        nullable: true
+                        type: string
+                      username:
+                        type: string
+                    required:
+                    - hostname
+                    - username
+                    type: object
+                  kopiaSnapshotID:
+                    description: |-
+                      Renamed to match the ADR wire shape exactly (`kopiaSnapshotID`, capital `ID`);
+                      serde's `camelCase` would otherwise produce `kopiaSnapshotId`.
+                    type: string
+                required:
+                - identity
+                - kopiaSnapshotID
+                type: object
+              stats:
+                description: Stats populated from kopia's JSON output. ADR §3.4.
+                nullable: true
+                properties:
+                  bytesNew:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  filesModified:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  filesNew:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  filesUnchanged:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  sizeBytes:
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              timing:
+                nullable: true
+                properties:
+                  durationSeconds:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  endTime:
+                    nullable: true
+                    type: string
+                  startTime:
+                    nullable: true
+                    type: string
+                type: object
+            type: object
+        required:
+        - spec
+        title: Backup
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

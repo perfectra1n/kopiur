@@ -1,0 +1,16 @@
+# Patterns to ignore when building Helm packages.
+.DS_Store
+.git/
+.gitignore
+.bak
+*.tmp
+*.orig
+*.swp
+# Editor/CI noise
+.vscode/
+.idea/
+*~
+# Tests / scratch
+ci/
+tests/
+README.md.gotmpl

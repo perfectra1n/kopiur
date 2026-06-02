@@ -1,0 +1,36 @@
+[package]
+name = "kopiur-controller"
+description = "kopiur operator controller: per-CRD reconcilers, finalizers, and scheduling"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+kopiur-api = { workspace = true }
+kopiur-kopia = { workspace = true }
+kopiur-mover = { workspace = true }
+kube = { workspace = true, features = ["client", "runtime", "derive"] }
+k8s-openapi = { workspace = true, features = ["v1_33"] }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
+croner = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+serial_test = { workspace = true }
+tower = { workspace = true }
+http = "1"
+
+[features]
+integration = []

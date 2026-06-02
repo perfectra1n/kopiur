@@ -1,0 +1,29 @@
+[package]
+name = "kopiur-api"
+description = "Strongly-typed CRD definitions, validators, and shared logic for the kopiur Kopia backup operator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+kube = { workspace = true, features = ["derive"] }
+k8s-openapi = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+croner = { workspace = true }
+tera = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }
+assert-json-diff = { workspace = true }
+
+[features]
+# k8s-openapi requires exactly one version feature selected by the final artifact.
+# For this library's own builds/tests we pick a recent one; downstream binaries re-select.
+default = ["k8s-openapi/v1_33"]

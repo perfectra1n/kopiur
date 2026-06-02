@@ -1,0 +1,27 @@
+[package]
+name = "xtask"
+description = "Code generation tasks for kopiur: CRD YAML, RBAC manifests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+kopiur-api = { workspace = true }
+kube = { workspace = true, features = ["derive"] }
+k8s-openapi = { workspace = true, features = ["v1_33"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+
+[features]
+# Gates the cluster-dependent integration test. Off by default; the test is also
+# `#[ignore]` so `cargo test` stays hermetic.
+integration = []

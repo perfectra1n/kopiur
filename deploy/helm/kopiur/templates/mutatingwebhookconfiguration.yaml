@@ -1,0 +1,43 @@
+{{- if .Values.webhook.enabled -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ include "kopiur.fullname" . }}-mutating
+  labels:
+    {{- include "kopiur.labels" . | nindent 4 }}
+  {{- if .Values.webhook.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "kopiur.webhook.fullname" . }}
+  {{- end }}
+webhooks:
+  - name: mutate.kopia.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+    # reinvocationPolicy IfNeeded: identity templating + deletionPolicy defaulting
+    # (ADR §4.2/§4.5) are pinned once; safe to re-run if another webhook mutates.
+    reinvocationPolicy: IfNeeded
+    clientConfig:
+      {{- if not .Values.webhook.certManager.enabled }}
+      caBundle: {{ .Values.webhook.caBundle | quote }}
+      {{- end }}
+      service:
+        name: {{ include "kopiur.webhook.fullname" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /admission
+        port: 443
+    rules:
+      - apiGroups: ["kopia.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources:
+          - repositories
+          - clusterrepositories
+          - backupconfigs
+          - backups
+          - backupschedules
+          - restores
+          - maintenances
+        scope: "*"
+{{- end }}

@@ -1,0 +1,77 @@
+# Example 01 — Single PVC, scheduled daily (ADR-0001 §5.1)
+#
+# The canonical first backup: one Repository (S3), one BackupConfig (the recipe,
+# idempotent — runs nothing on its own), one BackupSchedule (the cron that
+# creates Backup CRs). Maintenance is implicit: a default Maintenance is created
+# on first reference to a Repository unless one already exists.
+#
+# Field shapes verified against crates/api (externally-tagged backend: the bucket
+# lives under `backend.s3`, NOT `backend: { kind: S3 }`).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nas-primary-creds
+  namespace: billing
+type: Opaque
+stringData:
+  # Backend auth keys are read by well-known names from the referenced Secret.
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+  # Repository encryption password (kopia repo password).
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopia.io/v1alpha1
+kind: Repository
+metadata:
+  name: nas-primary
+  namespace: billing
+spec:
+  backend:
+    s3:
+      bucket: my-backups
+      prefix: prod/
+      endpoint: s3.us-east-1.amazonaws.com
+      region: us-east-1
+      auth:
+        secretRef:
+          name: nas-primary-creds
+  encryption:
+    passwordSecretRef:
+      name: nas-primary-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true
+---
+apiVersion: kopia.io/v1alpha1
+kind: BackupConfig
+metadata:
+  name: postgres-data
+  namespace: billing
+spec:
+  # repository.kind defaults to Repository; shown explicitly for clarity.
+  repository:
+    kind: Repository
+    name: nas-primary
+  sources:
+    - pvc:
+        name: postgres-data
+  # GFS retention is the ONLY successful-retention driver (ADR §4.4).
+  retention:
+    keepDaily: 14
+    keepWeekly: 4
+---
+apiVersion: kopia.io/v1alpha1
+kind: BackupSchedule
+metadata:
+  name: postgres-data-nightly
+  namespace: billing
+spec:
+  configRef:
+    name: postgres-data
+  schedule:
+    # Jenkins-style H pins a deterministic per-schedule minute (ADR §4.1).
+    cron: "H 2 * * *"
+    jitter: 30m
+    # GitOps-friendly default: do not fire immediately on create (ADR §4.1 / G3).
+    runOnCreate: false

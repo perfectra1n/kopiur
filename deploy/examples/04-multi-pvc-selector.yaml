@@ -1,0 +1,32 @@
+# Example 04 — Multi-PVC selector (ADR-0001 §5.4)
+#
+# Back up every PVC matching a label as one consistent group. Resolves volsync's
+# "one ReplicationSource = one PVC" limitation (G2).
+#
+# A Source has mutually-exclusive `pvc` and `pvcSelector` (webhook-enforced).
+# `sourcePathStrategy` is a closed enum: `PvcName` | `PvcNamespacedName`
+# (note: PvcName, not "PVCName").
+# `groupBy` is a closed enum: `VolumeGroupSnapshot` (default) | `None`.
+---
+apiVersion: kopia.io/v1alpha1
+kind: BackupConfig
+metadata:
+  name: app-bundle
+  namespace: billing
+spec:
+  repository:
+    kind: Repository
+    name: nas-primary
+  identity:
+    username: app-bundle
+    hostname: billing
+  sources:
+    - pvcSelector:
+        labelSelector:
+          matchLabels:
+            backup: include
+      sourcePathStrategy: PvcName
+  # One consistent VolumeGroupSnapshot across all matched PVCs (ADR §4.9).
+  groupBy: VolumeGroupSnapshot
+  retention:
+    keepDaily: 14

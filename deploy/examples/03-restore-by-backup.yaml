@@ -1,0 +1,35 @@
+# Example 03 — Restore by picking a Backup (ADR-0001 §5.3)
+#
+# Browse the catalog, then reference a specific Backup CR. No timestamp math —
+# restore is "pick a row" (ADR §3.8 / G8).
+#
+#   # list candidate snapshots for a config, newest last:
+#   kubectl get backup -n billing \
+#     -l kopia.io/backup-config=postgres-data \
+#     --sort-by=.status.timing.startTime
+#
+# RestoreSource is externally-tagged: `source: { backupRef: {...} }`.
+# RestoreTarget is externally-tagged: `target: { pvc: {...} }` (operator creates
+# the PVC) or `target: { pvcRef: {...} }` (write into an existing PVC).
+---
+apiVersion: kopia.io/v1alpha1
+kind: Restore
+metadata:
+  name: postgres-restore-yesterday
+  namespace: billing
+spec:
+  source:
+    backupRef:
+      name: postgres-data-20260523-021300
+      namespace: billing
+  target:
+    pvc:
+      name: postgres-data-restored
+      storageClassName: fast-ssd
+      capacity: 100Gi
+      accessModes:
+        - ReadWriteOnce
+  # Optional. Explicit sources fail-closed by default (onMissingSnapshot: Fail).
+  policy:
+    onMissingSnapshot: Fail
+    waitTimeout: 5m
