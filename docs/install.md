@@ -3,7 +3,7 @@
 Kopiur is a Kopia-native Kubernetes backup operator (Rust / kube-rs). This guide
 covers installing the operator with the bundled Helm chart and verifying it.
 
-> Status: **alpha** — API group `kopia.io`, version `v1alpha1`. The CRD surface
+> Status: **alpha** — API group `kopiur.dev`, version `v1alpha1`. The CRD surface
 > may still change between releases.
 
 ## Prerequisites
@@ -77,7 +77,7 @@ referenced by many tenant namespaces. See `deploy/examples/02-cluster-repository
 flag is honored and `helm upgrade` re-applies schema changes.
 
 > Caution: with templated CRDs, `helm uninstall kopiur` deletes the CRDs **and
-> every `kopia.io` object in the cluster** (Repositories, Backups, ...). For an
+> every `kopiur.dev` object in the cluster** (Repositories, Backups, ...). For an
 > alpha API this is the intended, predictable behavior. To decouple CRD lifecycle
 > from the release (e.g. GitOps), install with `--set installCRDs=false` and apply
 > the generated CRDs out of band:

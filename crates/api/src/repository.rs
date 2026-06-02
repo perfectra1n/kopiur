@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// reference one. ADR §3.1.
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[kube(
-    group = "kopia.io",
+    group = "kopiur.dev",
     version = "v1alpha1",
     kind = "Repository",
     namespaced,

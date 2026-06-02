@@ -310,8 +310,8 @@ mod tests {
     #[test]
     fn split_api_version_grouped() {
         assert_eq!(
-            split_api_version("kopia.io/v1alpha1"),
-            ("kopia.io".to_string(), "v1alpha1".to_string())
+            split_api_version("kopiur.dev/v1alpha1"),
+            ("kopiur.dev".to_string(), "v1alpha1".to_string())
         );
     }
 

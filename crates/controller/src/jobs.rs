@@ -302,7 +302,7 @@ mod tests {
 
     fn inputs(ws: &MoverWorkSpec, limits: JobLimits) -> MoverJobInputs<'_> {
         let mut labels = BTreeMap::new();
-        labels.insert("kopia.io/origin".to_string(), "scheduled".to_string());
+        labels.insert("kopiur.dev/origin".to_string(), "scheduled".to_string());
         MoverJobInputs {
             name: "db-1",
             namespace: "prod",

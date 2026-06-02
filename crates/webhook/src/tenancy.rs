@@ -223,22 +223,22 @@ mod tests {
     #[test]
     fn selector_match_labels_match_allows() {
         let sel = LabelSelector {
-            match_labels: Some(labels(&[("kopia.io/tier", "enterprise")])),
+            match_labels: Some(labels(&[("kopiur.dev/tier", "enterprise")])),
             ..Default::default()
         };
         let allowed = AllowedNamespaces::Selector(sel);
-        let ns_labels = labels(&[("kopia.io/tier", "enterprise")]);
+        let ns_labels = labels(&[("kopiur.dev/tier", "enterprise")]);
         assert!(evaluate_tenancy("ns", "repo", &allowed, Some(&ns_labels)).is_allow());
     }
 
     #[test]
     fn selector_match_labels_mismatch_denies() {
         let sel = LabelSelector {
-            match_labels: Some(labels(&[("kopia.io/tier", "enterprise")])),
+            match_labels: Some(labels(&[("kopiur.dev/tier", "enterprise")])),
             ..Default::default()
         };
         let allowed = AllowedNamespaces::Selector(sel);
-        let ns_labels = labels(&[("kopia.io/tier", "free")]);
+        let ns_labels = labels(&[("kopiur.dev/tier", "free")]);
         assert!(!evaluate_tenancy("ns", "repo", &allowed, Some(&ns_labels)).is_allow());
     }
 
@@ -257,7 +257,7 @@ mod tests {
     fn selector_match_expressions_in_allows_and_denies() {
         let sel = LabelSelector {
             match_expressions: Some(vec![LabelSelectorRequirement {
-                key: "kopia.io/tier".into(),
+                key: "kopiur.dev/tier".into(),
                 operator: "In".into(),
                 values: Some(vec!["gold".into(), "platinum".into()]),
             }]),
@@ -268,14 +268,14 @@ mod tests {
             "ns",
             "repo",
             &allowed,
-            Some(&labels(&[("kopia.io/tier", "gold")]))
+            Some(&labels(&[("kopiur.dev/tier", "gold")]))
         )
         .is_allow());
         assert!(!evaluate_tenancy(
             "ns",
             "repo",
             &allowed,
-            Some(&labels(&[("kopia.io/tier", "bronze")]))
+            Some(&labels(&[("kopiur.dev/tier", "bronze")]))
         )
         .is_allow());
     }
@@ -286,7 +286,7 @@ mod tests {
         // We evaluate it: Exists on a missing key must DENY (fail closed).
         let sel = LabelSelector {
             match_expressions: Some(vec![LabelSelectorRequirement {
-                key: "kopia.io/team".into(),
+                key: "kopiur.dev/team".into(),
                 operator: "Exists".into(),
                 values: None,
             }]),
@@ -297,7 +297,7 @@ mod tests {
             "ns",
             "repo",
             &allowed,
-            Some(&labels(&[("kopia.io/team", "x")]))
+            Some(&labels(&[("kopiur.dev/team", "x")]))
         )
         .is_allow());
         assert!(

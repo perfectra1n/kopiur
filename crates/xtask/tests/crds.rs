@@ -2,7 +2,7 @@
 //!
 //! Each generated CRD must round-trip back into a `CustomResourceDefinition`
 //! (proving the YAML the cluster would receive is well-formed), expose the
-//! `kopia.io` group + `v1alpha1` version, and carry the correct scope.
+//! `kopiur.dev` group + `v1alpha1` version, and carry the correct scope.
 
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use xtask::artifact::{Artifact, GEN_HEADER};
@@ -43,7 +43,7 @@ fn every_crd_roundtrips_with_expected_group_version_and_scope() {
     for (plural, scope) in expected {
         let crd = parse(&crd_yaml(&artifacts, plural));
 
-        assert_eq!(crd.spec.group, "kopia.io", "{plural} group");
+        assert_eq!(crd.spec.group, "kopiur.dev", "{plural} group");
         assert_eq!(
             crd.spec.names.plural, plural,
             "{plural} metadata plural mismatch"
@@ -75,6 +75,6 @@ fn bundle_contains_all_seven_crds() {
         let cleaned = doc.strip_prefix(GEN_HEADER).unwrap_or(doc);
         let crd: CustomResourceDefinition =
             serde_yaml::from_str(cleaned).unwrap_or_else(|e| panic!("bundle doc {i} parse: {e}"));
-        assert_eq!(crd.spec.group, "kopia.io");
+        assert_eq!(crd.spec.group, "kopiur.dev");
     }
 }

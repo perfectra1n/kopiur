@@ -2,7 +2,7 @@ apiVersion: v2
 name: kopiur
 description: |-
   Kopiur — a Kopia-native Kubernetes backup operator written in Rust.
-  Installs the controller, admission webhook, the 7 kopia.io/v1alpha1 CRDs,
+  Installs the controller, admission webhook, the 7 kopiur.dev/v1alpha1 CRDs,
   and the RBAC required to run them. Implements ADR-0003.
 type: application
 # Chart version — bump on any chart change (SemVer).

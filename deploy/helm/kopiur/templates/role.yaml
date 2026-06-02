@@ -1,7 +1,7 @@
 {{- if eq .Values.installScope "namespaced" -}}
 # RBAC rules SYNCED from `cargo xtask gen-rbac` (deploy/rbac/operator-role.yaml).
-# That xtask is the SOURCE OF TRUTH — it derives the kopia.io rules from the
-# kube-rs Resource traits (ADR §4.12). If you edit kopia.io permissions, edit the
+# That xtask is the SOURCE OF TRUTH — it derives the kopiur.dev rules from the
+# kube-rs Resource traits (ADR §4.12). If you edit kopiur.dev permissions, edit the
 # xtask and re-run `cargo xtask gen-rbac`, then re-sync these rules. Names/labels
 # are Helm-templated so the chart owns them.
 #
@@ -18,7 +18,7 @@ metadata:
     {{- include "kopiur.labels" . | nindent 4 }}
 rules:
   - apiGroups:
-      - kopia.io
+      - kopiur.dev
     resources:
       - repositories
       - backupconfigs
@@ -28,7 +28,7 @@ rules:
       - maintenances
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups:
-      - kopia.io
+      - kopiur.dev
     resources:
       - repositories/status
       - repositories/finalizers

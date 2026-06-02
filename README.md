@@ -10,10 +10,10 @@ surface is modeled as Rust enums so invalid states are unrepresentable and
 reconcilers handle every variant at compile time. See
 [ADR-0003](docs/adr/0003-kopiur-rust-operator.md) for the full design.
 
-> Status: **alpha** — API group `kopia.io`, version `v1alpha1`. The CRD surface
+> Status: **alpha** — API group `kopiur.dev`, version `v1alpha1`. The CRD surface
 > may still change between releases.
 
-## The 7 CRDs (`kopia.io/v1alpha1`)
+## The 7 CRDs (`kopiur.dev/v1alpha1`)
 
 | CRD | Scope | Layer | Purpose |
 |---|---|---|---|

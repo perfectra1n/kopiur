@@ -1,7 +1,7 @@
 //! The `Backup` reconciler — the heart of the ADR §5.5 thesis.
 //!
 //! Two paths:
-//! 1. **Normal reconcile** (produced backups): add the `kopia.io/snapshot-cleanup`
+//! 1. **Normal reconcile** (produced backups): add the `kopiur.dev/snapshot-cleanup`
 //!    finalizer, create a mover `Job` + `ConfigMap` (work spec), watch it to a
 //!    terminal state, copy stats/phase into `status`, and reap (owner-ref GC).
 //! 2. **Deletion** (finalizer present, `deletionTimestamp` set): run the
@@ -91,7 +91,7 @@ pub fn effective_deletion_policy(
 }
 
 /// Resolve a `Backup`'s origin from its status (canonical) or its
-/// `kopia.io/origin` label, defaulting to `Manual` when neither is present
+/// `kopiur.dev/origin` label, defaulting to `Manual` when neither is present
 /// (a bare `kubectl create`).
 pub fn resolve_origin(b: &Backup) -> Origin {
     if let Some(o) = b.status.as_ref().and_then(|s| s.origin) {
@@ -352,7 +352,7 @@ async fn delete_snapshot_via_job(
 
     let owner = io::owner_ref_for(backup, "Backup")?;
     let mut labels = run_labels(&config, resolve_origin(backup));
-    labels.insert("kopia.io/op".to_string(), "snapshot-delete".to_string());
+    labels.insert("kopiur.dev/op".to_string(), "snapshot-delete".to_string());
     let repo_pvc = io::filesystem_repo_pvc(&repo.spec.backend).map(|claim_name| PvcMount {
         claim_name,
         mount_path: io::filesystem_repo_path(&repo.spec.backend).unwrap_or_default(),
@@ -751,7 +751,7 @@ mod tests {
 
     #[test]
     fn unrelated_annotations_do_not_trigger_skip() {
-        let a = ann(&[("kopia.io/other", "x")]);
+        let a = ann(&[("kopiur.dev/other", "x")]);
         assert_eq!(
             plan_deletion(DeletionPolicy::Delete, &a),
             DeletionPlan::DeleteSnapshot

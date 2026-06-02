@@ -11,7 +11,7 @@
 //!
 //! It is both a **validating** and a **mutating** webhook served from a single
 //! endpoint: it denies invalid objects and applies safe defaulting patches (origin-
-//! aware `deletionPolicy`, the `kopia.io/snapshot-cleanup` finalizer, GitOps-safe
+//! aware `deletionPolicy`, the `kopiur.dev/snapshot-cleanup` finalizer, GitOps-safe
 //! schedule defaults) in one pass. See [`routes`] for the endpoint design rationale.
 
 pub mod handlers;

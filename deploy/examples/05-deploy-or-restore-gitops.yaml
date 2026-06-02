@@ -14,7 +14,7 @@
 #
 # `onMissingSnapshot: Continue` is the DEFAULT for fromConfig; shown explicitly.
 ---
-apiVersion: kopia.io/v1alpha1
+apiVersion: kopiur.dev/v1alpha1
 kind: BackupConfig
 metadata:
   name: postgres-data
@@ -27,7 +27,7 @@ spec:
     - pvc:
         name: postgres-data
 ---
-apiVersion: kopia.io/v1alpha1
+apiVersion: kopiur.dev/v1alpha1
 kind: BackupSchedule
 metadata:
   name: postgres-data-nightly
@@ -40,7 +40,7 @@ spec:
     jitter: 30m
     runOnCreate: false
 ---
-apiVersion: kopia.io/v1alpha1
+apiVersion: kopiur.dev/v1alpha1
 kind: Restore
 metadata:
   name: postgres-data-restore
@@ -68,6 +68,6 @@ spec:
       storage: 100Gi
   # Volume populator handshake — needs k8s >= 1.24 (AnyVolumeDataSource).
   dataSourceRef:
-    apiGroup: kopia.io
+    apiGroup: kopiur.dev
     kind: Restore
     name: postgres-data-restore

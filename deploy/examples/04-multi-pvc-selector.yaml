@@ -8,7 +8,7 @@
 # (note: PvcName, not "PVCName").
 # `groupBy` is a closed enum: `VolumeGroupSnapshot` (default) | `None`.
 ---
-apiVersion: kopia.io/v1alpha1
+apiVersion: kopiur.dev/v1alpha1
 kind: BackupConfig
 metadata:
   name: app-bundle

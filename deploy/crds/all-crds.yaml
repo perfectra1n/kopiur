@@ -2,9 +2,9 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: repositories.kopia.io
+  name: repositories.kopiur.dev
 spec:
-  group: kopia.io
+  group: kopiur.dev
   names:
     categories:
     - kopiur
@@ -548,9 +548,9 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: clusterrepositories.kopia.io
+  name: clusterrepositories.kopiur.dev
 spec:
-  group: kopia.io
+  group: kopiur.dev
   names:
     categories:
     - kopiur
@@ -1166,9 +1166,9 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: backupconfigs.kopia.io
+  name: backupconfigs.kopiur.dev
 spec:
-  group: kopia.io
+  group: kopiur.dev
   names:
     categories:
     - kopiur
@@ -11963,9 +11963,9 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: backups.kopia.io
+  name: backups.kopiur.dev
 spec:
-  group: kopia.io
+  group: kopiur.dev
   names:
     categories:
     - kopiur
@@ -12106,7 +12106,7 @@ spec:
                 type: integer
               origin:
                 description: |-
-                  How a `Backup` came to exist. Canonical value mirrored from the `kopia.io/origin`
+                  How a `Backup` came to exist. Canonical value mirrored from the `kopiur.dev/origin`
                   label. Closed enum. ADR §3.4.
                 enum:
                 - scheduled
@@ -12253,9 +12253,9 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: backupschedules.kopia.io
+  name: backupschedules.kopiur.dev
 spec:
-  group: kopia.io
+  group: kopiur.dev
   names:
     categories:
     - kopiur
@@ -12463,9 +12463,9 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: restores.kopia.io
+  name: restores.kopiur.dev
 spec:
-  group: kopia.io
+  group: kopiur.dev
   names:
     categories:
     - kopiur
@@ -12829,9 +12829,9 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: maintenances.kopia.io
+  name: maintenances.kopiur.dev
 spec:
-  group: kopia.io
+  group: kopiur.dev
   names:
     categories:
     - kopiur

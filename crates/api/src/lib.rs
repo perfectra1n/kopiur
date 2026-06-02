@@ -65,7 +65,7 @@ pub use jitter::{offset as jitter_offset, substitute_h};
 pub use retention::{select_kept, BackupLike, KeptSet};
 
 /// The CRD API group for all kopiur resources.
-pub const GROUP: &str = "kopia.io";
+pub const GROUP: &str = "kopiur.dev";
 /// The current (and only, per ADR §8) API version.
 pub const VERSION: &str = "v1alpha1";
 
@@ -95,7 +95,7 @@ mod roundtrip_tests {
     #[test]
     fn repository_crd_metadata_is_correct() {
         let crd = Repository::crd();
-        assert_eq!(crd.spec.group, "kopia.io");
+        assert_eq!(crd.spec.group, "kopiur.dev");
         assert_eq!(crd.spec.names.kind, "Repository");
         assert_eq!(crd.spec.scope, "Namespaced");
         assert_eq!(crd.spec.versions[0].name, "v1alpha1");

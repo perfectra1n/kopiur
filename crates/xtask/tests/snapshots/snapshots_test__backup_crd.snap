@@ -5,9 +5,9 @@ expression: "body(&artifacts, \"backups\")"
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: backups.kopia.io
+  name: backups.kopiur.dev
 spec:
-  group: kopia.io
+  group: kopiur.dev
   names:
     categories:
     - kopiur
@@ -148,7 +148,7 @@ spec:
                 type: integer
               origin:
                 description: |-
-                  How a `Backup` came to exist. Canonical value mirrored from the `kopia.io/origin`
+                  How a `Backup` came to exist. Canonical value mirrored from the `kopiur.dev/origin`
                   label. Closed enum. ADR §3.4.
                 enum:
                 - scheduled

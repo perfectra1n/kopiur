@@ -52,10 +52,10 @@ Invalid states are unrepresentable; reconcilers handle every variant. Concretely
   `BackupSchedule.spec.failedJobsHistoryLimit`. There is deliberately **no**
   `successfulJobsHistoryLimit`. (ADR §4.4 — resolves the onedr0p/bo0tzz split.)
 - **Snapshot lifecycle = CR lifecycle.** Every `Backup` carries the
-  `kopia.io/snapshot-cleanup` finalizer. `deletionPolicy`:
+  `kopiur.dev/snapshot-cleanup` finalizer. `deletionPolicy`:
   `Delete` (default for produced) / `Retain` (FORCED for `origin: discovered`,
   webhook-rejected otherwise) / `Orphan`. Match all three exhaustively; the
-  `kopia.io/skip-snapshot-cleanup` annotation is the repo-offline escape hatch.
+  `kopiur.dev/skip-snapshot-cleanup` annotation is the repo-offline escape hatch.
 - **Identity** defaults to `username=name`, `hostname=namespace`,
   `sourcePath=/pvc/<name>`; `ClusterRepository.identityDefaults` templates render
   via `tera` at admission and are pinned to `status.resolved.identity` — never

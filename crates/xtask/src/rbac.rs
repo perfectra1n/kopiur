@@ -36,9 +36,9 @@ const CLUSTERROLE_NAME: &str = "kopiur-controller";
 const ROLE_NAME: &str = "kopiur-controller";
 const DEFAULT_NAMESPACE: &str = "kopiur-system";
 
-const KOPIA_GROUP: &str = "kopia.io";
+const KOPIA_GROUP: &str = "kopiur.dev";
 
-/// All 7 CRD plurals in `kopia.io`. `clusterrepositories` is cluster-scoped.
+/// All 7 CRD plurals in `kopiur.dev`. `clusterrepositories` is cluster-scoped.
 const NAMESPACED_CRDS: &[&str] = &[
     "repositories",
     "backupconfigs",
@@ -68,7 +68,7 @@ const FULL_VERBS: &[&str] = &[
 const SUBRESOURCE_VERBS: &[&str] = &["get", "update", "patch"];
 const READ_VERBS: &[&str] = &["get", "list", "watch"];
 
-/// Build the `kopia.io` CRD rules shared by both flavours.
+/// Build the `kopiur.dev` CRD rules shared by both flavours.
 ///
 /// `include_cluster_crds` adds the cluster-scoped `clusterrepositories` CRD,
 /// which only belongs in the cluster-scoped `ClusterRole`.

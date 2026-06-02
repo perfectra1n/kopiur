@@ -8,7 +8,7 @@
 # a closed enum: Delete (default for produced) | Retain | Orphan (ADR §4.5).
 # `tags` are arbitrary kopia snapshot tags.
 ---
-apiVersion: kopia.io/v1alpha1
+apiVersion: kopiur.dev/v1alpha1
 kind: Backup
 metadata:
   name: postgres-data-pre-migration

@@ -7,7 +7,7 @@
 # create (ADR §4.5).
 #
 #   # list discovered snapshots in the repo namespace:
-#   kubectl get backup -n backups -l kopia.io/origin=discovered
+#   kubectl get backup -n backups -l kopiur.dev/origin=discovered
 #
 # Two ways to restore one:
 #   A) reference the discovered Backup CR by name (source.backupRef), or
@@ -16,7 +16,7 @@
 #      derive it from.
 ---
 # A) by the discovered Backup CR
-apiVersion: kopia.io/v1alpha1
+apiVersion: kopiur.dev/v1alpha1
 kind: Restore
 metadata:
   name: rescue-restore
@@ -36,7 +36,7 @@ spec:
 ---
 # B) by raw kopia identity (foreign writer / aged-out catalog).
 #    Requires spec.repository. source is externally-tagged: { identity: {...} }.
-apiVersion: kopia.io/v1alpha1
+apiVersion: kopiur.dev/v1alpha1
 kind: Restore
 metadata:
   name: rescue-restore-by-identity

@@ -10,7 +10,7 @@ metadata:
     cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "kopiur.webhook.fullname" . }}
   {{- end }}
 webhooks:
-  - name: mutate.kopia.io
+  - name: mutate.kopiur.dev
     admissionReviewVersions: ["v1"]
     sideEffects: None
     failurePolicy: {{ .Values.webhook.failurePolicy }}
@@ -28,7 +28,7 @@ webhooks:
         path: /admission
         port: 443
     rules:
-      - apiGroups: ["kopia.io"]
+      - apiGroups: ["kopiur.dev"]
         apiVersions: ["v1alpha1"]
         operations: ["CREATE", "UPDATE"]
         resources:

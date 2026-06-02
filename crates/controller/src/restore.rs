@@ -271,7 +271,7 @@ async fn drive_direct_restore(
         limits: JobLimits::default(),
         resources: None,
         security_context: None,
-        labels: io::child_labels(&[("kopia.io/op", "restore")]),
+        labels: io::child_labels(&[("kopiur.dev/op", "restore")]),
         // Restore writes INTO the target PVC, mounted read-write at /restore.
         source_pvc: Some(PvcMount {
             claim_name: target_pvc,

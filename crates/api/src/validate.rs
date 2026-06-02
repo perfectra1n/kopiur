@@ -219,7 +219,7 @@ pub fn validate_backup_config(spec: &BackupConfigSpec) -> Vec<ValidationError> {
 /// Validate a `Backup` spec for a given origin, accumulating all problems.
 ///
 /// `origin` is supplied by the caller because the canonical value lives in
-/// `status.origin` / the `kopia.io/origin` label, not in `spec` (ADR §3.4).
+/// `status.origin` / the `kopiur.dev/origin` label, not in `spec` (ADR §3.4).
 pub fn validate_backup(spec: &BackupSpec, origin: Origin) -> Vec<ValidationError> {
     let mut errs = Vec::new();
     if let Err(e) = validate_backup_deletion_policy(origin, spec.deletion_policy) {
@@ -368,13 +368,13 @@ mod tests {
     fn consumer_allowed_via_selector_match() {
         let sel = LabelSelector {
             match_labels: Some(BTreeMap::from([(
-                "kopia.io/tier".to_string(),
+                "kopiur.dev/tier".to_string(),
                 "enterprise".to_string(),
             )])),
             ..Default::default()
         };
         let allowed = AllowedNamespaces::Selector(sel);
-        let labels = BTreeMap::from([("kopia.io/tier".to_string(), "enterprise".to_string())]);
+        let labels = BTreeMap::from([("kopiur.dev/tier".to_string(), "enterprise".to_string())]);
         assert!(
             validate_consumer_against_cluster_repo("ns", "repo", &allowed, Some(&labels)).is_ok()
         );
@@ -384,13 +384,13 @@ mod tests {
     fn consumer_denied_via_selector_mismatch() {
         let sel = LabelSelector {
             match_labels: Some(BTreeMap::from([(
-                "kopia.io/tier".to_string(),
+                "kopiur.dev/tier".to_string(),
                 "enterprise".to_string(),
             )])),
             ..Default::default()
         };
         let allowed = AllowedNamespaces::Selector(sel);
-        let labels = BTreeMap::from([("kopia.io/tier".to_string(), "free".to_string())]);
+        let labels = BTreeMap::from([("kopiur.dev/tier".to_string(), "free".to_string())]);
         assert!(
             validate_consumer_against_cluster_repo("ns", "repo", &allowed, Some(&labels)).is_err()
         );

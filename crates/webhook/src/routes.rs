@@ -10,7 +10,7 @@
 //! contract intact (we run the api-crate validators and then apply defaulting patches
 //! in the same code path) and avoids the ordering pitfalls of a mutate webhook whose
 //! output a separate validate webhook must then re-accept. The Kubernetes
-//! `MutatingWebhookConfiguration` can point all kopia.io kinds at `/admission`.
+//! `MutatingWebhookConfiguration` can point all kopiur.dev kinds at `/admission`.
 //!
 //! Every response echoes the request `uid`. Any failure to even parse the review
 //! body is answered with an `AdmissionResponse::invalid(...)` deny (fail closed)
@@ -95,14 +95,14 @@ mod tests {
             "kind": "AdmissionReview",
             "request": {
                 "uid": uid,
-                "kind": { "group": "kopia.io", "version": "v1alpha1", "kind": kind },
-                "resource": { "group": "kopia.io", "version": "v1alpha1", "resource": "x" },
+                "kind": { "group": "kopiur.dev", "version": "v1alpha1", "kind": kind },
+                "resource": { "group": "kopiur.dev", "version": "v1alpha1", "resource": "x" },
                 "name": "obj",
                 "namespace": namespace,
                 "operation": "CREATE",
                 "userInfo": { "username": "tester" },
                 "object": {
-                    "apiVersion": "kopia.io/v1alpha1",
+                    "apiVersion": "kopiur.dev/v1alpha1",
                     "kind": kind,
                     "metadata": { "name": "obj", "namespace": namespace },
                     "spec": spec
@@ -269,7 +269,7 @@ mod tests {
         let has_fin = patch.iter().any(|op| {
             op["op"] == "add"
                 && op["path"] == "/metadata/finalizers"
-                && op["value"][0] == "kopia.io/snapshot-cleanup"
+                && op["value"][0] == "kopiur.dev/snapshot-cleanup"
         });
         assert!(has_dp, "expected Delete default: {patch:?}");
         assert!(has_fin, "expected finalizer add: {patch:?}");
@@ -285,7 +285,7 @@ mod tests {
         );
         // Mark origin=discovered via the canonical label.
         body["request"]["object"]["metadata"]["labels"] =
-            json!({ "kopia.io/origin": "discovered" });
+            json!({ "kopiur.dev/origin": "discovered" });
         let (_s, v) = post_review(body).await;
         assert_eq!(v["response"]["allowed"], false);
         let msg = v["response"]["status"]["message"].as_str().unwrap();
@@ -296,7 +296,7 @@ mod tests {
     async fn discovered_backup_defaults_retain() {
         let mut body = review_body("Backup", "billing", "u", json!({}));
         body["request"]["object"]["metadata"]["labels"] =
-            json!({ "kopia.io/origin": "discovered" });
+            json!({ "kopiur.dev/origin": "discovered" });
         let (_s, v) = post_review(body).await;
         assert_eq!(v["response"]["allowed"], true);
         let patch = decode_patch(&v);

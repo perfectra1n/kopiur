@@ -15,7 +15,7 @@ metadata:
   name: kopiur-controller
 rules:
 - apiGroups:
-  - kopia.io
+  - kopiur.dev
   resources:
   - repositories
   - backupconfigs
@@ -33,7 +33,7 @@ rules:
   - patch
   - delete
 - apiGroups:
-  - kopia.io
+  - kopiur.dev
   resources:
   - repositories/status
   - repositories/finalizers

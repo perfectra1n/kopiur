@@ -11,7 +11,7 @@ earlier Go-flavored drafts (ADR-0001 onedr0p, ADR-0002 bo0tzz). Read ADR-0003
 first — it is the canonical source of truth for the CRD surface, UX, and design
 decisions. ADR-0001 §3.2–§3.7 holds the authoritative *field-by-field* CRD YAML.
 
-The operator exposes **7 CRDs** in API group `kopia.io`, version `v1alpha1`:
+The operator exposes **7 CRDs** in API group `kopiur.dev`, version `v1alpha1`:
 `Repository` (ns), `ClusterRepository` (cluster), `BackupConfig`, `Backup`,
 `BackupSchedule`, `Restore`, `Maintenance` (ns). It separates **recipe**
 (`BackupConfig`) from **invocation** (`Backup`) from **schedule**

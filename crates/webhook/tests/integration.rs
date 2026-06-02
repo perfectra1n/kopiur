@@ -46,14 +46,14 @@ async fn webhook_serves_admission_over_ephemeral_port() {
         "kind": "AdmissionReview",
         "request": {
             "uid": "integ-uid",
-            "kind": { "group": "kopia.io", "version": "v1alpha1", "kind": "BackupSchedule" },
-            "resource": { "group": "kopia.io", "version": "v1alpha1", "resource": "backupschedules" },
+            "kind": { "group": "kopiur.dev", "version": "v1alpha1", "kind": "BackupSchedule" },
+            "resource": { "group": "kopiur.dev", "version": "v1alpha1", "resource": "backupschedules" },
             "name": "nightly",
             "namespace": "default",
             "operation": "CREATE",
             "userInfo": { "username": "integ" },
             "object": {
-                "apiVersion": "kopia.io/v1alpha1",
+                "apiVersion": "kopiur.dev/v1alpha1",
                 "kind": "BackupSchedule",
                 "metadata": { "name": "nightly", "namespace": "default" },
                 "spec": { "configRef": { "name": "c" }, "schedule": { "cron": "0 2 * * *" } }

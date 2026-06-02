@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// Not `Eq`: transitively embeds k8s-openapi types via `mover` and `hooks` (`JobSpec`).
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[kube(
-    group = "kopia.io",
+    group = "kopiur.dev",
     version = "v1alpha1",
     kind = "BackupConfig",
     namespaced,
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn backup_config_crd_metadata_is_correct() {
         let crd = BackupConfig::crd();
-        assert_eq!(crd.spec.group, "kopia.io");
+        assert_eq!(crd.spec.group, "kopiur.dev");
         assert_eq!(crd.spec.names.kind, "BackupConfig");
         assert_eq!(crd.spec.scope, "Namespaced");
         assert_eq!(crd.spec.versions[0].name, "v1alpha1");

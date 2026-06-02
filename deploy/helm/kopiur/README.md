@@ -1,7 +1,7 @@
 # kopiur Helm chart
 
 Deploys the **Kopiur** Kopia-native Kubernetes backup operator: the controller,
-the admission webhook, the 7 `kopia.io/v1alpha1` CRDs, and the RBAC to run them.
+the admission webhook, the 7 `kopiur.dev/v1alpha1` CRDs, and the RBAC to run them.
 Implements [ADR-0003](../../../docs/adr/0003-kopiur-rust-operator.md).
 
 - Chart type: `application`
@@ -26,8 +26,8 @@ prerequisites.
 
 | `installScope` | RBAC | What it manages | `ClusterRepository` |
 |---|---|---|---|
-| `namespaced` | `Role` + `RoleBinding` | `kopia.io` objects in the **release namespace** only | not reconciled |
-| `cluster` | `ClusterRole` + `ClusterRoleBinding` | `kopia.io` objects **cluster-wide** | reconciled |
+| `namespaced` | `Role` + `RoleBinding` | `kopiur.dev` objects in the **release namespace** only | not reconciled |
+| `cluster` | `ClusterRole` + `ClusterRoleBinding` | `kopiur.dev` objects **cluster-wide** | reconciled |
 
 `namespaced` is the safer default (ADR §4.11). Choose `cluster` when a platform
 team runs a shared backup tier (a `ClusterRepository` referenced by many tenant
@@ -38,7 +38,7 @@ helm install kopiur deploy/helm/kopiur --set installScope=cluster ...
 ```
 
 The RBAC rules are **synced from `cargo xtask gen-rbac`** (the checked-in
-`deploy/rbac/operator-*.yaml`), which derives the `kopia.io` permissions from the
+`deploy/rbac/operator-*.yaml`), which derives the `kopiur.dev` permissions from the
 kube-rs `Resource` traits. The xtask is the source of truth; the chart templates
 carry a header comment to that effect and own only the names/labels.
 
@@ -63,7 +63,7 @@ back to the controller's defensive checks only — not recommended).
 `installCRDs: true` (default) renders the 7 CRDs as **templates** (not via Helm's
 special `crds/` directory) so the flag actually works and `helm upgrade`
 re-applies schema changes. Trade-off: `helm uninstall` will then delete the CRDs
-**and every `kopia.io` object in the cluster**. For decoupled CRD lifecycle (e.g.
+**and every `kopiur.dev` object in the cluster**. For decoupled CRD lifecycle (e.g.
 GitOps), set `installCRDs: false` and apply `deploy/crds/*.yaml` out of band.
 
 ## Values
