@@ -60,9 +60,9 @@ pub use restore::{
 
 // Shared logic re-exports.
 pub use error::{ValidationError, ValidationResult};
-pub use identity::{identity_string, resolve_identity, IdentityInputs};
+pub use identity::{IdentityInputs, identity_string, resolve_identity};
 pub use jitter::{offset as jitter_offset, substitute_h};
-pub use retention::{select_kept, BackupLike, KeptSet};
+pub use retention::{BackupLike, KeptSet, select_kept};
 
 /// The CRD API group for all kopiur resources.
 pub const GROUP: &str = "kopiur.dev";

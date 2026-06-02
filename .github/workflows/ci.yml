@@ -95,6 +95,65 @@ jobs:
       - name: Run integration tests (feature-gated, ignored-by-default)
         run: cargo test --workspace --features integration --locked -- --include-ignored
 
+  # Hermetic line/region coverage over the unit/serde/validation suite. Report
+  # only (uploaded as an artifact + to Codecov when configured); does NOT fail
+  # the build on a threshold — visibility without blocking early churn.
+  coverage:
+    name: coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage (lcov)
+        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+      - name: Upload to Codecov (no-op without a token on forks)
+        uses: codecov/codecov-action@v5
+        continue-on-error: true
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+
+  # Lint the Helm chart and validate the rendered manifests + generated CRDs
+  # against the upstream Kubernetes JSON schemas.
+  helm:
+    name: helm lint · kubeconform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Install kubeconform
+        run: |
+          set -euo pipefail
+          curl -fsSL -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf kubeconform.tar.gz
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+      - name: helm lint
+        run: helm lint deploy/helm/kopiur
+      - name: Validate rendered manifests (namespaced + cluster scope)
+        run: |
+          set -euo pipefail
+          for scope in namespaced cluster; do
+            helm template kopiur deploy/helm/kopiur --set installScope=$scope \
+              | kubeconform -strict -summary -ignore-missing-schemas
+          done
+      - name: Validate generated CRDs
+        run: kubeconform -strict -summary -ignore-missing-schemas deploy/crds/all-crds.yaml
+
   # Supply-chain / license audit (advisory; does not block merges by default).
   audit:
     name: cargo-deny

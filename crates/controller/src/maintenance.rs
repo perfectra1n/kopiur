@@ -15,11 +15,11 @@ use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
 use kopiur_api::backend::Backend;
-use kopiur_api::{validate, Maintenance, Repository, TakeoverPolicy};
+use kopiur_api::{Maintenance, Repository, TakeoverPolicy, validate};
 use kopiur_kopia::{ConnectSpec, MaintenanceMode};
 
 use crate::context::Context;
-use crate::error::{error_policy_for, Error, Result};
+use crate::error::{Error, Result, error_policy_for};
 use crate::io;
 
 /// What to do about the ownership lease, decided from the takeover policy and

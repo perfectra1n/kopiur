@@ -100,6 +100,12 @@ controller:
   extraArgs: []
   # -- Extra environment variables for the controller container.
   extraEnv: []
+  # -- Extra volumes on the controller pod. Use this to make a filesystem-backend
+  # repository reachable in-process (hostPath/NFS/PVC) so the controller can run
+  # short idempotent kopia ops (ADR §5.4). The e2e harness uses a hostPath here.
+  extraVolumes: []
+  # -- Extra volume mounts on the controller container (pairs with extraVolumes).
+  extraVolumeMounts: []
   # -- Resource requests/limits for the controller pod.
   resources:
     requests:

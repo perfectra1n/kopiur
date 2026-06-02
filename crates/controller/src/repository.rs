@@ -21,12 +21,12 @@ use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
 use kopiur_api::backend::Backend;
-use kopiur_api::{validate, Backup, Repository};
+use kopiur_api::{Backup, Repository, validate};
 use kopiur_kopia::{ConnectSpec, SnapshotListEntry};
 
 use crate::consts::{ORIGIN_LABEL, REPOSITORY_UID_LABEL, SNAPSHOT_ID_LABEL};
 use crate::context::Context;
-use crate::error::{error_policy_for, Error, Result};
+use crate::error::{Error, Result, error_policy_for};
 use crate::io;
 
 /// The dedup key for a discovered snapshot: `(Repository.UID, kopiaSnapshotID)`

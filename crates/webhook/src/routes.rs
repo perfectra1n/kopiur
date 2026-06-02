@@ -18,15 +18,15 @@
 
 use crate::handlers;
 use axum::{
+    Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Json, Response},
     routing::{get, post},
-    Router,
 };
-use kube::core::admission::{AdmissionRequest, AdmissionResponse, AdmissionReview};
-use kube::core::DynamicObject;
 use kube::Client;
+use kube::core::DynamicObject;
+use kube::core::admission::{AdmissionRequest, AdmissionResponse, AdmissionReview};
 use std::sync::Arc;
 
 /// Shared handler state. The `client` is optional: tests pass `None` and tenancy
@@ -86,7 +86,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use tower::ServiceExt;
 
     fn review_body(kind: &str, namespace: &str, uid: &str, spec: Value) -> Value {

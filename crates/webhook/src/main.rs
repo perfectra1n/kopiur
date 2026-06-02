@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn init_tracing() {
-    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::registry()
         .with(filter)
@@ -89,8 +89,8 @@ async fn serve_tls(
     cert_path: &str,
     key_path: &str,
 ) -> anyhow::Result<()> {
-    use axum_server::tls_rustls::RustlsConfig;
     use axum_server::Handle;
+    use axum_server::tls_rustls::RustlsConfig;
 
     let config = RustlsConfig::from_pem_file(cert_path, key_path)
         .await

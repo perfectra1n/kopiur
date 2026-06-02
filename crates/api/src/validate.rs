@@ -149,12 +149,12 @@ pub fn validate_restore(spec: &RestoreSpec) -> ValidationResult {
     if matches!(spec.source, RestoreSource::Identity(_)) && spec.repository.is_none() {
         return Err(ValidationError::RestoreSourceRepositoryRequired);
     }
-    if let Some(RestoreTarget::Pvc(t)) = &spec.target {
-        if t.name.trim().is_empty() {
-            return Err(ValidationError::MissingRequiredField {
-                field: "restore.target.pvc.name".to_string(),
-            });
-        }
+    if let Some(RestoreTarget::Pvc(t)) = &spec.target
+        && t.name.trim().is_empty()
+    {
+        return Err(ValidationError::MissingRequiredField {
+            field: "restore.target.pvc.name".to_string(),
+        });
     }
     Ok(())
 }
@@ -270,10 +270,10 @@ pub fn validate_cluster_repository(spec: &ClusterRepositorySpec) -> Vec<Validati
 /// [`validate_restore`] for caller symmetry).
 pub fn validate_restore_spec(spec: &RestoreSpec) -> Vec<ValidationError> {
     let mut errs = Vec::new();
-    if let Some(r) = &spec.repository {
-        if let Err(e) = validate_repository_ref(r) {
-            errs.push(e);
-        }
+    if let Some(r) = &spec.repository
+        && let Err(e) = validate_repository_ref(r)
+    {
+        errs.push(e);
     }
     if let Err(e) = validate_restore(spec) {
         errs.push(e);
@@ -348,20 +348,24 @@ mod tests {
 
     #[test]
     fn consumer_allowed_via_all_true_denied_via_all_false() {
-        assert!(validate_consumer_against_cluster_repo(
-            "any",
-            "repo",
-            &AllowedNamespaces::All(true),
-            None
-        )
-        .is_ok());
-        assert!(validate_consumer_against_cluster_repo(
-            "any",
-            "repo",
-            &AllowedNamespaces::All(false),
-            None
-        )
-        .is_err());
+        assert!(
+            validate_consumer_against_cluster_repo(
+                "any",
+                "repo",
+                &AllowedNamespaces::All(true),
+                None
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_consumer_against_cluster_repo(
+                "any",
+                "repo",
+                &AllowedNamespaces::All(false),
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -642,12 +646,14 @@ mod tests {
         let errs = validate_backup_config(&spec);
         // Both: ClusterRepo namespace forbidden + missing sources.
         assert_eq!(errs.len(), 2);
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, ValidationError::ClusterRepoNamespaceForbidden { .. })));
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, ValidationError::MissingRequiredField { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::ClusterRepoNamespaceForbidden { .. }))
+        );
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::MissingRequiredField { .. }))
+        );
     }
 
     #[test]
@@ -713,9 +719,10 @@ mod tests {
             failed_jobs_history_limit: None,
         };
         let errs = validate_backup_schedule(&spec);
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, ValidationError::InvalidCron { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::InvalidCron { .. }))
+        );
     }
 
     #[test]

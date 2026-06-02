@@ -15,7 +15,7 @@ use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
 use kopiur_api::backup::Backup;
-use kopiur_api::{validate, OnMissingSnapshot, Repository, Restore, RestoreSource, RestoreTarget};
+use kopiur_api::{OnMissingSnapshot, Repository, Restore, RestoreSource, RestoreTarget, validate};
 use kopiur_mover::workspec::{
     MoverOptions, MoverWorkSpec, Operation, RepositoryConnect, ResolvedIdentity as MoverIdentity,
     RestoreOp, TargetRef,
@@ -23,7 +23,7 @@ use kopiur_mover::workspec::{
 
 use crate::consts::API_VERSION;
 use crate::context::Context;
-use crate::error::{error_policy_for, Error, Result};
+use crate::error::{Error, Result, error_policy_for};
 use crate::io;
 use crate::jobs::{self, JobLimits, MoverJobInputs, PvcMount};
 
@@ -228,7 +228,7 @@ async fn drive_direct_restore(
         None => {
             return Err(Error::Invariant(
                 "DirectTarget restore without a target".into(),
-            ))
+            ));
         }
     };
     let target_path = "/restore".to_string();
@@ -238,11 +238,21 @@ async fn drive_direct_restore(
         hostname: namespace.to_string(),
         source_path: target_path.clone(),
     };
+    // Carry the Restore CRD's options (ADR §4.6) through to the mover so kopia
+    // honors them. `None` lets kopia use its defaults.
+    let (ignore_permission_errors, write_files_atomically) = restore
+        .spec
+        .options
+        .as_ref()
+        .map(|o| (o.ignore_permission_errors, o.write_files_atomically))
+        .unwrap_or((None, None));
     let work_spec = MoverWorkSpec {
         version: 1,
         operation: Operation::Restore(RestoreOp {
             snapshot_id: snapshot_id.to_string(),
             target_path: target_path.clone(),
+            ignore_permission_errors,
+            write_files_atomically,
         }),
         identity,
         repository: restore_connect(&repo)?,
@@ -280,6 +290,7 @@ async fn drive_direct_restore(
         }),
         repo_pvc,
         creds_secret: Some(&creds.secret_name),
+        service_account: ctx.mover_service_account.as_deref(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);

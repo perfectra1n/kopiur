@@ -151,9 +151,11 @@ async fn backup_gets_finalizer_and_delete_path_removes_cr() {
         .create(&PostParams::default(), &b)
         .await
         .expect("create Backup");
-    assert!(created
-        .finalizers()
-        .contains(&SNAPSHOT_CLEANUP_FINALIZER.to_string()));
+    assert!(
+        created
+            .finalizers()
+            .contains(&SNAPSHOT_CLEANUP_FINALIZER.to_string())
+    );
 
     // Deleting it should eventually remove the CR once the controller clears the
     // finalizer (Orphan path). With no controller running this would block, so

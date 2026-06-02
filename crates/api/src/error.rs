@@ -50,13 +50,17 @@ pub enum ValidationError {
 
     /// A `Restore` with `source.identity` did not set `spec.repository`. Identity
     /// sources cannot derive a repository, so it is required (ADR §3.6/§4.6).
-    #[error("restore source.identity requires spec.repository to be set (no Backup/BackupConfig to derive it from)")]
+    #[error(
+        "restore source.identity requires spec.repository to be set (no Backup/BackupConfig to derive it from)"
+    )]
     RestoreSourceRepositoryRequired,
 
     /// A `Repository`/`ClusterRepository` spec carried kopia-side (repo-level)
     /// retention policy fields, which conflict with CR-driven GFS retention and
     /// risk double-deletion (ADR §4.4 exclusivity).
-    #[error("inline kopia-side retention policy on a Repository spec is unsupported (field {field:?}); retention is driven exclusively by BackupConfig.spec.retention (ADR §4.4)")]
+    #[error(
+        "inline kopia-side retention policy on a Repository spec is unsupported (field {field:?}); retention is driven exclusively by BackupConfig.spec.retention (ADR §4.4)"
+    )]
     InlineRetentionForbidden { field: String },
 
     /// A cron expression failed to parse with the same parser the controller uses

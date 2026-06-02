@@ -61,6 +61,11 @@ spec:
               value: {{ include "kopiur.image" (dict "root" $ "img" .Values.image.mover) | quote }}
             - name: KOPIUR_MOVER_PULL_POLICY
               value: {{ .Values.image.mover.pullPolicy | quote }}
+            # The mover PATCHes Backup/Restore .status, so its Job pods run as the
+            # operator ServiceAccount (bound to the status-patch RBAC), not the
+            # namespace default SA.
+            - name: KOPIUR_MOVER_SERVICE_ACCOUNT
+              value: {{ include "kopiur.serviceAccountName" . | quote }}
             {{- with .Values.controller.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -84,6 +89,14 @@ spec:
             {{- toYaml .Values.controller.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.controller.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.controller.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.controller.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

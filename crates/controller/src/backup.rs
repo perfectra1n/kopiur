@@ -22,6 +22,7 @@ use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType};
 use kube::{Api, Resource, ResourceExt};
 
+use kopiur_api::backend::Backend;
 use kopiur_api::backup::BackupPhase;
 use kopiur_api::common::ResolvedIdentity as ApiResolvedIdentity;
 use kopiur_api::{Backup, BackupConfig, DeletionPolicy, Origin, Repository};
@@ -35,7 +36,7 @@ use crate::consts::{
     SNAPSHOT_CLEANUP_FINALIZER,
 };
 use crate::context::Context;
-use crate::error::{error_policy_for, Error, Result};
+use crate::error::{Error, Result, error_policy_for};
 use crate::io;
 use crate::jobs::{self, JobLimits, MoverJobInputs, PvcMount};
 
@@ -210,6 +211,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         source_pvc,
         repo_pvc,
         creds_secret: Some(&creds_secret),
+        service_account: ctx.mover_service_account.as_deref(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -372,6 +374,7 @@ async fn delete_snapshot_via_job(
         source_pvc: None,
         repo_pvc,
         creds_secret: Some(&creds.secret_name),
+        service_account: ctx.mover_service_account.as_deref(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -424,7 +427,6 @@ async fn resolve_succeeded_snapshot(
     backup: &Backup,
     namespace: &str,
 ) -> Result<Option<(String, serde_json::Value)>> {
-    use kopiur_api::backend::Backend;
     let (config, repo) = resolve_recipe(ctx, backup, namespace).await?;
     let identity = resolve_identity_for(&config, namespace)?;
     match &repo.spec.backend {
@@ -593,26 +595,51 @@ pub(crate) fn mover_pull_policy_pub() -> Option<&'static str> {
 }
 
 /// Map a `Repository`'s backend to the mover's `RepositoryConnect`.
+///
+/// Exhaustive over every CRD `Backend` variant — a new backend cannot compile
+/// until it is wired through to the mover. Credentials never appear here; they
+/// flow to the mover Job as env vars from the referenced Secret (ADR §4.10).
 fn repository_connect(repo: &Repository) -> Result<RepositoryConnect> {
-    use kopiur_api::backend::Backend;
-    match &repo.spec.backend {
-        Backend::Filesystem(f) => Ok(RepositoryConnect::Filesystem {
+    Ok(backend_to_repository_connect(&repo.spec.backend))
+}
+
+/// Pure `Backend -> RepositoryConnect` translation (no kube types), so it is
+/// unit-testable and shared by the backup and restore reconcilers.
+pub(crate) fn backend_to_repository_connect(backend: &Backend) -> RepositoryConnect {
+    match backend {
+        Backend::Filesystem(f) => RepositoryConnect::Filesystem {
             path: f.path.clone(),
-        }),
-        Backend::S3(s) => Ok(RepositoryConnect::S3 {
+        },
+        Backend::S3(s) => RepositoryConnect::S3 {
             bucket: s.bucket.clone(),
             endpoint: s.endpoint.clone(),
             prefix: s.prefix.clone(),
             region: s.region.clone(),
-        }),
-        // NOTE: Azure/Gcs/B2/Sftp/WebDav/Rclone backends are modeled in the API
-        // but the mover wire type (RepositoryConnect) only carries Filesystem and
-        // S3 today; extending it is a mechanical follow-up. Reject explicitly so
-        // we never silently run against the wrong backend.
-        other => Err(Error::Validation(format!(
-            "backend {} not yet supported by the mover work spec",
-            other.kind_str()
-        ))),
+        },
+        Backend::Azure(a) => RepositoryConnect::Azure {
+            container: a.container.clone(),
+            storage_account: a.storage_account.clone(),
+            prefix: a.prefix.clone(),
+        },
+        Backend::Gcs(g) => RepositoryConnect::Gcs {
+            bucket: g.bucket.clone(),
+            prefix: g.prefix.clone(),
+        },
+        Backend::B2(b) => RepositoryConnect::B2 {
+            bucket: b.bucket.clone(),
+            prefix: b.prefix.clone(),
+        },
+        Backend::Sftp(s) => RepositoryConnect::Sftp {
+            host: s.host.clone(),
+            path: s.path.clone(),
+            port: s.port,
+            username: s.username.clone(),
+            keyfile: None,
+        },
+        Backend::WebDav(w) => RepositoryConnect::WebDav { url: w.url.clone() },
+        Backend::Rclone(r) => RepositoryConnect::Rclone {
+            remote_path: r.remote_path.clone(),
+        },
     }
 }
 
@@ -698,6 +725,74 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    // --- backend_to_repository_connect: every CRD Backend variant must map to a
+    // mover RepositoryConnect (no silent reject). A new Backend variant fails to
+    // compile in the mapping until handled. ---
+
+    #[test]
+    fn every_backend_maps_to_a_repository_connect() {
+        use kopiur_api::backend::{
+            AzureBackend, B2Backend, FilesystemBackend, GcsBackend, RcloneBackend, S3Backend,
+            SftpBackend, WebDavBackend,
+        };
+        let cases = vec![
+            Backend::Filesystem(FilesystemBackend {
+                path: "/repo".into(),
+                pvc_name: None,
+            }),
+            Backend::S3(S3Backend {
+                bucket: "b".into(),
+                prefix: None,
+                endpoint: None,
+                region: None,
+                auth: None,
+                tls: None,
+            }),
+            Backend::Azure(AzureBackend {
+                container: "c".into(),
+                prefix: None,
+                storage_account: Some("acct".into()),
+                auth: None,
+            }),
+            Backend::Gcs(GcsBackend {
+                bucket: "b".into(),
+                prefix: None,
+                auth: None,
+            }),
+            Backend::B2(B2Backend {
+                bucket: "b".into(),
+                prefix: None,
+                auth: None,
+            }),
+            Backend::Sftp(SftpBackend {
+                host: "h".into(),
+                path: "/r".into(),
+                port: Some(22),
+                username: Some("u".into()),
+                auth: None,
+            }),
+            Backend::WebDav(WebDavBackend {
+                url: "https://dav".into(),
+                auth: None,
+            }),
+            Backend::Rclone(RcloneBackend {
+                remote_path: "r:bucket".into(),
+                config_secret_ref: None,
+            }),
+        ];
+        // Each maps without panicking and converts cleanly to a kopia ConnectSpec
+        // whose discriminant matches the backend kind.
+        for backend in cases {
+            let rc = backend_to_repository_connect(&backend);
+            let spec = rc.to_connect_spec();
+            let want = match backend.kind_str() {
+                "WebDav" => "webdav",
+                other => &other.to_ascii_lowercase(),
+            };
+            assert_eq!(spec.kind_str(), want, "backend {}", backend.kind_str());
+        }
     }
 
     // --- plan_deletion: exhaustive over every DeletionPolicy ----------------

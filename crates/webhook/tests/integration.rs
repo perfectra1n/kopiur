@@ -15,7 +15,7 @@
 #![cfg(feature = "integration")]
 
 use kopiur_webhook::app;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Duration;
 
 #[tokio::test]

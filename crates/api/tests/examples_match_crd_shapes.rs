@@ -14,8 +14,8 @@ use kopiur_api::{
     BackupConfigSpec, BackupScheduleSpec, BackupSpec, ClusterRepositorySpec, MaintenanceSpec,
     RepositorySpec, RestoreSpec,
 };
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 
 fn examples_dir() -> PathBuf {

@@ -26,11 +26,11 @@ use kube::{Api, ResourceExt};
 
 use kopiur_api::backup::BackupSpec;
 use kopiur_api::common::ConfigRef;
-use kopiur_api::{jitter, validate, Backup, BackupSchedule, ConcurrencyPolicy, ScheduleSpec};
+use kopiur_api::{Backup, BackupSchedule, ConcurrencyPolicy, ScheduleSpec, jitter, validate};
 
 use crate::consts::ORIGIN_LABEL;
 use crate::context::Context;
-use crate::error::{error_policy_for, Error, Result};
+use crate::error::{Error, Result, error_policy_for};
 use crate::io;
 
 /// Parse Go-style duration strings used in the CRD (`30m`, `1h`, `90s`). Returns
