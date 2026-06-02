@@ -15,10 +15,10 @@ use std::path::{Path, PathBuf};
 
 /// Resolve the workspace root directory. See module docs for the strategy.
 pub fn workspace_root() -> PathBuf {
-    if let Ok(dir) = std::env::var("CARGO_WORKSPACE_DIR") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
+    if let Ok(dir) = std::env::var("CARGO_WORKSPACE_DIR")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
     }
     if let Some(dir) = option_env!("CARGO_MANIFEST_DIR") {
         // <root>/crates/xtask -> <root>

@@ -13,9 +13,19 @@
 //!   non-zero exit (with exit code + stderr tail + best-effort error class),
 //!   JSON parse error, empty output, and timeout — enough to build a
 //!   `status.failure` block (ADR §4.10).
-//! - [`client`] — [`KopiaClient`] and its builder, with async methods for
-//!   connect/create, snapshot create/list/delete/restore, repository status,
-//!   and maintenance.
+//! - [`client`] — [`KopiaClient`] and its builder, covering the operator's full
+//!   declarative backup/restore/maintain surface: connect/create against every
+//!   kopia 0.23 backend (filesystem, s3, azure, gcs, b2, sftp, webdav, rclone,
+//!   gdrive, from-config, server), snapshot create/list/delete/restore (with
+//!   [`RestoreOptions`]), verify/estimate/pin/expire, policy set/show
+//!   ([`PolicyArgs`]), repository status + validate-provider, and maintenance.
+//!
+//! ## Deliberately out of scope
+//!
+//! Commands that have no place inside a declarative Kubernetes operator are not
+//! wrapped: running a kopia API server (`server start`), FUSE `mount`,
+//! `notification` profiles, `repository change-password`, `benchmark`, and the
+//! low-level `blob`/`content`/`index`/`manifest`/`acl`/`users` plumbing.
 //!
 //! ## stdout vs stderr
 //!
@@ -27,7 +37,10 @@ pub mod client;
 pub mod error;
 pub mod model;
 
-pub use client::{ConnectSpec, KopiaClient, KopiaClientBuilder, MaintenanceMode};
+pub use client::{
+    ConnectSpec, KopiaClient, KopiaClientBuilder, MaintenanceMode, PolicyArgs, RestoreOptions,
+    VerifyOptions,
+};
 pub use error::{KopiaError, KopiaErrorClass};
 pub use model::{
     ClientOptions, ContentFormat, DirSummary, MaintenanceCadence, MaintenanceInfo,

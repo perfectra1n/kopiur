@@ -9,8 +9,8 @@
 //! decision logic is kept pure and unit-tested separately.
 
 use kopiur_kopia::{KopiaClient, KopiaClientBuilder};
-use kube::runtime::events::Recorder;
 use kube::Client;
+use kube::runtime::events::Recorder;
 
 use crate::metrics::Metrics;
 
@@ -68,6 +68,11 @@ pub struct Context {
     /// Container image used for mover `Job`s (configurable per deployment via
     /// `KOPIUR_MOVER_IMAGE`; defaults to [`crate::jobs::DEFAULT_MOVER_IMAGE`]).
     pub mover_image: String,
+    /// ServiceAccount the mover `Job` pods run as (configurable via
+    /// `KOPIUR_MOVER_SERVICE_ACCOUNT`). The mover PATCHes the owning CR's
+    /// `.status`, so this SA must be bound to the operator's status-patch rules.
+    /// `None` falls back to the namespace `default` SA.
+    pub mover_service_account: Option<String>,
 }
 
 impl Context {
@@ -79,6 +84,7 @@ impl Context {
         metrics: Metrics,
         recorder: Recorder,
         mover_image: String,
+        mover_service_account: Option<String>,
     ) -> Self {
         Context {
             client,
@@ -86,6 +92,7 @@ impl Context {
             metrics,
             recorder,
             mover_image,
+            mover_service_account,
         }
     }
 }

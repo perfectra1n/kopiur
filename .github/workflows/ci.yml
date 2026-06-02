@@ -22,16 +22,16 @@ jobs:
     name: fmt · clippy · test · codegen-drift
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master (2026)
         with:
           toolchain: "1.95"
           components: rustfmt, clippy
 
       - name: Cache cargo registry & target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           shared-key: ci
 
@@ -57,15 +57,15 @@ jobs:
     name: integration (kopia + kind)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master (2026)
         with:
           toolchain: "1.95"
 
       - name: Cache cargo registry & target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           shared-key: integration
 
@@ -80,7 +80,7 @@ jobs:
           kopia --version
 
       - name: Create ephemeral kind cluster
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@92086f6be054225fa813e0a4b13787fc9088faab # v1.13.0
         with:
           cluster_name: kopiur-it
 
@@ -95,13 +95,74 @@ jobs:
       - name: Run integration tests (feature-gated, ignored-by-default)
         run: cargo test --workspace --features integration --locked -- --include-ignored
 
+  # Hermetic line/region coverage over the unit/serde/validation suite. Report
+  # only (uploaded as an artifact + to Codecov when configured); does NOT fail
+  # the build on a threshold — visibility without blocking early churn.
+  coverage:
+    name: coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master (2026)
+        with:
+          toolchain: "1.95"
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          shared-key: coverage
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@81ecf985428d5c2ea81dbf079bceca32bc9604ab # v2.62.43
+        with:
+          tool: cargo-llvm-cov
+      - name: Generate coverage (lcov)
+        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-lcov
+          path: lcov.info
+      - name: Upload to Codecov (no-op without a token on forks)
+        uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
+        continue-on-error: true
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+
+  # Lint the Helm chart and validate the rendered manifests + generated CRDs
+  # against the upstream Kubernetes JSON schemas.
+  helm:
+    name: helm lint · kubeconform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - name: Install kubeconform
+        run: |
+          set -euo pipefail
+          curl -fsSL -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf kubeconform.tar.gz
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+      - name: helm lint
+        run: helm lint deploy/helm/kopiur
+      - name: Validate rendered manifests (namespaced + cluster scope)
+        run: |
+          set -euo pipefail
+          for scope in namespaced cluster; do
+            helm template kopiur deploy/helm/kopiur --set installScope=$scope \
+              | kubeconform -strict -summary -ignore-missing-schemas
+          done
+      - name: Validate generated CRDs
+        run: kubeconform -strict -summary -ignore-missing-schemas deploy/crds/all-crds.yaml
+
   # Supply-chain / license audit (advisory; does not block merges by default).
   audit:
     name: cargo-deny
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: EmbarkStudios/cargo-deny-action@76cd80eb775d7bbbd2d80292136d74d39e1b4918 # v2.0.14
         with:
           command: check

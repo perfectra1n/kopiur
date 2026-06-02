@@ -11,7 +11,7 @@ pub mod rbac;
 
 use anyhow::Result;
 
-use artifact::{check_all, write_all, Artifact};
+use artifact::{Artifact, check_all, write_all};
 
 /// Collect the artifacts a subcommand is responsible for.
 pub fn collect(cmd: &str) -> Result<Vec<Artifact>> {

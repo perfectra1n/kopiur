@@ -19,12 +19,12 @@ use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
 use kopiur_api::common::Retention;
-use kopiur_api::retention::{select_kept, BackupLike};
-use kopiur_api::{validate, Backup, BackupConfig};
+use kopiur_api::retention::{BackupLike, select_kept};
+use kopiur_api::{Backup, BackupConfig, validate};
 
 use crate::consts::CONFIG_LABEL;
 use crate::context::Context;
-use crate::error::{error_policy_for, Error, Result};
+use crate::error::{Error, Result, error_policy_for};
 use crate::io;
 
 /// A minimal view of a `Backup` for retention selection: its CR name (the id

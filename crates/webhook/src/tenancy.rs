@@ -264,20 +264,24 @@ mod tests {
             ..Default::default()
         };
         let allowed = AllowedNamespaces::Selector(sel);
-        assert!(evaluate_tenancy(
-            "ns",
-            "repo",
-            &allowed,
-            Some(&labels(&[("kopiur.dev/tier", "gold")]))
-        )
-        .is_allow());
-        assert!(!evaluate_tenancy(
-            "ns",
-            "repo",
-            &allowed,
-            Some(&labels(&[("kopiur.dev/tier", "bronze")]))
-        )
-        .is_allow());
+        assert!(
+            evaluate_tenancy(
+                "ns",
+                "repo",
+                &allowed,
+                Some(&labels(&[("kopiur.dev/tier", "gold")]))
+            )
+            .is_allow()
+        );
+        assert!(
+            !evaluate_tenancy(
+                "ns",
+                "repo",
+                &allowed,
+                Some(&labels(&[("kopiur.dev/tier", "bronze")]))
+            )
+            .is_allow()
+        );
     }
 
     #[test]
@@ -293,13 +297,15 @@ mod tests {
             ..Default::default()
         };
         let allowed = AllowedNamespaces::Selector(sel);
-        assert!(evaluate_tenancy(
-            "ns",
-            "repo",
-            &allowed,
-            Some(&labels(&[("kopiur.dev/team", "x")]))
-        )
-        .is_allow());
+        assert!(
+            evaluate_tenancy(
+                "ns",
+                "repo",
+                &allowed,
+                Some(&labels(&[("kopiur.dev/team", "x")]))
+            )
+            .is_allow()
+        );
         assert!(
             !evaluate_tenancy("ns", "repo", &allowed, Some(&labels(&[("other", "y")]))).is_allow()
         );

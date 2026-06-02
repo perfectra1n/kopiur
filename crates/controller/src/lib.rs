@@ -40,9 +40,9 @@ use std::sync::Arc;
 use futures::StreamExt;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::ConfigMap;
+use kube::runtime::Controller;
 use kube::runtime::events::{Recorder, Reporter};
 use kube::runtime::watcher::Config as WatcherConfig;
-use kube::runtime::Controller;
 use kube::{Api, Client};
 
 use kopiur_api::{
@@ -83,12 +83,20 @@ pub async fn run() -> anyhow::Result<()> {
     let mover_image = std::env::var("KOPIUR_MOVER_IMAGE")
         .unwrap_or_else(|_| jobs::DEFAULT_MOVER_IMAGE.to_string());
     tracing::info!(mover_image = %mover_image, "mover image configured");
+    // The mover PATCHes the owning CR's status, so its Job pods must run as an SA
+    // bound to the operator's status-patch RBAC (not the namespace `default` SA).
+    // The chart sets this to the operator ServiceAccount.
+    let mover_service_account = std::env::var("KOPIUR_MOVER_SERVICE_ACCOUNT")
+        .ok()
+        .filter(|s| !s.is_empty());
+    tracing::info!(mover_service_account = ?mover_service_account, "mover SA configured");
     let ctx = Arc::new(Context::new(
         client.clone(),
         KopiaClientFactory::new(),
         metrics.clone(),
         recorder,
         mover_image,
+        mover_service_account,
     ));
 
     tracing::info!("starting kopiur controllers");

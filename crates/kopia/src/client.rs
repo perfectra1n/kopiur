@@ -22,7 +22,7 @@ use serde::de::DeserializeOwned;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::error::{tail_lines, KopiaError, KopiaErrorClass};
+use crate::error::{KopiaError, KopiaErrorClass, tail_lines};
 use crate::model::{
     MaintenanceInfo, RepositoryStatus, SnapshotCreateResult, SnapshotListEntry, SnapshotSource,
 };
@@ -41,6 +41,27 @@ pub enum MaintenanceMode {
 /// Externally-tagged so exactly one backend is representable (mirrors the API
 /// crate's `Backend` discipline, though this is a separate, simpler type with
 /// no kube dependency).
+///
+/// ## Credentials are NOT here
+///
+/// Secrets (access keys, storage keys, SFTP passwords, GCS credentials JSON) are
+/// supplied via the process environment — set them with
+/// [`KopiaClientBuilder::env`]. Only the *non-secret* connection identifiers
+/// (bucket, container, host, path, …) live in `ConnectSpec` so they never leak
+/// into a ConfigMap, a process listing, or an error message. The relevant kopia
+/// env vars by backend:
+///   * S3:    `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`
+///   * Azure: `AZURE_STORAGE_KEY` / `AZURE_STORAGE_SAS_TOKEN` (or SP env)
+///   * B2:    `B2_KEY_ID`, `B2_KEY`
+///   * GCS:   `GOOGLE_APPLICATION_CREDENTIALS` (path to the credentials file)
+///   * SFTP:  `--keyfile`/`--sftp-password` via the key-data env or a mounted key
+///   * all:   `KOPIA_PASSWORD` (the repository encryption password)
+///
+/// This is the full set of kopia 0.23 `repository connect/create` backends. The
+/// operator's CRD `Backend` enum maps onto the first eight; `Gdrive`,
+/// `FromConfig`, and `Server` are exposed for client completeness (a kopia
+/// client connecting to an existing kopia API server is a legitimate backend —
+/// distinct from *running* a server, which the operator deliberately does not do).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectSpec {
     /// Filesystem backend at a local path (used in-cluster for hostPath/PVC
@@ -60,14 +81,105 @@ pub enum ConnectSpec {
         /// Region, if required by the endpoint.
         region: Option<String>,
     },
+    /// Azure Blob Storage backend.
+    Azure {
+        /// Blob container name.
+        container: String,
+        /// Storage account name (when not supplied via env).
+        storage_account: Option<String>,
+        /// Optional object prefix.
+        prefix: Option<String>,
+    },
+    /// Google Cloud Storage backend.
+    Gcs {
+        /// Bucket name.
+        bucket: String,
+        /// Optional object prefix.
+        prefix: Option<String>,
+    },
+    /// Backblaze B2 backend.
+    B2 {
+        /// Bucket name.
+        bucket: String,
+        /// Optional object prefix.
+        prefix: Option<String>,
+    },
+    /// SFTP/SSH backend.
+    Sftp {
+        /// Server hostname.
+        host: String,
+        /// Path to the repository on the server.
+        path: String,
+        /// Server port (defaults to 22 when `None`).
+        port: Option<u16>,
+        /// SSH username.
+        username: Option<String>,
+        /// Path to a private key file inside the mover pod.
+        keyfile: Option<String>,
+    },
+    /// WebDAV backend.
+    WebDav {
+        /// WebDAV server URL.
+        url: String,
+    },
+    /// Rclone backend (shells out to an `rclone` binary).
+    Rclone {
+        /// Rclone `remote:path`.
+        remote_path: String,
+    },
+    /// Google Drive backend.
+    Gdrive {
+        /// Drive folder id that holds the repository.
+        folder_id: String,
+    },
+    /// Reconnect from a kopia configuration token/file (`repository connect
+    /// from-config`). Exactly one of `file`/`token` is meaningful.
+    FromConfig {
+        /// Path to a kopia config file.
+        file: Option<String>,
+        /// A kopia configuration token.
+        token: Option<String>,
+    },
+    /// Connect to an existing kopia API server as a client.
+    Server {
+        /// Server URL.
+        url: String,
+        /// Expected server TLS certificate fingerprint (sha256 hex).
+        fingerprint: Option<String>,
+    },
 }
 
 impl ConnectSpec {
+    /// Stable discriminant string for logging/metrics (mirrors
+    /// `kopiur_api::backend::Backend::kind_str`).
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            ConnectSpec::Filesystem { .. } => "filesystem",
+            ConnectSpec::S3 { .. } => "s3",
+            ConnectSpec::Azure { .. } => "azure",
+            ConnectSpec::Gcs { .. } => "gcs",
+            ConnectSpec::B2 { .. } => "b2",
+            ConnectSpec::Sftp { .. } => "sftp",
+            ConnectSpec::WebDav { .. } => "webdav",
+            ConnectSpec::Rclone { .. } => "rclone",
+            ConnectSpec::Gdrive { .. } => "gdrive",
+            ConnectSpec::FromConfig { .. } => "from-config",
+            ConnectSpec::Server { .. } => "server",
+        }
+    }
+
     /// The kopia subcommand args that select this backend, e.g.
     /// `["filesystem", "--path", "/repo"]`. Used by both connect and create.
-    /// Credentials (S3 access key/secret) are expected in the environment, not
-    /// here.
+    /// Credentials are expected in the environment, never here (see the type
+    /// docs). A new backend variant cannot compile until it is handled.
     fn backend_args(&self) -> Vec<String> {
+        // Push `--flag value` only when the optional value is present.
+        fn opt(a: &mut Vec<String>, flag: &str, value: &Option<String>) {
+            if let Some(v) = value {
+                a.push(flag.into());
+                a.push(v.clone());
+            }
+        }
         match self {
             ConnectSpec::Filesystem { path } => {
                 vec![
@@ -83,22 +195,122 @@ impl ConnectSpec {
                 region,
             } => {
                 let mut a = vec!["s3".into(), "--bucket".into(), bucket.clone()];
-                if let Some(e) = endpoint {
-                    a.push("--endpoint".into());
-                    a.push(e.clone());
+                opt(&mut a, "--endpoint", endpoint);
+                opt(&mut a, "--prefix", prefix);
+                opt(&mut a, "--region", region);
+                a
+            }
+            ConnectSpec::Azure {
+                container,
+                storage_account,
+                prefix,
+            } => {
+                let mut a = vec!["azure".into(), "--container".into(), container.clone()];
+                opt(&mut a, "--storage-account", storage_account);
+                opt(&mut a, "--prefix", prefix);
+                a
+            }
+            ConnectSpec::Gcs { bucket, prefix } => {
+                let mut a = vec!["gcs".into(), "--bucket".into(), bucket.clone()];
+                opt(&mut a, "--prefix", prefix);
+                a
+            }
+            ConnectSpec::B2 { bucket, prefix } => {
+                let mut a = vec!["b2".into(), "--bucket".into(), bucket.clone()];
+                opt(&mut a, "--prefix", prefix);
+                a
+            }
+            ConnectSpec::Sftp {
+                host,
+                path,
+                port,
+                username,
+                keyfile,
+            } => {
+                let mut a = vec![
+                    "sftp".into(),
+                    "--host".into(),
+                    host.clone(),
+                    "--path".into(),
+                    path.clone(),
+                ];
+                if let Some(p) = port {
+                    a.push("--port".into());
+                    a.push(p.to_string());
                 }
-                if let Some(p) = prefix {
-                    a.push("--prefix".into());
-                    a.push(p.clone());
-                }
-                if let Some(r) = region {
-                    a.push("--region".into());
-                    a.push(r.clone());
-                }
+                opt(&mut a, "--username", username);
+                opt(&mut a, "--keyfile", keyfile);
+                a
+            }
+            ConnectSpec::WebDav { url } => {
+                vec!["webdav".into(), "--url".into(), url.clone()]
+            }
+            ConnectSpec::Rclone { remote_path } => {
+                vec!["rclone".into(), "--remote-path".into(), remote_path.clone()]
+            }
+            ConnectSpec::Gdrive { folder_id } => {
+                vec!["gdrive".into(), "--folder-id".into(), folder_id.clone()]
+            }
+            ConnectSpec::FromConfig { file, token } => {
+                let mut a = vec!["from-config".into()];
+                opt(&mut a, "--file", file);
+                opt(&mut a, "--token", token);
+                a
+            }
+            ConnectSpec::Server { url, fingerprint } => {
+                let mut a = vec!["server".into(), "--url".into(), url.clone()];
+                opt(&mut a, "--server-cert-fingerprint", fingerprint);
                 a
             }
         }
     }
+}
+
+/// Options for `kopia snapshot verify`. All fields default to kopia's defaults
+/// when `None`/empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VerifyOptions {
+    /// `--verify-files-percent`: randomly fully-read this percentage of files.
+    pub verify_files_percent: Option<u8>,
+    /// `--max-errors`: stop after this many errors (0 = never stop early).
+    pub max_errors: Option<u32>,
+    /// `--parallel`: verification parallelism.
+    pub parallel: Option<u32>,
+}
+
+/// Options for `kopia restore` / `kopia snapshot restore`. The tri-state
+/// booleans map to kopia's `--[no-]flag` form: `Some(true)` → `--flag`,
+/// `Some(false)` → `--no-flag`, `None` → omit (kopia default).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoreOptions {
+    /// `--[no-]ignore-permission-errors` (kopia default: true).
+    pub ignore_permission_errors: Option<bool>,
+    /// `--[no-]write-files-atomically`.
+    pub write_files_atomically: Option<bool>,
+    /// `--[no-]overwrite-files`.
+    pub overwrite_files: Option<bool>,
+    /// `--skip-existing`: skip files/symlinks that already exist in the target.
+    pub skip_existing: bool,
+    /// `--parallel`: restore parallelism (1 disables).
+    pub parallel: Option<u32>,
+}
+
+/// Policy fields kopia applies via `kopia policy set`. Mirrors the operator's
+/// `BackupConfig.spec.policy` without depending on the api crate, so the kopia
+/// crate stays controller-agnostic. The caller translates the CRD policy into
+/// this and the controller applies it before the first snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PolicyArgs {
+    /// `--compression` algorithm (e.g. `zstd`, `none`).
+    pub compression: Option<String>,
+    /// `--splitter` algorithm.
+    pub splitter: Option<String>,
+    /// `--add-ignore` glob patterns.
+    pub ignore: Vec<String>,
+    /// `--add-never-compress` glob patterns.
+    pub never_compress: Vec<String>,
+    /// Verbatim extra `policy set` flags (the CRD escape hatch).
+    pub extra_args: Vec<String>,
 }
 
 /// Builder for [`KopiaClient`].
@@ -382,16 +594,108 @@ impl KopiaClient {
         self.run_ok(&args).await.map(|_| ())
     }
 
-    /// Restore a snapshot's contents to a target directory. kopia's
-    /// `snapshot restore` does not emit JSON; success is exit code 0.
+    /// Restore a snapshot's contents to a target directory with kopia's default
+    /// options. kopia's `snapshot restore` does not emit JSON; success is exit
+    /// code 0.
     pub async fn snapshot_restore(&self, id: &str, target_dir: &str) -> Result<(), KopiaError> {
+        self.snapshot_restore_with(id, target_dir, &RestoreOptions::default())
+            .await
+    }
+
+    /// Restore a snapshot honoring the operator's [`RestoreOptions`]
+    /// (`enableFileDeletion`, `ignorePermissionErrors`, `writeFilesAtomically`,
+    /// …). Success is exit code 0.
+    pub async fn snapshot_restore_with(
+        &self,
+        id: &str,
+        target_dir: &str,
+        opts: &RestoreOptions,
+    ) -> Result<(), KopiaError> {
+        let args = restore_args(id, target_dir, opts);
+        self.run_ok(&args).await.map(|_| ())
+    }
+
+    /// Verify repository/snapshot integrity (`kopia snapshot verify`). Success is
+    /// exit code 0; a verification failure surfaces as a non-zero exit.
+    pub async fn snapshot_verify(&self, opts: &VerifyOptions) -> Result<(), KopiaError> {
+        let args = verify_args(opts);
+        self.run_ok(&args).await.map(|_| ())
+    }
+
+    /// Estimate the size/scope of snapshotting `source_path`
+    /// (`kopia snapshot estimate`). Best-effort; success is exit code 0.
+    pub async fn snapshot_estimate(&self, source_path: &str) -> Result<(), KopiaError> {
         let args = vec![
             "snapshot".into(),
-            "restore".into(),
-            id.to_string(),
-            target_dir.to_string(),
+            "estimate".into(),
+            source_path.to_string(),
         ];
         self.run_ok(&args).await.map(|_| ())
+    }
+
+    /// Add a pin to a snapshot so maintenance/expiration never deletes it
+    /// (`kopia snapshot pin <id> --add <pin>`). Used to protect snapshots whose
+    /// `Backup` carries `deletionPolicy: Retain`.
+    pub async fn snapshot_pin(&self, id: &str, pin: &str) -> Result<(), KopiaError> {
+        let args = vec![
+            "snapshot".into(),
+            "pin".into(),
+            id.to_string(),
+            "--add".into(),
+            pin.to_string(),
+        ];
+        self.run_ok(&args).await.map(|_| ())
+    }
+
+    /// Remove a pin from a snapshot (`kopia snapshot pin <id> --remove <pin>`).
+    pub async fn snapshot_unpin(&self, id: &str, pin: &str) -> Result<(), KopiaError> {
+        let args = vec![
+            "snapshot".into(),
+            "pin".into(),
+            id.to_string(),
+            "--remove".into(),
+            pin.to_string(),
+        ];
+        self.run_ok(&args).await.map(|_| ())
+    }
+
+    /// Expire snapshots per the repository's policy
+    /// (`kopia snapshot expire --all`). When `delete` is false this is a dry-run
+    /// (kopia requires `--delete` to actually remove). Success is exit code 0.
+    pub async fn snapshot_expire(&self, delete: bool) -> Result<(), KopiaError> {
+        let mut args = vec!["snapshot".into(), "expire".into(), "--all".into()];
+        if delete {
+            args.push("--delete".into());
+        }
+        self.run_ok(&args).await.map(|_| ())
+    }
+
+    /// Validate that the connected storage provider behaves correctly
+    /// (`kopia repository validate-provider`). A good Repository-readiness
+    /// preflight for object-store backends. Success is exit code 0.
+    pub async fn repository_validate_provider(&self) -> Result<(), KopiaError> {
+        let args = vec!["repository".into(), "validate-provider".into()];
+        self.run_ok(&args).await.map(|_| ())
+    }
+
+    /// Apply a policy to `target` (an identity string, a path, or `--global`)
+    /// via `kopia policy set`. The operator calls this before the first snapshot
+    /// so `BackupConfig.spec.policy` (compression/splitter/ignore) is honored.
+    pub async fn policy_set(&self, target: &str, policy: &PolicyArgs) -> Result<(), KopiaError> {
+        let args = policy_set_args(target, policy);
+        self.run_ok(&args).await.map(|_| ())
+    }
+
+    /// Show the effective policy for `target` (`kopia policy show <target>
+    /// --json`), parsed as a generic JSON value.
+    pub async fn policy_show(&self, target: &str) -> Result<serde_json::Value, KopiaError> {
+        let args = vec![
+            "policy".into(),
+            "show".into(),
+            target.to_string(),
+            "--json".into(),
+        ];
+        self.run_json(&args, "policy show").await
     }
 
     /// Get repository status (`kopia repository status --json`).
@@ -416,6 +720,87 @@ impl KopiaClient {
         }
         self.run_ok(&args).await.map(|_| ())
     }
+}
+
+/// Push a kopia `--[no-]flag` tri-state: `Some(true)` → `--flag`,
+/// `Some(false)` → `--no-flag`, `None` → nothing.
+fn push_tristate(args: &mut Vec<String>, flag: &str, value: Option<bool>) {
+    match value {
+        Some(true) => args.push(format!("--{flag}")),
+        Some(false) => args.push(format!("--no-{flag}")),
+        None => {}
+    }
+}
+
+/// Build the args for `kopia snapshot restore <id> <target>` plus options. Pure
+/// so it is unit-testable without spawning kopia.
+fn restore_args(id: &str, target_dir: &str, opts: &RestoreOptions) -> Vec<String> {
+    let mut args = vec![
+        "snapshot".into(),
+        "restore".into(),
+        id.to_string(),
+        target_dir.to_string(),
+    ];
+    push_tristate(
+        &mut args,
+        "ignore-permission-errors",
+        opts.ignore_permission_errors,
+    );
+    push_tristate(
+        &mut args,
+        "write-files-atomically",
+        opts.write_files_atomically,
+    );
+    push_tristate(&mut args, "overwrite-files", opts.overwrite_files);
+    if opts.skip_existing {
+        args.push("--skip-existing".into());
+    }
+    if let Some(p) = opts.parallel {
+        args.push("--parallel".into());
+        args.push(p.to_string());
+    }
+    args
+}
+
+/// Build the args for `kopia snapshot verify` plus options. Pure.
+fn verify_args(opts: &VerifyOptions) -> Vec<String> {
+    let mut args = vec!["snapshot".into(), "verify".into()];
+    if let Some(pct) = opts.verify_files_percent {
+        args.push("--verify-files-percent".into());
+        args.push(pct.to_string());
+    }
+    if let Some(m) = opts.max_errors {
+        args.push("--max-errors".into());
+        args.push(m.to_string());
+    }
+    if let Some(p) = opts.parallel {
+        args.push("--parallel".into());
+        args.push(p.to_string());
+    }
+    args
+}
+
+/// Build the args for `kopia policy set <target>` plus flags. Pure.
+fn policy_set_args(target: &str, policy: &PolicyArgs) -> Vec<String> {
+    let mut args = vec!["policy".into(), "set".into(), target.to_string()];
+    if let Some(c) = &policy.compression {
+        args.push("--compression".into());
+        args.push(c.clone());
+    }
+    if let Some(s) = &policy.splitter {
+        args.push("--splitter".into());
+        args.push(s.clone());
+    }
+    for pat in &policy.ignore {
+        args.push("--add-ignore".into());
+        args.push(pat.clone());
+    }
+    for pat in &policy.never_compress {
+        args.push("--add-never-compress".into());
+        args.push(pat.clone());
+    }
+    args.extend(policy.extra_args.iter().cloned());
+    args
 }
 
 /// Extract the JSON result from kopia stdout. kopia prints a single JSON object
@@ -498,5 +883,308 @@ mod tests {
     fn builder_defaults_binary() {
         let c = KopiaClient::builder().build();
         assert_eq!(c.binary(), &PathBuf::from("kopia"));
+    }
+
+    // --- backend_args: one assertion per backend variant. A new ConnectSpec
+    // variant must be added here (and to kind_str) or these tests fail to cover
+    // it, preserving the "every backend is wired" guarantee. ---
+
+    #[test]
+    fn azure_backend_args() {
+        let spec = ConnectSpec::Azure {
+            container: "c".into(),
+            storage_account: Some("acct".into()),
+            prefix: Some("p/".into()),
+        };
+        assert_eq!(
+            spec.backend_args(),
+            vec![
+                "azure",
+                "--container",
+                "c",
+                "--storage-account",
+                "acct",
+                "--prefix",
+                "p/"
+            ]
+        );
+        // Optional fields omitted when None.
+        let minimal = ConnectSpec::Azure {
+            container: "c".into(),
+            storage_account: None,
+            prefix: None,
+        };
+        assert_eq!(minimal.backend_args(), vec!["azure", "--container", "c"]);
+    }
+
+    #[test]
+    fn gcs_and_b2_backend_args() {
+        assert_eq!(
+            ConnectSpec::Gcs {
+                bucket: "b".into(),
+                prefix: Some("k/".into())
+            }
+            .backend_args(),
+            vec!["gcs", "--bucket", "b", "--prefix", "k/"]
+        );
+        assert_eq!(
+            ConnectSpec::B2 {
+                bucket: "b".into(),
+                prefix: None
+            }
+            .backend_args(),
+            vec!["b2", "--bucket", "b"]
+        );
+    }
+
+    #[test]
+    fn sftp_backend_args() {
+        let spec = ConnectSpec::Sftp {
+            host: "h".into(),
+            path: "/repo".into(),
+            port: Some(2222),
+            username: Some("u".into()),
+            keyfile: Some("/keys/id".into()),
+        };
+        assert_eq!(
+            spec.backend_args(),
+            vec![
+                "sftp",
+                "--host",
+                "h",
+                "--path",
+                "/repo",
+                "--port",
+                "2222",
+                "--username",
+                "u",
+                "--keyfile",
+                "/keys/id"
+            ]
+        );
+    }
+
+    #[test]
+    fn webdav_rclone_gdrive_backend_args() {
+        assert_eq!(
+            ConnectSpec::WebDav {
+                url: "https://dav".into()
+            }
+            .backend_args(),
+            vec!["webdav", "--url", "https://dav"]
+        );
+        assert_eq!(
+            ConnectSpec::Rclone {
+                remote_path: "r:bucket".into()
+            }
+            .backend_args(),
+            vec!["rclone", "--remote-path", "r:bucket"]
+        );
+        assert_eq!(
+            ConnectSpec::Gdrive {
+                folder_id: "fid".into()
+            }
+            .backend_args(),
+            vec!["gdrive", "--folder-id", "fid"]
+        );
+    }
+
+    #[test]
+    fn from_config_and_server_backend_args() {
+        assert_eq!(
+            ConnectSpec::FromConfig {
+                file: Some("/c.conf".into()),
+                token: None
+            }
+            .backend_args(),
+            vec!["from-config", "--file", "/c.conf"]
+        );
+        assert_eq!(
+            ConnectSpec::Server {
+                url: "https://srv".into(),
+                fingerprint: Some("ab12".into())
+            }
+            .backend_args(),
+            vec![
+                "server",
+                "--url",
+                "https://srv",
+                "--server-cert-fingerprint",
+                "ab12"
+            ]
+        );
+    }
+
+    #[test]
+    fn kind_str_covers_every_variant() {
+        // Exhaustiveness witness: each variant yields a distinct, stable string.
+        let all = [
+            ConnectSpec::Filesystem { path: "/r".into() },
+            ConnectSpec::S3 {
+                bucket: "b".into(),
+                endpoint: None,
+                prefix: None,
+                region: None,
+            },
+            ConnectSpec::Azure {
+                container: "c".into(),
+                storage_account: None,
+                prefix: None,
+            },
+            ConnectSpec::Gcs {
+                bucket: "b".into(),
+                prefix: None,
+            },
+            ConnectSpec::B2 {
+                bucket: "b".into(),
+                prefix: None,
+            },
+            ConnectSpec::Sftp {
+                host: "h".into(),
+                path: "/p".into(),
+                port: None,
+                username: None,
+                keyfile: None,
+            },
+            ConnectSpec::WebDav { url: "u".into() },
+            ConnectSpec::Rclone {
+                remote_path: "r".into(),
+            },
+            ConnectSpec::Gdrive {
+                folder_id: "f".into(),
+            },
+            ConnectSpec::FromConfig {
+                file: None,
+                token: None,
+            },
+            ConnectSpec::Server {
+                url: "u".into(),
+                fingerprint: None,
+            },
+        ];
+        let kinds: Vec<&str> = all.iter().map(|s| s.kind_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "filesystem",
+                "s3",
+                "azure",
+                "gcs",
+                "b2",
+                "sftp",
+                "webdav",
+                "rclone",
+                "gdrive",
+                "from-config",
+                "server"
+            ]
+        );
+    }
+
+    // --- verb arg builders ---
+
+    #[test]
+    fn restore_args_default_is_bare() {
+        assert_eq!(
+            restore_args("snap1", "/data", &RestoreOptions::default()),
+            vec!["snapshot", "restore", "snap1", "/data"]
+        );
+    }
+
+    #[test]
+    fn restore_args_tristate_and_flags() {
+        let opts = RestoreOptions {
+            ignore_permission_errors: Some(false),
+            write_files_atomically: Some(true),
+            overwrite_files: Some(false),
+            skip_existing: true,
+            parallel: Some(4),
+        };
+        assert_eq!(
+            restore_args("s", "/t", &opts),
+            vec![
+                "snapshot",
+                "restore",
+                "s",
+                "/t",
+                "--no-ignore-permission-errors",
+                "--write-files-atomically",
+                "--no-overwrite-files",
+                "--skip-existing",
+                "--parallel",
+                "4"
+            ]
+        );
+    }
+
+    #[test]
+    fn verify_args_builds_flags() {
+        assert_eq!(
+            verify_args(&VerifyOptions::default()),
+            vec!["snapshot", "verify"]
+        );
+        let opts = VerifyOptions {
+            verify_files_percent: Some(10),
+            max_errors: Some(3),
+            parallel: Some(8),
+        };
+        assert_eq!(
+            verify_args(&opts),
+            vec![
+                "snapshot",
+                "verify",
+                "--verify-files-percent",
+                "10",
+                "--max-errors",
+                "3",
+                "--parallel",
+                "8"
+            ]
+        );
+    }
+
+    #[test]
+    fn policy_set_args_builds_flags() {
+        let policy = PolicyArgs {
+            compression: Some("zstd".into()),
+            splitter: Some("DYNAMIC-4M-BUZHASH".into()),
+            ignore: vec!["*.tmp".into(), "cache/".into()],
+            never_compress: vec!["*.gz".into()],
+            extra_args: vec!["--ignore-cache-dirs".into(), "true".into()],
+        };
+        assert_eq!(
+            policy_set_args("user@host:/p", &policy),
+            vec![
+                "policy",
+                "set",
+                "user@host:/p",
+                "--compression",
+                "zstd",
+                "--splitter",
+                "DYNAMIC-4M-BUZHASH",
+                "--add-ignore",
+                "*.tmp",
+                "--add-ignore",
+                "cache/",
+                "--add-never-compress",
+                "*.gz",
+                "--ignore-cache-dirs",
+                "true"
+            ]
+        );
+        // Empty policy is just the bare command.
+        assert_eq!(
+            policy_set_args("--global", &PolicyArgs::default()),
+            vec!["policy", "set", "--global"]
+        );
+    }
+
+    #[test]
+    fn push_tristate_maps_correctly() {
+        let mut a = Vec::new();
+        push_tristate(&mut a, "flag", Some(true));
+        push_tristate(&mut a, "flag", Some(false));
+        push_tristate(&mut a, "flag", None);
+        assert_eq!(a, vec!["--flag", "--no-flag"]);
     }
 }

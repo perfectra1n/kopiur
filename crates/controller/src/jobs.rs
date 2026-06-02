@@ -95,6 +95,12 @@ pub struct MoverJobInputs<'a> {
     /// (`KOPIA_PASSWORD` and any backend credentials). Credentials NEVER come
     /// from the work-spec ConfigMap (§4.10/§4.11). `None` only in tests.
     pub creds_secret: Option<&'a str>,
+    /// ServiceAccount the mover pod runs as. The mover PATCHes the owning
+    /// Backup/Restore `.status`, so it needs an SA bound to the operator's
+    /// status-patch rules. `None` falls back to the namespace `default` SA
+    /// (which generally cannot patch `*/status`), so the controller should
+    /// always supply one in a real deployment.
+    pub service_account: Option<&'a str>,
 }
 
 /// The restricted-PSA-compatible default security context (§4.11/G16):
@@ -227,6 +233,7 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
         restart_policy: Some("Never".to_string()),
         containers: vec![container],
         volumes: Some(volumes),
+        service_account_name: inputs.service_account.map(str::to_string),
         ..Default::default()
     };
 
@@ -317,7 +324,24 @@ mod tests {
             source_pvc: None,
             repo_pvc: None,
             creds_secret: None,
+            service_account: Some("kopiur-operator"),
         }
+    }
+
+    #[test]
+    fn job_runs_under_the_supplied_service_account() {
+        // The mover PATCHes the owning CR's status, so the pod must run as the
+        // operator SA, not the namespace `default` SA.
+        let ws = sample_work_spec();
+        let job = build_job(&inputs(&ws, JobLimits::default()));
+        let sa = job
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap()
+            .service_account_name;
+        assert_eq!(sa.as_deref(), Some("kopiur-operator"));
     }
 
     #[test]

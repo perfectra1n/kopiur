@@ -60,6 +60,25 @@ pub struct RestoreOp {
     pub snapshot_id: String,
     /// Absolute path inside the mover pod to restore into (e.g. `/data`).
     pub target_path: String,
+    /// `--[no-]ignore-permission-errors` (Restore CRD `options`; kopia default
+    /// true). `None` lets kopia use its default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignore_permission_errors: Option<bool>,
+    /// `--[no-]write-files-atomically` (Restore CRD `options`). `None` lets kopia
+    /// use its default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_files_atomically: Option<bool>,
+}
+
+impl RestoreOp {
+    /// Translate the carried restore flags into the kopia client's options.
+    pub fn restore_options(&self) -> kopiur_kopia::RestoreOptions {
+        kopiur_kopia::RestoreOptions {
+            ignore_permission_errors: self.ignore_permission_errors,
+            write_files_atomically: self.write_files_atomically,
+            ..Default::default()
+        }
+    }
 }
 
 /// Payload for a snapshot-delete run.
@@ -89,8 +108,12 @@ pub struct ResolvedIdentity {
 /// (the kopia client's `ConnectSpec` is intentionally not serde). The mover
 /// converts one to the other. Credentials are NOT here: they arrive as env vars
 /// (mounted Secret) so they never land in a ConfigMap.
+///
+/// The variants mirror the eight CRD `Backend` kinds one-to-one, so the
+/// controller's `Backend -> RepositoryConnect` map is exhaustive (a new backend
+/// cannot compile until it is wired through to the mover).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum RepositoryConnect {
     /// Filesystem backend at a path.
     Filesystem {
@@ -111,25 +134,112 @@ pub enum RepositoryConnect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<String>,
     },
+    /// Azure Blob Storage backend.
+    Azure {
+        /// Blob container name.
+        container: String,
+        /// Storage account name (when not supplied via env).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        storage_account: Option<String>,
+        /// Optional object prefix.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<String>,
+    },
+    /// Google Cloud Storage backend.
+    Gcs {
+        /// Bucket name.
+        bucket: String,
+        /// Optional object prefix.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<String>,
+    },
+    /// Backblaze B2 backend.
+    B2 {
+        /// Bucket name.
+        bucket: String,
+        /// Optional object prefix.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<String>,
+    },
+    /// SFTP/SSH backend.
+    Sftp {
+        /// Server hostname.
+        host: String,
+        /// Path to the repository on the server.
+        path: String,
+        /// Server port (defaults to 22 when absent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
+        /// SSH username.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+        /// Path to a private key file inside the mover pod.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keyfile: Option<String>,
+    },
+    /// WebDAV backend.
+    WebDav {
+        /// WebDAV server URL.
+        url: String,
+    },
+    /// Rclone backend.
+    Rclone {
+        /// Rclone `remote:path`.
+        remote_path: String,
+    },
 }
 
 impl RepositoryConnect {
-    /// Convert to the kopia client's connect spec.
+    /// Convert to the kopia client's connect spec. Exhaustive: a new backend
+    /// variant fails to compile until handled.
     pub fn to_connect_spec(&self) -> kopiur_kopia::ConnectSpec {
+        use kopiur_kopia::ConnectSpec;
         match self {
-            RepositoryConnect::Filesystem { path } => {
-                kopiur_kopia::ConnectSpec::Filesystem { path: path.into() }
-            }
+            RepositoryConnect::Filesystem { path } => ConnectSpec::Filesystem { path: path.into() },
             RepositoryConnect::S3 {
                 bucket,
                 endpoint,
                 prefix,
                 region,
-            } => kopiur_kopia::ConnectSpec::S3 {
+            } => ConnectSpec::S3 {
                 bucket: bucket.clone(),
                 endpoint: endpoint.clone(),
                 prefix: prefix.clone(),
                 region: region.clone(),
+            },
+            RepositoryConnect::Azure {
+                container,
+                storage_account,
+                prefix,
+            } => ConnectSpec::Azure {
+                container: container.clone(),
+                storage_account: storage_account.clone(),
+                prefix: prefix.clone(),
+            },
+            RepositoryConnect::Gcs { bucket, prefix } => ConnectSpec::Gcs {
+                bucket: bucket.clone(),
+                prefix: prefix.clone(),
+            },
+            RepositoryConnect::B2 { bucket, prefix } => ConnectSpec::B2 {
+                bucket: bucket.clone(),
+                prefix: prefix.clone(),
+            },
+            RepositoryConnect::Sftp {
+                host,
+                path,
+                port,
+                username,
+                keyfile,
+            } => ConnectSpec::Sftp {
+                host: host.clone(),
+                path: path.clone(),
+                port: *port,
+                username: username.clone(),
+                keyfile: keyfile.clone(),
+            },
+            RepositoryConnect::WebDav { url } => ConnectSpec::WebDav { url: url.clone() },
+            RepositoryConnect::Rclone { remote_path } => ConnectSpec::Rclone {
+                remote_path: remote_path.clone(),
             },
         }
     }
@@ -275,6 +385,8 @@ mod tests {
             operation: Operation::Restore(RestoreOp {
                 snapshot_id: "abc123".into(),
                 target_path: "/data".into(),
+                ignore_permission_errors: Some(true),
+                write_files_atomically: Some(false),
             }),
             identity: sample_identity(),
             repository: RepositoryConnect::S3 {
@@ -382,5 +494,121 @@ mod tests {
                 region: Some("r".into()),
             }
         );
+    }
+
+    #[test]
+    fn object_store_backends_convert_and_roundtrip() {
+        use kopiur_kopia::ConnectSpec;
+        // One representative per non-trivial backend: assert both the wire
+        // round-trip and the conversion to the kopia client spec.
+        let cases: Vec<(RepositoryConnect, ConnectSpec)> = vec![
+            (
+                RepositoryConnect::Azure {
+                    container: "c".into(),
+                    storage_account: Some("acct".into()),
+                    prefix: None,
+                },
+                ConnectSpec::Azure {
+                    container: "c".into(),
+                    storage_account: Some("acct".into()),
+                    prefix: None,
+                },
+            ),
+            (
+                RepositoryConnect::Gcs {
+                    bucket: "b".into(),
+                    prefix: Some("p/".into()),
+                },
+                ConnectSpec::Gcs {
+                    bucket: "b".into(),
+                    prefix: Some("p/".into()),
+                },
+            ),
+            (
+                RepositoryConnect::B2 {
+                    bucket: "b".into(),
+                    prefix: None,
+                },
+                ConnectSpec::B2 {
+                    bucket: "b".into(),
+                    prefix: None,
+                },
+            ),
+            (
+                RepositoryConnect::Sftp {
+                    host: "h".into(),
+                    path: "/r".into(),
+                    port: Some(2222),
+                    username: Some("u".into()),
+                    keyfile: Some("/k".into()),
+                },
+                ConnectSpec::Sftp {
+                    host: "h".into(),
+                    path: "/r".into(),
+                    port: Some(2222),
+                    username: Some("u".into()),
+                    keyfile: Some("/k".into()),
+                },
+            ),
+            (
+                RepositoryConnect::WebDav {
+                    url: "https://dav".into(),
+                },
+                ConnectSpec::WebDav {
+                    url: "https://dav".into(),
+                },
+            ),
+            (
+                RepositoryConnect::Rclone {
+                    remote_path: "r:bucket".into(),
+                },
+                ConnectSpec::Rclone {
+                    remote_path: "r:bucket".into(),
+                },
+            ),
+        ];
+        for (wire, expected_spec) in cases {
+            // Wire round-trip (externally tagged, camelCase).
+            let json = serde_json::to_string(&wire).unwrap();
+            let back: RepositoryConnect = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, wire, "round-trip for {json}");
+            // Conversion to the kopia client spec.
+            assert_eq!(wire.to_connect_spec(), expected_spec);
+        }
+    }
+
+    #[test]
+    fn restore_op_maps_options_and_defaults_absent() {
+        // Options present → mapped onto the kopia client options.
+        let op = RestoreOp {
+            snapshot_id: "s".into(),
+            target_path: "/data".into(),
+            ignore_permission_errors: Some(false),
+            write_files_atomically: Some(true),
+        };
+        let opts = op.restore_options();
+        assert_eq!(opts.ignore_permission_errors, Some(false));
+        assert_eq!(opts.write_files_atomically, Some(true));
+
+        // Older wire payload without the option fields still deserializes
+        // (forward/backward compatible), mapping to kopia defaults (None).
+        let json = r#"{"snapshotId":"s","targetPath":"/data"}"#;
+        let parsed: RestoreOp = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.ignore_permission_errors, None);
+        assert_eq!(parsed.restore_options().write_files_atomically, None);
+    }
+
+    #[test]
+    fn azure_wire_shape_is_external_camel_case() {
+        let wire = RepositoryConnect::Azure {
+            container: "c".into(),
+            storage_account: Some("acct".into()),
+            prefix: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&wire).unwrap();
+        assert!(v["azure"]["container"].is_string());
+        assert_eq!(v["azure"]["storageAccount"], "acct");
+        // prefix omitted when None.
+        assert!(v["azure"].get("prefix").is_none());
     }
 }

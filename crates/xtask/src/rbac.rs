@@ -20,12 +20,12 @@
 //! expects.
 
 use anyhow::{Context, Result};
+use k8s_openapi::Resource;
 use k8s_openapi::api::core::v1::ServiceAccount;
 use k8s_openapi::api::rbac::v1::{
     ClusterRole, ClusterRoleBinding, PolicyRule, Role, RoleBinding, RoleRef, Subject,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use k8s_openapi::Resource;
 use serde::Serialize;
 
 use crate::artifact::{Artifact, RBAC_HEADER};

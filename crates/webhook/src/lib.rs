@@ -18,4 +18,4 @@ pub mod handlers;
 pub mod routes;
 pub mod tenancy;
 
-pub use routes::{app, AppState};
+pub use routes::{AppState, app};

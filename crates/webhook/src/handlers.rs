@@ -26,12 +26,12 @@ use api::repository::RepositorySpec;
 use api::restore::RestoreSpec;
 
 use crate::tenancy::{self, TenancyDecision};
-use json_patch::{jsonptr::PointerBuf, AddOperation, Patch, PatchOperation};
+use json_patch::{AddOperation, Patch, PatchOperation, jsonptr::PointerBuf};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::core::admission::{AdmissionRequest, AdmissionResponse};
-use kube::core::DynamicObject;
 use kube::Client;
-use serde_json::{json, Value};
+use kube::core::DynamicObject;
+use kube::core::admission::{AdmissionRequest, AdmissionResponse};
+use serde_json::{Value, json};
 
 /// The finalizer that ties a kopia snapshot's lifecycle to its `Backup` CR (ADR §4.5).
 pub const SNAPSHOT_CLEANUP_FINALIZER: &str = "kopiur.dev/snapshot-cleanup";
@@ -315,12 +315,11 @@ async fn handle_restore(
         return resp.deny(join_errors(&errs));
     }
 
-    if let Some(repo) = &spec.repository {
-        if let TenancyDecision::Deny(msg) =
+    if let Some(repo) = &spec.repository
+        && let TenancyDecision::Deny(msg) =
             tenancy_for(repo, req.namespace.as_deref(), client).await
-        {
-            return resp.deny(msg);
-        }
+    {
+        return resp.deny(msg);
     }
 
     resp

@@ -15,7 +15,9 @@
 
 use std::collections::BTreeMap;
 
-use kopiur_kopia::{ConnectSpec, KopiaClient, MaintenanceMode};
+use kopiur_kopia::{
+    ConnectSpec, KopiaClient, MaintenanceMode, PolicyArgs, RestoreOptions, VerifyOptions,
+};
 
 /// Build a client whose env isolates kopia state inside `config_dir` so the
 /// test never touches the user's real `~/.config/kopia`.
@@ -136,5 +138,126 @@ async fn filesystem_roundtrip() {
     assert!(
         !after.iter().any(|e| e.id == created.id),
         "deleted snapshot must not appear"
+    );
+}
+
+/// Exercises the broadened verb surface (policy, verify, estimate, pin, restore
+/// options, validate-provider) against a real filesystem repo. Proves the args
+/// we build are accepted by kopia 0.23, not just shaped correctly.
+#[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
+async fn verbs_roundtrip() {
+    let repo_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let source_dir = tempfile::tempdir().unwrap();
+    let restore_dir = tempfile::tempdir().unwrap();
+
+    std::fs::write(source_dir.path().join("keep.txt"), b"keep me\n").unwrap();
+    std::fs::write(source_dir.path().join("skip.tmp"), b"scratch\n").unwrap();
+
+    let client = isolated_client(config_dir.path());
+    client
+        .repository_create(&ConnectSpec::Filesystem {
+            path: repo_dir.path().to_path_buf(),
+        })
+        .await
+        .expect("repository create");
+
+    // validate-provider preflight succeeds against a freshly created repo.
+    client
+        .repository_validate_provider()
+        .await
+        .expect("validate-provider");
+
+    let identity = "verbuser@verbhost:/data";
+
+    // Apply a policy (compression + ignore glob) before snapshotting.
+    client
+        .policy_set(
+            identity,
+            &PolicyArgs {
+                compression: Some("zstd".into()),
+                ignore: vec!["*.tmp".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("policy set");
+
+    // policy show reflects the compression we set.
+    let shown = client.policy_show(identity).await.expect("policy show");
+    assert!(
+        shown.to_string().contains("zstd"),
+        "policy show should reflect zstd compression, got {shown}"
+    );
+
+    // Estimate runs cleanly.
+    client
+        .snapshot_estimate(source_dir.path().to_str().unwrap())
+        .await
+        .expect("snapshot estimate");
+
+    // Snapshot; the ignore policy should drop skip.tmp (1 file, not 2).
+    let created = client
+        .snapshot_create(
+            source_dir.path().to_str().unwrap(),
+            &BTreeMap::new(),
+            Some(identity),
+        )
+        .await
+        .expect("snapshot create");
+    assert_eq!(
+        created.file_count(),
+        1,
+        "ignore policy should exclude *.tmp"
+    );
+
+    // Verify integrity (read 100% of files).
+    client
+        .snapshot_verify(&VerifyOptions {
+            verify_files_percent: Some(100),
+            ..Default::default()
+        })
+        .await
+        .expect("verify");
+
+    // Restore honoring options (atomic writes, ignore permission errors).
+    client
+        .snapshot_restore_with(
+            &created.id,
+            restore_dir.path().to_str().unwrap(),
+            &RestoreOptions {
+                ignore_permission_errors: Some(true),
+                write_files_atomically: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("restore with options");
+
+    // Pin then unpin the snapshot (protects it from expiry). Pinning rewrites the
+    // manifest, so the manifest id changes — re-list to get the current id before
+    // unpinning, mirroring what a reconciler must do.
+    client
+        .snapshot_pin(&created.id, "protected")
+        .await
+        .expect("pin");
+    let pinned = client
+        .snapshot_list(Some(&created.source))
+        .await
+        .expect("list after pin");
+    let current_id = pinned
+        .first()
+        .map(|e| e.id.clone())
+        .expect("snapshot still present after pin");
+    client
+        .snapshot_unpin(&current_id, "protected")
+        .await
+        .expect("unpin");
+    let kept = std::fs::read(restore_dir.path().join("keep.txt")).expect("keep.txt restored");
+    assert_eq!(kept, b"keep me\n");
+    assert!(
+        !restore_dir.path().join("skip.tmp").exists(),
+        "ignored file should not be in the snapshot/restore"
     );
 }

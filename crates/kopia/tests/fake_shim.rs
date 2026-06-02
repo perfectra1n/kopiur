@@ -10,7 +10,10 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-use kopiur_kopia::{ConnectSpec, KopiaClient, KopiaError, KopiaErrorClass};
+use kopiur_kopia::{
+    ConnectSpec, KopiaClient, KopiaError, KopiaErrorClass, PolicyArgs, RestoreOptions,
+    VerifyOptions,
+};
 
 /// Write an executable shell script to a tempdir and return its path. The
 /// tempdir is leaked into the returned guard so the file outlives the test
@@ -199,4 +202,145 @@ exit 0
     let client = client_for(&s);
     client.snapshot_restore("abc", "/target").await.unwrap();
     client.snapshot_delete("abc").await.unwrap();
+}
+
+// --- New verb / backend coverage. The shims gate exit 0 on the expected argv,
+// so these double as wiring assertions against the real kopia 0.23 flag names. ---
+
+/// A shim that exits 0 iff its argv contains `$NEEDLE`, else 9 with a diagnostic.
+fn argv_gate_shim(needle: &str) -> Shim {
+    shim(&format!(
+        r#"#!/bin/sh
+case "$*" in
+  *"{needle}"*) exit 0 ;;
+  *) echo "argv did not contain [{needle}]: $*" 1>&2; exit 9 ;;
+esac
+"#
+    ))
+}
+
+#[tokio::test]
+async fn connect_azure_backend_argv() {
+    let s = argv_gate_shim("repository connect azure --container backups --prefix k/");
+    let client = client_for(&s);
+    client
+        .repository_connect(&ConnectSpec::Azure {
+            container: "backups".into(),
+            storage_account: None,
+            prefix: Some("k/".into()),
+        })
+        .await
+        .expect("azure connect argv must match");
+}
+
+#[tokio::test]
+async fn connect_sftp_backend_argv() {
+    let s =
+        argv_gate_shim("repository connect sftp --host h --path /repo --port 2222 --username u");
+    let client = client_for(&s);
+    client
+        .repository_connect(&ConnectSpec::Sftp {
+            host: "h".into(),
+            path: "/repo".into(),
+            port: Some(2222),
+            username: Some("u".into()),
+            keyfile: None,
+        })
+        .await
+        .expect("sftp connect argv must match");
+}
+
+#[tokio::test]
+async fn restore_with_options_passes_flags() {
+    let s = argv_gate_shim(
+        "snapshot restore snap1 /target --no-ignore-permission-errors --write-files-atomically",
+    );
+    let client = client_for(&s);
+    client
+        .snapshot_restore_with(
+            "snap1",
+            "/target",
+            &RestoreOptions {
+                ignore_permission_errors: Some(false),
+                write_files_atomically: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("restore option flags must pass through");
+}
+
+#[tokio::test]
+async fn snapshot_verify_passes_flags() {
+    let s = argv_gate_shim("snapshot verify --verify-files-percent 5 --max-errors 0");
+    let client = client_for(&s);
+    client
+        .snapshot_verify(&VerifyOptions {
+            verify_files_percent: Some(5),
+            max_errors: Some(0),
+            parallel: None,
+        })
+        .await
+        .expect("verify flags must pass through");
+}
+
+#[tokio::test]
+async fn snapshot_pin_unpin_expire_estimate_validate() {
+    // Each gates on its own argv; run them against fresh shims.
+    let pin = argv_gate_shim("snapshot pin s1 --add protected");
+    client_for(&pin)
+        .snapshot_pin("s1", "protected")
+        .await
+        .unwrap();
+
+    let unpin = argv_gate_shim("snapshot pin s1 --remove protected");
+    client_for(&unpin)
+        .snapshot_unpin("s1", "protected")
+        .await
+        .unwrap();
+
+    let expire = argv_gate_shim("snapshot expire --all --delete");
+    client_for(&expire).snapshot_expire(true).await.unwrap();
+
+    let estimate = argv_gate_shim("snapshot estimate /data");
+    client_for(&estimate)
+        .snapshot_estimate("/data")
+        .await
+        .unwrap();
+
+    let validate = argv_gate_shim("repository validate-provider");
+    client_for(&validate)
+        .repository_validate_provider()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn policy_set_passes_flags() {
+    let s = argv_gate_shim("policy set user@host:/d --compression zstd --add-ignore *.tmp");
+    let client = client_for(&s);
+    client
+        .policy_set(
+            "user@host:/d",
+            &PolicyArgs {
+                compression: Some("zstd".into()),
+                ignore: vec!["*.tmp".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("policy set flags must pass through");
+}
+
+#[tokio::test]
+async fn policy_show_parses_json() {
+    let s = shim(
+        r#"#!/bin/sh
+echo '{"compression":{"compressorName":"zstd"},"splitter":{"algorithm":"DYNAMIC-4M-BUZHASH"}}'
+exit 0
+"#,
+    );
+    let client = client_for(&s);
+    let v = client.policy_show("user@host:/d").await.unwrap();
+    assert_eq!(v["compression"]["compressorName"], "zstd");
 }

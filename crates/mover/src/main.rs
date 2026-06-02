@@ -134,7 +134,7 @@ async fn run_operation(
         }
         Operation::Restore(op) => {
             client
-                .snapshot_restore(&op.snapshot_id, &op.target_path)
+                .snapshot_restore_with(&op.snapshot_id, &op.target_path, &op.restore_options())
                 .await?;
             Ok(StatusUpdate::succeeded(chrono::Utc::now()))
         }
