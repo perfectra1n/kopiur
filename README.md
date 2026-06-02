@@ -64,5 +64,5 @@ docs/adr/        Architecture Decision Records (0003 is canonical)
 
 ## License
 
-Apache-2.0
+[AGPL-3.0-only](LICENSE)
 

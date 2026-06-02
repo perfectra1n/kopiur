@@ -26,4 +26,4 @@ maintainers:
   - name: kopiur maintainers
 annotations:
   category: Storage
-  licenses: Apache-2.0
+  licenses: AGPL-3.0-only
