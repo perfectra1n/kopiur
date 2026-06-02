@@ -35,7 +35,9 @@ The fork's existence and the volume of feature requests around kopia/restic lock
 7. Surface kopia's snapshot catalog through CRDs so restore is "browse and reference," not "construct an `restoreAsOf` timestamp and hope."
 8. Address the long backlog of papercuts as design decisions, not bug fixes.
 
-The API group is **`kopia.io`** with initial version `v1alpha1`. The project name is **`kopiur`** (Kopia + Rust); the binary, container, and helm chart all use that name.
+The API group is **`kopiur.dev`** with initial version `v1alpha1`. The project name is **`kopiur`** (Kopia + Rust); the binary, container, and helm chart all use that name.
+
+> **Group rename (post-decision):** earlier drafts of this ADR used the group `kopia.io`. That is the upstream Kopia project's own domain — using it for our CRDs would wrongly imply their ownership/endorsement — so the group, and every `kopia.io/`-prefixed finalizer, label, and annotation, were moved to **`kopiur.dev`**. References to the real Kopia project's documentation (e.g. `https://kopia.io/docs/`) are unchanged. The predecessor drafts ADR-0001/0002 are left as historical record and still show the original `kopia.io`.
 
 ### 1.1 The most important gaps we are addressing
 
@@ -71,7 +73,7 @@ G21 is the new entry: it's not a volsync defect, it's a positive reason to choos
 
 ### 2.1 Topology
 
-Seven CRDs in `kopia.io/v1alpha1`. Six are namespaced; **`ClusterRepository`** is cluster-scoped.
+Seven CRDs in `kopiur.dev/v1alpha1`. Six are namespaced; **`ClusterRepository`** is cluster-scoped.
 
 | CRD | Scope | Layer | Purpose |
 |---|---|---|---|
@@ -135,7 +137,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[kube(
-    group = "kopia.io",
+    group = "kopiur.dev",
     version = "v1alpha1",
     kind = "Repository",
     namespaced,
@@ -179,7 +181,7 @@ See ADR-0001 §3.2. Same shape; cluster-scoped via `#[kube(... )]` without the `
 ```rust
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[kube(
-    group = "kopia.io",
+    group = "kopiur.dev",
     version = "v1alpha1",
     kind = "ClusterRepository",
     status = "ClusterRepositoryStatus",
