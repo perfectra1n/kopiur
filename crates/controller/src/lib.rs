@@ -28,6 +28,7 @@ pub mod cluster_repository;
 pub mod consts;
 pub mod context;
 pub mod error;
+pub mod io;
 pub mod jobs;
 pub mod maintenance;
 pub mod metrics;
@@ -66,15 +67,28 @@ pub const METRICS_ADDR: &str = "0.0.0.0:8080";
 pub async fn run() -> anyhow::Result<()> {
     init_tracing();
 
+    // Install the process-level rustls CryptoProvider before the kube client
+    // builds any TLS config; without this, kube's rustls-tls backend panics with
+    // "no process-level CryptoProvider available". Idempotent: ignore the error
+    // if a provider is already installed (e.g. the webhook installed it).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let client = Client::try_default().await?;
     let metrics = Metrics::new();
     let reporter = Reporter::from("kopiur-controller");
     let recorder = Recorder::new(client.clone(), reporter);
+    // The mover image is configurable via KOPIUR_MOVER_IMAGE so a deployment (or
+    // the e2e harness) can pin a locally-loaded image instead of the published
+    // default (jobs::DEFAULT_MOVER_IMAGE).
+    let mover_image = std::env::var("KOPIUR_MOVER_IMAGE")
+        .unwrap_or_else(|_| jobs::DEFAULT_MOVER_IMAGE.to_string());
+    tracing::info!(mover_image = %mover_image, "mover image configured");
     let ctx = Arc::new(Context::new(
         client.clone(),
         KopiaClientFactory::new(),
         metrics.clone(),
         recorder,
+        mover_image,
     ));
 
     tracing::info!("starting kopiur controllers");

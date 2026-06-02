@@ -45,6 +45,10 @@ fn main() -> std::process::ExitCode {
 async fn run() -> Result<()> {
     init_tracing();
 
+    // Install the process-level rustls CryptoProvider before building any kube
+    // client (the rustls-tls backend panics without it). Idempotent.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let spec_path = work_spec_path().context("locating work spec")?;
     let spec = load_work_spec(&spec_path)
         .with_context(|| format!("loading work spec from {}", spec_path.display()))?;
@@ -117,7 +121,15 @@ async fn run_operation(
 ) -> Result<StatusUpdate, KopiaError> {
     match &spec.operation {
         Operation::Backup(op) => {
-            let result = client.snapshot_create(&op.source_path, &op.tags).await?;
+            // Record the snapshot under the operator-resolved identity
+            // (`username@hostname:sourcePath`), not the mover pod's ambient
+            // user/host — ADR §4.2. The catalog, retention, and restore paths
+            // all key on this identity.
+            let id = &spec.identity;
+            let override_source = format!("{}@{}:{}", id.username, id.hostname, id.source_path);
+            let result = client
+                .snapshot_create(&op.source_path, &op.tags, Some(&override_source))
+                .await?;
             Ok(StatusUpdate::succeeded_backup(&result, chrono::Utc::now()))
         }
         Operation::Restore(op) => {

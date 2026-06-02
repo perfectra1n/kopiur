@@ -16,14 +16,18 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use kube::api::ListParams;
 use kube::runtime::controller::Action;
-use kube::ResourceExt;
+use kube::{Api, ResourceExt};
 
-use kopiur_api::{validate, Repository};
-use kopiur_kopia::SnapshotListEntry;
+use kopiur_api::backend::Backend;
+use kopiur_api::{validate, Backup, Repository};
+use kopiur_kopia::{ConnectSpec, SnapshotListEntry};
 
+use crate::consts::{ORIGIN_LABEL, REPOSITORY_UID_LABEL, SNAPSHOT_ID_LABEL};
 use crate::context::Context;
 use crate::error::{error_policy_for, Error, Result};
+use crate::io;
 
 /// The dedup key for a discovered snapshot: `(Repository.UID, kopiaSnapshotID)`
 /// (ADR §2.1). Two scans of the same repo never materialize the same snapshot
@@ -57,20 +61,227 @@ pub async fn reconcile(repo: Arc<Repository>, ctx: Arc<Context>) -> Result<Actio
     result
 }
 
-async fn reconcile_inner(repo: &Repository, _ctx: &Context) -> Result<Action> {
+async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
     if let Err(e) = validate::validate_repository_no_inline_retention(&repo.spec) {
         return Err(Error::Validation(e.to_string()));
     }
 
-    // TODO(M6): connect-validate (short Job); if create.enabled and connect
-    // fails with "not found", create the repo; set status.phase/uniqueID/
-    // backend discriminant/storageStats from repository_status(); on the
-    // catalog refresh interval, run snapshot_list, compute needs_materialization
-    // against existing discovered Backups (keyed by (UID, id)), and create the
-    // bounded (catalog.retain) set of origin: discovered Backup CRs. The dedup
-    // decision (needs_materialization) is tested below.
+    let namespace = repo
+        .namespace()
+        .ok_or_else(|| Error::Invariant("Repository has no namespace".into()))?;
+    let name = repo.name_any();
+    let repo_uid = repo
+        .uid()
+        .ok_or_else(|| Error::Invariant("Repository has no uid".into()))?;
+    let api: Api<Repository> = Api::namespaced(ctx.client.clone(), &namespace);
+
+    // The controller may run kopia in-process for the FILESYSTEM backend only
+    // (ADR §5.4 permits short idempotent ops; filesystem repos are reachable from
+    // the controller's own filesystem when using a hostPath/shared mount, or in
+    // the e2e harness). For object-store backends, connect-validate would run as
+    // a short Job — documented as a follow-up below.
+    match &repo.spec.backend {
+        Backend::Filesystem(fs) => {
+            let creds = io::repo_credentials(&repo.spec.encryption);
+            let password = io::read_repo_password(&ctx.client, &namespace, &creds).await?;
+            let client = ctx.kopia.build([("KOPIA_PASSWORD".to_string(), password)]);
+            let spec = ConnectSpec::Filesystem {
+                path: fs.path.clone().into(),
+            };
+
+            // Idempotent connect; create on first use when enabled.
+            if let Err(e) = client.repository_connect(&spec).await {
+                let create_enabled = repo
+                    .spec
+                    .create
+                    .as_ref()
+                    .map(|c| c.enabled)
+                    .unwrap_or(false);
+                if create_enabled {
+                    client.repository_create(&spec).await?;
+                    client.repository_connect(&spec).await?;
+                } else {
+                    io::patch_status(
+                        &api,
+                        &name,
+                        serde_json::json!({ "phase": "Failed", "backend": "Filesystem" }),
+                    )
+                    .await?;
+                    return Err(Error::Kopia(e));
+                }
+            }
+
+            // Status: phase/uniqueID/backend/storageStats.
+            let status = client.repository_status().await?;
+            io::patch_status(
+                &api,
+                &name,
+                serde_json::json!({
+                    "phase": "Ready",
+                    "backend": "Filesystem",
+                    "uniqueId": status.unique_id_hex,
+                }),
+            )
+            .await?;
+
+            // Catalog scan: materialize discovered Backups for unseen snapshots,
+            // bounded by catalog.retain.perIdentity.
+            scan_catalog(ctx, repo, &namespace, &name, &repo_uid, &client).await?;
+        }
+        other => {
+            // NOTE: object-store connect/create/status/catalog would run via a
+            // short-lived mover Job (ADR §5.4). The filesystem path above is the
+            // fully-working core; extending the Job-based path to S3/etc is a
+            // mechanical follow-up that reuses the same MoverWorkSpec plumbing.
+            io::patch_status(
+                &api,
+                &name,
+                serde_json::json!({ "phase": "Pending", "backend": other.kind_str() }),
+            )
+            .await?;
+            tracing::info!(
+                repo = %name,
+                backend = other.kind_str(),
+                "object-store repository: in-process validation not run (filesystem only); see NOTE"
+            );
+        }
+    }
 
     Ok(Action::requeue(std::time::Duration::from_secs(300)))
+}
+
+/// Run `snapshot list`, compute which snapshots still need a `Backup` CR, and
+/// create the bounded `origin: discovered` set (forced `deletionPolicy: Retain`).
+async fn scan_catalog(
+    ctx: &Context,
+    repo: &Repository,
+    namespace: &str,
+    repo_name: &str,
+    repo_uid: &str,
+    client: &kopiur_kopia::KopiaClient,
+) -> Result<()> {
+    let listing = client.snapshot_list(None).await?;
+
+    // Existing discovered Backups keyed by (repo_uid, snapshot_id).
+    let backup_api: Api<Backup> = Api::namespaced(ctx.client.clone(), namespace);
+    let lp = ListParams::default().labels(&format!("{ORIGIN_LABEL}=discovered"));
+    let existing_crs = backup_api.list(&lp).await?.items;
+    let mut existing: BTreeSet<(String, String)> = BTreeSet::new();
+    for b in &existing_crs {
+        if let (Some(uid), Some(id)) = (
+            b.labels().get(REPOSITORY_UID_LABEL),
+            b.labels().get(SNAPSHOT_ID_LABEL),
+        ) {
+            existing.insert(catalog_dedup_key(uid, id));
+        }
+    }
+
+    let mut need = needs_materialization(repo_uid, &existing, &listing);
+
+    // Bound by catalog.retain.perIdentity (most-recent N). We approximate the
+    // global cap by sorting newest-first and truncating; per-identity refinement
+    // is a documented follow-up.
+    let retain = repo
+        .spec
+        .catalog
+        .as_ref()
+        .and_then(|c| c.retain.as_ref())
+        .and_then(|r| r.per_identity)
+        .map(|n| n.max(0) as usize);
+    need.sort_by_key(|e| std::cmp::Reverse(e.end_time));
+    if let Some(cap) = retain {
+        need.truncate(cap);
+    }
+
+    let mut created = 0i64;
+    for entry in need {
+        create_discovered_backup(ctx, repo, namespace, repo_name, repo_uid, entry).await?;
+        created += 1;
+    }
+    if created > 0 {
+        tracing::info!(repo = %repo_name, created, "materialized discovered Backup CRs");
+    }
+
+    let api: Api<Repository> = Api::namespaced(ctx.client.clone(), namespace);
+    io::patch_status(
+        &api,
+        repo_name,
+        serde_json::json!({
+            "catalog": {
+                "discoveredBackupCount": existing.len() as i64 + created,
+                "lastRefreshAt": chrono::Utc::now().to_rfc3339(),
+            },
+            "storageStats": { "snapshotCount": listing.len() as i64 },
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Create one `origin: discovered` Backup CR for a snapshot. `deletionPolicy` is
+/// FORCED to `Retain` (the operator never deletes a discovered snapshot, §4.5).
+async fn create_discovered_backup(
+    ctx: &Context,
+    repo: &Repository,
+    namespace: &str,
+    repo_name: &str,
+    repo_uid: &str,
+    entry: &SnapshotListEntry,
+) -> Result<()> {
+    use kopiur_api::backup::{BackupSpec, BackupStatus, SnapshotInfo};
+    use kopiur_api::common::{DeletionPolicy, ResolvedIdentity};
+    use kopiur_api::{BackupPhase, Origin};
+
+    // CR name: stable from the (short) snapshot id, namespaced under repo.
+    let short = entry.id.chars().take(16).collect::<String>();
+    let cr_name = format!("{repo_name}-disc-{short}");
+
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert(ORIGIN_LABEL.to_string(), "discovered".to_string());
+    labels.insert(REPOSITORY_UID_LABEL.to_string(), repo_uid.to_string());
+    labels.insert(SNAPSHOT_ID_LABEL.to_string(), entry.id.clone());
+
+    let owner = io::owner_ref_for(repo, "Repository")?;
+    let mut backup = Backup::new(
+        &cr_name,
+        BackupSpec {
+            config_ref: None,
+            tags: None,
+            failure_policy: None,
+            // Forced Retain for discovered (webhook would reject otherwise).
+            deletion_policy: Some(DeletionPolicy::Retain),
+        },
+    );
+    backup.metadata = io::child_meta(&cr_name, namespace, labels, Some(owner));
+    backup.status = Some(BackupStatus {
+        phase: Some(BackupPhase::Discovered),
+        origin: Some(Origin::Discovered),
+        snapshot: Some(SnapshotInfo {
+            kopia_snapshot_id: entry.id.clone(),
+            identity: ResolvedIdentity {
+                username: entry.source.user_name.clone(),
+                hostname: entry.source.host.clone(),
+                source_path: Some(entry.source.path.clone()),
+            },
+        }),
+        ..Default::default()
+    });
+
+    let api: Api<Backup> = Api::namespaced(ctx.client.clone(), namespace);
+    // Create the CR; the discovered status is then PATCHed onto the subresource.
+    match io::apply(&api, &cr_name, &backup).await {
+        Ok(_) => {}
+        Err(Error::Kube(kube::Error::Api(ae))) if ae.code == 409 => return Ok(()),
+        Err(e) => return Err(e),
+    }
+    io::patch_status(
+        &api,
+        &cr_name,
+        serde_json::to_value(backup.status.unwrap_or_default())?,
+    )
+    .await?;
+    let _ = repo; // repo retained for future per-identity bounding
+    Ok(())
 }
 
 /// `error_policy` for the `Repository` controller.

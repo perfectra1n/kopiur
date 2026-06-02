@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, ConfigMapVolumeSource, Container, PodSpec, PodTemplateSpec, ResourceRequirements,
-    SeccompProfile, SecurityContext, Volume, VolumeMount,
+    ConfigMap, ConfigMapVolumeSource, Container, EnvFromSource, PersistentVolumeClaimVolumeSource,
+    PodSpec, PodTemplateSpec, ResourceRequirements, SeccompProfile, SecretEnvSource,
+    SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use kopiur_mover::workspec::MoverWorkSpec;
@@ -49,6 +50,17 @@ impl Default for JobLimits {
     }
 }
 
+/// A PVC mounted into the mover pod at a path.
+#[derive(Debug, Clone)]
+pub struct PvcMount {
+    /// The `PersistentVolumeClaim` name in the mover's namespace.
+    pub claim_name: String,
+    /// Absolute mount path inside the mover container.
+    pub mount_path: String,
+    /// Whether the mount is read-only (Backup sources are mounted read-only).
+    pub read_only: bool,
+}
+
 /// All inputs needed to build a mover run's `ConfigMap` + `Job`.
 pub struct MoverJobInputs<'a> {
     /// Base name for both objects (e.g. the `Backup` CR name).
@@ -61,6 +73,9 @@ pub struct MoverJobInputs<'a> {
     pub work_spec: &'a MoverWorkSpec,
     /// Container image for the mover.
     pub image: &'a str,
+    /// Image pull policy (e.g. `IfNotPresent` for a locally-loaded e2e image).
+    /// `None` lets Kubernetes default it.
+    pub image_pull_policy: Option<&'a str>,
     /// Job retry/deadline limits.
     pub limits: JobLimits,
     /// Optional resource requests/limits for the mover container.
@@ -70,6 +85,16 @@ pub struct MoverJobInputs<'a> {
     pub security_context: Option<SecurityContext>,
     /// Extra labels applied to both objects (origin/config/snapshot keys).
     pub labels: BTreeMap<String, String>,
+    /// The source PVC to back up, mounted read-only at the snapshot source path
+    /// (Backup ops). `None` for non-PVC sources / restore / delete ops.
+    pub source_pvc: Option<PvcMount>,
+    /// The repo PVC for the filesystem backend, mounted read-write at the repo
+    /// path so kopia can write the repository. `None` for object-store backends.
+    pub repo_pvc: Option<PvcMount>,
+    /// Name of a `Secret` whose keys are exposed as env vars to the mover
+    /// (`KOPIA_PASSWORD` and any backend credentials). Credentials NEVER come
+    /// from the work-spec ConfigMap (§4.10/§4.11). `None` only in tests.
+    pub creds_secret: Option<&'a str>,
 }
 
 /// The restricted-PSA-compatible default security context (§4.11/G16):
@@ -120,20 +145,79 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
         .clone()
         .unwrap_or_else(default_security_context);
 
+    // Volumes + mounts: always the work-spec ConfigMap; plus the source PVC
+    // (read-only, for Backup) and the repo PVC (read-write, filesystem backend).
+    let mut volumes = vec![Volume {
+        name: "work-spec".to_string(),
+        config_map: Some(ConfigMapVolumeSource {
+            name: inputs.name.to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }];
+    let mut volume_mounts = vec![VolumeMount {
+        name: "work-spec".to_string(),
+        mount_path: WORK_SPEC_MOUNT.to_string(),
+        read_only: Some(true),
+        ..Default::default()
+    }];
+
+    if let Some(src) = &inputs.source_pvc {
+        volumes.push(Volume {
+            name: "source".to_string(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: src.claim_name.clone(),
+                read_only: Some(src.read_only),
+            }),
+            ..Default::default()
+        });
+        volume_mounts.push(VolumeMount {
+            name: "source".to_string(),
+            mount_path: src.mount_path.clone(),
+            read_only: Some(src.read_only),
+            ..Default::default()
+        });
+    }
+    if let Some(repo) = &inputs.repo_pvc {
+        volumes.push(Volume {
+            name: "repo".to_string(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: repo.claim_name.clone(),
+                read_only: Some(repo.read_only),
+            }),
+            ..Default::default()
+        });
+        volume_mounts.push(VolumeMount {
+            name: "repo".to_string(),
+            mount_path: repo.mount_path.clone(),
+            read_only: Some(repo.read_only),
+            ..Default::default()
+        });
+    }
+
+    // Credentials (KOPIA_PASSWORD + backend creds) come from a Secret as env,
+    // never from the ConfigMap.
+    let env_from = inputs.creds_secret.map(|secret| {
+        vec![EnvFromSource {
+            secret_ref: Some(SecretEnvSource {
+                name: secret.to_string(),
+                optional: Some(false),
+            }),
+            ..Default::default()
+        }]
+    });
+
     let container = Container {
         name: "mover".to_string(),
         image: Some(inputs.image.to_string()),
+        image_pull_policy: inputs.image_pull_policy.map(str::to_string),
         env: Some(vec![k8s_openapi::api::core::v1::EnvVar {
             name: WORK_SPEC_ENV.to_string(),
             value: Some(format!("{WORK_SPEC_MOUNT}/{WORK_SPEC_FILE}")),
             value_from: None,
         }]),
-        volume_mounts: Some(vec![VolumeMount {
-            name: "work-spec".to_string(),
-            mount_path: WORK_SPEC_MOUNT.to_string(),
-            read_only: Some(true),
-            ..Default::default()
-        }]),
+        env_from,
+        volume_mounts: Some(volume_mounts),
         resources: inputs.resources.clone(),
         security_context: Some(sec_ctx),
         ..Default::default()
@@ -142,14 +226,7 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
     let pod_spec = PodSpec {
         restart_policy: Some("Never".to_string()),
         containers: vec![container],
-        volumes: Some(vec![Volume {
-            name: "work-spec".to_string(),
-            config_map: Some(ConfigMapVolumeSource {
-                name: inputs.name.to_string(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }]),
+        volumes: Some(volumes),
         ..Default::default()
     };
 
@@ -232,10 +309,14 @@ mod tests {
             owner: owner_ref("Backup", "db-1", "uid-123"),
             work_spec: ws,
             image: DEFAULT_MOVER_IMAGE,
+            image_pull_policy: None,
             limits,
             resources: None,
             security_context: None,
             labels,
+            source_pvc: None,
+            repo_pvc: None,
+            creds_secret: None,
         }
     }
 
@@ -293,6 +374,72 @@ mod tests {
     fn default_backoff_limit_is_two() {
         assert_eq!(JobLimits::default().backoff_limit, 2);
         assert_eq!(JobLimits::default().active_deadline_seconds, None);
+    }
+
+    #[test]
+    fn job_mounts_source_and_repo_pvcs_and_secret_env() {
+        let ws = sample_work_spec();
+        let mut i = inputs(&ws, JobLimits::default());
+        i.source_pvc = Some(PvcMount {
+            claim_name: "data-pvc".into(),
+            mount_path: "/data".into(),
+            read_only: true,
+        });
+        i.repo_pvc = Some(PvcMount {
+            claim_name: "repo-pvc".into(),
+            mount_path: "/repo".into(),
+            read_only: false,
+        });
+        i.creds_secret = Some("kopia-creds");
+        i.image_pull_policy = Some("IfNotPresent");
+
+        let job = build_job(&i);
+        let pod = job.spec.unwrap().template.spec.unwrap();
+        let vols = pod.volumes.as_ref().unwrap();
+
+        // Source PVC: read-only at /data.
+        let src = vols
+            .iter()
+            .find(|v| v.name == "source")
+            .expect("source vol");
+        let src_claim = src.persistent_volume_claim.as_ref().unwrap();
+        assert_eq!(src_claim.claim_name, "data-pvc");
+        assert_eq!(src_claim.read_only, Some(true));
+
+        // Repo PVC: read-write at /repo.
+        let repo = vols.iter().find(|v| v.name == "repo").expect("repo vol");
+        let repo_claim = repo.persistent_volume_claim.as_ref().unwrap();
+        assert_eq!(repo_claim.claim_name, "repo-pvc");
+        assert_eq!(repo_claim.read_only, Some(false));
+
+        let container = &pod.containers[0];
+        let mounts = container.volume_mounts.as_ref().unwrap();
+        let src_mount = mounts.iter().find(|m| m.name == "source").unwrap();
+        assert_eq!(src_mount.mount_path, "/data");
+        assert_eq!(src_mount.read_only, Some(true));
+        let repo_mount = mounts.iter().find(|m| m.name == "repo").unwrap();
+        assert_eq!(repo_mount.mount_path, "/repo");
+        assert_eq!(repo_mount.read_only, Some(false));
+
+        // Credentials come from the Secret via envFrom (not the ConfigMap).
+        let env_from = container.env_from.as_ref().expect("envFrom present");
+        let secret_ref = env_from[0].secret_ref.as_ref().unwrap();
+        assert_eq!(secret_ref.name, "kopia-creds");
+        assert_eq!(secret_ref.optional, Some(false));
+
+        // Image pull policy applied.
+        assert_eq!(container.image_pull_policy.as_deref(), Some("IfNotPresent"));
+    }
+
+    #[test]
+    fn job_without_pvcs_or_secret_has_only_work_spec_volume() {
+        let ws = sample_work_spec();
+        let job = build_job(&inputs(&ws, JobLimits::default()));
+        let pod = job.spec.unwrap().template.spec.unwrap();
+        let vols = pod.volumes.as_ref().unwrap();
+        assert_eq!(vols.len(), 1);
+        assert_eq!(vols[0].name, "work-spec");
+        assert!(pod.containers[0].env_from.is_none());
     }
 
     #[test]

@@ -12,7 +12,8 @@ authors.workspace = true
 kopiur-api = { workspace = true }
 kopiur-kopia = { workspace = true }
 kopiur-mover = { workspace = true }
-kube = { workspace = true, features = ["client", "runtime", "derive"] }
+kube = { workspace = true, features = ["client", "runtime", "derive", "rustls-tls"] }
+rustls = { workspace = true }
 k8s-openapi = { workspace = true, features = ["v1_33"] }
 schemars = { workspace = true }
 serde = { workspace = true }

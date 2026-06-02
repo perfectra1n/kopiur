@@ -14,15 +14,18 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use kube::api::{DeleteParams, ListParams};
 use kube::runtime::controller::Action;
-use kube::ResourceExt;
+use kube::{Api, ResourceExt};
 
 use kopiur_api::common::Retention;
 use kopiur_api::retention::{select_kept, BackupLike};
 use kopiur_api::{validate, Backup, BackupConfig};
 
+use crate::consts::CONFIG_LABEL;
 use crate::context::Context;
 use crate::error::{error_policy_for, Error, Result};
+use crate::io;
 
 /// A minimal view of a `Backup` for retention selection: its CR name (the id
 /// used in delete decisions) and its snapshot end time (the GFS bucketing key).
@@ -88,19 +91,127 @@ pub async fn reconcile(config: Arc<BackupConfig>, ctx: Arc<Context>) -> Result<A
     result
 }
 
-async fn reconcile_inner(config: &BackupConfig, _ctx: &Context) -> Result<Action> {
+async fn reconcile_inner(config: &BackupConfig, ctx: &Context) -> Result<Action> {
     let errs = validate::validate_backup_config(&config.spec);
     if let Some(first) = errs.into_iter().next() {
         return Err(Error::Validation(first.to_string()));
     }
 
-    // TODO(M6): resolve identity via api::identity::resolve_identity (the
-    // ClusterRepository template + per-source pvc), pin status.resolved; then
-    // list owned Backup CRs, call backups_to_delete(&backups, retention), and
-    // `delete` each (the Backup finalizer governs the snapshot). The pure
-    // selection (backups_to_delete) is tested below.
+    let namespace = config
+        .namespace()
+        .ok_or_else(|| Error::Invariant("BackupConfig has no namespace".into()))?;
+    let name = config.name_any();
+    let api: Api<BackupConfig> = Api::namespaced(ctx.client.clone(), &namespace);
+
+    // 1. Resolve identity (per-source PVC + overrides) and pin status.resolved.
+    let resolved = resolve_config_identity(config, &namespace)?;
+    io::patch_status(&api, &name, serde_json::json!({ "resolved": resolved })).await?;
+
+    // 2. Enforce GFS retention: list this config's Backups, decide which to
+    //    delete, and delete each (the Backup finalizer governs the snapshot).
+    if let Some(retention) = config.spec.retention.as_ref() {
+        let backup_api: Api<Backup> = Api::namespaced(ctx.client.clone(), &namespace);
+        let lp = ListParams::default().labels(&format!("{CONFIG_LABEL}={name}"));
+        let backups = backup_api.list(&lp).await?.items;
+        let to_delete = backups_to_delete(&backups, retention);
+        let dp = DeleteParams::default();
+        for cr_name in &to_delete {
+            match backup_api.delete(cr_name, &dp).await {
+                Ok(_) => {
+                    tracing::info!(config = %name, backup = %cr_name, "pruned backup (GFS retention)")
+                }
+                Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+                Err(e) => return Err(Error::Kube(e)),
+            }
+        }
+        let active = backups.len().saturating_sub(to_delete.len());
+        io::patch_status(
+            &api,
+            &name,
+            serde_json::json!({
+                "retention": {
+                    "activeBackupCount": active as i64,
+                    "lastPruneAt": Utc::now().to_rfc3339(),
+                    "lastPruneDeleted": to_delete.len() as i64,
+                }
+            }),
+        )
+        .await?;
+    }
 
     Ok(Action::requeue(std::time::Duration::from_secs(300)))
+}
+
+/// Resolve a `BackupConfig`'s identity into the api `ResolvedIdentity` (reused by
+/// the restore reconciler for `fromConfig` source resolution).
+pub fn config_identity(
+    config: &BackupConfig,
+    namespace: &str,
+) -> Result<kopiur_api::common::ResolvedIdentity> {
+    let pvc_name = config
+        .spec
+        .sources
+        .first()
+        .and_then(|s| s.pvc.as_ref().map(|p| p.name.clone()));
+    let source_path_override = config
+        .spec
+        .sources
+        .first()
+        .and_then(|s| s.source_path_override.clone());
+    let inputs = kopiur_api::IdentityInputs {
+        object_name: &config.name_any(),
+        namespace,
+        overrides: config.spec.identity.as_ref(),
+        template: None,
+        pvc_name: pvc_name.as_deref(),
+        source_path_override: source_path_override.as_deref(),
+    };
+    kopiur_api::resolve_identity(&inputs).map_err(|e| Error::Validation(e.to_string()))
+}
+
+/// Resolve the config's identity + per-source paths into a `ResolvedConfig`
+/// status body. Reuses `api::identity::resolve_identity` (tested kernel).
+fn resolve_config_identity(
+    config: &BackupConfig,
+    namespace: &str,
+) -> Result<kopiur_api::backup_config::ResolvedConfig> {
+    use kopiur_api::backup_config::{ResolvedConfig, ResolvedConfigSource};
+    let pvc_name = config
+        .spec
+        .sources
+        .first()
+        .and_then(|s| s.pvc.as_ref().map(|p| p.name.clone()));
+    let source_path_override = config
+        .spec
+        .sources
+        .first()
+        .and_then(|s| s.source_path_override.clone());
+    let inputs = kopiur_api::IdentityInputs {
+        object_name: &config.name_any(),
+        namespace,
+        overrides: config.spec.identity.as_ref(),
+        template: None,
+        pvc_name: pvc_name.as_deref(),
+        source_path_override: source_path_override.as_deref(),
+    };
+    let identity =
+        kopiur_api::resolve_identity(&inputs).map_err(|e| Error::Validation(e.to_string()))?;
+    let sources = config
+        .spec
+        .sources
+        .iter()
+        .map(|s| ResolvedConfigSource {
+            pvc: s.pvc.as_ref().map(|p| format!("{namespace}/{}", p.name)),
+            source_path: s
+                .source_path_override
+                .clone()
+                .or_else(|| s.pvc.as_ref().map(|p| format!("/pvc/{}", p.name))),
+        })
+        .collect();
+    Ok(ResolvedConfig {
+        identity: Some(identity),
+        sources,
+    })
 }
 
 /// `error_policy` for the `BackupConfig` controller.

@@ -7,17 +7,25 @@
 //! The source-mode dispatch is an **exhaustive `match`** over the externally
 //! tagged `RestoreSource` enum (no `_ =>`), and [`default_on_missing`] /
 //! [`populator_state`] are pure decisions, all unit-tested. The pvc-prime
-//! handshake IO is a documented partial (`TODO(M6)`).
+//! handshake IO is a documented minimal partial (see NOTE in the reconcile body).
 
 use std::sync::Arc;
 
 use kube::runtime::controller::Action;
-use kube::ResourceExt;
+use kube::{Api, ResourceExt};
 
-use kopiur_api::{validate, OnMissingSnapshot, Restore, RestoreSource};
+use kopiur_api::backup::Backup;
+use kopiur_api::{validate, OnMissingSnapshot, Repository, Restore, RestoreSource, RestoreTarget};
+use kopiur_mover::workspec::{
+    MoverOptions, MoverWorkSpec, Operation, RepositoryConnect, ResolvedIdentity as MoverIdentity,
+    RestoreOp, TargetRef,
+};
 
+use crate::consts::API_VERSION;
 use crate::context::Context;
 use crate::error::{error_policy_for, Error, Result};
+use crate::io;
+use crate::jobs::{self, JobLimits, MoverJobInputs, PvcMount};
 
 /// Which source mode a restore uses, as a stable string (mirrors
 /// `RestoreSource::kind_str`, re-derived through an exhaustive match so a new
@@ -79,22 +87,361 @@ pub async fn reconcile(restore: Arc<Restore>, ctx: Arc<Context>) -> Result<Actio
     result
 }
 
-async fn reconcile_inner(restore: &Restore, _ctx: &Context) -> Result<Action> {
+async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
     if let Err(e) = validate::validate_restore(&restore.spec) {
         return Err(Error::Validation(e.to_string()));
     }
 
-    let _state = populator_state(restore.spec.target.is_some());
-    let _mode = source_mode(&restore.spec.source);
+    let namespace = restore
+        .namespace()
+        .ok_or_else(|| Error::Invariant("Restore has no namespace".into()))?;
+    let name = restore.name_any();
+    let api: Api<Restore> = Api::namespaced(ctx.client.clone(), &namespace);
 
-    // TODO(M6): resolve the source to a concrete snapshot id (BackupRef → that
-    // Backup's status.snapshot; FromConfig → identity + offset/asOf via kopia
-    // snapshot list; Identity → directly), pin status.resolved; honor
-    // effective_on_missing (Fail vs Continue); for DirectTarget create a restore
-    // mover Job; for AwaitingClaim drive the pvc-prime handshake by watching the
-    // target PVC's dataSourceRef. The pure decisions above are tested.
+    let state = populator_state(restore.spec.target.is_some());
+    let on_missing = effective_on_missing(
+        restore
+            .spec
+            .policy
+            .as_ref()
+            .and_then(|p| p.on_missing_snapshot),
+        &restore.spec.source,
+    );
 
-    Ok(Action::requeue(std::time::Duration::from_secs(300)))
+    // Resolve the source to a concrete snapshot id, pinning status.resolved.
+    let resolved = resolve_snapshot(ctx, restore, &namespace).await?;
+    let snapshot_id = match resolved {
+        Some(id) => id,
+        None => {
+            // No snapshot matched. Honor the closed enum exhaustively.
+            return match on_missing {
+                OnMissingSnapshot::Fail => {
+                    io::patch_status(
+                        &api,
+                        &name,
+                        serde_json::json!({
+                            "phase": "Failed",
+                            "conditions": [condition(
+                                "Resolved", "False", "SnapshotNotFound",
+                                "no snapshot matched the restore source",
+                            )],
+                        }),
+                    )
+                    .await?;
+                    Err(Error::MissingDependency(
+                        "no snapshot matched restore source".into(),
+                    ))
+                }
+                OnMissingSnapshot::Continue => {
+                    // Deploy-or-restore: nothing to restore, complete cleanly.
+                    io::patch_status(
+                        &api,
+                        &name,
+                        serde_json::json!({
+                            "phase": "Completed",
+                            "conditions": [condition(
+                                "Resolved", "True", "NoSnapshotContinue",
+                                "no snapshot found; continuing (deploy-or-restore)",
+                            )],
+                        }),
+                    )
+                    .await?;
+                    Ok(Action::requeue(std::time::Duration::from_secs(600)))
+                }
+            };
+        }
+    };
+
+    io::patch_status(
+        &api,
+        &name,
+        serde_json::json!({
+            "phase": "Resolving",
+            "resolved": { "pinnedAt": chrono::Utc::now().to_rfc3339() },
+        }),
+    )
+    .await?;
+
+    match state {
+        PopulatorState::DirectTarget => {
+            drive_direct_restore(ctx, restore, &api, &namespace, &name, &snapshot_id).await
+        }
+        PopulatorState::AwaitingClaim => {
+            // NOTE: passive populator mode. The full CSI populator handshake
+            // (PVC dataSourceRef -> prime PVC -> bind) requires the
+            // VolumePopulator lib-mover protocol. The minimal real implementation
+            // here surfaces the awaiting-claim condition and pins the resolved
+            // snapshot so a claim can proceed; wiring the prime-PVC dance is the
+            // documented residual.
+            io::patch_status(
+                &api,
+                &name,
+                serde_json::json!({
+                    "phase": "Pending",
+                    "conditions": [condition(
+                        "AwaitingClaim", "True", "AwaitingPvcDataSourceRef",
+                        "passive populator: awaiting a PVC dataSourceRef to claim this Restore",
+                    )],
+                    "target": { "pvcPrime": "awaiting-claim" },
+                }),
+            )
+            .await?;
+            Ok(Action::requeue(std::time::Duration::from_secs(30)))
+        }
+    }
+}
+
+/// Drive a restore-with-explicit-target: create the restore mover Job (writing
+/// into the target PVC), then track it to terminal.
+async fn drive_direct_restore(
+    ctx: &Context,
+    restore: &Restore,
+    api: &Api<Restore>,
+    namespace: &str,
+    name: &str,
+    snapshot_id: &str,
+) -> Result<Action> {
+    use k8s_openapi::api::batch::v1::Job;
+    let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), namespace);
+    if let Some(job) = job_api.get_opt(name).await? {
+        return match crate::backup::job_terminal_state(&job) {
+            Some(true) => {
+                io::patch_status(api, name, serde_json::json!({ "phase": "Completed" })).await?;
+                Ok(Action::requeue(std::time::Duration::from_secs(600)))
+            }
+            Some(false) => {
+                io::patch_status(api, name, serde_json::json!({ "phase": "Failed" })).await?;
+                Ok(Action::requeue(std::time::Duration::from_secs(120)))
+            }
+            None => {
+                io::patch_status(api, name, serde_json::json!({ "phase": "Restoring" })).await?;
+                Ok(Action::requeue(std::time::Duration::from_secs(30)))
+            }
+        };
+    }
+
+    // Resolve the repository + target PVC for the restore Job.
+    let repo = resolve_restore_repository(ctx, restore, namespace).await?;
+    let target_pvc = match restore.spec.target.as_ref() {
+        Some(RestoreTarget::PvcRef(r)) => r.name.clone(),
+        Some(RestoreTarget::Pvc(t)) => t.name.clone(),
+        None => {
+            return Err(Error::Invariant(
+                "DirectTarget restore without a target".into(),
+            ))
+        }
+    };
+    let target_path = "/restore".to_string();
+    let creds = io::repo_credentials(&repo.spec.encryption);
+    let identity = MoverIdentity {
+        username: "restore".into(),
+        hostname: namespace.to_string(),
+        source_path: target_path.clone(),
+    };
+    let work_spec = MoverWorkSpec {
+        version: 1,
+        operation: Operation::Restore(RestoreOp {
+            snapshot_id: snapshot_id.to_string(),
+            target_path: target_path.clone(),
+        }),
+        identity,
+        repository: restore_connect(&repo)?,
+        target_ref: TargetRef {
+            api_version: API_VERSION.to_string(),
+            kind: "Restore".to_string(),
+            name: name.to_string(),
+            namespace: namespace.to_string(),
+        },
+        hook_plan: Default::default(),
+        options: MoverOptions::default(),
+    };
+    let owner = io::owner_ref_for(restore, "Restore")?;
+    let repo_pvc = io::filesystem_repo_pvc(&repo.spec.backend).map(|claim_name| PvcMount {
+        claim_name,
+        mount_path: io::filesystem_repo_path(&repo.spec.backend).unwrap_or_default(),
+        read_only: true,
+    });
+    let inputs = MoverJobInputs {
+        name,
+        namespace,
+        owner,
+        work_spec: &work_spec,
+        image: &ctx.mover_image,
+        image_pull_policy: crate::backup::mover_pull_policy_pub(),
+        limits: JobLimits::default(),
+        resources: None,
+        security_context: None,
+        labels: io::child_labels(&[("kopia.io/op", "restore")]),
+        // Restore writes INTO the target PVC, mounted read-write at /restore.
+        source_pvc: Some(PvcMount {
+            claim_name: target_pvc,
+            mount_path: target_path,
+            read_only: false,
+        }),
+        repo_pvc,
+        creds_secret: Some(&creds.secret_name),
+    };
+    let cm = jobs::build_config_map(&inputs)?;
+    let job = jobs::build_job(&inputs);
+    io::apply_mover_objects(&ctx.client, namespace, name, &cm, &job).await?;
+    io::patch_status(api, name, serde_json::json!({ "phase": "Restoring" })).await?;
+    tracing::info!(restore = %name, %snapshot_id, "created restore Job");
+    Ok(Action::requeue(std::time::Duration::from_secs(30)))
+}
+
+/// Resolve the restore's source to a concrete kopia snapshot id. Returns `None`
+/// when no snapshot matches (caller applies `onMissingSnapshot`).
+async fn resolve_snapshot(
+    ctx: &Context,
+    restore: &Restore,
+    namespace: &str,
+) -> Result<Option<String>> {
+    match &restore.spec.source {
+        RestoreSource::BackupRef(r) => {
+            let ns = r.namespace.as_deref().unwrap_or(namespace);
+            let api: Api<Backup> = Api::namespaced(ctx.client.clone(), ns);
+            let backup = api.get_opt(&r.name).await?;
+            Ok(backup
+                .and_then(|b| b.status)
+                .and_then(|s| s.snapshot)
+                .map(|s| s.kopia_snapshot_id))
+        }
+        RestoreSource::Identity(id) => {
+            // An explicit snapshot id wins; otherwise resolve via snapshot list.
+            if let Some(sid) = &id.snapshot_id {
+                return Ok(Some(sid.clone()));
+            }
+            let repo = resolve_restore_repository(ctx, restore, namespace).await?;
+            let snapshots = list_for_identity(
+                ctx,
+                &repo,
+                namespace,
+                &id.username,
+                &id.hostname,
+                id.source_path.as_deref(),
+            )
+            .await?;
+            Ok(pick_offset(snapshots, id.offset.unwrap_or(0)))
+        }
+        RestoreSource::FromConfig(c) => {
+            // Resolve identity from the BackupConfig, then list newest/offset.
+            use kopiur_api::BackupConfig;
+            let cfg_ns = c.namespace.as_deref().unwrap_or(namespace);
+            let cfg_api: Api<BackupConfig> = Api::namespaced(ctx.client.clone(), cfg_ns);
+            let config = cfg_api.get_opt(&c.name).await?.ok_or_else(|| {
+                Error::MissingDependency(format!("BackupConfig {cfg_ns}/{}", c.name))
+            })?;
+            let identity = crate::backup_config::config_identity(&config, cfg_ns)?;
+            let repo = resolve_restore_repository(ctx, restore, namespace).await?;
+            let snapshots = list_for_identity(
+                ctx,
+                &repo,
+                namespace,
+                &identity.username,
+                &identity.hostname,
+                identity.source_path.as_deref(),
+            )
+            .await?;
+            Ok(pick_offset(snapshots, c.offset.unwrap_or(0)))
+        }
+    }
+}
+
+/// kopia snapshot list filtered to one identity (filesystem in-process path),
+/// newest-first.
+async fn list_for_identity(
+    ctx: &Context,
+    repo: &Repository,
+    namespace: &str,
+    username: &str,
+    hostname: &str,
+    source_path: Option<&str>,
+) -> Result<Vec<kopiur_kopia::SnapshotListEntry>> {
+    use kopiur_api::backend::Backend;
+    let creds = io::repo_credentials(&repo.spec.encryption);
+    match &repo.spec.backend {
+        Backend::Filesystem(fs) => {
+            let password = io::read_repo_password(&ctx.client, namespace, &creds).await?;
+            let client = ctx.kopia.build([("KOPIA_PASSWORD".to_string(), password)]);
+            client
+                .repository_connect(&kopiur_kopia::ConnectSpec::Filesystem {
+                    path: fs.path.clone().into(),
+                })
+                .await?;
+            let filter = kopiur_kopia::SnapshotSource {
+                host: hostname.to_string(),
+                user_name: username.to_string(),
+                path: source_path.unwrap_or("").to_string(),
+            };
+            let mut list = client.snapshot_list(Some(&filter)).await?;
+            list.sort_by_key(|e| std::cmp::Reverse(e.end_time));
+            Ok(list)
+        }
+        // NOTE: object-store snapshot resolution would run via a short Job; the
+        // filesystem path is the working core (see repository.rs NOTE).
+        _ => Ok(vec![]),
+    }
+}
+
+/// Pick the snapshot at `offset` (0 = newest) from a newest-first list.
+fn pick_offset(snapshots: Vec<kopiur_kopia::SnapshotListEntry>, offset: i64) -> Option<String> {
+    let idx = offset.max(0) as usize;
+    snapshots.into_iter().nth(idx).map(|e| e.id)
+}
+
+/// Resolve the repository a restore targets (`spec.repository` or, when omitted,
+/// via the backupRef'd Backup's recipe). Implemented for the explicit-repository
+/// and BackupRef paths.
+async fn resolve_restore_repository(
+    ctx: &Context,
+    restore: &Restore,
+    namespace: &str,
+) -> Result<Repository> {
+    if let Some(rref) = &restore.spec.repository {
+        let ns = rref.namespace.as_deref().unwrap_or(namespace);
+        let api: Api<Repository> = Api::namespaced(ctx.client.clone(), ns);
+        return api
+            .get_opt(&rref.name)
+            .await?
+            .ok_or_else(|| Error::MissingDependency(format!("Repository {ns}/{}", rref.name)));
+    }
+    // FromConfig: resolve via the BackupConfig's repository.
+    if let RestoreSource::FromConfig(c) = &restore.spec.source {
+        use kopiur_api::BackupConfig;
+        let cfg_ns = c.namespace.as_deref().unwrap_or(namespace);
+        let cfg_api: Api<BackupConfig> = Api::namespaced(ctx.client.clone(), cfg_ns);
+        let config = cfg_api
+            .get_opt(&c.name)
+            .await?
+            .ok_or_else(|| Error::MissingDependency(format!("BackupConfig {cfg_ns}/{}", c.name)))?;
+        let rref = &config.spec.repository;
+        let ns = rref.namespace.as_deref().unwrap_or(cfg_ns);
+        let api: Api<Repository> = Api::namespaced(ctx.client.clone(), ns);
+        return api
+            .get_opt(&rref.name)
+            .await?
+            .ok_or_else(|| Error::MissingDependency(format!("Repository {ns}/{}", rref.name)));
+    }
+    Err(Error::Validation(
+        "restore requires spec.repository (or a fromConfig source)".into(),
+    ))
+}
+
+/// Map a Repository backend to the mover connect spec for a restore.
+fn restore_connect(repo: &Repository) -> Result<RepositoryConnect> {
+    crate::backup::repository_connect_pub(repo)
+}
+
+/// Build a Kubernetes condition object.
+fn condition(type_: &str, status: &str, reason: &str, message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": type_,
+        "status": status,
+        "reason": reason,
+        "message": message,
+        "lastTransitionTime": chrono::Utc::now().to_rfc3339(),
+        "observedGeneration": 0,
+    })
 }
 
 /// `error_policy` for the `Restore` controller.

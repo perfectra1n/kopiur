@@ -47,7 +47,7 @@ exit 0
     );
     let client = client_for(&s);
     let res = client
-        .snapshot_create("/data", &BTreeMap::new())
+        .snapshot_create("/data", &BTreeMap::new(), None)
         .await
         .expect("should parse success");
     assert_eq!(res.id, "deadbeef");
@@ -71,8 +71,31 @@ exit 0
     let client = client_for(&s);
     let mut tags = BTreeMap::new();
     tags.insert("app".to_string(), "db".to_string());
-    let res = client.snapshot_create("/d", &tags).await.unwrap();
+    let res = client.snapshot_create("/d", &tags, None).await.unwrap();
     assert_eq!(res.id, "t1");
+}
+
+#[tokio::test]
+async fn snapshot_create_passes_override_source() {
+    // The shim exits non-zero UNLESS it is invoked with the resolved identity as
+    // `--override-source u@h:/d`, proving Kopiur records snapshots under the
+    // operator identity, not the pod's (ADR §4.2).
+    let s = shim(
+        r#"#!/bin/sh
+case "$*" in
+  *"--override-source u@h:/d"*)
+    echo '{"id":"ok","source":{"host":"h","userName":"u","path":"/d"},"startTime":"2026-06-02T03:13:59Z","endTime":"2026-06-02T03:14:00Z"}'
+    exit 0 ;;
+  *) echo "missing --override-source: $*" 1>&2; exit 7 ;;
+esac
+"#,
+    );
+    let client = client_for(&s);
+    let res = client
+        .snapshot_create("/d", &BTreeMap::new(), Some("u@h:/d"))
+        .await
+        .expect("override-source must be passed through");
+    assert_eq!(res.id, "ok");
 }
 
 #[tokio::test]
@@ -87,7 +110,7 @@ exit 1
     );
     let client = client_for(&s);
     let err = client
-        .snapshot_create("/nonexistent", &BTreeMap::new())
+        .snapshot_create("/nonexistent", &BTreeMap::new(), None)
         .await
         .expect_err("should fail");
     match err {

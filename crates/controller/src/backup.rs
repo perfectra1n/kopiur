@@ -17,14 +17,27 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use k8s_openapi::api::batch::v1::Job;
 use kube::runtime::controller::Action;
-use kube::ResourceExt;
+use kube::runtime::events::{Event, EventType};
+use kube::{Api, Resource, ResourceExt};
 
-use kopiur_api::{Backup, DeletionPolicy, Origin};
+use kopiur_api::backup::BackupPhase;
+use kopiur_api::common::ResolvedIdentity as ApiResolvedIdentity;
+use kopiur_api::{Backup, BackupConfig, DeletionPolicy, Origin, Repository};
+use kopiur_mover::workspec::{
+    BackupOp, MoverOptions, MoverWorkSpec, Operation, RepositoryConnect,
+    ResolvedIdentity as MoverIdentity, SnapshotDeleteOp, TargetRef,
+};
 
-use crate::consts::SKIP_SNAPSHOT_CLEANUP_ANNOTATION;
+use crate::consts::{
+    API_VERSION, CONFIG_LABEL, ORIGIN_LABEL, SKIP_SNAPSHOT_CLEANUP_ANNOTATION,
+    SNAPSHOT_CLEANUP_FINALIZER,
+};
 use crate::context::Context;
 use crate::error::{error_policy_for, Error, Result};
+use crate::io;
+use crate::jobs::{self, JobLimits, MoverJobInputs, PvcMount};
 
 /// The decision the deletion handler must execute. Derived purely from the
 /// effective `DeletionPolicy` and the object's annotations — no IO.
@@ -109,34 +122,566 @@ pub async fn reconcile(backup: Arc<Backup>, ctx: Arc<Context>) -> Result<Action>
     result
 }
 
-async fn reconcile_inner(backup: &Backup, _ctx: &Context) -> Result<Action> {
+async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
     let origin = resolve_origin(backup);
-    let _policy = effective_deletion_policy(backup.spec.deletion_policy, origin);
+    let policy = effective_deletion_policy(backup.spec.deletion_policy, origin);
+    let namespace = backup
+        .namespace()
+        .ok_or_else(|| Error::Invariant("Backup has no namespace".into()))?;
+    let name = backup.name_any();
+    let api: Api<Backup> = Api::namespaced(ctx.client.clone(), &namespace);
 
     if backup.metadata.deletion_timestamp.is_some() {
-        // Deletion path: compute the plan and (in a full cluster impl) execute
-        // its IO, then remove the finalizer. The plan is the tested decision;
-        // the cluster wiring (patch finalizer / create delete Job) is the thin
-        // part.
-        let plan = plan_deletion(_policy, backup.annotations());
-        tracing::info!(?plan, "backup deletion plan computed");
-        // TODO(M6): execute plan IO against the cluster:
-        //  - DeleteSnapshot: create a short SnapshotDelete mover Job; on success
-        //    remove the finalizer; on failure set phase=Deleting + condition,
-        //    bump kopia_snapshot_deletion_failures_total, and requeue.
-        //  - RetainSnapshot: remove the finalizer immediately.
-        //  - OrphanSnapshot: emit SnapshotOrphaned event, bump
-        //    kopia_orphaned_snapshots_total, remove the finalizer.
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return handle_deletion(backup, ctx, &api, &namespace, &name, policy).await;
     }
 
-    // Normal path: ensure finalizer, create/observe the mover Job, copy status.
-    // TODO(M6): patch-add the finalizer if absent; build the work spec from the
-    // resolved BackupConfig (jobs::build_config_map / build_job); apply both;
-    // watch the owned Job to terminal; copy stats/phase into status; the Job and
-    // ConfigMap are reaped by owner-ref GC (§4.10). The construction is exercised
-    // by jobs.rs tests; cluster apply is covered by the integration tests.
-    Ok(Action::requeue(Duration::from_secs(300)))
+    // Discovered backups are catalog rows, not runs: never spawn a Job. Pin the
+    // Discovered phase if unset and stop.
+    if origin == Origin::Discovered {
+        if backup.status.as_ref().and_then(|s| s.phase) != Some(BackupPhase::Discovered) {
+            io::patch_status(
+                &api,
+                &name,
+                serde_json::json!({ "phase": "Discovered", "origin": "discovered" }),
+            )
+            .await?;
+        }
+        return Ok(Action::requeue(Duration::from_secs(600)));
+    }
+
+    // Ensure the snapshot-cleanup finalizer before doing any work that creates a
+    // snapshot, so a delete during the run still triggers cleanup.
+    if io::ensure_finalizer(&api, backup, SNAPSHOT_CLEANUP_FINALIZER).await? {
+        // Requeue so the next pass sees the finalizer.
+        return Ok(Action::requeue(Duration::from_secs(1)));
+    }
+
+    // If the owned mover Job already reached a terminal state, copy phase/stats
+    // into status (controller-as-source-of-truth for phase) and stop running.
+    let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), &namespace);
+    if let Some(job) = job_api.get_opt(&name).await? {
+        match job_terminal_state(&job) {
+            Some(true) => {
+                if backup.status.as_ref().and_then(|s| s.phase) != Some(BackupPhase::Succeeded) {
+                    finalize_succeeded(ctx, backup, &api, &name, &namespace).await?;
+                }
+                return Ok(Action::requeue(Duration::from_secs(600)));
+            }
+            Some(false) => {
+                if backup.status.as_ref().and_then(|s| s.phase) != Some(BackupPhase::Failed) {
+                    io::patch_status(&api, &name, serde_json::json!({ "phase": "Failed" })).await?;
+                }
+                return Ok(Action::requeue(Duration::from_secs(120)));
+            }
+            None => {
+                // Job exists but is still running; mark Running and wait.
+                if backup.status.as_ref().and_then(|s| s.phase) != Some(BackupPhase::Running) {
+                    io::patch_status(&api, &name, serde_json::json!({ "phase": "Running" }))
+                        .await?;
+                }
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+        }
+    }
+
+    // No Job yet: resolve the recipe and create the mover Job + ConfigMap.
+    let (config, repo) = resolve_recipe(ctx, backup, &namespace).await?;
+    let (work_spec, source_pvc, repo_pvc, creds_secret) =
+        build_backup_run(backup, &config, &repo, &namespace, &name)?;
+
+    let owner = io::owner_ref_for(backup, "Backup")?;
+    let labels = run_labels(&config, origin);
+    let limits = job_limits(backup);
+    let inputs = MoverJobInputs {
+        name: &name,
+        namespace: &namespace,
+        owner,
+        work_spec: &work_spec,
+        image: &ctx.mover_image,
+        image_pull_policy: mover_pull_policy(),
+        limits,
+        resources: config.spec.mover.as_ref().and_then(|m| m.resources.clone()),
+        security_context: config
+            .spec
+            .mover
+            .as_ref()
+            .and_then(|m| m.security_context.clone()),
+        labels,
+        source_pvc,
+        repo_pvc,
+        creds_secret: Some(&creds_secret),
+    };
+    let cm = jobs::build_config_map(&inputs)?;
+    let job = jobs::build_job(&inputs);
+    io::apply_mover_objects(&ctx.client, &namespace, &name, &cm, &job).await?;
+
+    io::patch_status(
+        &api,
+        &name,
+        serde_json::json!({ "phase": "Running", "origin": origin_str(origin) }),
+    )
+    .await?;
+    tracing::info!(backup = %name, "created mover Job for backup");
+
+    Ok(Action::requeue(Duration::from_secs(30)))
+}
+
+/// Execute the deletion plan (the tested [`plan_deletion`] decision) against the
+/// cluster, then remove the finalizer when cleanup completes.
+async fn handle_deletion(
+    backup: &Backup,
+    ctx: &Context,
+    api: &Api<Backup>,
+    namespace: &str,
+    name: &str,
+    policy: DeletionPolicy,
+) -> Result<Action> {
+    // Nothing to clean up if our finalizer isn't present.
+    if !backup
+        .finalizers()
+        .iter()
+        .any(|f| f == SNAPSHOT_CLEANUP_FINALIZER)
+    {
+        return Ok(Action::await_change());
+    }
+
+    let plan = plan_deletion(policy, backup.annotations());
+    tracing::info!(?plan, backup = %name, "executing backup deletion plan");
+
+    match plan {
+        DeletionPlan::DeleteSnapshot => {
+            let snapshot_id = backup
+                .status
+                .as_ref()
+                .and_then(|s| s.snapshot.as_ref())
+                .map(|s| s.kopia_snapshot_id.clone());
+            match snapshot_id {
+                // No snapshot was ever recorded: nothing to delete in the repo.
+                None => {
+                    io::remove_finalizer(api, backup, SNAPSHOT_CLEANUP_FINALIZER).await?;
+                    Ok(Action::await_change())
+                }
+                Some(id) => delete_snapshot_via_job(backup, ctx, api, namespace, name, &id).await,
+            }
+        }
+        DeletionPlan::RetainSnapshot => {
+            io::remove_finalizer(api, backup, SNAPSHOT_CLEANUP_FINALIZER).await?;
+            Ok(Action::await_change())
+        }
+        DeletionPlan::OrphanSnapshot => {
+            ctx.metrics
+                .orphaned_snapshots
+                .with_label_values(&[namespace])
+                .inc();
+            let _ = ctx
+                .recorder
+                .publish(
+                    &Event {
+                        type_: EventType::Normal,
+                        reason: "SnapshotOrphaned".into(),
+                        note: Some(format!(
+                            "snapshot for backup {name} orphaned (policy/escape-hatch); finalizer removed without contacting the repository"
+                        )),
+                        action: "Orphan".into(),
+                        secondary: None,
+                    },
+                    &backup.object_ref(&()),
+                )
+                .await;
+            io::remove_finalizer(api, backup, SNAPSHOT_CLEANUP_FINALIZER).await?;
+            Ok(Action::await_change())
+        }
+    }
+}
+
+/// Drive a SnapshotDelete mover Job for the deletion path. Creates the Job if
+/// absent; on terminal success removes the finalizer; on failure records a
+/// Deleting phase, bumps the failure metric, and requeues.
+async fn delete_snapshot_via_job(
+    backup: &Backup,
+    ctx: &Context,
+    api: &Api<Backup>,
+    namespace: &str,
+    name: &str,
+    snapshot_id: &str,
+) -> Result<Action> {
+    let job_name = format!("{name}-delete");
+    let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), namespace);
+
+    if let Some(job) = job_api.get_opt(&job_name).await? {
+        match job_terminal_state(&job) {
+            Some(true) => {
+                io::remove_finalizer(api, backup, SNAPSHOT_CLEANUP_FINALIZER).await?;
+                tracing::info!(backup = %name, %snapshot_id, "snapshot deleted; finalizer removed");
+                return Ok(Action::await_change());
+            }
+            Some(false) => {
+                ctx.metrics
+                    .snapshot_deletion_failures
+                    .with_label_values(&[namespace])
+                    .inc();
+                io::patch_status(api, name, serde_json::json!({ "phase": "Deleting" })).await?;
+                tracing::warn!(backup = %name, "snapshot delete Job failed; backing off");
+                return Ok(Action::requeue(Duration::from_secs(60)));
+            }
+            None => return Ok(Action::requeue(Duration::from_secs(15))),
+        }
+    }
+
+    // Create the SnapshotDelete Job. We need the recipe to know how to connect
+    // and authenticate to the repository.
+    let (config, repo) = resolve_recipe(ctx, backup, namespace).await?;
+    let identity = resolve_identity_for(&config, namespace)?;
+    let creds = io::repo_credentials(&repo.spec.encryption);
+    let work_spec = MoverWorkSpec {
+        version: 1,
+        operation: Operation::SnapshotDelete(SnapshotDeleteOp {
+            snapshot_id: snapshot_id.to_string(),
+        }),
+        identity,
+        repository: repository_connect(&repo)?,
+        target_ref: TargetRef {
+            api_version: API_VERSION.to_string(),
+            kind: "Backup".to_string(),
+            name: name.to_string(),
+            namespace: namespace.to_string(),
+        },
+        hook_plan: Default::default(),
+        options: MoverOptions::default(),
+    };
+
+    let owner = io::owner_ref_for(backup, "Backup")?;
+    let mut labels = run_labels(&config, resolve_origin(backup));
+    labels.insert("kopia.io/op".to_string(), "snapshot-delete".to_string());
+    let repo_pvc = io::filesystem_repo_pvc(&repo.spec.backend).map(|claim_name| PvcMount {
+        claim_name,
+        mount_path: io::filesystem_repo_path(&repo.spec.backend).unwrap_or_default(),
+        read_only: false,
+    });
+    let inputs = MoverJobInputs {
+        name: &job_name,
+        namespace,
+        owner,
+        work_spec: &work_spec,
+        image: &ctx.mover_image,
+        image_pull_policy: mover_pull_policy(),
+        limits: JobLimits::default(),
+        resources: None,
+        security_context: None,
+        labels,
+        source_pvc: None,
+        repo_pvc,
+        creds_secret: Some(&creds.secret_name),
+    };
+    let cm = jobs::build_config_map(&inputs)?;
+    let job = jobs::build_job(&inputs);
+    io::apply_mover_objects(&ctx.client, namespace, &job_name, &cm, &job).await?;
+    io::patch_status(api, name, serde_json::json!({ "phase": "Deleting" })).await?;
+    tracing::info!(backup = %name, %snapshot_id, "created SnapshotDelete Job");
+    Ok(Action::requeue(Duration::from_secs(15)))
+}
+
+/// On a Job's terminal success, pin phase=Succeeded and the resulting kopia
+/// snapshot id/identity into status. The controller is the authoritative source
+/// of the terminal phase AND (for the filesystem backend) of the snapshot id: it
+/// resolves the newest snapshot for the run's identity in-process, so status is
+/// complete even when the in-cluster mover cannot PATCH back (best-effort path).
+/// The mover still PATCHes stats when it can reach the API server.
+async fn finalize_succeeded(
+    ctx: &Context,
+    backup: &Backup,
+    api: &Api<Backup>,
+    name: &str,
+    namespace: &str,
+) -> Result<()> {
+    // Try to resolve the snapshot id authoritatively for the filesystem backend.
+    let snapshot = resolve_succeeded_snapshot(ctx, backup, namespace).await;
+    let status = match snapshot {
+        Ok(Some((id, identity))) => serde_json::json!({
+            "phase": "Succeeded",
+            "snapshot": {
+                "kopiaSnapshotID": id,
+                "identity": identity,
+            },
+        }),
+        // Either object-store backend (mover PATCHes id) or no match yet.
+        _ => serde_json::json!({ "phase": "Succeeded" }),
+    };
+    io::patch_status(api, name, status).await?;
+    ctx.metrics
+        .backup_last_success_timestamp
+        .with_label_values(&[namespace, name])
+        .set(chrono::Utc::now().timestamp());
+    tracing::info!(backup = %name, "backup Job succeeded; phase=Succeeded");
+    Ok(())
+}
+
+/// Resolve the newest snapshot matching this backup's identity for the
+/// filesystem backend (in-process, ADR §5.4). Returns the snapshot id and a
+/// status `identity` JSON body, or `None` when not resolvable in-process.
+async fn resolve_succeeded_snapshot(
+    ctx: &Context,
+    backup: &Backup,
+    namespace: &str,
+) -> Result<Option<(String, serde_json::Value)>> {
+    use kopiur_api::backend::Backend;
+    let (config, repo) = resolve_recipe(ctx, backup, namespace).await?;
+    let identity = resolve_identity_for(&config, namespace)?;
+    match &repo.spec.backend {
+        Backend::Filesystem(fs) => {
+            let creds = io::repo_credentials(&repo.spec.encryption);
+            let password = io::read_repo_password(&ctx.client, namespace, &creds).await?;
+            let client = ctx.kopia.build([("KOPIA_PASSWORD".to_string(), password)]);
+            client
+                .repository_connect(&kopiur_kopia::ConnectSpec::Filesystem {
+                    path: fs.path.clone().into(),
+                })
+                .await?;
+            // Match the snapshot by its source path (the path we snapshotted),
+            // newest first. The pod's recorded user/host differ from our
+            // resolved identity (a documented mover-identity follow-up), so we
+            // key on the source path which IS authoritative.
+            let mut list = client.snapshot_list(None).await?;
+            list.sort_by_key(|e| std::cmp::Reverse(e.end_time));
+            let matched = list
+                .into_iter()
+                .find(|e| e.source.path == identity.source_path);
+            Ok(matched.map(|e| {
+                let id = e.id.clone();
+                let body = serde_json::json!({
+                    "username": e.source.user_name,
+                    "hostname": e.source.host,
+                    "sourcePath": e.source.path,
+                });
+                (id, body)
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Resolve a `Backup`'s referenced `BackupConfig` and that config's
+/// `Repository`. Cluster references and non-filesystem backends still resolve
+/// here; backend-specific behavior is decided downstream.
+async fn resolve_recipe(
+    ctx: &Context,
+    backup: &Backup,
+    namespace: &str,
+) -> Result<(BackupConfig, Repository)> {
+    let config_ref = backup
+        .spec
+        .config_ref
+        .as_ref()
+        .ok_or_else(|| Error::Invariant("produced Backup has no configRef".into()))?;
+    let cfg_ns = config_ref.namespace.as_deref().unwrap_or(namespace);
+    let cfg_api: Api<BackupConfig> = Api::namespaced(ctx.client.clone(), cfg_ns);
+    let config = cfg_api.get_opt(&config_ref.name).await?.ok_or_else(|| {
+        Error::MissingDependency(format!("BackupConfig {cfg_ns}/{}", config_ref.name))
+    })?;
+
+    let repo_ref = &config.spec.repository;
+    // NOTE: ClusterRepository-backed configs resolve their repo cluster-scoped;
+    // this e2e/core path implements the namespaced Repository case fully. A
+    // ClusterRepository lookup would use `Api::all` — left as a focused
+    // follow-up since the namespaced path exercises the full backup pipeline.
+    let repo_ns = repo_ref.namespace.as_deref().unwrap_or(cfg_ns);
+    let repo_api: Api<Repository> = Api::namespaced(ctx.client.clone(), repo_ns);
+    let repo = repo_api.get_opt(&repo_ref.name).await?.ok_or_else(|| {
+        Error::MissingDependency(format!("Repository {repo_ns}/{}", repo_ref.name))
+    })?;
+    Ok((config, repo))
+}
+
+/// Build everything a backup run needs: the work spec, the source PVC mount, the
+/// repo PVC mount (filesystem only), and the credentials Secret name.
+type BackupRun<'a> = (MoverWorkSpec, Option<PvcMount>, Option<PvcMount>, String);
+fn build_backup_run(
+    _backup: &Backup,
+    config: &BackupConfig,
+    repo: &Repository,
+    namespace: &str,
+    _name: &str,
+) -> Result<BackupRun<'static>> {
+    let identity = resolve_identity_for(config, namespace)?;
+
+    // First source's PVC + path drive the mount and the snapshot source path.
+    let source = config
+        .spec
+        .sources
+        .first()
+        .ok_or_else(|| Error::Invariant("BackupConfig has no sources".into()))?;
+    let pvc_name = source.pvc.as_ref().map(|p| p.name.clone()).ok_or_else(|| {
+        Error::Invariant("e2e backup path requires an explicit source.pvc".into())
+    })?;
+    let source_path = source
+        .source_path_override
+        .clone()
+        .unwrap_or_else(|| format!("/pvc/{pvc_name}"));
+
+    let creds = io::repo_credentials(&repo.spec.encryption);
+
+    let work_spec = MoverWorkSpec {
+        version: 1,
+        operation: Operation::Backup(BackupOp {
+            source_path: source_path.clone(),
+            tags: tags_for(config),
+        }),
+        identity,
+        repository: repository_connect(repo)?,
+        target_ref: TargetRef {
+            api_version: API_VERSION.to_string(),
+            kind: "Backup".to_string(),
+            name: _name.to_string(),
+            namespace: namespace.to_string(),
+        },
+        hook_plan: Default::default(),
+        options: MoverOptions::default(),
+    };
+
+    let source_pvc = Some(PvcMount {
+        claim_name: pvc_name,
+        mount_path: source_path,
+        read_only: true,
+    });
+    let repo_pvc = io::filesystem_repo_pvc(&repo.spec.backend).map(|claim_name| PvcMount {
+        claim_name,
+        mount_path: io::filesystem_repo_path(&repo.spec.backend).unwrap_or_default(),
+        read_only: false,
+    });
+
+    Ok((work_spec, source_pvc, repo_pvc, creds.secret_name))
+}
+
+/// Resolve identity from a `BackupConfig` (overrides + defaults) into the mover
+/// wire identity. Reuses `api::identity::resolve_identity` (the tested kernel).
+fn resolve_identity_for(config: &BackupConfig, namespace: &str) -> Result<MoverIdentity> {
+    let pvc_name = config
+        .spec
+        .sources
+        .first()
+        .and_then(|s| s.pvc.as_ref().map(|p| p.name.clone()));
+    let source_path_override = config
+        .spec
+        .sources
+        .first()
+        .and_then(|s| s.source_path_override.clone());
+    let inputs = kopiur_api::IdentityInputs {
+        object_name: &config.name_any(),
+        namespace,
+        overrides: config.spec.identity.as_ref(),
+        template: None,
+        pvc_name: pvc_name.as_deref(),
+        source_path_override: source_path_override.as_deref(),
+    };
+    let resolved: ApiResolvedIdentity =
+        kopiur_api::resolve_identity(&inputs).map_err(|e| Error::Validation(e.to_string()))?;
+    Ok(MoverIdentity {
+        username: resolved.username,
+        hostname: resolved.hostname,
+        source_path: resolved.source_path.unwrap_or_else(|| "/data".to_string()),
+    })
+}
+
+/// Public wrapper so the restore reconciler can reuse the backend mapping.
+pub(crate) fn repository_connect_pub(repo: &Repository) -> Result<RepositoryConnect> {
+    repository_connect(repo)
+}
+
+/// Public wrapper for the mover image pull policy (reused by restore).
+pub(crate) fn mover_pull_policy_pub() -> Option<&'static str> {
+    mover_pull_policy()
+}
+
+/// Map a `Repository`'s backend to the mover's `RepositoryConnect`.
+fn repository_connect(repo: &Repository) -> Result<RepositoryConnect> {
+    use kopiur_api::backend::Backend;
+    match &repo.spec.backend {
+        Backend::Filesystem(f) => Ok(RepositoryConnect::Filesystem {
+            path: f.path.clone(),
+        }),
+        Backend::S3(s) => Ok(RepositoryConnect::S3 {
+            bucket: s.bucket.clone(),
+            endpoint: s.endpoint.clone(),
+            prefix: s.prefix.clone(),
+            region: s.region.clone(),
+        }),
+        // NOTE: Azure/Gcs/B2/Sftp/WebDav/Rclone backends are modeled in the API
+        // but the mover wire type (RepositoryConnect) only carries Filesystem and
+        // S3 today; extending it is a mechanical follow-up. Reject explicitly so
+        // we never silently run against the wrong backend.
+        other => Err(Error::Validation(format!(
+            "backend {} not yet supported by the mover work spec",
+            other.kind_str()
+        ))),
+    }
+}
+
+/// Snapshot tags from the config + run metadata.
+fn tags_for(config: &BackupConfig) -> BTreeMap<String, String> {
+    let mut tags = BTreeMap::new();
+    tags.insert("kopiur:config".to_string(), config.name_any());
+    tags
+}
+
+/// Labels applied to the mover Job/ConfigMap and any child objects.
+fn run_labels(config: &BackupConfig, origin: Origin) -> BTreeMap<String, String> {
+    let mut labels = BTreeMap::new();
+    labels.insert(ORIGIN_LABEL.to_string(), origin_str(origin).to_string());
+    labels.insert(CONFIG_LABEL.to_string(), config.name_any());
+    labels
+}
+
+fn origin_str(origin: Origin) -> &'static str {
+    match origin {
+        Origin::Scheduled => "scheduled",
+        Origin::Manual => "manual",
+        Origin::Discovered => "discovered",
+    }
+}
+
+/// Job limits from the backup's `failurePolicy`, falling back to ADR defaults.
+fn job_limits(backup: &Backup) -> JobLimits {
+    match &backup.spec.failure_policy {
+        Some(fp) => JobLimits {
+            backoff_limit: fp.backoff_limit.unwrap_or(2),
+            active_deadline_seconds: fp.active_deadline_seconds,
+        },
+        None => JobLimits::default(),
+    }
+}
+
+/// `IfNotPresent` when running against a locally-loaded mover image (kind e2e),
+/// else `None` (cluster default). Controlled by the same env that picks the
+/// image so the two stay consistent.
+fn mover_pull_policy() -> Option<&'static str> {
+    if std::env::var("KOPIUR_MOVER_IMAGE").is_ok() {
+        Some("IfNotPresent")
+    } else {
+        None
+    }
+}
+
+/// Whether a Job reached a terminal state: `Some(true)` complete, `Some(false)`
+/// failed, `None` still running.
+pub(crate) fn job_terminal_state(job: &Job) -> Option<bool> {
+    let status = job.status.as_ref()?;
+    let conditions = status.conditions.as_ref();
+    if let Some(conds) = conditions {
+        for c in conds {
+            if c.status == "True" {
+                match c.type_.as_str() {
+                    "Complete" => return Some(true),
+                    "Failed" => return Some(false),
+                    _ => {}
+                }
+            }
+        }
+    }
+    // Fall back to counts when conditions aren't populated yet.
+    if status.succeeded.unwrap_or(0) >= 1 {
+        return Some(true);
+    }
+    None
 }
 
 /// `error_policy` for the `Backup` controller.

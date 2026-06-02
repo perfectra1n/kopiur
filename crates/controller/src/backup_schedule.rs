@@ -20,13 +20,18 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Utc};
+use kube::api::ListParams;
 use kube::runtime::controller::Action;
-use kube::ResourceExt;
+use kube::{Api, ResourceExt};
 
-use kopiur_api::{jitter, validate, BackupSchedule, ConcurrencyPolicy, ScheduleSpec};
+use kopiur_api::backup::BackupSpec;
+use kopiur_api::common::ConfigRef;
+use kopiur_api::{jitter, validate, Backup, BackupSchedule, ConcurrencyPolicy, ScheduleSpec};
 
+use crate::consts::ORIGIN_LABEL;
 use crate::context::Context;
 use crate::error::{error_policy_for, Error, Result};
+use crate::io;
 
 /// Parse Go-style duration strings used in the CRD (`30m`, `1h`, `90s`). Returns
 /// `None` for unparseable input (caller treats as "no jitter window").
@@ -137,12 +142,18 @@ pub async fn reconcile(schedule: Arc<BackupSchedule>, ctx: Arc<Context>) -> Resu
     result
 }
 
-async fn reconcile_inner(schedule: &BackupSchedule, _ctx: &Context) -> Result<Action> {
+async fn reconcile_inner(schedule: &BackupSchedule, ctx: &Context) -> Result<Action> {
     // Defensive re-validation (one validator, two callers — SKILL hard-rule 4).
     let errs = validate::validate_backup_schedule(&schedule.spec);
     if let Some(first) = errs.into_iter().next() {
         return Err(Error::Validation(first.to_string()));
     }
+
+    let namespace = schedule
+        .namespace()
+        .ok_or_else(|| Error::Invariant("BackupSchedule has no namespace".into()))?;
+    let sched_name = schedule.name_any();
+    let api: Api<BackupSchedule> = Api::namespaced(ctx.client.clone(), &namespace);
 
     let seed = schedule.uid().unwrap_or_else(|| schedule.name_any());
     let now = Utc::now();
@@ -152,16 +163,111 @@ async fn reconcile_inner(schedule: &BackupSchedule, _ctx: &Context) -> Result<Ac
         .jitter
         .as_deref()
         .and_then(parse_go_duration);
-    let slot = next_fire(&schedule.spec.schedule.cron, jitter_window, &seed, now)?;
 
-    // TODO(M6): if a *previous* slot is due (status.nextSchedule <= now) and
-    // should_create_backup() is true, create a Backup CR (owner-ref to the
-    // schedule, kopia.io/origin=scheduled) and update status.lastSchedule /
-    // lastSuccessfulSchedule / consecutiveFailures. The Backup-owned watch then
-    // recomputes. The pure decisions above (should_create_backup) are tested.
+    // The previously-pinned slot (status.nextSchedule) is the one that may now be
+    // due. If absent (first reconcile), compute the upcoming slot from now and
+    // pin it without firing (GitOps-friendly: runOnCreate defaults false).
+    let pinned_slot = schedule
+        .status
+        .as_ref()
+        .and_then(|s| s.next_schedule.as_ref())
+        .and_then(|r| r.at.as_deref())
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc));
 
-    let until = (slot - now).to_std().unwrap_or(StdDuration::from_secs(60));
+    if let Some(slot) = pinned_slot {
+        // Is a run currently active (an unfinished Backup owned by this schedule)?
+        let run_active = active_run_exists(ctx, &namespace, &sched_name).await?;
+        if should_create_backup(&schedule.spec.schedule, slot, now, run_active) {
+            let backup_name = scheduled_backup_name(&sched_name, slot);
+            create_scheduled_backup(ctx, schedule, &namespace, &backup_name).await?;
+            let next = next_fire(&schedule.spec.schedule.cron, jitter_window, &seed, now)?;
+            io::patch_status(
+                &api,
+                &sched_name,
+                serde_json::json!({
+                    "lastSchedule": { "at": slot.to_rfc3339(), "backupRef": { "name": backup_name } },
+                    "nextSchedule": { "at": next.to_rfc3339() },
+                    "consecutiveFailures": 0,
+                }),
+            )
+            .await?;
+            let until = (next - now).to_std().unwrap_or(StdDuration::from_secs(60));
+            return Ok(Action::requeue(until.max(StdDuration::from_secs(1))));
+        }
+        // Slot not yet due: wait until it is.
+        let until = (slot - now).to_std().unwrap_or(StdDuration::from_secs(1));
+        return Ok(Action::requeue(until.max(StdDuration::from_secs(1))));
+    }
+
+    // First reconcile: pin the next slot without firing.
+    let next = next_fire(&schedule.spec.schedule.cron, jitter_window, &seed, now)?;
+    io::patch_status(
+        &api,
+        &sched_name,
+        serde_json::json!({ "nextSchedule": { "at": next.to_rfc3339() } }),
+    )
+    .await?;
+    let until = (next - now).to_std().unwrap_or(StdDuration::from_secs(60));
     Ok(Action::requeue(until.max(StdDuration::from_secs(1))))
+}
+
+/// A deterministic, slot-stamped Backup name so the same slot is idempotent
+/// across reconciles/replicas (`<schedule>-<YYYYmmddHHMMSS>`).
+fn scheduled_backup_name(schedule: &str, slot: DateTime<Utc>) -> String {
+    format!("{schedule}-{}", slot.format("%Y%m%d%H%M%S"))
+}
+
+/// Whether an unfinished Backup created by this schedule still exists.
+async fn active_run_exists(ctx: &Context, namespace: &str, schedule: &str) -> Result<bool> {
+    use kopiur_api::BackupPhase;
+    let api: Api<Backup> = Api::namespaced(ctx.client.clone(), namespace);
+    let lp = ListParams::default().labels(&format!("kopia.io/schedule={schedule}"));
+    let items = api.list(&lp).await?.items;
+    Ok(items.iter().any(|b| {
+        matches!(
+            b.status.as_ref().and_then(|s| s.phase),
+            Some(BackupPhase::Pending) | Some(BackupPhase::Running) | None
+        ) && b.metadata.deletion_timestamp.is_none()
+    }))
+}
+
+/// Create a scheduled Backup CR (owner-ref to the schedule, origin=scheduled,
+/// configRef to the schedule's config). Server-side applied so re-firing the
+/// same slot converges instead of erroring.
+async fn create_scheduled_backup(
+    ctx: &Context,
+    schedule: &BackupSchedule,
+    namespace: &str,
+    backup_name: &str,
+) -> Result<()> {
+    let owner = io::owner_ref_for(schedule, "BackupSchedule")?;
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert(ORIGIN_LABEL.to_string(), "scheduled".to_string());
+    labels.insert("kopia.io/schedule".to_string(), schedule.name_any());
+    labels.insert(
+        crate::consts::CONFIG_LABEL.to_string(),
+        schedule.spec.config_ref.name.clone(),
+    );
+
+    let mut backup = Backup::new(
+        backup_name,
+        BackupSpec {
+            config_ref: Some(ConfigRef {
+                name: schedule.spec.config_ref.name.clone(),
+                namespace: schedule.spec.config_ref.namespace.clone(),
+            }),
+            tags: None,
+            failure_policy: None,
+            deletion_policy: None,
+        },
+    );
+    backup.metadata = io::child_meta(backup_name, namespace, labels, Some(owner));
+
+    let api: Api<Backup> = Api::namespaced(ctx.client.clone(), namespace);
+    io::apply(&api, backup_name, &backup).await?;
+    tracing::info!(schedule = %schedule.name_any(), backup = %backup_name, "created scheduled Backup");
+    Ok(())
 }
 
 /// `error_policy` for the `BackupSchedule` controller.

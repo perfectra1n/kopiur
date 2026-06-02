@@ -11,7 +11,8 @@ authors.workspace = true
 [dependencies]
 kopiur-api = { workspace = true }
 kopiur-kopia = { workspace = true }
-kube = { workspace = true, features = ["client"] }
+kube = { workspace = true, features = ["client", "rustls-tls"] }
+rustls = { workspace = true }
 k8s-openapi = { workspace = true, features = ["v1_33"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

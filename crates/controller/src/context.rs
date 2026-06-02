@@ -65,6 +65,9 @@ pub struct Context {
     pub metrics: Metrics,
     /// Event recorder for surfacing reconcile decisions on the objects.
     pub recorder: Recorder,
+    /// Container image used for mover `Job`s (configurable per deployment via
+    /// `KOPIUR_MOVER_IMAGE`; defaults to [`crate::jobs::DEFAULT_MOVER_IMAGE`]).
+    pub mover_image: String,
 }
 
 impl Context {
@@ -75,12 +78,14 @@ impl Context {
         kopia: KopiaClientFactory,
         metrics: Metrics,
         recorder: Recorder,
+        mover_image: String,
     ) -> Self {
         Context {
             client,
             kopia,
             metrics,
             recorder,
+            mover_image,
         }
     }
 }

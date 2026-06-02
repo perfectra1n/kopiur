@@ -68,10 +68,19 @@ async fn filesystem_roundtrip() {
     let mut tags = BTreeMap::new();
     tags.insert("test".to_string(), "roundtrip".to_string());
     let created = client
-        .snapshot_create(source_dir.path().to_str().unwrap(), &tags)
+        .snapshot_create(
+            source_dir.path().to_str().unwrap(),
+            &tags,
+            Some("testuser@testhost:/data"),
+        )
         .await
         .expect("snapshot create");
     assert!(!created.id.is_empty());
+    assert_eq!(
+        created.source.user_name, "testuser",
+        "snapshot recorded under the override identity, not the ambient user"
+    );
+    assert_eq!(created.source.host, "testhost");
     assert_eq!(created.file_count(), 2, "two files snapshotted");
     assert_eq!(created.total_bytes(), 13 + 5);
 

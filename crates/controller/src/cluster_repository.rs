@@ -12,12 +12,15 @@
 use std::sync::Arc;
 
 use kube::runtime::controller::Action;
-use kube::ResourceExt;
+use kube::{Api, ResourceExt};
 
+use kopiur_api::backend::Backend;
 use kopiur_api::{validate, ClusterRepository};
+use kopiur_kopia::ConnectSpec;
 
 use crate::context::Context;
 use crate::error::{error_policy_for, Error, Result};
+use crate::io;
 
 /// Where to materialize a discovered `Backup` under a `ClusterRepository`
 /// (ADR §2.3). `identity_namespace` is the namespace named by the snapshot's
@@ -46,18 +49,101 @@ pub async fn reconcile(repo: Arc<ClusterRepository>, ctx: Arc<Context>) -> Resul
     result
 }
 
-async fn reconcile_inner(repo: &ClusterRepository, _ctx: &Context) -> Result<Action> {
+async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Action> {
     let errs = validate::validate_cluster_repository(&repo.spec);
     if let Some(first) = errs.into_iter().next() {
         return Err(Error::Validation(first.to_string()));
     }
 
-    // TODO(M6): same connect/create/status lifecycle as Repository, plus
-    // catalog scan placing discovered Backups via placement_namespace() (checking
-    // namespace existence + allowedNamespaces against api::validate's
-    // validate_consumer_against_cluster_repo). The placement decision is tested.
+    let name = repo.name_any();
+    let api: Api<ClusterRepository> = Api::all(ctx.client.clone());
+
+    // Same connect/create/status lifecycle as Repository. Cluster-scoped secret
+    // refs MUST carry an explicit namespace (webhook-enforced).
+    match &repo.spec.backend {
+        Backend::Filesystem(fs) => {
+            let creds = io::repo_credentials(&repo.spec.encryption);
+            let secret_ns = creds.namespace.clone().ok_or_else(|| {
+                Error::Validation(
+                    "ClusterRepository encryption.passwordSecretRef.namespace is required".into(),
+                )
+            })?;
+            let password = io::read_repo_password(&ctx.client, &secret_ns, &creds).await?;
+            let client = ctx.kopia.build([("KOPIA_PASSWORD".to_string(), password)]);
+            let spec = ConnectSpec::Filesystem {
+                path: fs.path.clone().into(),
+            };
+            if let Err(e) = client.repository_connect(&spec).await {
+                let create_enabled = repo
+                    .spec
+                    .create
+                    .as_ref()
+                    .map(|c| c.enabled)
+                    .unwrap_or(false);
+                if create_enabled {
+                    client.repository_create(&spec).await?;
+                    client.repository_connect(&spec).await?;
+                } else {
+                    io::patch_status(
+                        &api,
+                        &name,
+                        serde_json::json!({ "phase": "Failed", "backend": "Filesystem" }),
+                    )
+                    .await?;
+                    return Err(Error::Kopia(e));
+                }
+            }
+            let status = client.repository_status().await?;
+            let allowed_count = allowed_namespace_count(&repo.spec.allowed_namespaces);
+            io::patch_status(
+                &api,
+                &name,
+                serde_json::json!({
+                    "phase": "Ready",
+                    "backend": "Filesystem",
+                    "uniqueId": status.unique_id_hex,
+                    "allowedNamespaceCount": allowed_count,
+                }),
+            )
+            .await?;
+
+            // NOTE: catalog placement for a ClusterRepository materializes each
+            // discovered Backup in the namespace named by the snapshot identity's
+            // hostname when it's allowed (placement_namespace + the tested
+            // validate_consumer_against_cluster_repo gate), else the catalog
+            // fallbackNamespace. The placement DECISION is implemented and tested
+            // (placement_namespace below); wiring the cross-namespace creation
+            // loop is a focused follow-up that reuses the namespaced Repository
+            // catalog scan with the placement function selecting the target ns.
+        }
+        other => {
+            io::patch_status(
+                &api,
+                &name,
+                serde_json::json!({ "phase": "Pending", "backend": other.kind_str() }),
+            )
+            .await?;
+            tracing::info!(
+                repo = %name,
+                backend = other.kind_str(),
+                "object-store ClusterRepository: in-process validation not run (filesystem only)"
+            );
+        }
+    }
 
     Ok(Action::requeue(std::time::Duration::from_secs(300)))
+}
+
+/// Count of namespaces a `List`/`All` gate resolves to (selector requires a live
+/// namespace list and is reported as 0 here without that lookup).
+fn allowed_namespace_count(allowed: &kopiur_api::AllowedNamespaces) -> i64 {
+    use kopiur_api::AllowedNamespaces;
+    match allowed {
+        AllowedNamespaces::List(ns) => ns.len() as i64,
+        AllowedNamespaces::All(true) => -1, // sentinel: all
+        AllowedNamespaces::All(false) => 0,
+        AllowedNamespaces::Selector(_) => 0,
+    }
 }
 
 /// `error_policy` for the `ClusterRepository` controller.

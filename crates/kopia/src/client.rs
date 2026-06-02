@@ -325,10 +325,18 @@ impl KopiaClient {
 
     /// Create a snapshot of `source_path` with the given `tags`
     /// (`key:value`). Returns the parsed create result.
+    ///
+    /// `override_source`, when set, is passed to kopia as `--override-source`
+    /// (format `username@hostname:path`). This is how Kopiur records snapshots
+    /// under the operator-*resolved* identity (ADR §4.2 / anchoring principle 9)
+    /// rather than the mover pod's ambient `user@host`. Without it kopia would
+    /// attribute the snapshot to the pod, breaking the identity model that the
+    /// whole catalog/retention/restore machinery keys on.
     pub async fn snapshot_create(
         &self,
         source_path: &str,
         tags: &BTreeMap<String, String>,
+        override_source: Option<&str>,
     ) -> Result<SnapshotCreateResult, KopiaError> {
         let mut args = vec![
             "snapshot".into(),
@@ -336,6 +344,10 @@ impl KopiaClient {
             source_path.to_string(),
             "--json".into(),
         ];
+        if let Some(src) = override_source {
+            args.push("--override-source".into());
+            args.push(src.to_string());
+        }
         for (k, v) in tags {
             args.push("--tags".into());
             args.push(format!("{k}:{v}"));
