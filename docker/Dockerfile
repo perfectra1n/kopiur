@@ -6,7 +6,7 @@
 #
 # syntax=docker/dockerfile:1
 
-FROM rust:1.95-bookworm AS builder
+FROM rust:1.96-bookworm AS builder
 ARG BIN=kopiur-controller
 WORKDIR /src
 
