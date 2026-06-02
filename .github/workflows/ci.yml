@@ -113,6 +113,8 @@ jobs:
           shared-key: coverage
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@81ecf985428d5c2ea81dbf079bceca32bc9604ab # v2.62.43
+        with:
+          tool: cargo-llvm-cov
       - name: Generate coverage (lcov)
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
       - name: Upload coverage artifact
