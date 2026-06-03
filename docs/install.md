@@ -134,7 +134,7 @@ Turn it all on with the ready-made overlay:
 
 ```bash
 helm upgrade kopiur deploy/helm/kopiur -n kopiur-system \
-  -f deploy/examples/observability-values.yaml
+  -f deploy/observability-values.yaml
 ```
 
 See [`docs/dev/observability.md`](dev/observability.md) for the full metric list,

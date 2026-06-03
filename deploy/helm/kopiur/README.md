@@ -127,7 +127,7 @@ over OTLP from the controller, webhook, and mover Jobs (the controller passes th
 to your collector's gRPC port. All metrics are under the `kopiur_` namespace; see
 [`docs/dev/observability.md`](../../../docs/dev/observability.md) for the full
 metric list, env vars, and a sample collector config. A ready-made values overlay
-that turns everything on is at `deploy/examples/observability-values.yaml`. The
+that turns everything on is at `deploy/observability-values.yaml`. The
 dashboard JSON also lives at `deploy/dashboards/kopiur.json` for manual Grafana
 import.
 

@@ -84,11 +84,11 @@ helm upgrade --install kopiur deploy/helm/kopiur -n kopiur-system \
 ```
 
 A ready-to-use values overlay is at
-[`deploy/examples/observability-values.yaml`](../../deploy/examples/observability-values.yaml):
+[`deploy/observability-values.yaml`](../../deploy/observability-values.yaml):
 
 ```bash
 helm upgrade --install kopiur deploy/helm/kopiur -n kopiur-system \
-  -f deploy/examples/observability-values.yaml
+  -f deploy/observability-values.yaml
 ```
 
 Keys (see `deploy/helm/kopiur/values.yaml` for the full set):
