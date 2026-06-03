@@ -66,6 +66,7 @@ spec:
             # namespace default SA.
             - name: KOPIUR_MOVER_SERVICE_ACCOUNT
               value: {{ include "kopiur.serviceAccountName" . | quote }}
+            {{- include "kopiur.otlpEnv" . | nindent 12 }}
             {{- with .Values.controller.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

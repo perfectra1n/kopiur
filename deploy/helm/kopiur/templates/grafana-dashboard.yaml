@@ -1,0 +1,18 @@
+{{- if .Values.grafanaDashboard.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kopiur.fullname" . }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kopiur.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+    {{ .Values.grafanaDashboard.label }}: {{ .Values.grafanaDashboard.labelValue | quote }}
+  {{- with .Values.grafanaDashboard.folderAnnotation }}
+  annotations:
+    {{ . }}: {{ $.Values.grafanaDashboard.folder | quote }}
+  {{- end }}
+data:
+  kopiur.json: |-
+    {{- .Files.Get "files/dashboards/kopiur.json" | nindent 4 }}
+{{- end }}

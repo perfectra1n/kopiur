@@ -5,6 +5,11 @@
 //! resulting `CustomResourceDefinition` to YAML, prepend a generated-file
 //! header, and emit it at `deploy/crds/<plural>.yaml`. A concatenated
 //! `deploy/crds/all-crds.yaml` is also produced for one-shot `kubectl apply`.
+//!
+//! The same per-CRD content is ALSO emitted to the Helm chart's
+//! `deploy/helm/kopiur/files/crds/<plural>.yaml`, so the chart's CRD copies are a
+//! generated artifact under the `gen-all --check` drift guard rather than a
+//! hand-maintained copy that can silently go stale.
 
 use anyhow::{Context, Result};
 use kube::core::CustomResourceExt;
@@ -40,6 +45,15 @@ pub fn artifacts() -> Result<Vec<Artifact>> {
     for (plural, content) in &crds {
         out.push(Artifact::new(
             format!("crds/{plural}.yaml"),
+            content.clone(),
+        ));
+        // The Helm chart ships its own copy under `files/crds/` (loaded via
+        // `.Files.Glob`); emit it from the same source so it can never silently
+        // drift from `deploy/crds/`, and so the `gen-all --check` guard covers it
+        // too. Otherwise a CRD field change would ship a stale chart CRD whose
+        // structural schema prunes the new field on every `helm install`.
+        out.push(Artifact::new(
+            format!("helm/kopiur/files/crds/{plural}.yaml"),
             content.clone(),
         ));
         // For the bundle, strip each file's leading header so we get one header

@@ -270,6 +270,8 @@ async fn create_scheduled_backup(
 
     let api: Api<Backup> = Api::namespaced(ctx.client.clone(), namespace);
     io::apply(&api, backup_name, &backup).await?;
+    ctx.metrics
+        .inc_schedule_backup_created(namespace, &schedule.name_any());
     tracing::info!(schedule = %schedule.name_any(), backup = %backup_name, "created scheduled Backup");
     Ok(())
 }

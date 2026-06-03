@@ -15,7 +15,7 @@ use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
 use kopiur_api::backend::Backend;
-use kopiur_api::{Maintenance, Repository, TakeoverPolicy, validate};
+use kopiur_api::{Maintenance, TakeoverPolicy, validate};
 use kopiur_kopia::{ConnectSpec, MaintenanceMode};
 
 use crate::context::Context;
@@ -58,7 +58,31 @@ pub async fn reconcile(maint: Arc<Maintenance>, ctx: Arc<Context>) -> Result<Act
     let result = reconcile_inner(&maint, &ctx).await;
     ctx.metrics
         .record_reconcile("Maintenance", start.elapsed().as_secs_f64());
+    record_maintenance_status_metrics(&maint, &ctx, result.is_ok()).await;
     result
+}
+
+/// Mirror the last full-maintenance reclaimed-bytes gauge from the freshest
+/// status on success (Maintenance has no phase gauge to clear). See the Backup
+/// equivalent for why the status is re-read rather than taken from the cache copy.
+async fn record_maintenance_status_metrics(maint: &Maintenance, ctx: &Context, ok: bool) {
+    let (Some(ns), name) = (maint.namespace(), maint.name_any()) else {
+        return;
+    };
+    if !ok {
+        return;
+    }
+    let api: Api<Maintenance> = Api::namespaced(ctx.client.clone(), &ns);
+    if let Ok(Some(latest)) = api.get_opt(&name).await
+        && let Some(bytes) = latest
+            .status
+            .as_ref()
+            .and_then(|s| s.full.as_ref())
+            .and_then(|f| f.last_content_reclaimed_bytes)
+    {
+        ctx.metrics
+            .set_maintenance_reclaimed_bytes(&ns, &name, bytes);
+    }
 }
 
 async fn reconcile_inner(maint: &Maintenance, ctx: &Context) -> Result<Action> {
@@ -77,13 +101,15 @@ async fn reconcile_inner(maint: &Maintenance, ctx: &Context) -> Result<Action> {
     // kopia maintenance directly (ADR §5.4 permits short ops; long full GC would
     // move to a Job for object stores — see NOTE).
     let repo_ref = &maint.spec.repository;
+    // Honor `repository.kind` (namespaced `Repository` vs. cluster-scoped
+    // `ClusterRepository`) via the shared resolver (ADR §5.5). The password
+    // Secret namespace falls back to the repo ref's namespace for a namespaced
+    // repo; a ClusterRepository's `passwordSecretRef` carries its own (required)
+    // namespace, which `repo_credentials` surfaces and overrides the fallback.
     let repo_ns = repo_ref.namespace.as_deref().unwrap_or(&namespace);
-    let repo_api: Api<Repository> = Api::namespaced(ctx.client.clone(), repo_ns);
-    let repo = repo_api.get_opt(&repo_ref.name).await?.ok_or_else(|| {
-        Error::MissingDependency(format!("Repository {repo_ns}/{}", repo_ref.name))
-    })?;
+    let repo = io::resolve_repository_ref(&ctx.client, repo_ref, &namespace).await?;
 
-    let fs = match &repo.spec.backend {
+    let fs = match &repo.backend {
         Backend::Filesystem(fs) => fs.clone(),
         other => {
             // NOTE: object-store maintenance runs as a short-lived Job; the
@@ -97,7 +123,7 @@ async fn reconcile_inner(maint: &Maintenance, ctx: &Context) -> Result<Action> {
         }
     };
 
-    let creds = io::repo_credentials(&repo.spec.encryption);
+    let creds = io::repo_credentials(&repo.encryption);
     let password = io::read_repo_password(&ctx.client, repo_ns, &creds).await?;
     let client = ctx.kopia.build([("KOPIA_PASSWORD".to_string(), password)]);
     client

@@ -115,3 +115,31 @@ Whether RBAC should be cluster-scoped.
 {{- define "kopiur.clusterScoped" -}}
 {{- eq .Values.installScope "cluster" -}}
 {{- end }}
+
+{{/*
+OTLP environment for the controller + webhook (and, via the controller, mover
+Jobs). Emits the standard OTEL_EXPORTER_OTLP_* vars only when
+observability.otlp.enabled. The env var NAMES match crates/telemetry/src/env.rs.
+Usage: {{- include "kopiur.otlpEnv" . | nindent 12 }}
+*/}}
+{{- define "kopiur.otlpEnv" -}}
+{{- if .Values.observability.otlp.enabled }}
+- name: OTEL_EXPORTER_OTLP_ENDPOINT
+  value: {{ required "observability.otlp.endpoint is required when observability.otlp.enabled" .Values.observability.otlp.endpoint | quote }}
+{{- with .Values.observability.otlp.protocol }}
+- name: OTEL_EXPORTER_OTLP_PROTOCOL
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.observability.otlp.headers }}
+- name: OTEL_EXPORTER_OTLP_HEADERS
+  value: {{ . | quote }}
+{{- end }}
+{{- if .Values.observability.otlp.strict }}
+- name: KOPIUR_OTEL_STRICT
+  value: "true"
+{{- end }}
+{{- with .Values.observability.otlp.extraEnv }}
+{{- toYaml . }}
+{{- end }}
+{{- end }}
+{{- end }}

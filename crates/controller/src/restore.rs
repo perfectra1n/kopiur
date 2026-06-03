@@ -15,7 +15,9 @@ use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
 use kopiur_api::backup::Backup;
-use kopiur_api::{OnMissingSnapshot, Repository, Restore, RestoreSource, RestoreTarget, validate};
+use kopiur_api::{
+    OnMissingSnapshot, Restore, RestorePhase, RestoreSource, RestoreTarget, validate,
+};
 use kopiur_mover::workspec::{
     MoverOptions, MoverWorkSpec, Operation, RepositoryConnect, ResolvedIdentity as MoverIdentity,
     RestoreOp, TargetRef,
@@ -24,7 +26,7 @@ use kopiur_mover::workspec::{
 use crate::consts::API_VERSION;
 use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
-use crate::io;
+use crate::io::{self, ResolvedRepository};
 use crate::jobs::{self, JobLimits, MoverJobInputs, PvcMount};
 
 /// Which source mode a restore uses, as a stable string (mirrors
@@ -68,6 +70,17 @@ pub enum PopulatorState {
     DirectTarget,
 }
 
+/// Wall-clock duration (seconds) of a restore `Job` from its
+/// `status.startTime`/`completionTime`. `None` if either is absent or the
+/// interval is negative (clock skew). Pure. (`Time.0` is a jiff `Timestamp`.)
+pub fn restore_job_duration_seconds(job: &k8s_openapi::api::batch::v1::Job) -> Option<i64> {
+    let st = job.status.as_ref()?;
+    let start = st.start_time.as_ref()?.0.as_second();
+    let end = st.completion_time.as_ref()?.0.as_second();
+    let secs = end - start;
+    (secs >= 0).then_some(secs)
+}
+
 /// Decide the populator state from whether a `target` is present.
 pub fn populator_state(has_target: bool) -> PopulatorState {
     if has_target {
@@ -84,7 +97,32 @@ pub async fn reconcile(restore: Arc<Restore>, ctx: Arc<Context>) -> Result<Actio
     let result = reconcile_inner(&restore, &ctx).await;
     ctx.metrics
         .record_reconcile("Restore", start.elapsed().as_secs_f64());
+    record_restore_status_metrics(&restore, &ctx, result.is_ok()).await;
     result
+}
+
+/// Mirror a Restore's phase gauge. Zeroes it on deletion (so a Failed restore's
+/// alert clears once the CR is gone) and re-reads the freshest status on success
+/// — see the Backup equivalent for the rationale. (Restore *duration* is
+/// recorded at the Job-completion site, not from status.)
+async fn record_restore_status_metrics(restore: &Restore, ctx: &Context, ok: bool) {
+    let (Some(ns), name) = (restore.namespace(), restore.name_any()) else {
+        return;
+    };
+    if restore.metadata.deletion_timestamp.is_some() {
+        ctx.metrics
+            .clear_phase::<RestorePhase>("Restore", &ns, &name);
+        return;
+    }
+    if !ok {
+        return;
+    }
+    let api: Api<Restore> = Api::namespaced(ctx.client.clone(), &ns);
+    if let Ok(Some(latest)) = api.get_opt(&name).await
+        && let Some(phase) = latest.status.as_ref().and_then(|s| s.phase)
+    {
+        ctx.metrics.set_restore_phase(&ns, &name, phase);
+    }
 }
 
 async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
@@ -206,6 +244,9 @@ async fn drive_direct_restore(
     if let Some(job) = job_api.get_opt(name).await? {
         return match crate::backup::job_terminal_state(&job) {
             Some(true) => {
+                if let Some(secs) = restore_job_duration_seconds(&job) {
+                    ctx.metrics.set_restore_duration(namespace, name, secs);
+                }
                 io::patch_status(api, name, serde_json::json!({ "phase": "Completed" })).await?;
                 Ok(Action::requeue(std::time::Duration::from_secs(600)))
             }
@@ -232,7 +273,7 @@ async fn drive_direct_restore(
         }
     };
     let target_path = "/restore".to_string();
-    let creds = io::repo_credentials(&repo.spec.encryption);
+    let creds = io::repo_credentials(&repo.encryption);
     let identity = MoverIdentity {
         username: "restore".into(),
         hostname: namespace.to_string(),
@@ -266,9 +307,9 @@ async fn drive_direct_restore(
         options: MoverOptions::default(),
     };
     let owner = io::owner_ref_for(restore, "Restore")?;
-    let repo_pvc = io::filesystem_repo_pvc(&repo.spec.backend).map(|claim_name| PvcMount {
+    let repo_pvc = io::filesystem_repo_pvc(&repo.backend).map(|claim_name| PvcMount {
         claim_name,
-        mount_path: io::filesystem_repo_path(&repo.spec.backend).unwrap_or_default(),
+        mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
         read_only: true,
     });
     let inputs = MoverJobInputs {
@@ -291,6 +332,7 @@ async fn drive_direct_restore(
         repo_pvc,
         creds_secret: Some(&creds.secret_name),
         service_account: ctx.mover_service_account.as_deref(),
+        otlp_env: ctx.mover_otlp_env.clone(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -362,15 +404,15 @@ async fn resolve_snapshot(
 /// newest-first.
 async fn list_for_identity(
     ctx: &Context,
-    repo: &Repository,
+    repo: &ResolvedRepository,
     namespace: &str,
     username: &str,
     hostname: &str,
     source_path: Option<&str>,
 ) -> Result<Vec<kopiur_kopia::SnapshotListEntry>> {
     use kopiur_api::backend::Backend;
-    let creds = io::repo_credentials(&repo.spec.encryption);
-    match &repo.spec.backend {
+    let creds = io::repo_credentials(&repo.encryption);
+    match &repo.backend {
         Backend::Filesystem(fs) => {
             let password = io::read_repo_password(&ctx.client, namespace, &creds).await?;
             let client = ctx.kopia.build([("KOPIA_PASSWORD".to_string(), password)]);
@@ -407,14 +449,11 @@ async fn resolve_restore_repository(
     ctx: &Context,
     restore: &Restore,
     namespace: &str,
-) -> Result<Repository> {
+) -> Result<ResolvedRepository> {
+    // Explicit `spec.repository` wins. Honors `kind` (namespaced vs.
+    // ClusterRepository) via the shared resolver (ADR §5.5).
     if let Some(rref) = &restore.spec.repository {
-        let ns = rref.namespace.as_deref().unwrap_or(namespace);
-        let api: Api<Repository> = Api::namespaced(ctx.client.clone(), ns);
-        return api
-            .get_opt(&rref.name)
-            .await?
-            .ok_or_else(|| Error::MissingDependency(format!("Repository {ns}/{}", rref.name)));
+        return io::resolve_repository_ref(&ctx.client, rref, namespace).await;
     }
     // FromConfig: resolve via the BackupConfig's repository.
     if let RestoreSource::FromConfig(c) = &restore.spec.source {
@@ -425,21 +464,15 @@ async fn resolve_restore_repository(
             .get_opt(&c.name)
             .await?
             .ok_or_else(|| Error::MissingDependency(format!("BackupConfig {cfg_ns}/{}", c.name)))?;
-        let rref = &config.spec.repository;
-        let ns = rref.namespace.as_deref().unwrap_or(cfg_ns);
-        let api: Api<Repository> = Api::namespaced(ctx.client.clone(), ns);
-        return api
-            .get_opt(&rref.name)
-            .await?
-            .ok_or_else(|| Error::MissingDependency(format!("Repository {ns}/{}", rref.name)));
+        return io::resolve_repository_ref(&ctx.client, &config.spec.repository, cfg_ns).await;
     }
     Err(Error::Validation(
         "restore requires spec.repository (or a fromConfig source)".into(),
     ))
 }
 
-/// Map a Repository backend to the mover connect spec for a restore.
-fn restore_connect(repo: &Repository) -> Result<RepositoryConnect> {
+/// Map a resolved repository backend to the mover connect spec for a restore.
+fn restore_connect(repo: &ResolvedRepository) -> Result<RepositoryConnect> {
     crate::backup::repository_connect_pub(repo)
 }
 
@@ -465,6 +498,33 @@ mod tests {
     use super::*;
     use kopiur_api::common::ObjectRef;
     use kopiur_api::restore::{FromConfig, IdentitySource};
+
+    fn job_with_times(start: Option<&str>, end: Option<&str>) -> k8s_openapi::api::batch::v1::Job {
+        use k8s_openapi::api::batch::v1::{Job, JobStatus};
+        let parse = |s: &str| serde_json::from_value(serde_json::json!(s)).unwrap();
+        Job {
+            status: Some(JobStatus {
+                start_time: start.map(parse),
+                completion_time: end.map(parse),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn restore_duration_is_completion_minus_start() {
+        let job = job_with_times(Some("2024-01-01T00:00:00Z"), Some("2024-01-01T00:01:30Z"));
+        assert_eq!(restore_job_duration_seconds(&job), Some(90));
+        // Missing completion → None (still running).
+        assert_eq!(
+            restore_job_duration_seconds(&job_with_times(Some("2024-01-01T00:00:00Z"), None)),
+            None
+        );
+        // Negative interval (clock skew) → None.
+        let skew = job_with_times(Some("2024-01-01T00:01:00Z"), Some("2024-01-01T00:00:00Z"));
+        assert_eq!(restore_job_duration_seconds(&skew), None);
+    }
 
     fn backup_ref() -> RestoreSource {
         RestoreSource::BackupRef(ObjectRef {

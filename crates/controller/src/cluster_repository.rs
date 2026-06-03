@@ -15,7 +15,7 @@ use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
 use kopiur_api::backend::Backend;
-use kopiur_api::{ClusterRepository, validate};
+use kopiur_api::{ClusterRepository, RepositoryPhase, validate};
 use kopiur_kopia::ConnectSpec;
 
 use crate::context::Context;
@@ -46,7 +46,45 @@ pub async fn reconcile(repo: Arc<ClusterRepository>, ctx: Arc<Context>) -> Resul
     let result = reconcile_inner(&repo, &ctx).await;
     ctx.metrics
         .record_reconcile("ClusterRepository", start.elapsed().as_secs_f64());
+    record_cluster_repository_status_metrics(&repo, &ctx, result.is_ok()).await;
     result
+}
+
+/// Mirror a ClusterRepository's phase + catalog gauges (cluster-scoped, so the
+/// `namespace` label is empty). Zeroes the phase on deletion and re-reads the
+/// freshest status on success — see the Backup equivalent for the rationale.
+async fn record_cluster_repository_status_metrics(
+    repo: &ClusterRepository,
+    ctx: &Context,
+    ok: bool,
+) {
+    let name = repo.name_any();
+    if repo.metadata.deletion_timestamp.is_some() {
+        ctx.metrics
+            .clear_phase::<RepositoryPhase>("ClusterRepository", "", &name);
+        return;
+    }
+    if !ok {
+        return;
+    }
+    let api: Api<ClusterRepository> = Api::all(ctx.client.clone());
+    if let Ok(Some(latest)) = api.get_opt(&name).await
+        && let Some(status) = latest.status.as_ref()
+    {
+        if let Some(phase) = status.phase {
+            ctx.metrics
+                .set_repository_phase("ClusterRepository", "", &name, phase);
+        }
+        let snapshots = status.storage_stats.as_ref().and_then(|s| s.snapshot_count);
+        let discovered = status
+            .catalog
+            .as_ref()
+            .and_then(|c| c.discovered_backup_count);
+        if snapshots.is_some() || discovered.is_some() {
+            ctx.metrics
+                .set_repo_catalog("", &name, snapshots, discovered);
+        }
+    }
 }
 
 async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Action> {

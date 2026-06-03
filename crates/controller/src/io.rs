@@ -19,7 +19,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use kopiur_api::backend::Backend;
-use kopiur_api::common::Encryption;
+use kopiur_api::common::{Encryption, RepositoryKind, RepositoryRef};
+use kopiur_api::{ClusterRepository, Repository};
 
 use crate::consts::API_VERSION;
 use crate::error::{Error, Result};
@@ -145,6 +146,93 @@ pub struct RepoCredentials {
     pub namespace: Option<String>,
 }
 
+/// The repository surface a backup/restore/maintenance run needs, resolved from
+/// either a namespaced [`Repository`] or a cluster-scoped [`ClusterRepository`].
+///
+/// Both CRDs expose the same `backend`/`encryption` shape; the reconcilers only
+/// need those two fields to connect to kopia, so we normalize once at resolution
+/// time. The discriminated [`RepositoryKind`] is `match`ed exhaustively in
+/// [`resolve_repository_ref`] (ADR §5.5) — a future variant cannot compile until
+/// it is handled here.
+#[derive(Debug, Clone)]
+pub struct ResolvedRepository {
+    pub backend: Backend,
+    pub encryption: Encryption,
+}
+
+/// Which API a [`RepositoryRef`] resolves against, derived purely from `kind`.
+///
+/// Extracting this from the IO lets the namespaced-vs-cluster decision be
+/// unit-tested without a cluster. It is the regression guard for the class of
+/// bug where a `kind: ClusterRepository` ref silently fell through to a
+/// namespaced `Repository` lookup and produced `missing dependency: Repository
+/// <ns>/<name>` for cluster-backed `BackupConfig`s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoLookup {
+    /// Namespaced `Repository` get in `namespace`.
+    Namespaced { namespace: String, name: String },
+    /// Cluster-scoped `ClusterRepository` get (`Api::all`).
+    Cluster { name: String },
+}
+
+/// Pure mapping from a consumer's [`RepositoryRef`] (+ the default namespace to
+/// use when the ref omits one) to the API lookup it implies. Exhaustive over
+/// [`RepositoryKind`] (ADR §5.5): a new variant cannot compile until handled.
+pub fn repo_lookup(repo_ref: &RepositoryRef, default_ns: &str) -> RepoLookup {
+    match repo_ref.kind {
+        RepositoryKind::Repository => RepoLookup::Namespaced {
+            namespace: repo_ref
+                .namespace
+                .as_deref()
+                .unwrap_or(default_ns)
+                .to_string(),
+            name: repo_ref.name.clone(),
+        },
+        // Cluster-scoped: `ref.namespace` is forbidden (webhook-enforced) and
+        // deliberately ignored here.
+        RepositoryKind::ClusterRepository => RepoLookup::Cluster {
+            name: repo_ref.name.clone(),
+        },
+    }
+}
+
+/// Resolve a consumer CR's [`RepositoryRef`] to its backend + encryption,
+/// honoring `kind` via [`repo_lookup`]:
+///
+/// - [`RepositoryKind::Repository`]: namespaced lookup, cross-namespace allowed
+///   via `ref.namespace` (defaulting to `default_ns`, usually the consumer's
+///   namespace).
+/// - [`RepositoryKind::ClusterRepository`]: cluster-scoped lookup (`Api::all`).
+pub async fn resolve_repository_ref(
+    client: &kube::Client,
+    repo_ref: &RepositoryRef,
+    default_ns: &str,
+) -> Result<ResolvedRepository> {
+    match repo_lookup(repo_ref, default_ns) {
+        RepoLookup::Namespaced { namespace, name } => {
+            let api: Api<Repository> = Api::namespaced(client.clone(), &namespace);
+            let repo = api.get_opt(&name).await?.ok_or_else(|| {
+                Error::MissingDependency(format!("Repository {namespace}/{name}"))
+            })?;
+            Ok(ResolvedRepository {
+                backend: repo.spec.backend,
+                encryption: repo.spec.encryption,
+            })
+        }
+        RepoLookup::Cluster { name } => {
+            let api: Api<ClusterRepository> = Api::all(client.clone());
+            let repo = api
+                .get_opt(&name)
+                .await?
+                .ok_or_else(|| Error::MissingDependency(format!("ClusterRepository {name}")))?;
+            Ok(ResolvedRepository {
+                backend: repo.spec.backend,
+                encryption: repo.spec.encryption,
+            })
+        }
+    }
+}
+
 /// Resolve the credentials Secret reference from a repository's encryption block.
 pub fn repo_credentials(enc: &Encryption) -> RepoCredentials {
     let r = &enc.password_secret_ref;
@@ -252,6 +340,70 @@ mod tests {
     use super::*;
     use kopiur_api::backend::FilesystemBackend;
     use kopiur_api::common::SecretKeyRef;
+
+    fn ref_of(kind: RepositoryKind, name: &str, namespace: Option<&str>) -> RepositoryRef {
+        RepositoryRef {
+            kind,
+            name: name.into(),
+            namespace: namespace.map(str::to_string),
+        }
+    }
+
+    // --- repo_lookup: the regression guard for "ClusterRepository references are
+    // ignored" (controller logged `missing dependency: Repository <ns>/<name>`
+    // for a `kind: ClusterRepository` config). A ClusterRepository ref MUST map
+    // to a cluster-scoped lookup, never a namespaced Repository get. ---
+
+    #[test]
+    fn repo_lookup_namespaced_uses_ref_namespace() {
+        let r = ref_of(RepositoryKind::Repository, "nas", Some("backups"));
+        assert_eq!(
+            repo_lookup(&r, "consumer-ns"),
+            RepoLookup::Namespaced {
+                namespace: "backups".into(),
+                name: "nas".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn repo_lookup_namespaced_defaults_to_consumer_namespace() {
+        let r = ref_of(RepositoryKind::Repository, "nas", None);
+        assert_eq!(
+            repo_lookup(&r, "consumer-ns"),
+            RepoLookup::Namespaced {
+                namespace: "consumer-ns".into(),
+                name: "nas".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn repo_lookup_cluster_is_cluster_scoped_not_namespaced() {
+        // This is the bug the user hit: a config referencing
+        // `{ kind: ClusterRepository, name: hetzner }` was resolved as a
+        // namespaced Repository in the consumer's namespace and never found.
+        let r = ref_of(RepositoryKind::ClusterRepository, "hetzner", None);
+        assert_eq!(
+            repo_lookup(&r, "selfhosted"),
+            RepoLookup::Cluster {
+                name: "hetzner".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn repo_lookup_cluster_ignores_a_stray_namespace() {
+        // Even if `namespace` somehow slips through (webhook normally forbids it),
+        // a ClusterRepository ref still resolves cluster-scoped — never namespaced.
+        let r = ref_of(RepositoryKind::ClusterRepository, "hetzner", Some("oops"));
+        assert_eq!(
+            repo_lookup(&r, "selfhosted"),
+            RepoLookup::Cluster {
+                name: "hetzner".into(),
+            }
+        );
+    }
 
     #[test]
     fn repo_credentials_defaults_password_key() {

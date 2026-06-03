@@ -1,0 +1,12 @@
+//! The single place that names every environment variable the mover reads.
+//!
+//! Exposed from the library (not just `main.rs`) because the controller stamps
+//! these onto the mover `Job` it creates — both sides reference the same
+//! constant so the controller↔mover env contract can't drift.
+
+/// Path to the mounted work-spec JSON (the controller↔mover contract). The
+/// controller sets this on the Job; the mover reads it (falling back to argv[1]).
+pub const WORK_SPEC_PATH: &str = "KOPIUR_WORK_SPEC_PATH";
+
+/// Optional override for the `kopia` binary path (defaults to `kopia` on PATH).
+pub const KOPIA_BINARY: &str = "KOPIUR_KOPIA_BINARY";

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/api",
     "crates/kopia",
+    "crates/telemetry",
     "crates/webhook",
     "crates/controller",
     "crates/mover",
@@ -23,6 +24,7 @@ authors = ["kopiur contributors"]
 kopiur-api = { path = "crates/api" }
 kopiur-kopia = { path = "crates/kopia" }
 kopiur-mover = { path = "crates/mover" }
+kopiur-telemetry = { path = "crates/telemetry" }
 
 # Kubernetes / controller-runtime
 kube = { version = "3.1", default-features = false }
@@ -49,6 +51,27 @@ json-patch = "4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 prometheus = "0.14"
+# OpenTelemetry / OTLP. Matrix confirmed to compile on Rust 1.95 with the
+# prometheus 0.14 pin above (opentelemetry-prometheus 0.31 shares it). OTLP
+# export is runtime/env-gated; these add no behavior unless an endpoint is set.
+opentelemetry = { version = "0.31", features = ["metrics", "trace", "logs"] }
+opentelemetry_sdk = { version = "0.31", features = [
+    "rt-tokio",
+    "metrics",
+    "trace",
+    "logs",
+    "experimental_metrics_custom_reader",
+] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = [
+    "grpc-tonic",
+    "trace",
+    "metrics",
+    "logs",
+] }
+opentelemetry-prometheus = "0.31"
+opentelemetry-appender-tracing = "0.31"
+tracing-opentelemetry = "0.32"
+url = "2"
 
 # Scheduling / templating
 croner = "2"

@@ -23,13 +23,9 @@ use kopiur_kopia::{KopiaClient, KopiaError};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
+use kopiur_mover::env::{KOPIA_BINARY, WORK_SPEC_PATH};
 use kopiur_mover::status::StatusUpdate;
 use kopiur_mover::workspec::{self, MoverWorkSpec, Operation};
-
-/// Env var naming the work-spec file path (downward-API/ConfigMap mount).
-const WORK_SPEC_ENV: &str = "KOPIUR_WORK_SPEC_PATH";
-/// Env var overriding the kopia binary path (defaults to `kopia` on PATH).
-const KOPIA_BINARY_ENV: &str = "KOPIUR_KOPIA_BINARY";
 
 fn main() -> std::process::ExitCode {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -43,7 +39,11 @@ fn main() -> std::process::ExitCode {
 }
 
 async fn run() -> Result<()> {
-    init_tracing();
+    // Tracing subscriber (fmt + OTLP traces/logs when configured). The mover is a
+    // short-lived Job, so OTLP push is the right model for its metrics — we flush
+    // both before returning.
+    let _telemetry = kopiur_telemetry::init_tracing("kopiur-mover")?;
+    let metrics = MoverMetrics::new();
 
     // Install the process-level rustls CryptoProvider before building any kube
     // client (the rustls-tls backend panics without it). Idempotent.
@@ -52,8 +52,9 @@ async fn run() -> Result<()> {
     let spec_path = work_spec_path().context("locating work spec")?;
     let spec = load_work_spec(&spec_path)
         .with_context(|| format!("loading work spec from {}", spec_path.display()))?;
+    let operation = spec.operation.kind_str().to_string();
     info!(
-        operation = spec.operation.kind_str(),
+        operation = %operation,
         target = %spec.target_ref.name,
         namespace = %spec.target_ref.namespace,
         "loaded work spec"
@@ -65,25 +66,34 @@ async fn run() -> Result<()> {
     // running outside a cluster), we log instead of failing the operation.
     let reporter = StatusReporter::try_new(&spec).await;
 
-    // Connect to the repository first (short, idempotent).
-    if let Err(e) = client
+    let started = std::time::Instant::now();
+    // Connect to the repository (short, idempotent), then run the operation with
+    // periodic progress reporting.
+    let result = match client
         .repository_connect(&spec.repository.to_connect_spec())
         .await
     {
-        return terminal_failure(&reporter, &e).await;
-    }
-
-    // Run the operation with periodic progress reporting.
-    let outcome = execute(&client, &spec, &reporter).await;
-
-    match outcome {
-        Ok(update) => {
-            reporter.report(&update).await;
-            info!(phase = %update.phase, "operation succeeded");
-            Ok(())
-        }
         Err(e) => terminal_failure(&reporter, &e).await,
-    }
+        Ok(()) => match execute(&client, &spec, &reporter).await {
+            Ok(update) => {
+                reporter.report(&update).await;
+                info!(phase = %update.phase, "operation succeeded");
+                Ok(())
+            }
+            Err(e) => terminal_failure(&reporter, &e).await,
+        },
+    };
+
+    // Push the operation outcome metric, then flush OTLP before the Job exits.
+    let outcome = if result.is_ok() {
+        "succeeded"
+    } else {
+        "failed"
+    };
+    metrics.record(&operation, outcome, started.elapsed().as_secs_f64());
+    metrics.shutdown();
+
+    result
 }
 
 /// Execute the work-spec operation, emitting periodic "Running" updates while
@@ -173,25 +183,57 @@ impl std::fmt::Display for CloneableKopiaError {
 
 impl std::error::Error for CloneableKopiaError {}
 
-fn init_tracing() {
-    // Best-effort: ignore an error if a global subscriber is already set (e.g.
-    // in tests).
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
+/// Mover metrics, pushed over OTLP (when configured) before the Job exits. The
+/// Prometheus pull endpoint is irrelevant for a short-lived Job, so this only
+/// adds value with `OTEL_EXPORTER_OTLP_ENDPOINT` set.
+struct MoverMetrics {
+    provider: kopiur_telemetry::MetricsProvider,
+    operations: opentelemetry::metrics::Counter<u64>,
+    duration: opentelemetry::metrics::Histogram<f64>,
+}
+
+impl MoverMetrics {
+    fn new() -> Self {
+        let provider = kopiur_telemetry::MetricsProvider::new("kopiur-mover");
+        let m = provider.meter();
+        let operations = m
+            .u64_counter("kopiur_mover_operations")
+            .with_description("Total mover operations by kind and result.")
+            .build();
+        let duration = m
+            .f64_histogram("kopiur_mover_operation_duration_seconds")
+            .with_description("Mover operation wall-clock duration in seconds.")
+            .build();
+        MoverMetrics {
+            provider,
+            operations,
+            duration,
+        }
+    }
+
+    fn record(&self, operation: &str, result: &str, seconds: f64) {
+        use opentelemetry::KeyValue;
+        let attrs = [
+            KeyValue::new("operation", operation.to_string()),
+            KeyValue::new("result", result.to_string()),
+        ];
+        self.operations.add(1, &attrs);
+        self.duration.record(seconds, &attrs);
+    }
+
+    fn shutdown(&self) {
+        self.provider.shutdown();
+    }
 }
 
 fn work_spec_path() -> Result<PathBuf> {
     if let Some(arg) = std::env::args().nth(1) {
         return Ok(PathBuf::from(arg));
     }
-    if let Ok(env) = std::env::var(WORK_SPEC_ENV) {
+    if let Ok(env) = std::env::var(WORK_SPEC_PATH) {
         return Ok(PathBuf::from(env));
     }
-    anyhow::bail!("no work spec path: pass it as the first arg or set {WORK_SPEC_ENV}")
+    anyhow::bail!("no work spec path: pass it as the first arg or set {WORK_SPEC_PATH}")
 }
 
 fn load_work_spec(path: &PathBuf) -> Result<MoverWorkSpec> {
@@ -202,7 +244,7 @@ fn load_work_spec(path: &PathBuf) -> Result<MoverWorkSpec> {
 
 fn build_client(spec: &MoverWorkSpec) -> KopiaClient {
     let mut builder = KopiaClient::builder();
-    if let Ok(bin) = std::env::var(KOPIA_BINARY_ENV) {
+    if let Ok(bin) = std::env::var(KOPIA_BINARY) {
         builder = builder.binary(bin);
     }
     // Suppress the GitHub update check globally.

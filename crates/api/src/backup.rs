@@ -71,6 +71,27 @@ pub enum BackupPhase {
     Discovered,
 }
 
+impl crate::common::PhaseLabel for BackupPhase {
+    const ALL: &'static [Self] = &[
+        Self::Pending,
+        Self::Running,
+        Self::Succeeded,
+        Self::Failed,
+        Self::Deleting,
+        Self::Discovered,
+    ];
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Running => "Running",
+            Self::Succeeded => "Succeeded",
+            Self::Failed => "Failed",
+            Self::Deleting => "Deleting",
+            Self::Discovered => "Discovered",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupStatus {
@@ -169,8 +190,25 @@ pub struct ResolvedSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::PhaseLabel;
     use crate::testutil::from_yaml;
     use kube::core::CustomResourceExt;
+
+    #[test]
+    fn backup_phase_all_covers_every_variant_uniquely() {
+        // Guards the enumerate-and-reset contract: every variant is in ALL with
+        // a unique, non-empty label. A new variant added without updating ALL
+        // makes this fail (and `label`'s exhaustive match won't compile at all).
+        let labels: Vec<&str> = BackupPhase::ALL.iter().map(|p| p.label()).collect();
+        assert_eq!(BackupPhase::ALL.len(), 6);
+        assert!(labels.iter().all(|l| !l.is_empty()));
+        let mut sorted = labels.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), labels.len(), "phase labels must be unique");
+        // Default is reachable through ALL.
+        assert!(BackupPhase::ALL.contains(&BackupPhase::default()));
+    }
 
     #[test]
     fn backup_crd_metadata_is_correct() {

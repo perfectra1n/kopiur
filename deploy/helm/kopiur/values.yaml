@@ -145,6 +145,15 @@ webhook:
   listenAddr: "0.0.0.0:8443"
   # -- Port the webhook container listens on (must match listenAddr above).
   containerPort: 8443
+  # The webhook serves /metrics on its TLS port (kopiur_webhook_admission_total).
+  serviceMonitor:
+    # -- Create a ServiceMonitor scraping the webhook's /metrics over HTTPS.
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    # -- The webhook serves a self-signed cert, so skip verification by default.
+    insecureSkipVerify: true
   resources:
     requests:
       cpu: 25m
@@ -202,6 +211,49 @@ metrics:
     # -- Relabelings / metricRelabelings passed through verbatim.
     relabelings: []
     metricRelabelings: []
+  prometheusRule:
+    # -- Create a Prometheus-Operator PrometheusRule with kopiur alerts.
+    enabled: false
+    # -- Extra labels (e.g. to match your Prometheus ruleSelector).
+    labels: {}
+    # -- Age (seconds) after which a BackupConfig's last success is "stale".
+    backupStaleAfterSeconds: 172800 # 48h
+
+# -- Grafana dashboard for the kopiur fleet. Shipped as a ConfigMap labeled for
+# the Grafana sidecar to auto-discover; the same JSON also lives in
+# deploy/dashboards/kopiur.json for manual import.
+grafanaDashboard:
+  # -- Create the dashboard ConfigMap.
+  enabled: false
+  # -- Label the Grafana sidecar watches for (key: value). Adjust to your stack.
+  label: grafana_dashboard
+  labelValue: "1"
+  # -- Annotation setting the Grafana folder for the dashboard (optional).
+  folderAnnotation: ""
+  folder: ""
+
+# =============================================================================
+# OpenTelemetry (OTLP) — traces, logs, and a metrics push, off by default
+# =============================================================================
+# When enabled, the controller, webhook, and mover Jobs export OTLP to the
+# configured collector (the controller passes the same OTEL_* env to movers).
+# Metrics are ALSO always available via the Prometheus /metrics pull endpoint;
+# OTLP just adds a push path plus traces and logs. Env var names match
+# crates/telemetry/src/env.rs.
+observability:
+  otlp:
+    # -- Enable OTLP export (sets OTEL_EXPORTER_OTLP_ENDPOINT on all components).
+    enabled: false
+    # -- Collector gRPC endpoint. Required when enabled. Only gRPC is compiled in.
+    endpoint: "http://otel-collector.observability.svc:4317"
+    # -- OTEL_EXPORTER_OTLP_PROTOCOL (only "grpc" is supported by this build).
+    protocol: "grpc"
+    # -- OTEL_EXPORTER_OTLP_HEADERS, e.g. "authorization=Bearer xyz". Empty to omit.
+    headers: ""
+    # -- Fail-fast on telemetry misconfiguration instead of degrading to fmt+pull.
+    strict: false
+    # -- Extra raw env (e.g. OTEL_TRACES_SAMPLER) added to every component.
+    extraEnv: []
 
 # =============================================================================
 # Pod security (shared defaults; per-component sections may override)

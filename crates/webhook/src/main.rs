@@ -17,14 +17,16 @@ use tokio::signal;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
+    // Tracing subscriber (fmt + OTLP traces/logs when configured). Held for the
+    // process lifetime so buffered OTLP data flushes on shutdown.
+    let _telemetry = kopiur_telemetry::init_tracing("kopiur-webhook")?;
 
     // Install the ring crypto provider for rustls (required before building any
     // rustls ServerConfig). Ignore the error if a provider is already installed.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let addr: SocketAddr = std::env::var("KOPIUR_WEBHOOK_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:8443".to_string())
+    let addr: SocketAddr = std::env::var(kopiur_webhook::config::WEBHOOK_ADDR_ENV)
+        .unwrap_or_else(|_| kopiur_webhook::config::DEFAULT_ADDR.to_string())
         .parse()?;
 
     // Best-effort kube client. If unavailable (no kubeconfig / not in-cluster), the
@@ -45,8 +47,8 @@ async fn main() -> anyhow::Result<()> {
 
     let router = app(client);
 
-    let cert = std::env::var("KOPIUR_WEBHOOK_TLS_CERT").ok();
-    let key = std::env::var("KOPIUR_WEBHOOK_TLS_KEY").ok();
+    let cert = std::env::var(kopiur_webhook::config::WEBHOOK_TLS_CERT_ENV).ok();
+    let key = std::env::var(kopiur_webhook::config::WEBHOOK_TLS_KEY_ENV).ok();
 
     match (cert, key) {
         (Some(cert), Some(key)) => {
@@ -63,15 +65,6 @@ async fn main() -> anyhow::Result<()> {
             serve_http(addr, router).await
         }
     }
-}
-
-fn init_tracing() {
-    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer())
-        .init();
 }
 
 async fn serve_http(addr: SocketAddr, router: axum::Router) -> anyhow::Result<()> {

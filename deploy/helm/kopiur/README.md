@@ -108,8 +108,25 @@ GitOps), set `installCRDs: false` and apply `deploy/crds/*.yaml` out of band.
 | `metrics.port` | `8080` | Metrics Service port. |
 | `metrics.serviceMonitor.enabled` | `false` | Create a Prometheus-Operator ServiceMonitor. |
 | `metrics.serviceMonitor.{interval,scrapeTimeout,labels,...}` | see values.yaml | ServiceMonitor tuning. |
+| `metrics.prometheusRule.enabled` | `false` | Create a PrometheusRule of kopiur alerts. |
+| `grafanaDashboard.enabled` | `false` | Ship the Grafana dashboard as a sidecar-labeled ConfigMap. |
+| `observability.otlp.enabled` | `false` | Export OTLP traces/logs/metrics from all components. |
+| `observability.otlp.endpoint` | `…:4317` | Collector gRPC endpoint (required when enabled; gRPC only). |
+| `observability.otlp.{protocol,headers,strict,extraEnv}` | see values.yaml | OTLP tuning (env names match `crates/telemetry/src/env.rs`). |
+| `webhook.serviceMonitor.enabled` | `false` | Scrape the webhook's `/metrics` over HTTPS. |
 | `podSecurityContext` | runAsNonRoot, uid/gid/fsGroup 65534, RuntimeDefault | Pod security (ADR §4.9/§4.11). |
 | `securityContext` | drop ALL, no privilege escalation, read-only rootfs | Container security. |
+
+### Observability
+
+Metrics are always available on the controller's `/metrics` (also `/healthz`,
+`/readyz`); enable `metrics.serviceMonitor` to scrape them. Turning on
+`observability.otlp` additionally exports **traces, logs, and a metrics push**
+over OTLP from the controller, webhook, and mover Jobs (the controller passes the
+`OTEL_*` env through to the Jobs it creates) — set `observability.otlp.endpoint`
+to your collector's gRPC port. All metrics are under the `kopiur_` namespace; see
+ADR §4.13 for the full list. The dashboard JSON also lives at
+`deploy/dashboards/kopiur.json` for manual Grafana import.
 
 ## Verify a render locally
 

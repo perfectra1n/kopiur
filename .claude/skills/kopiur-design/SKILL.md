@@ -83,3 +83,32 @@ scripts/with-kind.sh cargo test --workspace --features integration -- --include-
   schema-generation smoke test; it panics if an enum is mis-encoded).
 - Delegating a milestone to a subagent is encouraged when it's well-specified,
   but always re-run `cargo test`/`clippy` yourself before trusting the result.
+
+## Every bug fix ships with a regression test (non-negotiable)
+
+When you fix a bug — especially one a user hit at runtime — you have NOT finished
+until a test would fail without your fix and passes with it. A fix without a test
+is an invitation for the same bug to return. Default to writing the test *first*
+(reproduce the failure), then fix.
+
+Pick the cheapest tier that actually exercises the broken path:
+
+1. **Hermetic unit test (preferred).** If the bug lives in a decision, extract that
+   decision into a pure function and unit-test it — the codebase's "thin IO over a
+   tested pure fn" idiom (ADR §5.2/§5.4). Example: the "ClusterRepository refs are
+   ignored" bug (controller resolved every `repository` ref as a namespaced
+   `Repository` regardless of `kind`) became `io::repo_lookup(&RepositoryRef, …) ->
+   RepoLookup` with unit tests asserting `kind: ClusterRepository` maps to a
+   cluster-scoped lookup, never a namespaced get. Runs in `cargo test`, no cluster.
+2. **e2e test for whole-pipeline bugs.** If the failure only shows up against a live
+   operator (a reconcile that never reaches `Succeeded`, a missing dependency, an
+   RBAC/SA gap, a dropped option), add a scenario to `crates/e2e/tests/lifecycle.rs`
+   that reproduces the *exact* user-visible symptom and asserts the success
+   condition (e.g. Backup reaching `Succeeded` with a real `kopiaSnapshotID`). Write
+   the test so it would have *timed out / failed* on the buggy code. See
+   `cluster_repository_backup_lifecycle` for the template.
+3. Integration tier (`#[ignore]` + `--features integration`) for API-server
+   interactions that don't need the mover images.
+
+Then record the bug + its guard in the `operator-bugs-fixed-by-e2e` auto-memory so
+the class of failure stays visible across sessions.

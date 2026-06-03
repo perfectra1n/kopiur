@@ -29,8 +29,9 @@ pub const DEFAULT_MOVER_IMAGE: &str = "ghcr.io/home-operations/kopiur-mover:v0.1
 pub const WORK_SPEC_MOUNT: &str = "/etc/kopiur";
 /// File name of the work spec within the mount.
 pub const WORK_SPEC_FILE: &str = "work-spec.json";
-/// Env var the mover reads for the work-spec path (matches the mover binary).
-pub const WORK_SPEC_ENV: &str = "KOPIUR_WORK_SPEC_PATH";
+/// Env var the mover reads for the work-spec path. Sourced from the mover
+/// crate's single definition so the controller↔mover contract can't drift.
+pub const WORK_SPEC_ENV: &str = kopiur_mover::env::WORK_SPEC_PATH;
 
 /// Defaults for the mover `Job`, sourced from `FailurePolicy` (ADR §4.10, G6).
 #[derive(Debug, Clone, Copy)]
@@ -101,6 +102,10 @@ pub struct MoverJobInputs<'a> {
     /// (which generally cannot patch `*/status`), so the controller should
     /// always supply one in a real deployment.
     pub service_account: Option<&'a str>,
+    /// Extra environment passed through to the mover container — used for the
+    /// `OTEL_EXPORTER_OTLP_*` config so mover telemetry reaches the collector.
+    /// `(name, value)` pairs; empty when OTLP is not configured.
+    pub otlp_env: Vec<(String, String)>,
 }
 
 /// The restricted-PSA-compatible default security context (§4.11/G16):
@@ -213,15 +218,29 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
         }]
     });
 
+    // Work-spec path env, plus any OTLP passthrough so mover telemetry exports
+    // to the same collector as the controller.
+    let mut env = vec![k8s_openapi::api::core::v1::EnvVar {
+        name: WORK_SPEC_ENV.to_string(),
+        value: Some(format!("{WORK_SPEC_MOUNT}/{WORK_SPEC_FILE}")),
+        value_from: None,
+    }];
+    env.extend(
+        inputs
+            .otlp_env
+            .iter()
+            .map(|(k, v)| k8s_openapi::api::core::v1::EnvVar {
+                name: k.clone(),
+                value: Some(v.clone()),
+                value_from: None,
+            }),
+    );
+
     let container = Container {
         name: "mover".to_string(),
         image: Some(inputs.image.to_string()),
         image_pull_policy: inputs.image_pull_policy.map(str::to_string),
-        env: Some(vec![k8s_openapi::api::core::v1::EnvVar {
-            name: WORK_SPEC_ENV.to_string(),
-            value: Some(format!("{WORK_SPEC_MOUNT}/{WORK_SPEC_FILE}")),
-            value_from: None,
-        }]),
+        env: Some(env),
         env_from,
         volume_mounts: Some(volume_mounts),
         resources: inputs.resources.clone(),
@@ -328,6 +347,7 @@ mod tests {
             repo_pvc: None,
             creds_secret: None,
             service_account: Some("kopiur-operator"),
+            otlp_env: Vec::new(),
         }
     }
 

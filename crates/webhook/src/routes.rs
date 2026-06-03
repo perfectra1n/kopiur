@@ -17,10 +17,12 @@
 //! rather than a bare HTTP 500, so the API server gets a structured rejection.
 
 use crate::handlers;
+use crate::metrics::WebhookMetrics;
 use axum::{
     Router,
     extract::State,
     http::StatusCode,
+    http::header::CONTENT_TYPE,
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
@@ -34,6 +36,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct AppState {
     pub client: Option<Client>,
+    pub metrics: Arc<WebhookMetrics>,
 }
 
 /// Build the webhook router.
@@ -43,18 +46,30 @@ pub struct AppState {
 /// when no kubeconfig is available) — tenancy checks then deny with a fail-closed
 /// reason, while all pure validation/defaulting still runs.
 pub fn app(client: Option<Client>) -> Router {
-    let state = Arc::new(AppState { client });
+    let state = Arc::new(AppState {
+        client,
+        metrics: Arc::new(WebhookMetrics::new()),
+    });
     Router::new()
         .route("/admission", post(admission))
         .route("/validate", post(admission))
         .route("/mutate", post(admission))
         .route("/healthz", get(healthz))
         .route("/readyz", get(healthz))
+        .route("/metrics", get(metrics))
         .with_state(state)
 }
 
 async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok")
+}
+
+/// Prometheus exposition for the webhook's admission metrics.
+async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "text/plain; version=0.0.4")],
+        state.metrics.gather(),
+    )
 }
 
 /// The single admission handler: parse the review, dispatch on `kind`, respond.
@@ -77,6 +92,7 @@ async fn admission(
     };
 
     let resp = handlers::dispatch(&req, state.client.as_ref()).await;
+    state.metrics.record(&req.kind.kind, resp.allowed);
     Json(resp.into_review()).into_response()
 }
 

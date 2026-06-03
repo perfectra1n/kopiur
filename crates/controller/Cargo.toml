@@ -12,6 +12,7 @@ authors.workspace = true
 kopiur-api = { workspace = true }
 kopiur-kopia = { workspace = true }
 kopiur-mover = { workspace = true }
+kopiur-telemetry = { workspace = true }
 kube = { workspace = true, features = ["client", "runtime", "derive", "rustls-tls"] }
 rustls = { workspace = true }
 k8s-openapi = { workspace = true, features = ["v1_33"] }
@@ -22,7 +23,8 @@ tokio = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-prometheus = { workspace = true }
+opentelemetry = { workspace = true }
+axum = { workspace = true }
 croner = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }

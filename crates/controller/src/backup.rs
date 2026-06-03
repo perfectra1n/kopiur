@@ -25,7 +25,7 @@ use kube::{Api, Resource, ResourceExt};
 use kopiur_api::backend::Backend;
 use kopiur_api::backup::BackupPhase;
 use kopiur_api::common::ResolvedIdentity as ApiResolvedIdentity;
-use kopiur_api::{Backup, BackupConfig, DeletionPolicy, Origin, Repository};
+use kopiur_api::{Backup, BackupConfig, DeletionPolicy, Origin};
 use kopiur_mover::workspec::{
     BackupOp, MoverOptions, MoverWorkSpec, Operation, RepositoryConnect,
     ResolvedIdentity as MoverIdentity, SnapshotDeleteOp, TargetRef,
@@ -37,7 +37,7 @@ use crate::consts::{
 };
 use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
-use crate::io;
+use crate::io::{self, ResolvedRepository};
 use crate::jobs::{self, JobLimits, MoverJobInputs, PvcMount};
 
 /// The decision the deletion handler must execute. Derived purely from the
@@ -120,7 +120,58 @@ pub async fn reconcile(backup: Arc<Backup>, ctx: Arc<Context>) -> Result<Action>
     let result = reconcile_inner(&backup, &ctx).await;
     ctx.metrics
         .record_reconcile("Backup", start.elapsed().as_secs_f64());
+    record_backup_status_metrics(&backup, &ctx, result.is_ok()).await;
     result
+}
+
+/// Drive the Backup's phase + stats gauges. On deletion the phase series is
+/// zeroed so `kopiur_resource_phase{...} == 1` alerts clear before the CR is GC'd
+/// (OTel sync gauges can't drop a series). Otherwise, on a successful reconcile,
+/// the freshest status is re-read — the object handed to `reconcile` is the
+/// pre-reconcile watch-cache copy, so reading its status would lag one cycle.
+async fn record_backup_status_metrics(backup: &Backup, ctx: &Context, ok: bool) {
+    let (Some(ns), name) = (backup.namespace(), backup.name_any()) else {
+        return;
+    };
+    if backup.metadata.deletion_timestamp.is_some() {
+        ctx.metrics.clear_phase::<BackupPhase>("Backup", &ns, &name);
+        return;
+    }
+    if !ok {
+        return;
+    }
+    let api: Api<Backup> = Api::namespaced(ctx.client.clone(), &ns);
+    if let Ok(Some(latest)) = api.get_opt(&name).await {
+        record_backup_metrics(&latest, ctx);
+    }
+}
+
+/// Mirror the Backup's observed status onto the phase + stats gauges. Idempotent
+/// (it `set`s current values), so it is safe to call every reconcile.
+fn record_backup_metrics(backup: &Backup, ctx: &Context) {
+    let (Some(ns), name) = (backup.namespace(), backup.name_any()) else {
+        return;
+    };
+    let Some(status) = backup.status.as_ref() else {
+        return;
+    };
+    if let Some(phase) = status.phase {
+        ctx.metrics.set_backup_phase(&ns, &name, phase);
+    }
+    let size = status.stats.as_ref().and_then(|s| s.size_bytes);
+    // Only emit a file count when at least one category is present — otherwise
+    // "unknown" would masquerade as a measured zero.
+    let files = status.stats.as_ref().and_then(|s| {
+        match (s.files_new, s.files_modified, s.files_unchanged) {
+            (None, None, None) => None,
+            (a, b, c) => Some(a.unwrap_or(0) + b.unwrap_or(0) + c.unwrap_or(0)),
+        }
+    });
+    let duration = status.timing.as_ref().and_then(|t| t.duration_seconds);
+    if size.is_some() || files.is_some() || duration.is_some() {
+        ctx.metrics
+            .set_backup_stats(&ns, &name, size, files, duration);
+    }
 }
 
 async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
@@ -212,6 +263,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         repo_pvc,
         creds_secret: Some(&creds_secret),
         service_account: ctx.mover_service_account.as_deref(),
+        otlp_env: ctx.mover_otlp_env.clone(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -271,10 +323,7 @@ async fn handle_deletion(
             Ok(Action::await_change())
         }
         DeletionPlan::OrphanSnapshot => {
-            ctx.metrics
-                .orphaned_snapshots
-                .with_label_values(&[namespace])
-                .inc();
+            ctx.metrics.inc_orphaned_snapshot(namespace);
             let _ = ctx
                 .recorder
                 .publish(
@@ -318,10 +367,7 @@ async fn delete_snapshot_via_job(
                 return Ok(Action::await_change());
             }
             Some(false) => {
-                ctx.metrics
-                    .snapshot_deletion_failures
-                    .with_label_values(&[namespace])
-                    .inc();
+                ctx.metrics.inc_snapshot_deletion_failure(namespace);
                 io::patch_status(api, name, serde_json::json!({ "phase": "Deleting" })).await?;
                 tracing::warn!(backup = %name, "snapshot delete Job failed; backing off");
                 return Ok(Action::requeue(Duration::from_secs(60)));
@@ -334,7 +380,7 @@ async fn delete_snapshot_via_job(
     // and authenticate to the repository.
     let (config, repo) = resolve_recipe(ctx, backup, namespace).await?;
     let identity = resolve_identity_for(&config, namespace)?;
-    let creds = io::repo_credentials(&repo.spec.encryption);
+    let creds = io::repo_credentials(&repo.encryption);
     let work_spec = MoverWorkSpec {
         version: 1,
         operation: Operation::SnapshotDelete(SnapshotDeleteOp {
@@ -358,9 +404,9 @@ async fn delete_snapshot_via_job(
         "kopiur.home-operations.com/op".to_string(),
         "snapshot-delete".to_string(),
     );
-    let repo_pvc = io::filesystem_repo_pvc(&repo.spec.backend).map(|claim_name| PvcMount {
+    let repo_pvc = io::filesystem_repo_pvc(&repo.backend).map(|claim_name| PvcMount {
         claim_name,
-        mount_path: io::filesystem_repo_path(&repo.spec.backend).unwrap_or_default(),
+        mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
         read_only: false,
     });
     let inputs = MoverJobInputs {
@@ -378,6 +424,7 @@ async fn delete_snapshot_via_job(
         repo_pvc,
         creds_secret: Some(&creds.secret_name),
         service_account: ctx.mover_service_account.as_deref(),
+        otlp_env: ctx.mover_otlp_env.clone(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -415,9 +462,7 @@ async fn finalize_succeeded(
     };
     io::patch_status(api, name, status).await?;
     ctx.metrics
-        .backup_last_success_timestamp
-        .with_label_values(&[namespace, name])
-        .set(chrono::Utc::now().timestamp());
+        .set_backup_last_success(namespace, name, chrono::Utc::now().timestamp());
     tracing::info!(backup = %name, "backup Job succeeded; phase=Succeeded");
     Ok(())
 }
@@ -432,9 +477,9 @@ async fn resolve_succeeded_snapshot(
 ) -> Result<Option<(String, serde_json::Value)>> {
     let (config, repo) = resolve_recipe(ctx, backup, namespace).await?;
     let identity = resolve_identity_for(&config, namespace)?;
-    match &repo.spec.backend {
+    match &repo.backend {
         Backend::Filesystem(fs) => {
-            let creds = io::repo_credentials(&repo.spec.encryption);
+            let creds = io::repo_credentials(&repo.encryption);
             let password = io::read_repo_password(&ctx.client, namespace, &creds).await?;
             let client = ctx.kopia.build([("KOPIA_PASSWORD".to_string(), password)]);
             client
@@ -472,7 +517,7 @@ async fn resolve_recipe(
     ctx: &Context,
     backup: &Backup,
     namespace: &str,
-) -> Result<(BackupConfig, Repository)> {
+) -> Result<(BackupConfig, ResolvedRepository)> {
     let config_ref = backup
         .spec
         .config_ref
@@ -484,16 +529,11 @@ async fn resolve_recipe(
         Error::MissingDependency(format!("BackupConfig {cfg_ns}/{}", config_ref.name))
     })?;
 
-    let repo_ref = &config.spec.repository;
-    // NOTE: ClusterRepository-backed configs resolve their repo cluster-scoped;
-    // this e2e/core path implements the namespaced Repository case fully. A
-    // ClusterRepository lookup would use `Api::all` — left as a focused
-    // follow-up since the namespaced path exercises the full backup pipeline.
-    let repo_ns = repo_ref.namespace.as_deref().unwrap_or(cfg_ns);
-    let repo_api: Api<Repository> = Api::namespaced(ctx.client.clone(), repo_ns);
-    let repo = repo_api.get_opt(&repo_ref.name).await?.ok_or_else(|| {
-        Error::MissingDependency(format!("Repository {repo_ns}/{}", repo_ref.name))
-    })?;
+    // Honor `repository.kind`: namespaced `Repository` (cross-ns via
+    // `ref.namespace`, defaulting to the config's namespace) vs. cluster-scoped
+    // `ClusterRepository` (`Api::all`). The discriminated kind is matched
+    // exhaustively in the resolver (ADR §5.5).
+    let repo = io::resolve_repository_ref(&ctx.client, &config.spec.repository, cfg_ns).await?;
     Ok((config, repo))
 }
 
@@ -503,7 +543,7 @@ type BackupRun<'a> = (MoverWorkSpec, Option<PvcMount>, Option<PvcMount>, String)
 fn build_backup_run(
     _backup: &Backup,
     config: &BackupConfig,
-    repo: &Repository,
+    repo: &ResolvedRepository,
     namespace: &str,
     _name: &str,
 ) -> Result<BackupRun<'static>> {
@@ -523,7 +563,7 @@ fn build_backup_run(
         .clone()
         .unwrap_or_else(|| format!("/pvc/{pvc_name}"));
 
-    let creds = io::repo_credentials(&repo.spec.encryption);
+    let creds = io::repo_credentials(&repo.encryption);
 
     let work_spec = MoverWorkSpec {
         version: 1,
@@ -548,9 +588,9 @@ fn build_backup_run(
         mount_path: source_path,
         read_only: true,
     });
-    let repo_pvc = io::filesystem_repo_pvc(&repo.spec.backend).map(|claim_name| PvcMount {
+    let repo_pvc = io::filesystem_repo_pvc(&repo.backend).map(|claim_name| PvcMount {
         claim_name,
-        mount_path: io::filesystem_repo_path(&repo.spec.backend).unwrap_or_default(),
+        mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
         read_only: false,
     });
 
@@ -588,7 +628,7 @@ fn resolve_identity_for(config: &BackupConfig, namespace: &str) -> Result<MoverI
 }
 
 /// Public wrapper so the restore reconciler can reuse the backend mapping.
-pub(crate) fn repository_connect_pub(repo: &Repository) -> Result<RepositoryConnect> {
+pub(crate) fn repository_connect_pub(repo: &ResolvedRepository) -> Result<RepositoryConnect> {
     repository_connect(repo)
 }
 
@@ -602,8 +642,8 @@ pub(crate) fn mover_pull_policy_pub() -> Option<&'static str> {
 /// Exhaustive over every CRD `Backend` variant — a new backend cannot compile
 /// until it is wired through to the mover. Credentials never appear here; they
 /// flow to the mover Job as env vars from the referenced Secret (ADR §4.10).
-fn repository_connect(repo: &Repository) -> Result<RepositoryConnect> {
-    Ok(backend_to_repository_connect(&repo.spec.backend))
+fn repository_connect(repo: &ResolvedRepository) -> Result<RepositoryConnect> {
+    Ok(backend_to_repository_connect(&repo.backend))
 }
 
 /// Pure `Backend -> RepositoryConnect` translation (no kube types), so it is
@@ -684,7 +724,7 @@ fn job_limits(backup: &Backup) -> JobLimits {
 /// else `None` (cluster default). Controlled by the same env that picks the
 /// image so the two stay consistent.
 fn mover_pull_policy() -> Option<&'static str> {
-    if std::env::var("KOPIUR_MOVER_IMAGE").is_ok() {
+    if std::env::var(crate::config::MOVER_IMAGE_ENV).is_ok() {
         Some("IfNotPresent")
     } else {
         None
