@@ -3,32 +3,40 @@
 //! types.
 //!
 //! The pure mapping (`KopiaError → FailureBlock`, `SnapshotCreateResult →
-//! StatusStats`) is unit-testable with no cluster. The actual kube PATCH lives
-//! in a thin function (`patch_status`) gated so tests don't need a client.
+//! `kopiur_api::BackupStats`/`BackupTiming`) is unit-testable with no cluster.
+//! The stats/timing types are the CRD's own (not mover-local) so their field
+//! names cannot drift from the structural schema — a mismatch is silently pruned
+//! by the API server. The actual kube PATCH lives in a thin function gated so
+//! tests don't need a client.
 
 use chrono::{DateTime, Utc};
+use kopiur_api::{BackupStats, BackupTiming};
 use kopiur_kopia::{KopiaError, SnapshotCreateResult};
 use serde::{Deserialize, Serialize};
 
-/// Aggregate snapshot statistics surfaced on a successful `Backup.status`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StatusStats {
-    /// Total logical bytes in the snapshot.
-    pub total_bytes: u64,
-    /// Number of files in the snapshot.
-    pub file_count: u64,
-    /// Number of entries that failed during the walk.
-    pub error_count: u64,
+/// Map a kopia create result to the CRD `status.stats` shape (`BackupStats`).
+///
+/// We reuse the API type rather than a mover-local struct so the field names
+/// stay in lockstep with the `Backup` CRD's structural schema. They MUST match:
+/// the API server **prunes unknown status fields**, so a drifting name (the old
+/// mover-local `totalBytes`/`fileCount`) is silently dropped and `status.stats`
+/// lands as `{}` — which is exactly the bug that left `kopiur_backup_size_bytes`
+/// empty. kopia's snapshot-create summary reports the snapshot's total size and
+/// file count, mapped to `sizeBytes`/`filesNew`.
+fn stats_from_result(r: &SnapshotCreateResult) -> BackupStats {
+    BackupStats {
+        size_bytes: Some(r.total_bytes() as i64),
+        files_new: Some(r.file_count() as i64),
+        ..Default::default()
+    }
 }
 
-impl From<&SnapshotCreateResult> for StatusStats {
-    fn from(r: &SnapshotCreateResult) -> Self {
-        StatusStats {
-            total_bytes: r.total_bytes(),
-            file_count: r.file_count(),
-            error_count: r.error_count(),
-        }
+/// Map a kopia create result's start/end timestamps to the CRD `status.timing`.
+fn timing_from_result(r: &SnapshotCreateResult) -> BackupTiming {
+    BackupTiming {
+        start_time: Some(r.start_time.to_rfc3339()),
+        end_time: Some(r.end_time.to_rfc3339()),
+        duration_seconds: Some((r.end_time - r.start_time).num_seconds()),
     }
 }
 
@@ -103,9 +111,12 @@ pub struct StatusUpdate {
     /// The snapshot id, once known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
-    /// Stats, on success.
+    /// Timing, on success (CRD `status.timing`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stats: Option<StatusStats>,
+    pub timing: Option<BackupTiming>,
+    /// Stats, on success (CRD `status.stats`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<BackupStats>,
     /// Failure block, on terminal failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<FailureBlock>,
@@ -118,6 +129,7 @@ impl StatusUpdate {
             phase: MoverPhase::Running.as_str().to_string(),
             observed_at,
             snapshot_id: None,
+            timing: None,
             stats: None,
             failure: None,
         }
@@ -129,7 +141,8 @@ impl StatusUpdate {
             phase: MoverPhase::Succeeded.as_str().to_string(),
             observed_at,
             snapshot_id: Some(result.id.clone()),
-            stats: Some(StatusStats::from(result)),
+            timing: Some(timing_from_result(result)),
+            stats: Some(stats_from_result(result)),
             failure: None,
         }
     }
@@ -140,6 +153,7 @@ impl StatusUpdate {
             phase: MoverPhase::Succeeded.as_str().to_string(),
             observed_at,
             snapshot_id: None,
+            timing: None,
             stats: None,
             failure: None,
         }
@@ -151,6 +165,7 @@ impl StatusUpdate {
             phase: MoverPhase::Failed.as_str().to_string(),
             observed_at,
             snapshot_id: None,
+            timing: None,
             stats: None,
             failure: Some(FailureBlock::from(err)),
         }
@@ -173,17 +188,34 @@ mod tests {
     }
 
     #[test]
-    fn stats_from_create_result() {
+    fn stats_from_create_result_uses_crd_field_names() {
         let json = r#"{
             "id":"x","source":{"host":"h","userName":"u","path":"/p"},
             "startTime":"2026-06-02T03:13:59Z","endTime":"2026-06-02T03:14:00Z",
             "rootEntry":{"name":"p","type":"d","obj":"k1","summ":{"size":100,"files":5,"dirs":2,"numFailed":1}}
         }"#;
         let r: SnapshotCreateResult = serde_json::from_str(json).unwrap();
-        let stats = StatusStats::from(&r);
-        assert_eq!(stats.total_bytes, 100);
-        assert_eq!(stats.file_count, 5);
-        assert_eq!(stats.error_count, 1);
+        let stats = stats_from_result(&r);
+        assert_eq!(stats.size_bytes, Some(100));
+        assert_eq!(stats.files_new, Some(5));
+        // The serialized body MUST use the CRD `status.stats` field names, or the
+        // API server prunes them and the stats are lost (regression guard).
+        let body = serde_json::to_value(&stats).unwrap();
+        assert_eq!(body["sizeBytes"], 100);
+        assert_eq!(body["filesNew"], 5);
+        assert!(body.get("totalBytes").is_none(), "stale field name leaked");
+    }
+
+    #[test]
+    fn timing_from_create_result_computes_duration() {
+        let json = r#"{
+            "id":"x","source":{"host":"h","userName":"u","path":"/p"},
+            "startTime":"2026-06-02T03:13:59Z","endTime":"2026-06-02T03:14:00Z",
+            "rootEntry":{"name":"p","type":"d","obj":"k1","summ":{"size":1,"files":1}}
+        }"#;
+        let r: SnapshotCreateResult = serde_json::from_str(json).unwrap();
+        let timing = timing_from_result(&r);
+        assert_eq!(timing.duration_seconds, Some(1));
     }
 
     #[test]
@@ -252,7 +284,9 @@ mod tests {
         let u = StatusUpdate::succeeded_backup(&r, ts());
         assert_eq!(u.phase, "Succeeded");
         assert_eq!(u.snapshot_id.as_deref(), Some("snap1"));
-        assert_eq!(u.stats.as_ref().unwrap().total_bytes, 42);
+        assert_eq!(u.stats.as_ref().unwrap().size_bytes, Some(42));
+        assert_eq!(u.stats.as_ref().unwrap().files_new, Some(3));
+        assert!(u.timing.is_some());
         assert!(u.failure.is_none());
     }
 

@@ -89,7 +89,7 @@ GitOps), set `installCRDs: false` and apply `deploy/crds/*.yaml` out of band.
 | `controller.replicaCount` | `1` | `>1` = HA via leader election. |
 | `controller.leaderElection.enabled` | `true` | Required for `replicaCount > 1`. |
 | `controller.logLevel` | `info` | `RUST_LOG` value. |
-| `controller.resources` | requests 50m/64Mi, limits 500m/256Mi | Controller resources. |
+| `controller.resources` | requests 50m/128Mi, limit 1Gi memory (no CPU limit) | Controller resources; the 1Gi memory limit covers the kopia-subprocess startup burst. |
 | `controller.nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | Scheduling. |
 | `controller.priorityClassName` | `""` | Priority class. |
 | `controller.probePort` | `8080` | Health + `/metrics` port. |
