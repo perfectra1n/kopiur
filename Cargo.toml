@@ -70,7 +70,7 @@ opentelemetry-otlp = { version = "0.31", default-features = false, features = [
 ] }
 opentelemetry-prometheus = "0.31"
 opentelemetry-appender-tracing = "0.31"
-tracing-opentelemetry = "0.32"
+tracing-opentelemetry = "0.33"
 url = "2"
 
 # Scheduling / templating
