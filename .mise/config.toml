@@ -1,9 +1,8 @@
 # mise tasks + tooling for kopiur. `mise tasks` lists them; `mise run <task>`.
-# The Rust channel is mirrored in rust-toolchain.toml so cargo/rustup can read
-# it natively; mise installs it for developers and CI.
+# Mise is the source of truth for Rust and project tools in developer shells and CI.
 
 [tools]
-rust = "1.95"
+rust = { version = "1.95", components = "rustfmt,clippy,llvm-tools-preview" }
 lefthook = "2.1.9"
 oxfmt = "0.53.0"
 zizmor = "1.25.2"

@@ -84,7 +84,7 @@ Pinned dep triad (Rust 1.95): `kube` 3.1, `k8s-openapi` 0.27 (feature `v1_33`,
 ## Build / test / verify
 
 Tasks live in `.mise/config.toml`; `mise tasks` lists them, `mise run <task>` runs
-one. (The Rust toolchain itself stays pinned in `rust-toolchain.toml`.)
+one. Mise is mandatory and pins the Rust toolchain plus required components.
 
 ```bash
 mise run build

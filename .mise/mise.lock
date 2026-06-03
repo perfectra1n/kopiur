@@ -271,6 +271,13 @@ backend = "npm:oxfmt"
 version = "1.95.0"
 backend = "core:rust"
 
+[[tools.rust]]
+version = "1.95.0"
+backend = "core:rust"
+
+[tools.rust.options]
+components = "clippy,llvm-tools-preview,rustfmt"
+
 [[tools.zizmor]]
 version = "1.25.2"
 backend = "aqua:zizmorcore/zizmor"
