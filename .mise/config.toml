@@ -1,15 +1,16 @@
 # mise tasks + tooling for kopiur. `mise tasks` lists them; `mise run <task>`.
-# The Rust toolchain itself stays pinned in rust-toolchain.toml (cargo/rustup
-# read it natively); mise carries the org meta-tools and the task dependencies
-# so developers and CI (.github/workflows) share one source of truth.
+# The Rust channel is mirrored in rust-toolchain.toml so cargo/rustup can read
+# it natively; mise installs it for developers and CI.
 
 [tools]
+rust = "1.95"
 lefthook = "2.1.9"
 oxfmt = "0.53.0"
 zizmor = "1.25.2"
 helm = "4.2.0"
 kubectl = "1.36.1"
 kind = "0.32.0"
+kopia = "0.23.0"
 kubeconform = "0.7.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.19.8"
 "aqua:taiki-e/cargo-llvm-cov" = "0.8.7"
@@ -105,7 +106,7 @@ description = "Supply-chain + license audit"
 run = "cargo deny check"
 
 [tasks.ci]
-description = "The full hermetic gate, exactly what CI's lint-test job runs"
+description = "The full local hermetic gate: format, lint, build, test, and drift check"
 depends = ["fmt-check", "clippy", "build", "test", "gen-check"]
 
 [tasks.release]

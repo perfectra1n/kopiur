@@ -1,0 +1,101 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - published
+
+jobs:
+  release:
+    name: Release (${{ matrix.component }})
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: controller
+            dockerfile: docker/Dockerfile
+            build_args: BIN=kopiur-controller
+          - component: webhook
+            dockerfile: docker/Dockerfile
+            build_args: BIN=kopiur-webhook
+          - component: mover
+            dockerfile: docker/Dockerfile.mover
+            build_args: ""
+    uses: docker/github-builder/.github/workflows/build.yml@17bd7d64200cae4ba58ffc099934e8012ae320f2 # v1.10.0
+    with:
+      build-args: |
+        VERSION=${{ github.ref_name }}
+        REVISION=${{ github.sha }}
+        ${{ matrix.build_args }}
+      cache: true
+      cache-scope: ${{ matrix.component }}
+      file: ${{ matrix.dockerfile }}
+      meta-images: ghcr.io/${{ github.repository }}-${{ matrix.component }}
+      meta-tags: |
+        type=semver,pattern={{version}}
+        type=semver,pattern={{major}}.{{minor}}
+        type=raw,value=rolling,enable=${{ github.event_name == 'release' }}
+        type=ref,event=branch
+      output: image
+      platforms: linux/amd64,linux/arm64
+      push: true
+      sbom: true
+      sign: true
+    secrets:
+      registry-auths: |
+        - registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+  helm:
+    name: Helm
+    if: ${{ github.event_name == 'release' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup Mise
+        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+        with:
+          cache: false
+          experimental: true
+          install_args: --locked
+
+      - name: Check generated manifests
+        run: cargo xtask gen-all --check
+
+      - name: Package Helm chart
+        run: |
+          VERSION="${VERSION#v}"
+          helm package deploy/helm/kopiur \
+            --version "${VERSION}" \
+            --app-version "${VERSION}"
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish Helm chart to GHCR
+        run: |-
+          VERSION="${VERSION#v}"
+          helm push "kopiur-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
