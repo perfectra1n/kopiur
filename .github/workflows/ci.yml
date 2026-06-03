@@ -31,7 +31,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry & target
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: ci
 
@@ -65,7 +65,7 @@ jobs:
           toolchain: "1.95"
 
       - name: Cache cargo registry & target
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: integration
 
@@ -108,7 +108,7 @@ jobs:
         with:
           toolchain: "1.95"
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: coverage
       - name: Install cargo-llvm-cov
