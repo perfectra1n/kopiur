@@ -68,15 +68,32 @@ run = "cargo llvm-cov --workspace --locked --summary-only"
 
 [tasks.image-controller]
 description = "Build the controller image locally"
-run = 'docker build -f docker/Dockerfile --build-arg BIN=kopiur-controller -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/controller:${KOPIUR_IMAGE_TAG:-dev}" .'
+run = '''
+KOPIA_VERSION="${KOPIA_VERSION:-$(mise config get tools.kopia)}"
+docker build -f docker/Dockerfile \
+  --build-arg BIN=kopiur-controller \
+  --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" \
+  -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/controller:${KOPIUR_IMAGE_TAG:-dev}" .
+'''
 
 [tasks.image-webhook]
 description = "Build the webhook image locally"
-run = 'docker build -f docker/Dockerfile --build-arg BIN=kopiur-webhook -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/webhook:${KOPIUR_IMAGE_TAG:-dev}" .'
+run = '''
+KOPIA_VERSION="${KOPIA_VERSION:-$(mise config get tools.kopia)}"
+docker build -f docker/Dockerfile \
+  --build-arg BIN=kopiur-webhook \
+  --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" \
+  -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/webhook:${KOPIUR_IMAGE_TAG:-dev}" .
+'''
 
 [tasks.image-mover]
 description = "Build the mover image locally (ships the kopia binary too)"
-run = 'docker build -f docker/Dockerfile.mover --build-arg KOPIA_VERSION="${KOPIA_VERSION:-0.23.0}" -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/mover:${KOPIUR_IMAGE_TAG:-dev}" .'
+run = '''
+KOPIA_VERSION="${KOPIA_VERSION:-$(mise config get tools.kopia)}"
+docker build -f docker/Dockerfile.mover \
+  --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" \
+  -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/mover:${KOPIUR_IMAGE_TAG:-dev}" .
+'''
 
 [tasks.images]
 description = "Build all three component images locally"
@@ -107,19 +124,6 @@ run = "cargo deny check"
 [tasks.ci]
 description = "The full local hermetic gate: format, lint, build, test, and drift check"
 depends = ["fmt-check", "clippy", "build", "test", "gen-check"]
-
-[tasks.release]
-description = "Build release artifacts, package the chart, then tag & push v<version>"
-depends = ["gen-check", "build-release"]
-run = '''
-version="{{arg(name="version")}}"
-echo "==> packaging Helm chart $version"
-helm package deploy/helm/kopiur --version "$version" --app-version "$version" -d dist
-echo "==> tagging v$version"
-git tag -a "v$version" -m "kopiur v$version"
-git push origin "v$version"
-echo "==> pushed tag v$version; release.yml will publish images, chart, and the GitHub release"
-'''
 
 [hooks]
 postinstall = "lefthook install"

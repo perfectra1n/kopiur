@@ -14,21 +14,22 @@
 # Env knobs:
 #   KOPIUR_E2E_SKIP_BUILD=1   reuse already-built kopiur/*:e2e images
 #   KOPIUR_KEEP_KIND=1        leave the cluster running for inspection
-#   KOPIA_VERSION=0.23.0      kopia version baked into the images
+#   KOPIA_VERSION=x.y.z       override the mise-pinned kopia image version
 set -euo pipefail
 
 CLUSTER="${KOPIUR_KIND_CLUSTER:-kopiur-e2e}"
 NS="kopiur-e2e"
 TAG="e2e"
-KOPIA_VERSION="${KOPIA_VERSION:-0.23.0}"
 NODE="${CLUSTER}-control-plane"
 KUBECONFIG_PATH="$(mktemp -t kopiur-e2e-kubeconfig.XXXXXX)"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-for bin in docker kind kubectl helm; do
+for bin in docker kind kubectl helm mise; do
   command -v "$bin" >/dev/null 2>&1 || { echo "error: '$bin' is required" >&2; exit 127; }
 done
+
+KOPIA_VERSION="${KOPIA_VERSION:-$(mise config get tools.kopia)}"
 
 cleanup() {
   local rc=$?
