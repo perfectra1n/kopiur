@@ -81,6 +81,46 @@ pub fn backups_to_delete(backups: &[Backup], policy: &Retention) -> Vec<String> 
     select_kept(&views, policy).delete
 }
 
+/// Count the most-recent run of consecutive `Failed` backups before the latest
+/// `Succeeded` one (the `kopiur_backup_consecutive_failures` gauge). Only
+/// terminal backups (Succeeded/Failed) count; ordering is by `endTime` (falling
+/// back to the CR creation time). Pure. ADR §4.13.
+pub fn consecutive_failures(backups: &[Backup]) -> i64 {
+    use kopiur_api::BackupPhase;
+    let terminal_time = |b: &Backup| -> Option<(DateTime<Utc>, BackupPhase)> {
+        let status = b.status.as_ref()?;
+        let phase = status.phase?;
+        if !matches!(phase, BackupPhase::Succeeded | BackupPhase::Failed) {
+            return None;
+        }
+        let t = status
+            .timing
+            .as_ref()
+            .and_then(|t| t.end_time.as_deref())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .or_else(|| {
+                b.creation_timestamp()
+                    .and_then(|t| DateTime::<Utc>::from_timestamp(t.0.as_second(), 0))
+            })?;
+        Some((t, phase))
+    };
+    let mut terminal: Vec<(DateTime<Utc>, BackupPhase)> =
+        backups.iter().filter_map(terminal_time).collect();
+    // Newest first.
+    terminal.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+    let mut n = 0;
+    for (_, phase) in terminal {
+        match phase {
+            BackupPhase::Failed => n += 1,
+            BackupPhase::Succeeded => break,
+            // Non-terminal already filtered out.
+            _ => {}
+        }
+    }
+    n
+}
+
 /// Reconcile a `BackupConfig`.
 #[tracing::instrument(skip(config, ctx), fields(kind = "BackupConfig", name = %config.name_any()))]
 pub async fn reconcile(config: Arc<BackupConfig>, ctx: Arc<Context>) -> Result<Action> {
@@ -113,6 +153,12 @@ async fn reconcile_inner(config: &BackupConfig, ctx: &Context) -> Result<Action>
         let backup_api: Api<Backup> = Api::namespaced(ctx.client.clone(), &namespace);
         let lp = ListParams::default().labels(&format!("{CONFIG_LABEL}={name}"));
         let backups = backup_api.list(&lp).await?.items;
+        // Surface the consecutive-failure streak for alerting (ADR §4.13).
+        ctx.metrics.set_backup_consecutive_failures(
+            &namespace,
+            &name,
+            consecutive_failures(&backups),
+        );
         let to_delete = backups_to_delete(&backups, retention);
         let dp = DeleteParams::default();
         for cr_name in &to_delete {
@@ -263,12 +309,48 @@ mod tests {
         b
     }
 
+    fn failed_backup(name: &str, end: DateTime<Utc>) -> Backup {
+        let mut b = succeeded_backup(name, end);
+        if let Some(s) = b.status.as_mut() {
+            s.phase = Some(BackupPhase::Failed);
+            s.snapshot = None;
+        }
+        b
+    }
+
     fn policy(latest: Option<u32>, daily: Option<u32>) -> Retention {
         Retention {
             keep_latest: latest,
             keep_daily: daily,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn consecutive_failures_counts_trailing_failures_before_last_success() {
+        // Newest→oldest: Fail(26), Fail(25), Succeed(24), Fail(23) → 2.
+        let backups = vec![
+            failed_backup("f23", at(2026, 5, 23)),
+            succeeded_backup("s24", at(2026, 5, 24)),
+            failed_backup("f25", at(2026, 5, 25)),
+            failed_backup("f26", at(2026, 5, 26)),
+        ];
+        assert_eq!(consecutive_failures(&backups), 2);
+        // All succeeded → 0.
+        assert_eq!(
+            consecutive_failures(&[succeeded_backup("s", at(2026, 5, 24))]),
+            0
+        );
+        // All failed → counts them all.
+        assert_eq!(
+            consecutive_failures(&[
+                failed_backup("f1", at(2026, 5, 24)),
+                failed_backup("f2", at(2026, 5, 25)),
+            ]),
+            2
+        );
+        // No terminal backups (e.g. only Running/Pending) → 0.
+        assert_eq!(consecutive_failures(&[]), 0);
     }
 
     #[test]

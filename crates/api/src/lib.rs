@@ -50,9 +50,9 @@ pub use cluster_repository::{
     AllowedNamespaces, ClusterRepository, ClusterRepositorySpec, ClusterRepositoryStatus,
     IdentityTemplate,
 };
-pub use common::{ConfigRef, CronSpec, DeletionPolicy, ObjectRef};
+pub use common::{ConfigRef, CronSpec, DeletionPolicy, ObjectRef, PhaseLabel};
 pub use maintenance::{Maintenance, MaintenanceSpec, MaintenanceStatus, TakeoverPolicy};
-pub use repository::{Repository, RepositorySpec, RepositoryStatus};
+pub use repository::{Repository, RepositoryPhase, RepositorySpec, RepositoryStatus};
 pub use restore::{
     OnMissingSnapshot, Restore, RestorePhase, RestoreSource, RestoreSpec, RestoreStatus,
     RestoreTarget,

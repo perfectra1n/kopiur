@@ -47,6 +47,7 @@ spec:
               value: /tls/tls.crt
             - name: KOPIUR_WEBHOOK_TLS_KEY
               value: /tls/tls.key
+            {{- include "kopiur.otlpEnv" . | nindent 12 }}
           ports:
             - name: https
               containerPort: {{ .Values.webhook.containerPort }}

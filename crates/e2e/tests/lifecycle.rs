@@ -439,6 +439,127 @@ async fn maintenance_claims_lease() {
     .expect("Maintenance should claim the lease");
 }
 
+/// Scrape the controller's `/metrics` through the API server's Service-proxy
+/// subresource (no port-forward / `ws` feature needed). The chart names the
+/// controller metrics Service `kopiur-controller-metrics` on port 8080.
+async fn scrape_controller_metrics(client: &Client) -> anyhow::Result<String> {
+    let path = format!(
+        "/api/v1/namespaces/{E2E_NAMESPACE}/services/kopiur-controller-metrics:8080/proxy/metrics"
+    );
+    let req = http::Request::get(path).body(Vec::new())?;
+    Ok(client.request_text(req).await?)
+}
+
+/// Drive a Backup to Succeeded, then assert the controller exposes the expected
+/// metric families with sane values — and that the exposition is valid
+/// Prometheus text (a regression guard for the OTel→Prometheus name rewrite).
+/// The webhook is disabled in the e2e harness, so webhook metrics are covered by
+/// the unit tier, not here.
+#[tokio::test]
+#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+async fn metrics_reflect_backup_lifecycle() {
+    let Some(client) = try_client().await else {
+        return;
+    };
+    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    // A successful backup so phase/size/duration gauges have real values.
+    let _ = repos
+        .create(&PostParams::default(), &cr(repository_json("e2e-mx-repo")))
+        .await;
+    wait_phase(&repos, "e2e-mx-repo", "Ready")
+        .await
+        .expect("Repository should reach Ready");
+    configs
+        .create(
+            &PostParams::default(),
+            &cr(backup_config_json("e2e-mx-cfg", "e2e-mx-repo", "e2e-src")),
+        )
+        .await
+        .expect("create BackupConfig");
+    backups
+        .create(
+            &PostParams::default(),
+            &cr(backup_json("e2e-mx-backup", "e2e-mx-cfg", "Retain")),
+        )
+        .await
+        .expect("create Backup");
+    wait_phase(&backups, "e2e-mx-backup", "Succeeded")
+        .await
+        .expect("Backup should reach Succeeded");
+
+    // The Prometheus exporter publishes a family only after first observation and
+    // the controller's own self-reconcile must record the Succeeded phase, so
+    // poll until the key families are present.
+    let text = wait_until(
+        "controller /metrics exposes kopiur families",
+        default_timeout(),
+        poll_interval(),
+        || {
+            let client = client.clone();
+            async move {
+                match scrape_controller_metrics(&client).await {
+                    Ok(t)
+                        if t.contains("kopiur_controller_reconciliations_total")
+                            && t.contains("kopiur_resource_phase")
+                            && t.contains("kopiur_backup_size_bytes") =>
+                    {
+                        Ok(Some(t))
+                    }
+                    // Not ready yet, or the proxy isn't up — keep polling.
+                    _ => Ok(None),
+                }
+            }
+        },
+    )
+    .await
+    .expect("controller should expose the kopiur metric families");
+
+    // Reconcile loop metrics, per kind.
+    assert!(
+        text.contains("kopiur_controller_reconciliations_total{")
+            && text.contains("kind=\"Backup\""),
+        "missing per-kind reconciliations counter:\n{text}"
+    );
+    // Histogram buckets present (validates the OTel histogram → _bucket rewrite).
+    assert!(
+        text.contains("kopiur_controller_reconcile_duration_seconds_bucket"),
+        "missing reconcile duration histogram buckets"
+    );
+    // Our backup's phase gauge: Succeeded == 1.
+    let succeeded_series = text.lines().any(|l| {
+        l.starts_with("kopiur_resource_phase{")
+            && l.contains("kind=\"Backup\"")
+            && l.contains("name=\"e2e-mx-backup\"")
+            && l.contains("phase=\"Succeeded\"")
+            && l.trim_end().ends_with(" 1")
+    });
+    assert!(
+        succeeded_series,
+        "expected kopiur_resource_phase ...Backup...Succeeded == 1:\n{text}"
+    );
+    // Backup stats gauges populated with a positive size.
+    let positive_size = text.lines().any(|l| {
+        l.starts_with("kopiur_backup_size_bytes{")
+            && l.contains("name=\"e2e-mx-backup\"")
+            && l.rsplit(' ')
+                .next()
+                .and_then(|v| v.parse::<f64>().ok())
+                .is_some_and(|v| v > 0.0)
+    });
+    assert!(
+        positive_size,
+        "expected positive kopiur_backup_size_bytes:\n{text}"
+    );
+    // Valid Prometheus exposition: HELP/TYPE metadata present.
+    assert!(
+        text.contains("# TYPE kopiur_controller_reconciliations_total counter"),
+        "exposition should carry # TYPE metadata"
+    );
+}
+
 /// Compile-time guard that `Client` is reachable from this crate even when the
 /// `e2e` feature gates the bodies above — keeps the dependency graph honest.
 #[allow(dead_code)]

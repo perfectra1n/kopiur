@@ -18,6 +18,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+http = "1"
 
 [features]
 # e2e tests are gated so the hermetic `cargo test --workspace` never compiles

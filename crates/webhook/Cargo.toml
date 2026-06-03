@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 kopiur-api = { workspace = true }
+kopiur-telemetry = { workspace = true }
 kube = { workspace = true, features = ["client", "admission"] }
 k8s-openapi = { workspace = true, features = ["v1_33"] }
 schemars = { workspace = true }
@@ -19,10 +20,10 @@ axum = { workspace = true }
 axum-server = { workspace = true }
 rustls = { workspace = true }
 json-patch = { workspace = true }
+opentelemetry = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 
 [dev-dependencies]

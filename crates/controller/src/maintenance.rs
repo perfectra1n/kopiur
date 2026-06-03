@@ -58,7 +58,31 @@ pub async fn reconcile(maint: Arc<Maintenance>, ctx: Arc<Context>) -> Result<Act
     let result = reconcile_inner(&maint, &ctx).await;
     ctx.metrics
         .record_reconcile("Maintenance", start.elapsed().as_secs_f64());
+    record_maintenance_status_metrics(&maint, &ctx, result.is_ok()).await;
     result
+}
+
+/// Mirror the last full-maintenance reclaimed-bytes gauge from the freshest
+/// status on success (Maintenance has no phase gauge to clear). See the Backup
+/// equivalent for why the status is re-read rather than taken from the cache copy.
+async fn record_maintenance_status_metrics(maint: &Maintenance, ctx: &Context, ok: bool) {
+    let (Some(ns), name) = (maint.namespace(), maint.name_any()) else {
+        return;
+    };
+    if !ok {
+        return;
+    }
+    let api: Api<Maintenance> = Api::namespaced(ctx.client.clone(), &ns);
+    if let Ok(Some(latest)) = api.get_opt(&name).await
+        && let Some(bytes) = latest
+            .status
+            .as_ref()
+            .and_then(|s| s.full.as_ref())
+            .and_then(|f| f.last_content_reclaimed_bytes)
+    {
+        ctx.metrics
+            .set_maintenance_reclaimed_bytes(&ns, &name, bytes);
+    }
 }
 
 async fn reconcile_inner(maint: &Maintenance, ctx: &Context) -> Result<Action> {

@@ -9,6 +9,21 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// A lifecycle-phase enum that can be rendered as a metric label.
+///
+/// The single source of truth for a CRD's phase labels: [`PhaseLabel::ALL`]
+/// enumerates every variant and [`PhaseLabel::label`] is an exhaustive match.
+/// The controller's `kopiur_resource_phase` gauge uses these to set the active
+/// phase to 1 and the rest to 0 (and to clear all on deletion), so both the
+/// label string and the reset set come from the enum itself rather than a
+/// stringly-typed table that can silently drift (ADR §5.5 type-safety thesis).
+pub trait PhaseLabel: Copy + PartialEq + 'static {
+    /// Every variant, in declaration order.
+    const ALL: &'static [Self];
+    /// The stable metric label string for this variant (exhaustive `match`).
+    fn label(&self) -> &'static str;
+}
+
 /// Reference to a key within a `Secret` in the same namespace as the referrer,
 /// unless `namespace` is given (required for cluster-scoped CRs — ADR §3.2).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

@@ -14,7 +14,9 @@
 //! aware `deletionPolicy`, the `kopiur.home-operations.com/snapshot-cleanup` finalizer, GitOps-safe
 //! schedule defaults) in one pass. See [`routes`] for the endpoint design rationale.
 
+pub mod config;
 pub mod handlers;
+pub mod metrics;
 pub mod routes;
 pub mod tenancy;
 

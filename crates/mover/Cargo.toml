@@ -11,14 +11,15 @@ authors.workspace = true
 [dependencies]
 kopiur-api = { workspace = true }
 kopiur-kopia = { workspace = true }
+kopiur-telemetry = { workspace = true }
 kube = { workspace = true, features = ["client", "rustls-tls"] }
 rustls = { workspace = true }
 k8s-openapi = { workspace = true, features = ["v1_33"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+opentelemetry = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 

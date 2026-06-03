@@ -15,7 +15,9 @@ use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
 use kopiur_api::backup::Backup;
-use kopiur_api::{OnMissingSnapshot, Restore, RestoreSource, RestoreTarget, validate};
+use kopiur_api::{
+    OnMissingSnapshot, Restore, RestorePhase, RestoreSource, RestoreTarget, validate,
+};
 use kopiur_mover::workspec::{
     MoverOptions, MoverWorkSpec, Operation, RepositoryConnect, ResolvedIdentity as MoverIdentity,
     RestoreOp, TargetRef,
@@ -68,6 +70,17 @@ pub enum PopulatorState {
     DirectTarget,
 }
 
+/// Wall-clock duration (seconds) of a restore `Job` from its
+/// `status.startTime`/`completionTime`. `None` if either is absent or the
+/// interval is negative (clock skew). Pure. (`Time.0` is a jiff `Timestamp`.)
+pub fn restore_job_duration_seconds(job: &k8s_openapi::api::batch::v1::Job) -> Option<i64> {
+    let st = job.status.as_ref()?;
+    let start = st.start_time.as_ref()?.0.as_second();
+    let end = st.completion_time.as_ref()?.0.as_second();
+    let secs = end - start;
+    (secs >= 0).then_some(secs)
+}
+
 /// Decide the populator state from whether a `target` is present.
 pub fn populator_state(has_target: bool) -> PopulatorState {
     if has_target {
@@ -84,7 +97,32 @@ pub async fn reconcile(restore: Arc<Restore>, ctx: Arc<Context>) -> Result<Actio
     let result = reconcile_inner(&restore, &ctx).await;
     ctx.metrics
         .record_reconcile("Restore", start.elapsed().as_secs_f64());
+    record_restore_status_metrics(&restore, &ctx, result.is_ok()).await;
     result
+}
+
+/// Mirror a Restore's phase gauge. Zeroes it on deletion (so a Failed restore's
+/// alert clears once the CR is gone) and re-reads the freshest status on success
+/// — see the Backup equivalent for the rationale. (Restore *duration* is
+/// recorded at the Job-completion site, not from status.)
+async fn record_restore_status_metrics(restore: &Restore, ctx: &Context, ok: bool) {
+    let (Some(ns), name) = (restore.namespace(), restore.name_any()) else {
+        return;
+    };
+    if restore.metadata.deletion_timestamp.is_some() {
+        ctx.metrics
+            .clear_phase::<RestorePhase>("Restore", &ns, &name);
+        return;
+    }
+    if !ok {
+        return;
+    }
+    let api: Api<Restore> = Api::namespaced(ctx.client.clone(), &ns);
+    if let Ok(Some(latest)) = api.get_opt(&name).await
+        && let Some(phase) = latest.status.as_ref().and_then(|s| s.phase)
+    {
+        ctx.metrics.set_restore_phase(&ns, &name, phase);
+    }
 }
 
 async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
@@ -206,6 +244,9 @@ async fn drive_direct_restore(
     if let Some(job) = job_api.get_opt(name).await? {
         return match crate::backup::job_terminal_state(&job) {
             Some(true) => {
+                if let Some(secs) = restore_job_duration_seconds(&job) {
+                    ctx.metrics.set_restore_duration(namespace, name, secs);
+                }
                 io::patch_status(api, name, serde_json::json!({ "phase": "Completed" })).await?;
                 Ok(Action::requeue(std::time::Duration::from_secs(600)))
             }
@@ -291,6 +332,7 @@ async fn drive_direct_restore(
         repo_pvc,
         creds_secret: Some(&creds.secret_name),
         service_account: ctx.mover_service_account.as_deref(),
+        otlp_env: ctx.mover_otlp_env.clone(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -456,6 +498,33 @@ mod tests {
     use super::*;
     use kopiur_api::common::ObjectRef;
     use kopiur_api::restore::{FromConfig, IdentitySource};
+
+    fn job_with_times(start: Option<&str>, end: Option<&str>) -> k8s_openapi::api::batch::v1::Job {
+        use k8s_openapi::api::batch::v1::{Job, JobStatus};
+        let parse = |s: &str| serde_json::from_value(serde_json::json!(s)).unwrap();
+        Job {
+            status: Some(JobStatus {
+                start_time: start.map(parse),
+                completion_time: end.map(parse),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn restore_duration_is_completion_minus_start() {
+        let job = job_with_times(Some("2024-01-01T00:00:00Z"), Some("2024-01-01T00:01:30Z"));
+        assert_eq!(restore_job_duration_seconds(&job), Some(90));
+        // Missing completion → None (still running).
+        assert_eq!(
+            restore_job_duration_seconds(&job_with_times(Some("2024-01-01T00:00:00Z"), None)),
+            None
+        );
+        // Negative interval (clock skew) → None.
+        let skew = job_with_times(Some("2024-01-01T00:01:00Z"), Some("2024-01-01T00:00:00Z"));
+        assert_eq!(restore_job_duration_seconds(&skew), None);
+    }
 
     fn backup_ref() -> RestoreSource {
         RestoreSource::BackupRef(ObjectRef {

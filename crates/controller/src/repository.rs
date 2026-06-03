@@ -21,7 +21,7 @@ use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
 use kopiur_api::backend::Backend;
-use kopiur_api::{Backup, Repository, validate};
+use kopiur_api::{Backup, Repository, RepositoryPhase, validate};
 use kopiur_kopia::{ConnectSpec, SnapshotListEntry};
 
 use crate::consts::{ORIGIN_LABEL, REPOSITORY_UID_LABEL, SNAPSHOT_ID_LABEL};
@@ -51,6 +51,27 @@ pub fn needs_materialization<'a>(
         .collect()
 }
 
+/// Logical bytes under management: the sum, over each distinct snapshot source,
+/// of the most-recent snapshot's logical `total_size`. Older snapshots of the
+/// same source are not added (they would double-count unchanged data). Pure.
+pub fn logical_bytes_under_management(listing: &[SnapshotListEntry]) -> i64 {
+    use std::collections::HashMap;
+    let mut newest: HashMap<&str, &SnapshotListEntry> = HashMap::new();
+    for e in listing {
+        let key = e.source.path.as_str();
+        match newest.get(key) {
+            Some(prev) if prev.end_time >= e.end_time => {}
+            _ => {
+                newest.insert(key, e);
+            }
+        }
+    }
+    newest
+        .values()
+        .map(|e| i64::try_from(e.stats.total_size).unwrap_or(i64::MAX))
+        .sum()
+}
+
 /// Reconcile a `Repository`.
 #[tracing::instrument(skip(repo, ctx), fields(kind = "Repository", name = %repo.name_any()))]
 pub async fn reconcile(repo: Arc<Repository>, ctx: Arc<Context>) -> Result<Action> {
@@ -58,7 +79,44 @@ pub async fn reconcile(repo: Arc<Repository>, ctx: Arc<Context>) -> Result<Actio
     let result = reconcile_inner(&repo, &ctx).await;
     ctx.metrics
         .record_reconcile("Repository", start.elapsed().as_secs_f64());
+    record_repository_status_metrics(&repo, &ctx, result.is_ok()).await;
     result
+}
+
+/// Mirror a Repository's phase + catalog gauges. Zeroes the phase on deletion
+/// (so Degraded/Failed alerts clear) and re-reads the freshest status on success
+/// (the passed object is the pre-reconcile cache copy). See the Backup
+/// equivalent for the rationale.
+async fn record_repository_status_metrics(repo: &Repository, ctx: &Context, ok: bool) {
+    let (Some(ns), name) = (repo.namespace(), repo.name_any()) else {
+        return;
+    };
+    if repo.metadata.deletion_timestamp.is_some() {
+        ctx.metrics
+            .clear_phase::<RepositoryPhase>("Repository", &ns, &name);
+        return;
+    }
+    if !ok {
+        return;
+    }
+    let api: Api<Repository> = Api::namespaced(ctx.client.clone(), &ns);
+    if let Ok(Some(latest)) = api.get_opt(&name).await
+        && let Some(status) = latest.status.as_ref()
+    {
+        if let Some(phase) = status.phase {
+            ctx.metrics
+                .set_repository_phase("Repository", &ns, &name, phase);
+        }
+        let snapshots = status.storage_stats.as_ref().and_then(|s| s.snapshot_count);
+        let discovered = status
+            .catalog
+            .as_ref()
+            .and_then(|c| c.discovered_backup_count);
+        if snapshots.is_some() || discovered.is_some() {
+            ctx.metrics
+                .set_repo_catalog(&ns, &name, snapshots, discovered);
+        }
+    }
 }
 
 async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
@@ -202,6 +260,14 @@ async fn scan_catalog(
         tracing::info!(repo = %repo_name, created, "materialized discovered Backup CRs");
     }
 
+    // Logical bytes under management is recorded directly from kopia's data
+    // (the status field is a human string, so the gauge bypasses it).
+    ctx.metrics.set_repo_size_bytes(
+        namespace,
+        repo_name,
+        logical_bytes_under_management(&listing),
+    );
+
     let api: Api<Repository> = Api::namespaced(ctx.client.clone(), namespace);
     io::patch_status(
         &api,
@@ -310,6 +376,34 @@ mod tests {
             root_entry: None,
             retention_reason: vec![],
         }
+    }
+
+    fn entry_sized(
+        id: &str,
+        path: &str,
+        end: chrono::DateTime<Utc>,
+        size: u64,
+    ) -> SnapshotListEntry {
+        let mut e = entry(id);
+        e.source.path = path.into();
+        e.end_time = end;
+        e.stats.total_size = size;
+        e
+    }
+
+    #[test]
+    fn logical_bytes_sums_newest_snapshot_per_source() {
+        let t0 = Utc::now();
+        let t1 = t0 + chrono::Duration::seconds(10);
+        let listing = vec![
+            // Source /a: older 100, newer 150 → counts 150 (not 250).
+            entry_sized("a-old", "/a", t0, 100),
+            entry_sized("a-new", "/a", t1, 150),
+            // Source /b: single snapshot 40.
+            entry_sized("b", "/b", t0, 40),
+        ];
+        assert_eq!(logical_bytes_under_management(&listing), 190);
+        assert_eq!(logical_bytes_under_management(&[]), 0);
     }
 
     #[test]

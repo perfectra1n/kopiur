@@ -47,6 +47,25 @@ pub enum RepositoryPhase {
     Failed,
 }
 
+impl crate::common::PhaseLabel for RepositoryPhase {
+    const ALL: &'static [Self] = &[
+        Self::Pending,
+        Self::Initializing,
+        Self::Ready,
+        Self::Degraded,
+        Self::Failed,
+    ];
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Initializing => "Initializing",
+            Self::Ready => "Ready",
+            Self::Degraded => "Degraded",
+            Self::Failed => "Failed",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryStatus {

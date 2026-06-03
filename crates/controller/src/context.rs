@@ -73,11 +73,16 @@ pub struct Context {
     /// `.status`, so this SA must be bound to the operator's status-patch rules.
     /// `None` falls back to the namespace `default` SA.
     pub mover_service_account: Option<String>,
+    /// OTLP env (`OTEL_EXPORTER_OTLP_*`) the controller passes through to every
+    /// mover `Job` so mover traces/logs/metrics export to the same collector.
+    /// Empty when OTLP is not configured. `(name, value)` pairs.
+    pub mover_otlp_env: Vec<(String, String)>,
 }
 
 impl Context {
     /// Construct a context. The [`Recorder`] should be built from the same
     /// client with a `Reporter` naming this controller.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: Client,
         kopia: KopiaClientFactory,
@@ -85,6 +90,7 @@ impl Context {
         recorder: Recorder,
         mover_image: String,
         mover_service_account: Option<String>,
+        mover_otlp_env: Vec<(String, String)>,
     ) -> Self {
         Context {
             client,
@@ -93,6 +99,7 @@ impl Context {
             recorder,
             mover_image,
             mover_service_account,
+            mover_otlp_env,
         }
     }
 }

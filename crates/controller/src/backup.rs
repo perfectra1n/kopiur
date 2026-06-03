@@ -120,7 +120,58 @@ pub async fn reconcile(backup: Arc<Backup>, ctx: Arc<Context>) -> Result<Action>
     let result = reconcile_inner(&backup, &ctx).await;
     ctx.metrics
         .record_reconcile("Backup", start.elapsed().as_secs_f64());
+    record_backup_status_metrics(&backup, &ctx, result.is_ok()).await;
     result
+}
+
+/// Drive the Backup's phase + stats gauges. On deletion the phase series is
+/// zeroed so `kopiur_resource_phase{...} == 1` alerts clear before the CR is GC'd
+/// (OTel sync gauges can't drop a series). Otherwise, on a successful reconcile,
+/// the freshest status is re-read — the object handed to `reconcile` is the
+/// pre-reconcile watch-cache copy, so reading its status would lag one cycle.
+async fn record_backup_status_metrics(backup: &Backup, ctx: &Context, ok: bool) {
+    let (Some(ns), name) = (backup.namespace(), backup.name_any()) else {
+        return;
+    };
+    if backup.metadata.deletion_timestamp.is_some() {
+        ctx.metrics.clear_phase::<BackupPhase>("Backup", &ns, &name);
+        return;
+    }
+    if !ok {
+        return;
+    }
+    let api: Api<Backup> = Api::namespaced(ctx.client.clone(), &ns);
+    if let Ok(Some(latest)) = api.get_opt(&name).await {
+        record_backup_metrics(&latest, ctx);
+    }
+}
+
+/// Mirror the Backup's observed status onto the phase + stats gauges. Idempotent
+/// (it `set`s current values), so it is safe to call every reconcile.
+fn record_backup_metrics(backup: &Backup, ctx: &Context) {
+    let (Some(ns), name) = (backup.namespace(), backup.name_any()) else {
+        return;
+    };
+    let Some(status) = backup.status.as_ref() else {
+        return;
+    };
+    if let Some(phase) = status.phase {
+        ctx.metrics.set_backup_phase(&ns, &name, phase);
+    }
+    let size = status.stats.as_ref().and_then(|s| s.size_bytes);
+    // Only emit a file count when at least one category is present — otherwise
+    // "unknown" would masquerade as a measured zero.
+    let files = status.stats.as_ref().and_then(|s| {
+        match (s.files_new, s.files_modified, s.files_unchanged) {
+            (None, None, None) => None,
+            (a, b, c) => Some(a.unwrap_or(0) + b.unwrap_or(0) + c.unwrap_or(0)),
+        }
+    });
+    let duration = status.timing.as_ref().and_then(|t| t.duration_seconds);
+    if size.is_some() || files.is_some() || duration.is_some() {
+        ctx.metrics
+            .set_backup_stats(&ns, &name, size, files, duration);
+    }
 }
 
 async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
@@ -212,6 +263,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         repo_pvc,
         creds_secret: Some(&creds_secret),
         service_account: ctx.mover_service_account.as_deref(),
+        otlp_env: ctx.mover_otlp_env.clone(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -271,10 +323,7 @@ async fn handle_deletion(
             Ok(Action::await_change())
         }
         DeletionPlan::OrphanSnapshot => {
-            ctx.metrics
-                .orphaned_snapshots
-                .with_label_values(&[namespace])
-                .inc();
+            ctx.metrics.inc_orphaned_snapshot(namespace);
             let _ = ctx
                 .recorder
                 .publish(
@@ -318,10 +367,7 @@ async fn delete_snapshot_via_job(
                 return Ok(Action::await_change());
             }
             Some(false) => {
-                ctx.metrics
-                    .snapshot_deletion_failures
-                    .with_label_values(&[namespace])
-                    .inc();
+                ctx.metrics.inc_snapshot_deletion_failure(namespace);
                 io::patch_status(api, name, serde_json::json!({ "phase": "Deleting" })).await?;
                 tracing::warn!(backup = %name, "snapshot delete Job failed; backing off");
                 return Ok(Action::requeue(Duration::from_secs(60)));
@@ -378,6 +424,7 @@ async fn delete_snapshot_via_job(
         repo_pvc,
         creds_secret: Some(&creds.secret_name),
         service_account: ctx.mover_service_account.as_deref(),
+        otlp_env: ctx.mover_otlp_env.clone(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -415,9 +462,7 @@ async fn finalize_succeeded(
     };
     io::patch_status(api, name, status).await?;
     ctx.metrics
-        .backup_last_success_timestamp
-        .with_label_values(&[namespace, name])
-        .set(chrono::Utc::now().timestamp());
+        .set_backup_last_success(namespace, name, chrono::Utc::now().timestamp());
     tracing::info!(backup = %name, "backup Job succeeded; phase=Succeeded");
     Ok(())
 }
@@ -679,7 +724,7 @@ fn job_limits(backup: &Backup) -> JobLimits {
 /// else `None` (cluster default). Controlled by the same env that picks the
 /// image so the two stay consistent.
 fn mover_pull_policy() -> Option<&'static str> {
-    if std::env::var("KOPIUR_MOVER_IMAGE").is_ok() {
+    if std::env::var(crate::config::MOVER_IMAGE_ENV).is_ok() {
         Some("IfNotPresent")
     } else {
         None

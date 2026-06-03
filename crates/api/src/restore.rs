@@ -176,6 +176,25 @@ pub enum RestorePhase {
     Failed,
 }
 
+impl crate::common::PhaseLabel for RestorePhase {
+    const ALL: &'static [Self] = &[
+        Self::Pending,
+        Self::Resolving,
+        Self::Restoring,
+        Self::Completed,
+        Self::Failed,
+    ];
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Resolving => "Resolving",
+            Self::Restoring => "Restoring",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreStatus {
