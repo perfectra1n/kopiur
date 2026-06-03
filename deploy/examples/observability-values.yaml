@@ -1,0 +1,51 @@
+# Example Helm values overlay that turns on Kopiur's full observability surface.
+# Unlike the numbered files in this directory (which are Custom Resources applied
+# with `kubectl apply -f`), this is a Helm VALUES file:
+#
+#   helm upgrade --install kopiur deploy/helm/kopiur -n kopiur-system \
+#     -f deploy/examples/observability-values.yaml
+#
+# See docs/dev/observability.md for the full metric list and details.
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    # Requires the Prometheus-Operator CRDs. Add labels here if your Prometheus
+    # uses a serviceMonitorSelector.
+    enabled: true
+    # labels:
+    #   release: kube-prometheus-stack
+  prometheusRule:
+    # Ships the kopiur alert rules (backup stale/failed, repo not ready, etc.).
+    enabled: true
+    # A BackupConfig is "stale" if its last success is older than this (seconds).
+    backupStaleAfterSeconds: 172800 # 48h
+
+# Ship the Grafana dashboard as a ConfigMap the Grafana sidecar auto-discovers.
+# Adjust `label`/`labelValue` to match your sidecar's watch label.
+grafanaDashboard:
+  enabled: true
+  label: grafana_dashboard
+  labelValue: "1"
+
+# Scrape the webhook's /metrics (served over its TLS port; self-signed by default).
+webhook:
+  serviceMonitor:
+    enabled: true
+    insecureSkipVerify: true
+
+# Optional: export OTLP traces + logs + a metrics push to a collector. Leave
+# disabled to run Prometheus-pull only. Only gRPC is supported — point at the
+# collector's gRPC port (4317).
+observability:
+  otlp:
+    enabled: false
+    endpoint: "http://otel-collector.observability.svc:4317"
+    protocol: "grpc"
+    # headers: "authorization=Bearer <token>"
+    # strict: false              # true = fail-fast on telemetry misconfiguration
+    # extraEnv:                  # e.g. tail-sampling / resource attributes
+    #   - name: OTEL_TRACES_SAMPLER
+    #     value: parentbased_traceidratio
+    #   - name: OTEL_TRACES_SAMPLER_ARG
+    #     value: "0.1"
