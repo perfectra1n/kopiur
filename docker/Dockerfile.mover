@@ -7,11 +7,15 @@
 ARG KOPIA_VERSION=0.23.0
 
 FROM rust:1.95-bookworm AS builder
+# Per-arch cache mount ids: a concurrent multi-arch buildx run (amd64 + arm64)
+# must NOT share one cargo cache, or the two arches race unpacking the registry
+# (`.cargo-ok: File exists`, os error 17). See docker/Dockerfile for the detail.
+ARG TARGETARCH
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH},sharing=locked \
+    --mount=type=cache,target=/src/target,id=cargo-target-mover-${TARGETARCH},sharing=locked \
     cargo build --release --locked --bin kopiur-mover && \
     cp target/release/kopiur-mover /usr/local/bin/kopiur-mover
 

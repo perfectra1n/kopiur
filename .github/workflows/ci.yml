@@ -156,6 +156,42 @@ jobs:
       - name: Validate generated CRDs
         run: kubeconform -strict -summary -ignore-missing-schemas deploy/crds/all-crds.yaml
 
+  # Build every component image MULTI-ARCH (linux/amd64 + linux/arm64) but do NOT
+  # push. This mirrors the release `images` job exactly, so a Dockerfile break or
+  # a concurrent multi-arch cache race (the cargo `.cargo-ok: File exists` failure
+  # that only surfaces when both arches build in one buildx) is caught on the PR
+  # instead of at release time. push=false keeps it credential-free.
+  images:
+    name: image build (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: controller
+            dockerfile: docker/Dockerfile
+            build_args: BIN=kopiur-controller
+          - component: webhook
+            dockerfile: docker/Dockerfile
+            build_args: BIN=kopiur-webhook
+          - component: mover
+            dockerfile: docker/Dockerfile.mover
+            build_args: ""
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Build (multi-arch, no push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: false
+          build-args: ${{ matrix.build_args }}
+          cache-from: type=gha,scope=img-${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=img-${{ matrix.component }}
+
   # Supply-chain / license audit (advisory; does not block merges by default).
   audit:
     name: cargo-deny

@@ -14,14 +14,20 @@ ARG KOPIA_VERSION=0.23.0
 
 FROM rust:1.95-bookworm AS builder
 ARG BIN=kopiur-controller
+# TARGETARCH is supplied by buildx per platform. The cache mount ids below are
+# keyed on it so a concurrent multi-arch build (linux/amd64 + linux/arm64 in the
+# same `docker buildx build`) does NOT share one cargo cache and race on
+# unpacking the registry (`.cargo-ok: File exists`, os error 17). `sharing=locked`
+# additionally serialises any same-id concurrent access.
+ARG TARGETARCH
 WORKDIR /src
 
 # Cache dependency compilation: copy manifests first, then sources.
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 # Build only the requested binary, release profile, locked deps.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH},sharing=locked \
+    --mount=type=cache,target=/src/target,id=cargo-target-${BIN}-${TARGETARCH},sharing=locked \
     cargo build --release --locked --bin "${BIN}" && \
     cp "target/release/${BIN}" /usr/local/bin/app
 
