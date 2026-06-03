@@ -7,9 +7,11 @@ ignore = []
 
 [licenses]
 version = 2
-# Permissive dependency licenses we accept. The project itself is AGPL-3.0-only
-# (see /LICENSE); these are the licenses allowed for upstream crates we depend on.
+# Allowed licenses. The first entry is the project's OWN license (the workspace
+# crates declare AGPL-3.0-only via `license.workspace = true`); the rest are the
+# permissive licenses we accept for the upstream crates we depend on.
 allow = [
+    "AGPL-3.0-only",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "MIT",
