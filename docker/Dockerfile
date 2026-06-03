@@ -12,7 +12,7 @@
 
 ARG KOPIA_VERSION=0.23.0
 
-FROM rust:1.95-bookworm AS builder
+FROM rust:1.96-bookworm AS builder
 ARG BIN=kopiur-controller
 # TARGETARCH is supplied by buildx per platform. The cache mount ids below are
 # keyed on it so a concurrent multi-arch build (linux/amd64 + linux/arm64 in the

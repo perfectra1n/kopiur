@@ -6,7 +6,7 @@
 
 ARG KOPIA_VERSION=0.23.0
 
-FROM rust:1.95-bookworm AS builder
+FROM rust:1.96-bookworm AS builder
 # Per-arch cache mount ids: a concurrent multi-arch buildx run (amd64 + arm64)
 # must NOT share one cargo cache, or the two arches race unpacking the registry
 # (`.cargo-ok: File exists`, os error 17). See docker/Dockerfile for the detail.
