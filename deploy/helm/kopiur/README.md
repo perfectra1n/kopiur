@@ -73,11 +73,11 @@ GitOps), set `installCRDs: false` and apply `deploy/crds/*.yaml` out of band.
 | `nameOverride` / `fullnameOverride` | `""` | Name overrides. |
 | `image.registry` | `ghcr.io` | Shared registry. |
 | `image.pullPolicy` | `IfNotPresent` | Controller/webhook pull policy. |
-| `image.controller.repository` | `perfectra1n/kopiur-controller` | Controller image repo. |
+| `image.controller.repository` | `home-operations/kopiur-controller` | Controller image repo. |
 | `image.controller.tag` / `.digest` | `""` | Tag (defaults to appVersion) / digest (wins). |
-| `image.webhook.repository` | `perfectra1n/kopiur-webhook` | Webhook image repo. |
+| `image.webhook.repository` | `home-operations/kopiur-webhook` | Webhook image repo. |
 | `image.webhook.tag` / `.digest` | `""` | Tag / digest. |
-| `image.mover.repository` | `perfectra1n/kopiur-mover` | Per-Job mover image repo. |
+| `image.mover.repository` | `home-operations/kopiur-mover` | Per-Job mover image repo. |
 | `image.mover.digest` | `""` | **Recommended** digest pin (ADR §G15); wins over tag. |
 | `image.mover.pullPolicy` | `IfNotPresent` | Mover Job pull policy. |
 | `imagePullSecrets` | `[]` | Pull secrets for pods and mover Jobs. |

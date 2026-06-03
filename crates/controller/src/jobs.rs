@@ -23,7 +23,7 @@ use crate::consts::API_VERSION;
 
 /// Default mover image; overridable per deployment via the controller config.
 /// `:latest` is deliberately avoided (G15) — callers should pin a digest/tag.
-pub const DEFAULT_MOVER_IMAGE: &str = "ghcr.io/perfectra1n/kopiur-mover:v0.1.0";
+pub const DEFAULT_MOVER_IMAGE: &str = "ghcr.io/home-operations/kopiur-mover:v0.1.0";
 
 /// Path inside the mover pod where the work-spec ConfigMap is mounted.
 pub const WORK_SPEC_MOUNT: &str = "/etc/kopiur";

@@ -10,7 +10,7 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # Image coordinates for local builds (CI publishes to GHCR via release.yml).
-image_prefix := env_var_or_default("KOPIUR_IMAGE_PREFIX", "ghcr.io/perfectra1n/kopiur")
+image_prefix := env_var_or_default("KOPIUR_IMAGE_PREFIX", "ghcr.io/home-operations/kopiur")
 image_tag    := env_var_or_default("KOPIUR_IMAGE_TAG", "dev")
 kopia_version := env_var_or_default("KOPIA_VERSION", "0.23.0")
 

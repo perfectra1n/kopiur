@@ -25,20 +25,20 @@ image:
   pullPolicy: IfNotPresent
   # Controller (operator) image.
   controller:
-    repository: perfectra1n/kopiur-controller
+    repository: home-operations/kopiur-controller
     # -- Defaults to .Chart.AppVersion when empty.
     tag: ""
     # -- Pin by digest (e.g. "sha256:..."); takes precedence over tag.
     digest: ""
   # Admission webhook image.
   webhook:
-    repository: perfectra1n/kopiur-webhook
+    repository: home-operations/kopiur-webhook
     tag: ""
     digest: ""
   # Mover (per-Job) image. The controller reads this reference and stamps it
   # into every Job it creates. Digest-pinned recommended (ADR §G15).
   mover:
-    repository: perfectra1n/kopiur-mover
+    repository: home-operations/kopiur-mover
     tag: ""
     # -- STRONGLY RECOMMENDED in production. Digest pin for the mover Job image.
     digest: ""

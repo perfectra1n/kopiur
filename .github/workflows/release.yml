@@ -16,6 +16,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
+  # Derived from the repo's owner (home-operations). The three component images
+  # publish as ghcr.io/<owner>/<repo>-<component> (e.g. .../kopiur-controller),
+  # the dash-flat scheme this org uses and the chart's image defaults expect.
   IMAGE_PREFIX: ghcr.io/${{ github.repository }}
 
 jobs:
@@ -89,7 +92,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
-          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.component }}
+          images: ${{ env.IMAGE_PREFIX }}-${{ matrix.component }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -145,9 +148,10 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.ver.outputs.tag }}"; VERSION="${VERSION#v}"
           helm package deploy/helm/kopiur --version "${VERSION}" --app-version "${VERSION}" -d dist
-          # Push the chart as an OCI artifact to GHCR alongside the images.
+          # Push the chart as an OCI artifact to the org's shared chart namespace
+          # (ghcr.io/<owner>/charts/kopiur), the convention used across the org.
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-          helm push "dist/kopiur-${VERSION}.tgz" "oci://${{ env.IMAGE_PREFIX }}/charts" || \
+          helm push "dist/kopiur-${VERSION}.tgz" "oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts" || \
             echo "::warning::helm push to OCI failed (non-fatal); chart is still attached to the release"
 
       - name: Bundle CRDs
