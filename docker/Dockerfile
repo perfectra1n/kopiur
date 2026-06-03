@@ -11,8 +11,9 @@
 # syntax=docker/dockerfile:1
 
 ARG KOPIA_VERSION
+ARG RUST_VERSION
 
-FROM rust:1.95-bookworm AS builder
+FROM rust:${RUST_VERSION}-bookworm AS builder
 ARG BIN=kopiur-controller
 # TARGETARCH is supplied by buildx per platform. The cache mount ids below are
 # keyed on it so a concurrent multi-arch build (linux/amd64 + linux/arm64 in the

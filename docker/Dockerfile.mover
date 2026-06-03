@@ -5,8 +5,9 @@
 # syntax=docker/dockerfile:1
 
 ARG KOPIA_VERSION
+ARG RUST_VERSION
 
-FROM rust:1.95-bookworm AS builder
+FROM rust:${RUST_VERSION}-bookworm AS builder
 # Per-arch cache mount ids: a concurrent multi-arch buildx run (amd64 + arm64)
 # must NOT share one cargo cache, or the two arches race unpacking the registry
 # (`.cargo-ok: File exists`, os error 17). See docker/Dockerfile for the detail.

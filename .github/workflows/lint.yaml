@@ -36,6 +36,7 @@ jobs:
       - name: Setup Mise
         uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
         with:
+          cache_key: ${{ runner.os }}-mise-${{ hashFiles('.mise/config.toml', '.mise/mise.lock') }}
           experimental: true
           install_args: --locked
 
@@ -64,6 +65,7 @@ jobs:
       - name: Setup Mise
         uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
         with:
+          cache_key: ${{ runner.os }}-mise-${{ hashFiles('.mise/config.toml', '.mise/mise.lock') }}
           experimental: true
           install_args: --locked
 
@@ -85,6 +87,7 @@ jobs:
       - name: Setup Mise
         uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
         with:
+          cache_key: ${{ runner.os }}-mise-${{ hashFiles('.mise/config.toml', '.mise/mise.lock') }}
           experimental: true
           install_args: --locked
 

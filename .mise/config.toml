@@ -70,9 +70,11 @@ run = "cargo llvm-cov --workspace --locked --summary-only"
 description = "Build the controller image locally"
 run = '''
 KOPIA_VERSION="${KOPIA_VERSION:-$(mise config get tools.kopia)}"
+RUST_VERSION="${RUST_VERSION:-$(mise config get tools.rust.version)}"
 docker build -f docker/Dockerfile \
   --build-arg BIN=kopiur-controller \
   --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" \
+  --build-arg "RUST_VERSION=${RUST_VERSION}" \
   -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/controller:${KOPIUR_IMAGE_TAG:-dev}" .
 '''
 
@@ -80,9 +82,11 @@ docker build -f docker/Dockerfile \
 description = "Build the webhook image locally"
 run = '''
 KOPIA_VERSION="${KOPIA_VERSION:-$(mise config get tools.kopia)}"
+RUST_VERSION="${RUST_VERSION:-$(mise config get tools.rust.version)}"
 docker build -f docker/Dockerfile \
   --build-arg BIN=kopiur-webhook \
   --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" \
+  --build-arg "RUST_VERSION=${RUST_VERSION}" \
   -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/webhook:${KOPIUR_IMAGE_TAG:-dev}" .
 '''
 
@@ -90,8 +94,10 @@ docker build -f docker/Dockerfile \
 description = "Build the mover image locally (ships the kopia binary too)"
 run = '''
 KOPIA_VERSION="${KOPIA_VERSION:-$(mise config get tools.kopia)}"
+RUST_VERSION="${RUST_VERSION:-$(mise config get tools.rust.version)}"
 docker build -f docker/Dockerfile.mover \
   --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" \
+  --build-arg "RUST_VERSION=${RUST_VERSION}" \
   -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/mover:${KOPIUR_IMAGE_TAG:-dev}" .
 '''
 
