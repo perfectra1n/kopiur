@@ -1,0 +1,125 @@
+# mise tasks + tooling for kopiur. `mise tasks` lists them; `mise run <task>`.
+# The Rust toolchain itself stays pinned in rust-toolchain.toml (cargo/rustup
+# read it natively); mise carries the org meta-tools and the task dependencies
+# so developers and CI (.github/workflows) share one source of truth.
+
+[tools]
+lefthook = "2.1.9"
+oxfmt = "0.53.0"
+zizmor = "1.25.2"
+helm = "4.2.0"
+kubectl = "1.36.1"
+kind = "0.32.0"
+kubeconform = "0.7.0"
+"aqua:EmbarkStudios/cargo-deny" = "0.19.8"
+"aqua:taiki-e/cargo-llvm-cov" = "0.8.7"
+
+[tasks.build]
+description = "Compile the whole workspace (debug, locked deps)"
+run = "cargo build --workspace --locked"
+
+[tasks.build-release]
+description = "Compile the release binaries we ship (controller, webhook, mover)"
+run = "cargo build --release --locked -p kopiur-controller -p kopiur-webhook -p kopiur-mover"
+
+[tasks.test]
+description = "Hermetic test suite: unit + serde + validation (no cluster, no network)"
+run = "cargo test --workspace --locked"
+
+[tasks.test-int]
+description = "Cluster + kopia integration tests on an ephemeral kind cluster"
+run = "scripts/with-kind.sh cargo test --workspace --features integration --locked -- --include-ignored"
+
+[tasks.test-e2e]
+description = "Full end-to-end: build images, load into kind, helm install, drive lifecycles, tear down"
+run = "scripts/with-e2e.sh"
+
+[tasks.clippy]
+description = "Clippy across the workspace, warnings are errors"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.fmt]
+description = "Format the workspace in place"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Verify formatting without changing files (CI gate)"
+run = "cargo fmt --all -- --check"
+
+[tasks.gen]
+description = "Regenerate deploy/crds + deploy/rbac from the Rust types"
+run = "cargo xtask gen-all"
+
+[tasks.gen-check]
+description = "Fail if checked-in CRDs/RBAC are stale (CI drift guard)"
+run = "cargo xtask gen-all --check"
+
+[tasks.cov]
+description = "Coverage over the hermetic suite -> lcov.info (report-only; no threshold)"
+run = "cargo llvm-cov --workspace --locked --lcov --output-path lcov.info"
+
+[tasks.cov-html]
+description = "Coverage as a browsable HTML report under target/llvm-cov/html"
+run = "cargo llvm-cov --workspace --locked --html"
+
+[tasks.cov-summary]
+description = "Coverage summary printed to the terminal"
+run = "cargo llvm-cov --workspace --locked --summary-only"
+
+[tasks.image-controller]
+description = "Build the controller image locally"
+run = 'docker build -f docker/Dockerfile --build-arg BIN=kopiur-controller -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/controller:${KOPIUR_IMAGE_TAG:-dev}" .'
+
+[tasks.image-webhook]
+description = "Build the webhook image locally"
+run = 'docker build -f docker/Dockerfile --build-arg BIN=kopiur-webhook -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/webhook:${KOPIUR_IMAGE_TAG:-dev}" .'
+
+[tasks.image-mover]
+description = "Build the mover image locally (ships the kopia binary too)"
+run = 'docker build -f docker/Dockerfile.mover --build-arg KOPIA_VERSION="${KOPIA_VERSION:-0.23.0}" -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/mover:${KOPIUR_IMAGE_TAG:-dev}" .'
+
+[tasks.images]
+description = "Build all three component images locally"
+depends = ["image-controller", "image-webhook", "image-mover"]
+
+[tasks.helm-lint]
+description = "Lint the chart and validate rendered manifests (both scopes) + CRDs against the k8s schema"
+run = """
+helm lint deploy/helm/kopiur
+for scope in namespaced cluster; do
+  helm template kopiur deploy/helm/kopiur --set installScope="$scope" | kubeconform -strict -summary -ignore-missing-schemas
+done
+kubeconform -strict -summary -ignore-missing-schemas deploy/crds/all-crds.yaml
+"""
+
+[tasks.kind-up]
+description = "Create (or reuse) the ephemeral kind cluster and leave it running"
+run = "KOPIUR_KEEP_KIND=1 scripts/with-kind.sh kubectl cluster-info"
+
+[tasks.kind-down]
+description = "Delete the ephemeral kind cluster"
+run = 'kind delete cluster --name "${KOPIUR_KIND_CLUSTER:-kopiur-it}"'
+
+[tasks.audit]
+description = "Supply-chain + license audit"
+run = "cargo deny check"
+
+[tasks.ci]
+description = "The full hermetic gate, exactly what CI's lint-test job runs"
+depends = ["fmt-check", "clippy", "build", "test", "gen-check"]
+
+[tasks.release]
+description = "Build release artifacts, package the chart, then tag & push v<version>"
+depends = ["gen-check", "build-release"]
+run = '''
+version="{{arg(name="version")}}"
+echo "==> packaging Helm chart $version"
+helm package deploy/helm/kopiur --version "$version" --app-version "$version" -d dist
+echo "==> tagging v$version"
+git tag -a "v$version" -m "kopiur v$version"
+git push origin "v$version"
+echo "==> pushed tag v$version; release.yml will publish images, chart, and the GitHub release"
+'''
+
+[hooks]
+postinstall = "lefthook install"
