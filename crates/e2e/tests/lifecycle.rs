@@ -24,7 +24,9 @@ use kube::api::{DeleteParams, PostParams};
 use kube::{Api, Client, ResourceExt};
 use serde::de::DeserializeOwned;
 
-use kopiur_api::{Backup, BackupConfig, BackupSchedule, Maintenance, Repository, Restore};
+use kopiur_api::{
+    Backup, BackupConfig, BackupSchedule, ClusterRepository, Maintenance, Repository, Restore,
+};
 use kopiur_e2e::{E2E_NAMESPACE, default_timeout, poll_interval, try_client, wait_until};
 
 /// Deserialize a CR from a JSON literal into its typed kube object.
@@ -57,6 +59,43 @@ fn backup_config_json(name: &str, repo: &str, src_pvc: &str) -> serde_json::Valu
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
             "repository": { "kind": "Repository", "name": repo },
+            "sources": [ { "pvc": { "name": src_pvc } } ],
+            "retention": { "keepLatest": 5 }
+        }
+    })
+}
+
+/// A cluster-scoped `ClusterRepository` pointing at the same hostPath repo the
+/// namespaced `Repository` uses. Secret refs MUST carry an explicit namespace
+/// (cluster-scoped resources can't infer one), and `allowedNamespaces` opens it
+/// to the e2e namespace.
+fn cluster_repository_json(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "ClusterRepository",
+        "metadata": { "name": name },
+        "spec": {
+            "backend": { "filesystem": { "path": "/repo", "pvcName": "kopiur-e2e-repo" } },
+            "encryption": {
+                "passwordSecretRef": {
+                    "name": CREDS_SECRET, "namespace": E2E_NAMESPACE, "key": "KOPIA_PASSWORD"
+                }
+            },
+            "create": { "enabled": true },
+            "allowedNamespaces": { "all": true }
+        }
+    })
+}
+
+/// A `BackupConfig` whose repository ref is a `ClusterRepository` (cluster-scoped:
+/// note no `namespace` on the ref — that is the whole point of this scenario).
+fn cluster_backup_config_json(name: &str, crepo: &str, src_pvc: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "BackupConfig",
+        "metadata": { "name": name, "namespace": E2E_NAMESPACE },
+        "spec": {
+            "repository": { "kind": "ClusterRepository", "name": crepo },
             "sources": [ { "pvc": { "name": src_pvc } } ],
             "retention": { "keepLatest": 5 }
         }
@@ -223,6 +262,74 @@ async fn backup_restore_delete_lifecycle() {
     )
     .await
     .expect("Backup CR should be removed once the snapshot-cleanup finalizer runs");
+}
+
+/// Regression guard (the "ClusterRepository references are ignored" bug): a
+/// `BackupConfig` that references a cluster-scoped `ClusterRepository` must drive
+/// a Backup all the way to `Succeeded`. Before the fix, the controller resolved
+/// every repository ref as a namespaced `Repository` regardless of `kind`, so a
+/// `kind: ClusterRepository` config failed with
+/// `missing dependency: Repository <ns>/<name>` and never produced a snapshot —
+/// this test would time out at `wait_phase(... "Succeeded")`.
+#[tokio::test]
+#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+async fn cluster_repository_backup_lifecycle() {
+    let Some(client) = try_client().await else {
+        return;
+    };
+    let crepos: Api<ClusterRepository> = Api::all(client.clone());
+    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    // 1. ClusterRepository becomes Ready (cluster-scoped; controller watches it
+    //    cluster-wide under the e2e ClusterRole).
+    crepos
+        .create(
+            &PostParams::default(),
+            &cr(cluster_repository_json("e2e-crepo")),
+        )
+        .await
+        .expect("create ClusterRepository");
+    wait_phase(&crepos, "e2e-crepo", "Ready")
+        .await
+        .expect("ClusterRepository should reach Ready");
+
+    // 2. A BackupConfig referencing it by `kind: ClusterRepository` (no namespace
+    //    on the ref) + a Backup → mover Job → Succeeded with a real snapshot id.
+    configs
+        .create(
+            &PostParams::default(),
+            &cr(cluster_backup_config_json(
+                "e2e-cfg-crepo",
+                "e2e-crepo",
+                "e2e-src",
+            )),
+        )
+        .await
+        .expect("create BackupConfig (ClusterRepository-backed)");
+    backups
+        .create(
+            &PostParams::default(),
+            &cr(backup_json("e2e-backup-crepo", "e2e-cfg-crepo", "Retain")),
+        )
+        .await
+        .expect("create Backup");
+    wait_phase(&backups, "e2e-backup-crepo", "Succeeded")
+        .await
+        .expect("ClusterRepository-backed Backup should reach Succeeded");
+    let bstatus = status_json(&backups, "e2e-backup-crepo").await;
+    let snap_id = bstatus
+        .get("snapshot")
+        .and_then(|s| s.get("kopiaSnapshotID"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        !snap_id.is_empty(),
+        "ClusterRepository-backed Backup must carry a real kopia snapshot id, got {bstatus}"
+    );
+
+    // Cleanup the cluster-scoped resource (the namespaced ones GC with the ns).
+    let _ = crepos.delete("e2e-crepo", &DeleteParams::default()).await;
 }
 
 /// A BackupSchedule with an every-minute cron creates a scheduled Backup CR.

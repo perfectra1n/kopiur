@@ -15,7 +15,7 @@ use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
 use kopiur_api::backup::Backup;
-use kopiur_api::{OnMissingSnapshot, Repository, Restore, RestoreSource, RestoreTarget, validate};
+use kopiur_api::{OnMissingSnapshot, Restore, RestoreSource, RestoreTarget, validate};
 use kopiur_mover::workspec::{
     MoverOptions, MoverWorkSpec, Operation, RepositoryConnect, ResolvedIdentity as MoverIdentity,
     RestoreOp, TargetRef,
@@ -24,7 +24,7 @@ use kopiur_mover::workspec::{
 use crate::consts::API_VERSION;
 use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
-use crate::io;
+use crate::io::{self, ResolvedRepository};
 use crate::jobs::{self, JobLimits, MoverJobInputs, PvcMount};
 
 /// Which source mode a restore uses, as a stable string (mirrors
@@ -232,7 +232,7 @@ async fn drive_direct_restore(
         }
     };
     let target_path = "/restore".to_string();
-    let creds = io::repo_credentials(&repo.spec.encryption);
+    let creds = io::repo_credentials(&repo.encryption);
     let identity = MoverIdentity {
         username: "restore".into(),
         hostname: namespace.to_string(),
@@ -266,9 +266,9 @@ async fn drive_direct_restore(
         options: MoverOptions::default(),
     };
     let owner = io::owner_ref_for(restore, "Restore")?;
-    let repo_pvc = io::filesystem_repo_pvc(&repo.spec.backend).map(|claim_name| PvcMount {
+    let repo_pvc = io::filesystem_repo_pvc(&repo.backend).map(|claim_name| PvcMount {
         claim_name,
-        mount_path: io::filesystem_repo_path(&repo.spec.backend).unwrap_or_default(),
+        mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
         read_only: true,
     });
     let inputs = MoverJobInputs {
@@ -362,15 +362,15 @@ async fn resolve_snapshot(
 /// newest-first.
 async fn list_for_identity(
     ctx: &Context,
-    repo: &Repository,
+    repo: &ResolvedRepository,
     namespace: &str,
     username: &str,
     hostname: &str,
     source_path: Option<&str>,
 ) -> Result<Vec<kopiur_kopia::SnapshotListEntry>> {
     use kopiur_api::backend::Backend;
-    let creds = io::repo_credentials(&repo.spec.encryption);
-    match &repo.spec.backend {
+    let creds = io::repo_credentials(&repo.encryption);
+    match &repo.backend {
         Backend::Filesystem(fs) => {
             let password = io::read_repo_password(&ctx.client, namespace, &creds).await?;
             let client = ctx.kopia.build([("KOPIA_PASSWORD".to_string(), password)]);
@@ -407,14 +407,11 @@ async fn resolve_restore_repository(
     ctx: &Context,
     restore: &Restore,
     namespace: &str,
-) -> Result<Repository> {
+) -> Result<ResolvedRepository> {
+    // Explicit `spec.repository` wins. Honors `kind` (namespaced vs.
+    // ClusterRepository) via the shared resolver (ADR §5.5).
     if let Some(rref) = &restore.spec.repository {
-        let ns = rref.namespace.as_deref().unwrap_or(namespace);
-        let api: Api<Repository> = Api::namespaced(ctx.client.clone(), ns);
-        return api
-            .get_opt(&rref.name)
-            .await?
-            .ok_or_else(|| Error::MissingDependency(format!("Repository {ns}/{}", rref.name)));
+        return io::resolve_repository_ref(&ctx.client, rref, namespace).await;
     }
     // FromConfig: resolve via the BackupConfig's repository.
     if let RestoreSource::FromConfig(c) = &restore.spec.source {
@@ -425,21 +422,15 @@ async fn resolve_restore_repository(
             .get_opt(&c.name)
             .await?
             .ok_or_else(|| Error::MissingDependency(format!("BackupConfig {cfg_ns}/{}", c.name)))?;
-        let rref = &config.spec.repository;
-        let ns = rref.namespace.as_deref().unwrap_or(cfg_ns);
-        let api: Api<Repository> = Api::namespaced(ctx.client.clone(), ns);
-        return api
-            .get_opt(&rref.name)
-            .await?
-            .ok_or_else(|| Error::MissingDependency(format!("Repository {ns}/{}", rref.name)));
+        return io::resolve_repository_ref(&ctx.client, &config.spec.repository, cfg_ns).await;
     }
     Err(Error::Validation(
         "restore requires spec.repository (or a fromConfig source)".into(),
     ))
 }
 
-/// Map a Repository backend to the mover connect spec for a restore.
-fn restore_connect(repo: &Repository) -> Result<RepositoryConnect> {
+/// Map a resolved repository backend to the mover connect spec for a restore.
+fn restore_connect(repo: &ResolvedRepository) -> Result<RepositoryConnect> {
     crate::backup::repository_connect_pub(repo)
 }
 
