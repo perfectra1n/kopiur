@@ -21,7 +21,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
     cp target/release/kopiur-mover /usr/local/bin/kopiur-mover
 
 # Pull the official kopia release binary at a pinned version.
-FROM debian:slim-trixie AS kopia
+FROM debian:trixie-slim AS kopia
 ARG KOPIA_VERSION
 ARG TARGETARCH
 RUN set -eux; \

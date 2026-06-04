@@ -34,7 +34,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
 
 # Pull the official kopia release binary at a pinned version (matches
 # docker/Dockerfile.mover so the controller and movers run identical kopia).
-FROM debian:slim-trixie AS kopia
+FROM debian:trixie-slim AS kopia
 ARG KOPIA_VERSION
 ARG TARGETARCH
 RUN set -eux; \
