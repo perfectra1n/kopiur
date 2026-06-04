@@ -64,6 +64,17 @@ fn clusterrole_parses_and_grants_expected_rules() {
         rule_grants(&rules, "", "serviceaccounts"),
         "cluster role must allow minting per-namespace serviceaccounts"
     );
+    // kube's Recorder writes events.k8s.io/v1 Events — without this group the
+    // create is 403'd and reconcile-outcome Events (e.g. MaintenanceNotConfigured,
+    // SnapshotOrphaned) are silently dropped.
+    assert!(
+        rule_grants(&rules, "events.k8s.io", "events"),
+        "must grant events under events.k8s.io (kube Recorder target)"
+    );
+    assert!(
+        rule_grants(&rules, "", "events"),
+        "must also grant legacy core events"
+    );
 }
 
 #[test]
@@ -88,6 +99,11 @@ fn namespaced_role_parses_and_omits_cluster_scoped_bits() {
     // Same core grants...
     assert!(rule_grants(&rules, "kopiur.home-operations.com", "backups"));
     assert!(rule_grants(&rules, "batch", "jobs"));
+    // Events surfacing works in namespaced mode too (Recorder → events.k8s.io/v1).
+    assert!(
+        rule_grants(&rules, "events.k8s.io", "events"),
+        "namespaced role must grant events under events.k8s.io"
+    );
     // ...but cluster-scoped bits are dropped in namespaced mode.
     assert!(
         !rule_grants(&rules, "kopiur.home-operations.com", "clusterrepositories"),

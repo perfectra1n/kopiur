@@ -112,8 +112,12 @@ fn workload_rules(include_sa_minting: bool) -> Vec<PolicyRule> {
         ),
         // Hook execution into running workload pods.
         rule(&[""], &["pods/exec".into()], &["create", "get"]),
-        // Surface reconcile outcomes as Kubernetes Events.
+        // Surface reconcile outcomes as Kubernetes Events. kube's `Recorder`
+        // writes the modern `events.k8s.io/v1` Event (not the legacy core Event),
+        // so BOTH api groups are required — the core `""` group alone yields a 403
+        // on create and the Event is silently dropped.
         rule(&[""], &["events".into()], &["create", "patch"]),
+        rule(&["events.k8s.io"], &["events".into()], &["create", "patch"]),
         // Secrets hold repository credentials — read-only, never written.
         rule(&[""], &["secrets".into()], READ_VERBS),
         // Mover Jobs.
