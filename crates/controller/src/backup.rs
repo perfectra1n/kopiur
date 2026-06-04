@@ -238,7 +238,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
 
     // No Job yet: resolve the recipe and create the mover Job + ConfigMap.
     let (config, repo) = resolve_recipe(ctx, backup, &namespace).await?;
-    let (work_spec, source_pvc, repo_pvc, creds_secret) =
+    let (work_spec, source_pvc, repo_pvc, creds_secrets) =
         build_backup_run(backup, &config, &repo, &namespace, &name)?;
 
     let owner = io::owner_ref_for(backup, "Backup")?;
@@ -261,7 +261,8 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         labels,
         source_pvc,
         repo_pvc,
-        creds_secret: Some(&creds_secret),
+        creds_secrets,
+        result_configmap: None,
         service_account: ctx.mover_service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
     };
@@ -380,7 +381,7 @@ async fn delete_snapshot_via_job(
     // and authenticate to the repository.
     let (config, repo) = resolve_recipe(ctx, backup, namespace).await?;
     let identity = resolve_identity_for(&config, namespace)?;
-    let creds = io::repo_credentials(&repo.encryption);
+    let creds_secrets = io::mover_creds_secrets(&repo.backend, &repo.encryption);
     let work_spec = MoverWorkSpec {
         version: 1,
         operation: Operation::SnapshotDelete(SnapshotDeleteOp {
@@ -422,7 +423,8 @@ async fn delete_snapshot_via_job(
         labels,
         source_pvc: None,
         repo_pvc,
-        creds_secret: Some(&creds.secret_name),
+        creds_secrets,
+        result_configmap: None,
         service_account: ctx.mover_service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
     };
@@ -539,7 +541,12 @@ async fn resolve_recipe(
 
 /// Build everything a backup run needs: the work spec, the source PVC mount, the
 /// repo PVC mount (filesystem only), and the credentials Secret name.
-type BackupRun<'a> = (MoverWorkSpec, Option<PvcMount>, Option<PvcMount>, String);
+type BackupRun<'a> = (
+    MoverWorkSpec,
+    Option<PvcMount>,
+    Option<PvcMount>,
+    Vec<String>,
+);
 fn build_backup_run(
     _backup: &Backup,
     config: &BackupConfig,
@@ -563,7 +570,7 @@ fn build_backup_run(
         .clone()
         .unwrap_or_else(|| format!("/pvc/{pvc_name}"));
 
-    let creds = io::repo_credentials(&repo.encryption);
+    let creds_secrets = io::mover_creds_secrets(&repo.backend, &repo.encryption);
 
     let work_spec = MoverWorkSpec {
         version: 1,
@@ -594,7 +601,7 @@ fn build_backup_run(
         read_only: false,
     });
 
-    Ok((work_spec, source_pvc, repo_pvc, creds.secret_name))
+    Ok((work_spec, source_pvc, repo_pvc, creds_secrets))
 }
 
 /// Resolve identity from a `BackupConfig` (overrides + defaults) into the mover
@@ -658,6 +665,12 @@ pub(crate) fn backend_to_repository_connect(backend: &Backend) -> RepositoryConn
             endpoint: s.endpoint.clone(),
             prefix: s.prefix.clone(),
             region: s.region.clone(),
+            disable_tls: s.tls.as_ref().map(|t| t.disable_tls).unwrap_or(false),
+            disable_tls_verification: s
+                .tls
+                .as_ref()
+                .map(|t| t.insecure_skip_verify)
+                .unwrap_or(false),
         },
         Backend::Azure(a) => RepositoryConnect::Azure {
             container: a.container.clone(),

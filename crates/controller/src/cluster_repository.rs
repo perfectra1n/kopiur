@@ -9,8 +9,13 @@
 //! [`placement_namespace`] encodes that rule purely and is unit-tested; the
 //! existence check and `Backup` creation are the thin IO parts.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
+use k8s_openapi::api::batch::v1::Job;
+use k8s_openapi::api::core::v1::ConfigMap;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::runtime::controller::Action;
 use kube::{Api, Resource, ResourceExt};
 
@@ -18,10 +23,17 @@ use kopiur_api::backend::Backend;
 use kopiur_api::common::RepositoryKind;
 use kopiur_api::{ClusterRepository, RepositoryPhase, validate};
 use kopiur_kopia::ConnectSpec;
+use kopiur_mover::bootstrap::{BootstrapResult, RESULT_CONFIGMAP_KEY};
+use kopiur_mover::workspec::{
+    BootstrapRepositoryOp, MoverOptions, MoverWorkSpec, Operation, ResolvedIdentity, TargetRef,
+};
 
+use crate::backup::{backend_to_repository_connect, mover_pull_policy_pub};
+use crate::consts::{API_VERSION, REPOSITORY_BOOTSTRAPPED_CONDITION};
 use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
 use crate::io;
+use crate::jobs::{self, JobLimits, MoverJobInputs};
 
 /// Where to materialize a discovered `Backup` under a `ClusterRepository`
 /// (ADR §2.3). `identity_namespace` is the namespace named by the snapshot's
@@ -119,7 +131,7 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
                     .as_ref()
                     .map(|c| c.enabled)
                     .unwrap_or(false);
-                if create_enabled {
+                if kopiur_mover::bootstrap::should_attempt_create(create_enabled, e.class()) {
                     client.repository_create(&spec).await?;
                     client.repository_connect(&spec).await?;
                 } else {
@@ -178,21 +190,278 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
             .await;
         }
         other => {
-            io::patch_status(
-                &api,
-                &name,
-                serde_json::json!({ "phase": "Pending", "backend": other.kind_str() }),
-            )
-            .await?;
-            tracing::info!(
-                repo = %name,
-                backend = other.kind_str(),
-                "object-store ClusterRepository: in-process validation not run (filesystem only)"
-            );
+            // Object-store backends bootstrap via a short-lived mover Job (ADR
+            // §5.4). The Job runs in the credentials Secret's namespace (so its
+            // `envFrom` resolves) and is owned by this cluster-scoped CR (a
+            // namespaced dependent may have a cluster-scoped owner; GC works).
+            return bootstrap_cluster_object_store(ctx, repo, &name, &api, other).await;
         }
     }
 
-    Ok(Action::requeue(std::time::Duration::from_secs(300)))
+    Ok(Action::requeue(Duration::from_secs(300)))
+}
+
+/// Drive the object-store bootstrap for a `ClusterRepository`. Mirrors the
+/// namespaced [`crate::repository::reconcile`] path, minus discovered-Backup
+/// materialization: cross-namespace catalog placement for a ClusterRepository is
+/// a separate concern (see [`placement_namespace`]), so `scanCatalog` is off and
+/// the bootstrap reports identity + snapshot count only.
+async fn bootstrap_cluster_object_store(
+    ctx: &Context,
+    repo: &ClusterRepository,
+    name: &str,
+    api: &Api<ClusterRepository>,
+    backend: &Backend,
+) -> Result<Action> {
+    // The Job + its result ConfigMap live in the credentials Secret's namespace
+    // (cluster-scoped refs must carry an explicit namespace — webhook-enforced).
+    let creds = io::repo_credentials(&repo.spec.encryption);
+    let job_ns = creds.namespace.clone().ok_or_else(|| {
+        Error::Validation(
+            "ClusterRepository encryption.passwordSecretRef.namespace is required".into(),
+        )
+    })?;
+    let job_name = format!("{name}-bootstrap");
+    let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), &job_ns);
+
+    if let Some(job) = job_api.get_opt(&job_name).await? {
+        return match crate::backup::job_terminal_state(&job) {
+            None => {
+                io::patch_status(
+                    api,
+                    name,
+                    serde_json::json!({ "phase": "Initializing", "backend": backend.kind_str() }),
+                )
+                .await?;
+                Ok(Action::requeue(Duration::from_secs(15)))
+            }
+            Some(success) => {
+                finalize_cluster_bootstrap(
+                    ctx, repo, name, &job_ns, &job_name, api, backend, success,
+                )
+                .await
+            }
+        };
+    }
+
+    let create_enabled = repo
+        .spec
+        .create
+        .as_ref()
+        .map(|c| c.enabled)
+        .unwrap_or(false);
+    // ClusterRepository: no discovered-Backup materialization (scanCatalog off).
+    let work_spec = cluster_bootstrap_work_spec(backend, name, &job_ns, create_enabled);
+    let creds_secrets = io::mover_creds_secrets(backend, &repo.spec.encryption);
+    let owner = io::owner_ref_for(repo, "ClusterRepository")?;
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        "kopiur.home-operations.com/cluster-repository".to_string(),
+        name.to_string(),
+    );
+    let inputs = MoverJobInputs {
+        name: &job_name,
+        namespace: &job_ns,
+        owner,
+        work_spec: &work_spec,
+        image: &ctx.mover_image,
+        image_pull_policy: mover_pull_policy_pub(),
+        limits: JobLimits::default(),
+        resources: None,
+        security_context: None,
+        labels,
+        source_pvc: None,
+        repo_pvc: None,
+        creds_secrets,
+        result_configmap: Some(&job_name),
+        service_account: ctx.mover_service_account.as_deref(),
+        passthrough_env: ctx.mover_env_passthrough.clone(),
+    };
+    let cm = jobs::build_config_map(&inputs)?;
+    let job = jobs::build_job(&inputs);
+    io::apply_mover_objects(&ctx.client, &job_ns, &job_name, &cm, &job).await?;
+    io::patch_status(
+        api,
+        name,
+        serde_json::json!({ "phase": "Initializing", "backend": backend.kind_str() }),
+    )
+    .await?;
+    tracing::info!(repo = %name, backend = backend.kind_str(), namespace = %job_ns, "launched ClusterRepository bootstrap Job");
+    Ok(Action::requeue(Duration::from_secs(15)))
+}
+
+/// Build the bootstrap work spec for a `ClusterRepository` object store.
+fn cluster_bootstrap_work_spec(
+    backend: &Backend,
+    name: &str,
+    job_ns: &str,
+    auto_create: bool,
+) -> MoverWorkSpec {
+    MoverWorkSpec {
+        version: 1,
+        operation: Operation::BootstrapRepository(BootstrapRepositoryOp {
+            auto_create,
+            scan_catalog: false,
+        }),
+        identity: ResolvedIdentity {
+            username: "kopiur-bootstrap".to_string(),
+            hostname: name.to_string(),
+            source_path: String::new(),
+        },
+        repository: backend_to_repository_connect(backend),
+        target_ref: TargetRef {
+            api_version: API_VERSION.to_string(),
+            kind: "ClusterRepository".to_string(),
+            name: name.to_string(),
+            namespace: job_ns.to_string(),
+        },
+        hook_plan: Default::default(),
+        options: MoverOptions::default(),
+    }
+}
+
+/// Reflect a finished `ClusterRepository` bootstrap Job into its status.
+#[allow(clippy::too_many_arguments)]
+async fn finalize_cluster_bootstrap(
+    ctx: &Context,
+    repo: &ClusterRepository,
+    name: &str,
+    job_ns: &str,
+    job_name: &str,
+    api: &Api<ClusterRepository>,
+    backend: &Backend,
+    job_succeeded: bool,
+) -> Result<Action> {
+    let result = read_cluster_bootstrap_result(ctx, job_ns, job_name).await?;
+    let Some(result) = result else {
+        if job_succeeded {
+            tracing::warn!(repo = %name, "bootstrap Job complete but result not readable yet; requeueing");
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+        let conditions = cluster_bootstrap_condition(
+            repo,
+            false,
+            "Unknown",
+            "bootstrap Job failed without a result",
+        );
+        io::patch_status(
+            api,
+            name,
+            serde_json::json!({
+                "phase": "Failed",
+                "backend": backend.kind_str(),
+                "conditions": conditions,
+            }),
+        )
+        .await?;
+        return Ok(Action::requeue(Duration::from_secs(120)));
+    };
+
+    if !result.success {
+        let (class, message) = result
+            .failure
+            .as_ref()
+            .map(|f| (f.kopia_error_class.as_str(), f.message.as_str()))
+            .unwrap_or(("Unknown", "repository bootstrap failed"));
+        let conditions = cluster_bootstrap_condition(repo, false, class, message);
+        io::patch_status(
+            api,
+            name,
+            serde_json::json!({
+                "phase": "Failed",
+                "backend": backend.kind_str(),
+                "conditions": conditions,
+            }),
+        )
+        .await?;
+        tracing::warn!(repo = %name, class, "ClusterRepository bootstrap failed");
+        return Ok(Action::requeue(Duration::from_secs(120)));
+    }
+
+    let allowed_count = allowed_namespace_count(&repo.spec.allowed_namespaces);
+    let conditions = cluster_bootstrap_condition(
+        repo,
+        true,
+        "Bootstrapped",
+        if result.created {
+            "created a new repository"
+        } else {
+            "connected to the existing repository"
+        },
+    );
+    io::patch_status(
+        api,
+        name,
+        serde_json::json!({
+            "phase": "Ready",
+            "backend": backend.kind_str(),
+            "uniqueId": result.unique_id,
+            "allowedNamespaceCount": allowed_count,
+            "storageStats": { "snapshotCount": result.snapshot_count },
+            "conditions": conditions,
+        }),
+    )
+    .await?;
+
+    // Surface whether a Maintenance CR references this ClusterRepository (§3.7).
+    // Build on the conditions we just patched (including `Bootstrapped`), not the
+    // stale cached object, so this patch doesn't drop the `Bootstrapped` set above.
+    io::check_maintenance(
+        ctx,
+        api,
+        &repo.object_ref(&()),
+        RepositoryKind::ClusterRepository,
+        "ClusterRepository",
+        "",
+        None,
+        name,
+        &conditions,
+        repo.metadata.generation,
+    )
+    .await;
+
+    Ok(Action::requeue(Duration::from_secs(300)))
+}
+
+/// Read the [`BootstrapResult`] the mover wrote into the work-spec ConfigMap (in
+/// the credentials Secret's namespace).
+async fn read_cluster_bootstrap_result(
+    ctx: &Context,
+    namespace: &str,
+    cm_name: &str,
+) -> Result<Option<BootstrapResult>> {
+    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), namespace);
+    let Some(cm) = cm_api.get_opt(cm_name).await? else {
+        return Ok(None);
+    };
+    let Some(raw) = cm.data.as_ref().and_then(|d| d.get(RESULT_CONFIGMAP_KEY)) else {
+        return Ok(None);
+    };
+    let result: BootstrapResult = serde_json::from_str(raw)
+        .map_err(|e| Error::Invariant(format!("parsing bootstrap result for {cm_name}: {e}")))?;
+    Ok(Some(result))
+}
+
+/// Upsert the `Bootstrapped` condition onto the ClusterRepository's conditions.
+fn cluster_bootstrap_condition(
+    repo: &ClusterRepository,
+    status: bool,
+    reason: &str,
+    message: &str,
+) -> Vec<Condition> {
+    let existing = repo
+        .status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default();
+    io::upsert_condition(
+        &existing,
+        REPOSITORY_BOOTSTRAPPED_CONDITION,
+        status,
+        reason,
+        message,
+        repo.metadata.generation,
+    )
 }
 
 /// Count of namespaces a `List`/`All` gate resolves to (selector requires a live

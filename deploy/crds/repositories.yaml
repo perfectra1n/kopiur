@@ -269,7 +269,17 @@ spec:
                                 nullable: true
                                 type: string
                             type: object
+                          disableTls:
+                            description: |-
+                              Disable TLS entirely and talk plain HTTP. Maps to kopia's `--disable-tls`.
+                              Needed for HTTP-only endpoints (e.g. an in-cluster MinIO/RustFS service);
+                              kopia's S3 path otherwise assumes HTTPS. Off by default.
+                            type: boolean
                           insecureSkipVerify:
+                            description: |-
+                              Skip TLS certificate verification (still uses TLS). Maps to kopia's
+                              `--disable-tls-verification`. For self-signed endpoints; prefer
+                              `caBundleRef` in production.
                             type: boolean
                         type: object
                     required:

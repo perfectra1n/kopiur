@@ -9,6 +9,7 @@
 //! contract) and [`status`] (the pure kopia-result → status mapping). The kube
 //! PATCH path lives in `main.rs` and is not part of the library surface.
 
+pub mod bootstrap;
 pub mod env;
 pub mod status;
 pub mod workspec;

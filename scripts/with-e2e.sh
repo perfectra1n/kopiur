@@ -145,6 +145,78 @@ spec:
   resources: { requests: { storage: 1Gi } }
 YAML
 
+# --- 4b. MinIO (S3) for the object-store bootstrap scenarios -------------------
+# A single-pod, HTTP-only MinIO + Service. The S3 Repository/ClusterRepository
+# point at it over plain HTTP via the backend's `tls.disableTls` knob (kopiur's
+# S3 path is otherwise HTTPS-only). The mover Job reads KOPIA_PASSWORD + the AWS
+# keys from one Secret via envFrom; kopia 0.23 picks up AWS_ACCESS_KEY_ID /
+# AWS_SECRET_ACCESS_KEY from the environment.
+MINIO_USER="minioadmin"
+MINIO_PASS="minioadmin123"
+echo "==> deploying MinIO (S3) for object-store e2e"
+kubectl apply -f - <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: ${NS}
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: minio } }
+  template:
+    metadata: { labels: { app: minio } }
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:latest
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - { name: MINIO_ROOT_USER, value: "${MINIO_USER}" }
+            - { name: MINIO_ROOT_PASSWORD, value: "${MINIO_PASS}" }
+          ports:
+            - { containerPort: 9000 }
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: 9000 }
+            periodSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: ${NS}
+spec:
+  selector: { app: minio }
+  ports:
+    - { name: s3, port: 9000, targetPort: 9000 }
+YAML
+echo "==> waiting for MinIO rollout"
+kubectl -n "${NS}" rollout status deploy/minio --timeout=120s
+
+echo "==> creating S3 buckets via mc"
+kubectl -n "${NS}" run mc-mkbucket --rm -i --restart=Never \
+  --image=minio/mc:latest --command -- /bin/sh -c "
+    set -e
+    until mc alias set local http://minio:9000 ${MINIO_USER} ${MINIO_PASS} >/dev/null 2>&1; do sleep 2; done
+    mc mb --ignore-existing local/kopiur
+    mc mb --ignore-existing local/kopiur-guard
+  "
+
+echo "==> creating S3 credential Secrets"
+# Good creds: one Secret holds the repo password AND the S3 access keys (the
+# homelab single-secret layout — the mover dedupes it to one envFrom).
+kubectl -n "${NS}" create secret generic kopia-s3-creds \
+  --from-literal=KOPIA_PASSWORD="e2e-test-password-123" \
+  --from-literal=AWS_ACCESS_KEY_ID="${MINIO_USER}" \
+  --from-literal=AWS_SECRET_ACCESS_KEY="${MINIO_PASS}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+# Wrong password but valid S3 keys: exercises the safe-create guard (an existing
+# repo whose password fails to open must end Failed, never be recreated).
+kubectl -n "${NS}" create secret generic kopia-s3-badpw \
+  --from-literal=KOPIA_PASSWORD="this-is-the-wrong-password" \
+  --from-literal=AWS_ACCESS_KEY_ID="${MINIO_USER}" \
+  --from-literal=AWS_SECRET_ACCESS_KEY="${MINIO_PASS}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 # --- 5. Install the chart ------------------------------------------------------
 # Webhook disabled (its admission logic is covered by the unit + integration
 # tiers and needs TLS/cert-manager we don't want in the harness). The controller

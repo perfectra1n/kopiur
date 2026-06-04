@@ -63,8 +63,16 @@ pub struct ConfigMapKeyRef {
 pub struct TlsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_bundle_ref: Option<ConfigMapKeyRef>,
+    /// Skip TLS certificate verification (still uses TLS). Maps to kopia's
+    /// `--disable-tls-verification`. For self-signed endpoints; prefer
+    /// `caBundleRef` in production.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub insecure_skip_verify: bool,
+    /// Disable TLS entirely and talk plain HTTP. Maps to kopia's `--disable-tls`.
+    /// Needed for HTTP-only endpoints (e.g. an in-cluster MinIO/RustFS service);
+    /// kopia's S3 path otherwise assumes HTTPS. Off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_tls: bool,
 }
 
 /// Which kind of repository a consumer CR references. ADR §3.2/§3.3.

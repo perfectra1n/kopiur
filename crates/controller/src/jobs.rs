@@ -32,6 +32,9 @@ pub const WORK_SPEC_FILE: &str = "work-spec.json";
 /// Env var the mover reads for the work-spec path. Sourced from the mover
 /// crate's single definition so the controller↔mover contract can't drift.
 pub const WORK_SPEC_ENV: &str = kopiur_mover::env::WORK_SPEC_PATH;
+/// Env var naming the ConfigMap the mover writes a bootstrap result into (set
+/// only for `BootstrapRepository` Jobs). Single definition shared with the mover.
+pub const RESULT_CONFIGMAP_ENV: &str = kopiur_mover::env::RESULT_CONFIGMAP;
 
 /// Defaults for the mover `Job`, sourced from `FailurePolicy` (ADR §4.10, G6).
 #[derive(Debug, Clone, Copy)]
@@ -92,10 +95,16 @@ pub struct MoverJobInputs<'a> {
     /// The repo PVC for the filesystem backend, mounted read-write at the repo
     /// path so kopia can write the repository. `None` for object-store backends.
     pub repo_pvc: Option<PvcMount>,
-    /// Name of a `Secret` whose keys are exposed as env vars to the mover
-    /// (`KOPIA_PASSWORD` and any backend credentials). Credentials NEVER come
-    /// from the work-spec ConfigMap (§4.10/§4.11). `None` only in tests.
-    pub creds_secret: Option<&'a str>,
+    /// Names of `Secret`s whose keys are exposed as env vars to the mover
+    /// (`KOPIA_PASSWORD` from the encryption secret, plus backend credentials
+    /// like `AWS_*` from the backend `auth.secretRef`). Each distinct secret
+    /// becomes one `envFrom` entry; callers dedupe identical names (the common
+    /// single-secret case collapses to one). Credentials NEVER come from the
+    /// work-spec ConfigMap (§4.10/§4.11). Empty only in tests / filesystem repos.
+    pub creds_secrets: Vec<String>,
+    /// Name of the ConfigMap the mover writes its bootstrap result into (set only
+    /// for `BootstrapRepository` runs; `None` for backup/restore/delete).
+    pub result_configmap: Option<&'a str>,
     /// ServiceAccount the mover pod runs as. The mover PATCHes the owning
     /// Backup/Restore `.status`, so it needs an SA bound to the operator's
     /// status-patch rules. `None` falls back to the namespace `default` SA
@@ -207,17 +216,27 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
         });
     }
 
-    // Credentials (KOPIA_PASSWORD + backend creds) come from a Secret as env,
-    // never from the ConfigMap.
-    let env_from = inputs.creds_secret.map(|secret| {
-        vec![EnvFromSource {
-            secret_ref: Some(SecretEnvSource {
-                name: secret.to_string(),
-                optional: Some(false),
-            }),
-            ..Default::default()
-        }]
-    });
+    // Credentials (KOPIA_PASSWORD + backend creds) come from Secret(s) as env,
+    // never from the ConfigMap. One `envFrom` per distinct secret so an
+    // object-store repo whose password and backend keys live in separate Secrets
+    // both reach the mover.
+    let env_from: Option<Vec<EnvFromSource>> = if inputs.creds_secrets.is_empty() {
+        None
+    } else {
+        Some(
+            inputs
+                .creds_secrets
+                .iter()
+                .map(|secret| EnvFromSource {
+                    secret_ref: Some(SecretEnvSource {
+                        name: secret.clone(),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                })
+                .collect(),
+        )
+    };
 
     // Work-spec path env, plus any passthrough (OTLP + RUST_LOG/KOPIUR_LOG_FORMAT)
     // so the mover exports to the same collector and logs at the same level/format
@@ -227,6 +246,13 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
         value: Some(format!("{WORK_SPEC_MOUNT}/{WORK_SPEC_FILE}")),
         value_from: None,
     }];
+    if let Some(cm) = inputs.result_configmap {
+        env.push(k8s_openapi::api::core::v1::EnvVar {
+            name: RESULT_CONFIGMAP_ENV.to_string(),
+            value: Some(cm.to_string()),
+            value_from: None,
+        });
+    }
     env.extend(
         inputs
             .passthrough_env
@@ -347,7 +373,8 @@ mod tests {
             labels,
             source_pvc: None,
             repo_pvc: None,
-            creds_secret: None,
+            creds_secrets: Vec::new(),
+            result_configmap: None,
             service_account: Some("kopiur-operator"),
             passthrough_env: Vec::new(),
         }
@@ -439,7 +466,7 @@ mod tests {
             mount_path: "/repo".into(),
             read_only: false,
         });
-        i.creds_secret = Some("kopia-creds");
+        i.creds_secrets = vec!["kopia-creds".into()];
         i.image_pull_policy = Some("IfNotPresent");
 
         let job = build_job(&i);
@@ -478,6 +505,33 @@ mod tests {
 
         // Image pull policy applied.
         assert_eq!(container.image_pull_policy.as_deref(), Some("IfNotPresent"));
+    }
+
+    #[test]
+    fn job_mounts_each_distinct_creds_secret_and_result_configmap_env() {
+        // Object-store bootstrap: password secret + backend auth secret both reach
+        // the mover (one envFrom each), and the result ConfigMap name is exported.
+        let ws = sample_work_spec();
+        let mut i = inputs(&ws, JobLimits::default());
+        i.creds_secrets = vec!["kopia-password".into(), "s3-creds".into()];
+        i.result_configmap = Some("repo-bootstrap");
+
+        let job = build_job(&i);
+        let container = &job.spec.unwrap().template.spec.unwrap().containers[0];
+
+        let env_from = container.env_from.as_ref().expect("envFrom present");
+        let names: Vec<&str> = env_from
+            .iter()
+            .filter_map(|e| e.secret_ref.as_ref().map(|s| s.name.as_str()))
+            .collect();
+        assert_eq!(names, vec!["kopia-password", "s3-creds"]);
+
+        let env = container.env.as_ref().unwrap();
+        let result_env = env
+            .iter()
+            .find(|e| e.name == RESULT_CONFIGMAP_ENV)
+            .expect("result configmap env present");
+        assert_eq!(result_env.value.as_deref(), Some("repo-bootstrap"));
     }
 
     #[test]

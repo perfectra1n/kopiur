@@ -23,9 +23,12 @@ use kopiur_kopia::{KopiaClient, KopiaError};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use kopiur_mover::env::{KOPIA_BINARY, WORK_SPEC_PATH};
+use kopiur_mover::bootstrap::{
+    BootstrapResult, MAX_RETURNED_SNAPSHOTS, RESULT_CONFIGMAP_KEY, should_attempt_create,
+};
+use kopiur_mover::env::{KOPIA_BINARY, RESULT_CONFIGMAP, WORK_SPEC_PATH};
 use kopiur_mover::status::StatusUpdate;
-use kopiur_mover::workspec::{self, MoverWorkSpec, Operation};
+use kopiur_mover::workspec::{self, BootstrapRepositoryOp, MoverWorkSpec, Operation};
 
 fn main() -> std::process::ExitCode {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -62,26 +65,31 @@ async fn run() -> Result<()> {
 
     let client = build_client(&spec);
 
-    // A best-effort status reporter. If we cannot build a kube client (e.g.
-    // running outside a cluster), we log instead of failing the operation.
-    let reporter = StatusReporter::try_new(&spec).await;
-
     let started = std::time::Instant::now();
-    // Connect to the repository (short, idempotent), then run the operation with
-    // periodic progress reporting.
-    let result = match client
-        .repository_connect(&spec.repository.to_connect_spec())
-        .await
-    {
-        Err(e) => terminal_failure(&reporter, &e).await,
-        Ok(()) => match execute(&client, &spec, &reporter).await {
-            Ok(update) => {
-                reporter.report(&update).await;
-                info!(phase = %update.phase, "operation succeeded");
-                Ok(())
+    // Bootstrap owns its own connect/create lifecycle (and reports via a result
+    // ConfigMap, not the CR status); every other operation connects first, then
+    // runs with periodic progress PATCHes.
+    let result = match &spec.operation {
+        Operation::BootstrapRepository(op) => run_bootstrap_flow(&client, &spec, op).await,
+        _ => {
+            // A best-effort status reporter. If we cannot build a kube client
+            // (e.g. running outside a cluster), we log instead of failing.
+            let reporter = StatusReporter::try_new(&spec).await;
+            match client
+                .repository_connect(&spec.repository.to_connect_spec())
+                .await
+            {
+                Err(e) => terminal_failure(&reporter, &e).await,
+                Ok(()) => match execute(&client, &spec, &reporter).await {
+                    Ok(update) => {
+                        reporter.report(&update).await;
+                        info!(phase = %update.phase, "operation succeeded");
+                        Ok(())
+                    }
+                    Err(e) => terminal_failure(&reporter, &e).await,
+                },
             }
-            Err(e) => terminal_failure(&reporter, &e).await,
-        },
+        }
     };
 
     // Push the operation outcome metric, then flush OTLP before the Job exits.
@@ -154,7 +162,148 @@ async fn run_operation(
             client.snapshot_delete(&op.snapshot_id).await?;
             Ok(StatusUpdate::succeeded(chrono::Utc::now()))
         }
+        // Bootstrap is dispatched in `run()` before the connect+execute path; it
+        // owns its own connect/create lifecycle and never reaches here. Named
+        // explicitly (not `_`) so a future Operation variant still fails to
+        // compile until handled (ADR §5.5).
+        Operation::BootstrapRepository(_) => {
+            unreachable!("BootstrapRepository is handled by run_bootstrap_flow, not execute()")
+        }
     }
+}
+
+/// Drive a `BootstrapRepository` run: connect/create, write the result to the
+/// work-spec ConfigMap (so the controller can read it even on failure), and
+/// translate success/failure into the process exit code.
+async fn run_bootstrap_flow(
+    client: &KopiaClient,
+    spec: &MoverWorkSpec,
+    op: &BootstrapRepositoryOp,
+) -> Result<()> {
+    let result = run_bootstrap(client, spec, op).await;
+    // Persist BEFORE returning: a failed bootstrap still exits non-zero (so the
+    // Job is marked Failed and backoff is bounded), but the controller must be
+    // able to read the structured failure to set an actionable Repository status.
+    write_bootstrap_result(spec, &result).await;
+    if result.success {
+        info!(
+            created = result.created,
+            unique_id = ?result.unique_id,
+            snapshot_count = result.snapshot_count,
+            "repository bootstrap succeeded"
+        );
+        Ok(())
+    } else {
+        let class = result
+            .failure
+            .as_ref()
+            .map(|f| f.kopia_error_class.as_str())
+            .unwrap_or("Unknown");
+        error!(class, "repository bootstrap failed terminally");
+        Err(anyhow::anyhow!(
+            "repository bootstrap failed (class {class})"
+        ))
+    }
+}
+
+/// The bootstrap routine: connect-first (adopt an existing repo), create only
+/// when gated by [`should_attempt_create`], then read identity + catalog.
+async fn run_bootstrap(
+    client: &KopiaClient,
+    spec: &MoverWorkSpec,
+    op: &BootstrapRepositoryOp,
+) -> BootstrapResult {
+    let connect_spec = spec.repository.to_connect_spec();
+
+    let mut created = false;
+    if let Err(e) = client.repository_connect(&connect_spec).await {
+        if !should_attempt_create(op.auto_create, e.class()) {
+            // Either auto_create is off, or the failure means a repo already
+            // exists (auth/locked) — surface it, never recreate.
+            return BootstrapResult::failed(&e);
+        }
+        info!(class = %e.class(), "connect failed; attempting repository create");
+        if let Err(ce) = client.repository_create(&connect_spec).await {
+            return BootstrapResult::failed(&ce);
+        }
+        if let Err(ce) = client.repository_connect(&connect_spec).await {
+            return BootstrapResult::failed(&ce);
+        }
+        created = true;
+    }
+
+    let unique_id = match client.repository_status().await {
+        Ok(s) => Some(s.unique_id_hex),
+        Err(e) => return BootstrapResult::failed(&e),
+    };
+
+    // Always list to report an authoritative snapshot count; return the entries
+    // for materialization only when scanning is requested.
+    let listing = match client.snapshot_list(None).await {
+        Ok(l) => l,
+        Err(e) => return BootstrapResult::failed(&e),
+    };
+    let snapshot_count = listing.len() as i64;
+    let (snapshots, truncated) = if op.scan_catalog {
+        let truncated = listing.len() > MAX_RETURNED_SNAPSHOTS;
+        let mut s = listing;
+        if truncated {
+            s.truncate(MAX_RETURNED_SNAPSHOTS);
+        }
+        (s, truncated)
+    } else {
+        (Vec::new(), false)
+    };
+    if truncated {
+        warn!(
+            snapshot_count,
+            returned = MAX_RETURNED_SNAPSHOTS,
+            "more snapshots than the materialization cap; only the newest were returned"
+        );
+    }
+
+    BootstrapResult::ready(created, unique_id, snapshot_count, snapshots, truncated)
+}
+
+/// Persist a [`BootstrapResult`] into the work-spec ConfigMap (best-effort). The
+/// controller reads it from key [`RESULT_CONFIGMAP_KEY`].
+async fn write_bootstrap_result(spec: &MoverWorkSpec, result: &BootstrapResult) {
+    let cm_name = match std::env::var(RESULT_CONFIGMAP) {
+        Ok(n) if !n.is_empty() => n,
+        _ => {
+            warn!("{RESULT_CONFIGMAP} unset; bootstrap result not persisted");
+            return;
+        }
+    };
+    let ns = &spec.target_ref.namespace;
+    match write_result_configmap(&cm_name, ns, result).await {
+        Ok(()) => info!(configmap = %cm_name, "wrote bootstrap result"),
+        Err(e) => warn!(error = %e, configmap = %cm_name, "failed to write bootstrap result"),
+    }
+}
+
+/// Merge-patch the result JSON into the ConfigMap's `data` (adds
+/// [`RESULT_CONFIGMAP_KEY`] without disturbing the work-spec key).
+async fn write_result_configmap(
+    cm_name: &str,
+    namespace: &str,
+    result: &BootstrapResult,
+) -> Result<()> {
+    use k8s_openapi::api::core::v1::ConfigMap;
+    use kube::api::{Patch, PatchParams};
+
+    let client = kube::Client::try_default().await?;
+    let api: kube::Api<ConfigMap> = kube::Api::namespaced(client, namespace);
+    let body = serde_json::json!({
+        "data": { RESULT_CONFIGMAP_KEY: serde_json::to_string(result)? }
+    });
+    api.patch(
+        cm_name,
+        &PatchParams::apply("kopiur.home-operations.com/mover"),
+        &Patch::Merge(&body),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Report a terminal failure (PATCH the failure block) and return an error so

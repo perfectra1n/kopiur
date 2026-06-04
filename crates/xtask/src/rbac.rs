@@ -100,7 +100,10 @@ fn kopia_crd_rules(include_cluster_crds: bool) -> Vec<PolicyRule> {
 fn workload_rules(include_sa_minting: bool) -> Vec<PolicyRule> {
     let mut rules = vec![
         // Mover pods + exec for pre/post hooks; PVCs for snapshot/restore I/O;
-        // events for surfacing reconcile outcomes; configmaps for mover config.
+        // events for surfacing reconcile outcomes; configmaps carry the mover
+        // work spec AND (for repository bootstrap) receive the mover's result
+        // patch — the mover runs as this SA, so its result write reuses these
+        // configmaps verbs (no separate rule needed).
         rule(
             &[""],
             &[

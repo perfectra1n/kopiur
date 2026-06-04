@@ -13,9 +13,12 @@
 //! [`needs_materialization`]) and is unit-tested here; the kopia `snapshot list`
 //! IO and `Backup` CR creation are the thin parts.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 
+use k8s_openapi::api::batch::v1::Job;
+use k8s_openapi::api::core::v1::ConfigMap;
 use kube::api::ListParams;
 use kube::runtime::controller::Action;
 use kube::{Api, Resource, ResourceExt};
@@ -24,11 +27,20 @@ use kopiur_api::backend::Backend;
 use kopiur_api::common::RepositoryKind;
 use kopiur_api::{Backup, Repository, RepositoryPhase, validate};
 use kopiur_kopia::{ConnectSpec, SnapshotListEntry};
+use kopiur_mover::bootstrap::{BootstrapResult, RESULT_CONFIGMAP_KEY};
+use kopiur_mover::workspec::{
+    BootstrapRepositoryOp, MoverOptions, MoverWorkSpec, Operation, ResolvedIdentity, TargetRef,
+};
 
-use crate::consts::{ORIGIN_LABEL, REPOSITORY_UID_LABEL, SNAPSHOT_ID_LABEL};
+use crate::backup::{backend_to_repository_connect, mover_pull_policy_pub};
+use crate::consts::{
+    API_VERSION, ORIGIN_LABEL, REPOSITORY_BOOTSTRAPPED_CONDITION, REPOSITORY_UID_LABEL,
+    SNAPSHOT_ID_LABEL,
+};
 use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
 use crate::io;
+use crate::jobs::{self, JobLimits, MoverJobInputs};
 
 /// The dedup key for a discovered snapshot: `(Repository.UID, kopiaSnapshotID)`
 /// (ADR §2.1). Two scans of the same repo never materialize the same snapshot
@@ -148,7 +160,9 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
                 path: fs.path.clone().into(),
             };
 
-            // Idempotent connect; create on first use when enabled.
+            // Idempotent connect; create on first use when enabled AND the
+            // failure does not indicate an existing repo (auth/locked) — the same
+            // safe gate the bootstrap mover applies (never recreate over data).
             if let Err(e) = client.repository_connect(&spec).await {
                 let create_enabled = repo
                     .spec
@@ -156,7 +170,7 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
                     .as_ref()
                     .map(|c| c.enabled)
                     .unwrap_or(false);
-                if create_enabled {
+                if kopiur_mover::bootstrap::should_attempt_create(create_enabled, e.class()) {
                     client.repository_create(&spec).await?;
                     client.repository_connect(&spec).await?;
                 } else {
@@ -184,8 +198,10 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
             .await?;
 
             // Catalog scan: materialize discovered Backups for unseen snapshots,
-            // bounded by catalog.retain.perIdentity.
-            scan_catalog(ctx, repo, &namespace, &name, &repo_uid, &client).await?;
+            // bounded by catalog.retain.perIdentity. Filesystem lists in-process.
+            let listing = client.snapshot_list(None).await?;
+            let total = listing.len() as i64;
+            scan_catalog(ctx, repo, &namespace, &name, &repo_uid, &listing, total).await?;
 
             // Now that the repo is Ready, surface whether a Maintenance CR
             // references it (Warning event + condition + gauge). ADR §3.7.
@@ -209,39 +225,325 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
             .await;
         }
         other => {
-            // NOTE: object-store connect/create/status/catalog would run via a
-            // short-lived mover Job (ADR §5.4). The filesystem path above is the
-            // fully-working core; extending the Job-based path to S3/etc is a
-            // mechanical follow-up that reuses the same MoverWorkSpec plumbing.
-            io::patch_status(
-                &api,
-                &name,
-                serde_json::json!({ "phase": "Pending", "backend": other.kind_str() }),
-            )
-            .await?;
-            tracing::info!(
-                repo = %name,
-                backend = other.kind_str(),
-                "object-store repository: in-process validation not run (filesystem only); see NOTE"
-            );
+            // Object-store backends run connect/create/status/catalog in a
+            // short-lived mover Job (ADR §5.4): the controller cannot reach the
+            // store in-process. The Job writes its result into the work-spec
+            // ConfigMap; the controller (sole writer of the Repository status)
+            // reads it back to set phase/uniqueId and materialize the catalog.
+            return bootstrap_object_store(ctx, repo, &namespace, &name, &repo_uid, &api, other)
+                .await;
         }
     }
 
-    Ok(Action::requeue(std::time::Duration::from_secs(300)))
+    Ok(Action::requeue(Duration::from_secs(300)))
 }
 
-/// Run `snapshot list`, compute which snapshots still need a `Backup` CR, and
-/// create the bounded `origin: discovered` set (forced `deletionPolicy: Retain`).
+/// Drive the object-store bootstrap state machine: launch the mover Job, then on
+/// each reconcile reflect its progress (`Initializing` → `Ready`/`Failed`),
+/// reading the result the mover wrote into the work-spec ConfigMap.
+#[allow(clippy::too_many_arguments)]
+async fn bootstrap_object_store(
+    ctx: &Context,
+    repo: &Repository,
+    namespace: &str,
+    name: &str,
+    repo_uid: &str,
+    api: &Api<Repository>,
+    backend: &Backend,
+) -> Result<Action> {
+    let job_name = format!("{name}-bootstrap");
+    let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), namespace);
+
+    if let Some(job) = job_api.get_opt(&job_name).await? {
+        return match crate::backup::job_terminal_state(&job) {
+            // Still running: surface Initializing and poll.
+            None => {
+                io::patch_status(
+                    api,
+                    name,
+                    serde_json::json!({ "phase": "Initializing", "backend": backend.kind_str() }),
+                )
+                .await?;
+                Ok(Action::requeue(Duration::from_secs(15)))
+            }
+            // Complete or backoff-exhausted: read the structured result.
+            Some(success) => {
+                finalize_bootstrap(
+                    ctx, repo, namespace, name, repo_uid, api, backend, &job_name, success,
+                )
+                .await
+            }
+        };
+    }
+
+    // No Job yet: build + apply it (ConfigMap carries the work spec; the result
+    // is written back into the same ConfigMap under `result.json`).
+    let create_enabled = repo
+        .spec
+        .create
+        .as_ref()
+        .map(|c| c.enabled)
+        .unwrap_or(false);
+    let work_spec = bootstrap_work_spec(backend, name, namespace, create_enabled, true);
+    let creds_secrets = io::mover_creds_secrets(backend, &repo.spec.encryption);
+    let owner = io::owner_ref_for(repo, "Repository")?;
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        "kopiur.home-operations.com/repository".to_string(),
+        name.to_string(),
+    );
+    let inputs = MoverJobInputs {
+        name: &job_name,
+        namespace,
+        owner,
+        work_spec: &work_spec,
+        image: &ctx.mover_image,
+        image_pull_policy: mover_pull_policy_pub(),
+        limits: JobLimits::default(),
+        resources: None,
+        security_context: None,
+        labels,
+        source_pvc: None,
+        repo_pvc: None,
+        creds_secrets,
+        result_configmap: Some(&job_name),
+        service_account: ctx.mover_service_account.as_deref(),
+        passthrough_env: ctx.mover_env_passthrough.clone(),
+    };
+    let cm = jobs::build_config_map(&inputs)?;
+    let job = jobs::build_job(&inputs);
+    io::apply_mover_objects(&ctx.client, namespace, &job_name, &cm, &job).await?;
+    io::patch_status(
+        api,
+        name,
+        serde_json::json!({ "phase": "Initializing", "backend": backend.kind_str() }),
+    )
+    .await?;
+    tracing::info!(repo = %name, backend = backend.kind_str(), "launched repository bootstrap Job");
+    Ok(Action::requeue(Duration::from_secs(15)))
+}
+
+/// Build the bootstrap work spec for an object-store backend. Identity is a
+/// sentinel (bootstrap connects/creates the repo, it does not snapshot under any
+/// identity). `scan_catalog` drives whether the mover returns the snapshot list
+/// for discovered-Backup materialization.
+fn bootstrap_work_spec(
+    backend: &Backend,
+    name: &str,
+    namespace: &str,
+    auto_create: bool,
+    scan_catalog: bool,
+) -> MoverWorkSpec {
+    MoverWorkSpec {
+        version: 1,
+        operation: Operation::BootstrapRepository(BootstrapRepositoryOp {
+            auto_create,
+            scan_catalog,
+        }),
+        identity: ResolvedIdentity {
+            username: "kopiur-bootstrap".to_string(),
+            hostname: namespace.to_string(),
+            source_path: String::new(),
+        },
+        repository: backend_to_repository_connect(backend),
+        target_ref: TargetRef {
+            api_version: API_VERSION.to_string(),
+            kind: "Repository".to_string(),
+            name: name.to_string(),
+            namespace: namespace.to_string(),
+        },
+        hook_plan: Default::default(),
+        options: MoverOptions::default(),
+    }
+}
+
+/// Read the [`BootstrapResult`] the mover wrote into the work-spec ConfigMap.
+/// `Ok(None)` if the ConfigMap or the result key is not (yet) present.
+async fn read_bootstrap_result(
+    ctx: &Context,
+    namespace: &str,
+    cm_name: &str,
+) -> Result<Option<BootstrapResult>> {
+    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), namespace);
+    let Some(cm) = cm_api.get_opt(cm_name).await? else {
+        return Ok(None);
+    };
+    let Some(raw) = cm.data.as_ref().and_then(|d| d.get(RESULT_CONFIGMAP_KEY)) else {
+        return Ok(None);
+    };
+    let result: BootstrapResult = serde_json::from_str(raw)
+        .map_err(|e| Error::Invariant(format!("parsing bootstrap result for {cm_name}: {e}")))?;
+    Ok(Some(result))
+}
+
+/// Reflect a finished bootstrap Job into the Repository status. On success:
+/// `Ready` + uniqueId, then materialize discovered Backups from the returned
+/// snapshots. On failure: `Failed` + an actionable `Bootstrapped=False`
+/// condition carrying the kopia error class/message.
+#[allow(clippy::too_many_arguments)]
+async fn finalize_bootstrap(
+    ctx: &Context,
+    repo: &Repository,
+    namespace: &str,
+    name: &str,
+    repo_uid: &str,
+    api: &Api<Repository>,
+    backend: &Backend,
+    job_name: &str,
+    job_succeeded: bool,
+) -> Result<Action> {
+    let result = read_bootstrap_result(ctx, namespace, job_name).await?;
+    let Some(result) = result else {
+        // Job is terminal but the result is not visible yet (write/propagation
+        // race) — requeue briefly rather than guessing. If the Job truly failed
+        // without writing a result, the next pass still has the Job terminal.
+        if job_succeeded {
+            tracing::warn!(repo = %name, "bootstrap Job complete but result not readable yet; requeueing");
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+        let conditions = bootstrap_condition(
+            repo,
+            false,
+            "Unknown",
+            "bootstrap Job failed without a result",
+        );
+        io::patch_status(
+            api,
+            name,
+            serde_json::json!({
+                "phase": "Failed",
+                "backend": backend.kind_str(),
+                "conditions": conditions,
+            }),
+        )
+        .await?;
+        return Ok(Action::requeue(Duration::from_secs(120)));
+    };
+
+    if !result.success {
+        let (class, message) = result
+            .failure
+            .as_ref()
+            .map(|f| (f.kopia_error_class.as_str(), f.message.as_str()))
+            .unwrap_or(("Unknown", "repository bootstrap failed"));
+        let conditions = bootstrap_condition(repo, false, class, message);
+        io::patch_status(
+            api,
+            name,
+            serde_json::json!({
+                "phase": "Failed",
+                "backend": backend.kind_str(),
+                "conditions": conditions,
+            }),
+        )
+        .await?;
+        tracing::warn!(repo = %name, class, "repository bootstrap failed");
+        return Ok(Action::requeue(Duration::from_secs(120)));
+    }
+
+    // Success: Ready + uniqueId + a Bootstrapped=True condition.
+    let conditions = bootstrap_condition(
+        repo,
+        true,
+        "Bootstrapped",
+        if result.created {
+            "created a new repository"
+        } else {
+            "connected to the existing repository"
+        },
+    );
+    io::patch_status(
+        api,
+        name,
+        serde_json::json!({
+            "phase": "Ready",
+            "backend": backend.kind_str(),
+            "uniqueId": result.unique_id,
+            "conditions": conditions,
+        }),
+    )
+    .await?;
+    if result.snapshots_truncated {
+        tracing::warn!(
+            repo = %name,
+            snapshot_count = result.snapshot_count,
+            "catalog larger than the materialization cap; not all snapshots were materialized"
+        );
+    }
+
+    // Materialize discovered Backups from the snapshots the Job returned.
+    scan_catalog(
+        ctx,
+        repo,
+        namespace,
+        name,
+        repo_uid,
+        &result.snapshots,
+        result.snapshot_count,
+    )
+    .await?;
+
+    // Surface whether a Maintenance CR references this repo (ADR §3.7). Build on
+    // the conditions we just patched (which include `Bootstrapped`), NOT the
+    // stale cached object — otherwise this patch would drop the `Bootstrapped`
+    // condition we set above (both writes replace the whole conditions array).
+    io::check_maintenance(
+        ctx,
+        api,
+        &repo.object_ref(&()),
+        RepositoryKind::Repository,
+        "Repository",
+        namespace,
+        Some(namespace),
+        name,
+        &conditions,
+        repo.metadata.generation,
+    )
+    .await;
+
+    Ok(Action::requeue(Duration::from_secs(300)))
+}
+
+/// Upsert the `Bootstrapped` condition onto the repository's existing conditions.
+fn bootstrap_condition(
+    repo: &Repository,
+    status: bool,
+    reason: &str,
+    message: &str,
+) -> Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> {
+    let existing = repo
+        .status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default();
+    io::upsert_condition(
+        &existing,
+        REPOSITORY_BOOTSTRAPPED_CONDITION,
+        status,
+        reason,
+        message,
+        repo.metadata.generation,
+    )
+}
+
+/// Compute which snapshots in `listing` still need a `Backup` CR, and create the
+/// bounded `origin: discovered` set (forced `deletionPolicy: Retain`).
+///
+/// `listing` is the snapshot set to materialize from: produced in-process for the
+/// filesystem backend, or carried back from the bootstrap Job for object stores.
+/// `total_snapshot_count` is the authoritative repository-wide count for
+/// `storageStats` (may exceed `listing.len()` if the Job capped the returned
+/// entries — see `BootstrapResult::snapshots_truncated`).
+#[allow(clippy::too_many_arguments)]
 async fn scan_catalog(
     ctx: &Context,
     repo: &Repository,
     namespace: &str,
     repo_name: &str,
     repo_uid: &str,
-    client: &kopiur_kopia::KopiaClient,
+    listing: &[SnapshotListEntry],
+    total_snapshot_count: i64,
 ) -> Result<()> {
-    let listing = client.snapshot_list(None).await?;
-
     // Existing discovered Backups keyed by (repo_uid, snapshot_id).
     let backup_api: Api<Backup> = Api::namespaced(ctx.client.clone(), namespace);
     let lp = ListParams::default().labels(&format!("{ORIGIN_LABEL}=discovered"));
@@ -256,7 +558,7 @@ async fn scan_catalog(
         }
     }
 
-    let mut need = needs_materialization(repo_uid, &existing, &listing);
+    let mut need = needs_materialization(repo_uid, &existing, listing);
 
     // Bound by catalog.retain.perIdentity (most-recent N). We approximate the
     // global cap by sorting newest-first and truncating; per-identity refinement
@@ -287,19 +589,22 @@ async fn scan_catalog(
     ctx.metrics.set_repo_size_bytes(
         namespace,
         repo_name,
-        logical_bytes_under_management(&listing),
+        logical_bytes_under_management(listing),
     );
 
+    // Report THIS repository's discovered count (the `existing` set is
+    // namespace-wide for cross-repo dedup; the status count must be per-repo).
+    let existing_this_repo = existing.iter().filter(|(uid, _)| uid == repo_uid).count() as i64;
     let api: Api<Repository> = Api::namespaced(ctx.client.clone(), namespace);
     io::patch_status(
         &api,
         repo_name,
         serde_json::json!({
             "catalog": {
-                "discoveredBackupCount": existing.len() as i64 + created,
+                "discoveredBackupCount": existing_this_repo + created,
                 "lastRefreshAt": chrono::Utc::now().to_rfc3339(),
             },
-            "storageStats": { "snapshotCount": listing.len() as i64 },
+            "storageStats": { "snapshotCount": total_snapshot_count },
         }),
     )
     .await?;

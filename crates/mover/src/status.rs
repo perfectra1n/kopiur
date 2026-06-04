@@ -10,6 +10,8 @@
 //! tests don't need a client.
 
 use chrono::{DateTime, Utc};
+use kopiur_api::backup::SnapshotInfo;
+use kopiur_api::common::ResolvedIdentity;
 use kopiur_api::{BackupStats, BackupTiming};
 use kopiur_kopia::{KopiaError, SnapshotCreateResult};
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,25 @@ fn stats_from_result(r: &SnapshotCreateResult) -> BackupStats {
         size_bytes: Some(r.total_bytes() as i64),
         files_new: Some(r.file_count() as i64),
         ..Default::default()
+    }
+}
+
+/// Map a kopia create result to the CRD `status.snapshot` (`SnapshotInfo`).
+///
+/// MUST be the nested `{ kopiaSnapshotID, identity }` shape, not a flat
+/// `snapshotId`: the API server prunes unknown status fields, so a flat field is
+/// silently dropped and `status.snapshot` never lands — which is exactly why
+/// object-store backups recorded `Succeeded` with no snapshot id. The identity
+/// comes from kopia's recorded source (`user@host:path`), which the controller
+/// pinned via `--override-source`.
+fn snapshot_from_result(r: &SnapshotCreateResult) -> SnapshotInfo {
+    SnapshotInfo {
+        kopia_snapshot_id: r.id.clone(),
+        identity: ResolvedIdentity {
+            username: r.source.user_name.clone(),
+            hostname: r.source.host.clone(),
+            source_path: Some(r.source.path.clone()),
+        },
     }
 }
 
@@ -108,9 +129,10 @@ pub struct StatusUpdate {
     pub phase: String,
     /// When this update was produced.
     pub observed_at: DateTime<Utc>,
-    /// The snapshot id, once known.
+    /// The snapshot (CRD `status.snapshot`), once known. Nested `SnapshotInfo`
+    /// (`{ kopiaSnapshotID, identity }`) so the API server doesn't prune it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot_id: Option<String>,
+    pub snapshot: Option<SnapshotInfo>,
     /// Timing, on success (CRD `status.timing`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing: Option<BackupTiming>,
@@ -128,7 +150,7 @@ impl StatusUpdate {
         StatusUpdate {
             phase: MoverPhase::Running.as_str().to_string(),
             observed_at,
-            snapshot_id: None,
+            snapshot: None,
             timing: None,
             stats: None,
             failure: None,
@@ -140,7 +162,7 @@ impl StatusUpdate {
         StatusUpdate {
             phase: MoverPhase::Succeeded.as_str().to_string(),
             observed_at,
-            snapshot_id: Some(result.id.clone()),
+            snapshot: Some(snapshot_from_result(result)),
             timing: Some(timing_from_result(result)),
             stats: Some(stats_from_result(result)),
             failure: None,
@@ -152,7 +174,7 @@ impl StatusUpdate {
         StatusUpdate {
             phase: MoverPhase::Succeeded.as_str().to_string(),
             observed_at,
-            snapshot_id: None,
+            snapshot: None,
             timing: None,
             stats: None,
             failure: None,
@@ -164,7 +186,7 @@ impl StatusUpdate {
         StatusUpdate {
             phase: MoverPhase::Failed.as_str().to_string(),
             observed_at,
-            snapshot_id: None,
+            snapshot: None,
             timing: None,
             stats: None,
             failure: Some(FailureBlock::from(err)),
@@ -283,7 +305,19 @@ mod tests {
         let r: SnapshotCreateResult = serde_json::from_str(json).unwrap();
         let u = StatusUpdate::succeeded_backup(&r, ts());
         assert_eq!(u.phase, "Succeeded");
-        assert_eq!(u.snapshot_id.as_deref(), Some("snap1"));
+        // The snapshot MUST serialize as the nested CRD shape
+        // `status.snapshot.kopiaSnapshotID`, or the API server prunes it (the bug
+        // that left object-store backups Succeeded with no snapshot id).
+        let snap = u.snapshot.as_ref().expect("snapshot present");
+        assert_eq!(snap.kopia_snapshot_id, "snap1");
+        assert_eq!(snap.identity.username, "u");
+        assert_eq!(snap.identity.hostname, "h");
+        let body = u.as_patch_body();
+        assert_eq!(body["status"]["snapshot"]["kopiaSnapshotID"], "snap1");
+        assert!(
+            body["status"].get("snapshotId").is_none(),
+            "flat snapshotId leaked; the API server would prune it"
+        );
         assert_eq!(u.stats.as_ref().unwrap().size_bytes, Some(42));
         assert_eq!(u.stats.as_ref().unwrap().files_new, Some(3));
         assert!(u.timing.is_some());

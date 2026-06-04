@@ -27,6 +27,13 @@ pub enum Operation {
     /// Delete a snapshot from the repository (finalizer path, deletionPolicy:
     /// Delete).
     SnapshotDelete(SnapshotDeleteOp),
+    /// Bootstrap a repository: connect (adopt an existing repo), or — when
+    /// `autoCreate` and the backend is reachable with valid creds — create it,
+    /// then report its identity + catalog back to the controller. The
+    /// connect/create lifecycle for object-store backends the controller cannot
+    /// reach in-process (ADR §5.4). Result is written to the work-spec ConfigMap,
+    /// not the CR status (the controller owns the Repository status).
+    BootstrapRepository(BootstrapRepositoryOp),
 }
 
 impl Operation {
@@ -36,6 +43,7 @@ impl Operation {
             Operation::Backup(_) => "Backup",
             Operation::Restore(_) => "Restore",
             Operation::SnapshotDelete(_) => "SnapshotDelete",
+            Operation::BootstrapRepository(_) => "BootstrapRepository",
         }
     }
 }
@@ -89,6 +97,26 @@ pub struct SnapshotDeleteOp {
     pub snapshot_id: String,
 }
 
+/// Payload for a repository-bootstrap run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapRepositoryOp {
+    /// Create the repository when connect fails AND the backend is reachable
+    /// with valid credentials (mirrors `Repository.spec.create.enabled`). The
+    /// connect-first ordering means an existing repo is always adopted, never
+    /// recreated; create is gated so a wrong password / locked repo is surfaced
+    /// instead of silently spawning a second repository.
+    #[serde(default)]
+    pub auto_create: bool,
+    /// Run `snapshot list` and return the entries so the controller can
+    /// materialize `origin: discovered` Backup CRs. The snapshot *count* is
+    /// always reported; the entries are only returned when this is set (the
+    /// controller sets it for namespaced `Repository`, not `ClusterRepository`,
+    /// whose cross-namespace placement is a separate concern).
+    #[serde(default)]
+    pub scan_catalog: bool,
+}
+
 /// The resolved kopia identity (`username@hostname:path`). Pinned by the
 /// controller at admission and never re-derived (ADR §4.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +161,12 @@ pub enum RepositoryConnect {
         /// Optional region.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<String>,
+        /// Talk plain HTTP (`--disable-tls`) for HTTP-only endpoints.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        disable_tls: bool,
+        /// Skip TLS certificate verification (`--disable-tls-verification`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        disable_tls_verification: bool,
     },
     /// Azure Blob Storage backend.
     Azure {
@@ -201,11 +235,15 @@ impl RepositoryConnect {
                 endpoint,
                 prefix,
                 region,
+                disable_tls,
+                disable_tls_verification,
             } => ConnectSpec::S3 {
                 bucket: bucket.clone(),
                 endpoint: endpoint.clone(),
                 prefix: prefix.clone(),
                 region: region.clone(),
+                disable_tls: *disable_tls,
+                disable_tls_verification: *disable_tls_verification,
             },
             RepositoryConnect::Azure {
                 container,
@@ -394,6 +432,8 @@ mod tests {
                 endpoint: Some("https://minio.local".into()),
                 prefix: Some("kopiur/".into()),
                 region: None,
+                disable_tls: false,
+                disable_tls_verification: false,
             },
             target_ref: TargetRef {
                 kind: "Restore".into(),
@@ -426,6 +466,45 @@ mod tests {
         };
         assert_eq!(roundtrip(&spec), spec);
         assert_eq!(spec.operation.kind_str(), "SnapshotDelete");
+    }
+
+    #[test]
+    fn bootstrap_repository_roundtrip_and_wire_shape() {
+        let spec = MoverWorkSpec {
+            version: 1,
+            operation: Operation::BootstrapRepository(BootstrapRepositoryOp {
+                auto_create: true,
+                scan_catalog: true,
+            }),
+            identity: sample_identity(),
+            repository: RepositoryConnect::S3 {
+                bucket: "b".into(),
+                endpoint: Some("minio:9000".into()),
+                prefix: None,
+                region: None,
+                disable_tls: true,
+                disable_tls_verification: false,
+            },
+            target_ref: TargetRef {
+                kind: "Repository".into(),
+                ..sample_target()
+            },
+            hook_plan: HookPlanSummary::default(),
+            options: MoverOptions::default(),
+        };
+        assert_eq!(roundtrip(&spec), spec);
+        assert_eq!(spec.operation.kind_str(), "BootstrapRepository");
+        let v: serde_json::Value = serde_json::to_value(&spec).unwrap();
+        // Externally tagged: { "bootstrapRepository": { "autoCreate": true, ... } }.
+        assert_eq!(v["operation"]["bootstrapRepository"]["autoCreate"], true);
+        assert_eq!(v["operation"]["bootstrapRepository"]["scanCatalog"], true);
+        // S3 disable-tls flows on the wire (camelCase, omitted when false).
+        assert_eq!(v["repository"]["s3"]["disableTls"], true);
+        assert!(
+            v["repository"]["s3"]
+                .get("disableTlsVerification")
+                .is_none()
+        );
     }
 
     #[test]
@@ -484,6 +563,8 @@ mod tests {
             endpoint: None,
             prefix: None,
             region: Some("r".into()),
+            disable_tls: false,
+            disable_tls_verification: false,
         };
         assert_eq!(
             s3.to_connect_spec(),
@@ -492,6 +573,8 @@ mod tests {
                 endpoint: None,
                 prefix: None,
                 region: Some("r".into()),
+                disable_tls: false,
+                disable_tls_verification: false,
             }
         );
     }

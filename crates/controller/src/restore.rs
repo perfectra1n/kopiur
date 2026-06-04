@@ -273,7 +273,7 @@ async fn drive_direct_restore(
         }
     };
     let target_path = "/restore".to_string();
-    let creds = io::repo_credentials(&repo.encryption);
+    let creds_secrets = io::mover_creds_secrets(&repo.backend, &repo.encryption);
     let identity = MoverIdentity {
         username: "restore".into(),
         hostname: namespace.to_string(),
@@ -330,7 +330,8 @@ async fn drive_direct_restore(
             read_only: false,
         }),
         repo_pvc,
-        creds_secret: Some(&creds.secret_name),
+        creds_secrets,
+        result_configmap: None,
         service_account: ctx.mover_service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
     };

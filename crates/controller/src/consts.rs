@@ -33,3 +33,8 @@ pub const MAINTENANCE_NOT_CONFIGURED_REASON: &str = "MaintenanceNotConfigured";
 pub const MAINTENANCE_CONFIGURED_REASON: &str = "MaintenanceConfigured";
 /// `action` for the maintenance-configuration check Event.
 pub const CHECK_MAINTENANCE_ACTION: &str = "CheckMaintenance";
+
+/// Status condition `type` recording the outcome of an object-store repository
+/// bootstrap Job (connect/create). `True` once the repository is reachable;
+/// `False` carries the kopia error class + message so a failure is actionable.
+pub const REPOSITORY_BOOTSTRAPPED_CONDITION: &str = "Bootstrapped";

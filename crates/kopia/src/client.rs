@@ -80,6 +80,11 @@ pub enum ConnectSpec {
         prefix: Option<String>,
         /// Region, if required by the endpoint.
         region: Option<String>,
+        /// Talk plain HTTP to the endpoint (`--disable-tls`). For HTTP-only
+        /// endpoints (in-cluster MinIO/RustFS); kopia otherwise assumes HTTPS.
+        disable_tls: bool,
+        /// Skip TLS certificate verification (`--disable-tls-verification`).
+        disable_tls_verification: bool,
     },
     /// Azure Blob Storage backend.
     Azure {
@@ -193,11 +198,19 @@ impl ConnectSpec {
                 endpoint,
                 prefix,
                 region,
+                disable_tls,
+                disable_tls_verification,
             } => {
                 let mut a = vec!["s3".into(), "--bucket".into(), bucket.clone()];
                 opt(&mut a, "--endpoint", endpoint);
                 opt(&mut a, "--prefix", prefix);
                 opt(&mut a, "--region", region);
+                if *disable_tls {
+                    a.push("--disable-tls".into());
+                }
+                if *disable_tls_verification {
+                    a.push("--disable-tls-verification".into());
+                }
                 a
             }
             ConnectSpec::Azure {
@@ -853,6 +866,8 @@ mod tests {
             endpoint: None,
             prefix: None,
             region: None,
+            disable_tls: false,
+            disable_tls_verification: false,
         };
         assert_eq!(spec.backend_args(), vec!["s3", "--bucket", "b"]);
     }
@@ -864,6 +879,8 @@ mod tests {
             endpoint: Some("https://minio".into()),
             prefix: Some("kopiur/".into()),
             region: Some("us-east-1".into()),
+            disable_tls: false,
+            disable_tls_verification: false,
         };
         assert_eq!(
             spec.backend_args(),
@@ -879,6 +896,22 @@ mod tests {
                 "us-east-1"
             ]
         );
+    }
+
+    #[test]
+    fn s3_backend_args_disable_tls_flags() {
+        // Plain-HTTP endpoint (in-cluster MinIO/RustFS): emit --disable-tls.
+        let spec = ConnectSpec::S3 {
+            bucket: "b".into(),
+            endpoint: Some("minio:9000".into()),
+            prefix: None,
+            region: None,
+            disable_tls: true,
+            disable_tls_verification: true,
+        };
+        let args = spec.backend_args();
+        assert!(args.contains(&"--disable-tls".to_string()));
+        assert!(args.contains(&"--disable-tls-verification".to_string()));
     }
 
     #[test]
@@ -1046,6 +1079,8 @@ mod tests {
                 endpoint: None,
                 prefix: None,
                 region: None,
+                disable_tls: false,
+                disable_tls_verification: false,
             },
             ConnectSpec::Azure {
                 container: "c".into(),

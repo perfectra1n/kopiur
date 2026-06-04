@@ -280,6 +280,42 @@ pub async fn read_repo_password(
         .map_err(|e| Error::Invariant(format!("password not valid utf-8: {e}")))
 }
 
+/// The backend credentials Secret name for an object-store backend, if any.
+///
+/// Exhaustive over [`Backend`] (ADR §5.5): a new backend cannot compile until its
+/// credential source is decided here. Object stores read keys (e.g.
+/// `AWS_ACCESS_KEY_ID`) from `auth.secretRef`; Rclone reads its config from
+/// `configSecretRef`; Filesystem has no backend credentials. This Secret is
+/// mounted into the mover Job alongside the encryption-password Secret so kopia
+/// can reach the store (the in-process filesystem path never needs it).
+pub fn backend_auth_secret_ref(backend: &Backend) -> Option<&kopiur_api::common::SecretRef> {
+    match backend {
+        Backend::S3(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
+        Backend::Azure(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
+        Backend::Gcs(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
+        Backend::B2(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
+        Backend::Sftp(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
+        Backend::WebDav(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
+        Backend::Rclone(b) => b.config_secret_ref.as_ref(),
+        Backend::Filesystem(_) => None,
+    }
+}
+
+/// The distinct credential Secret names a mover Job for `backend` + `encryption`
+/// needs as `envFrom`: always the encryption-password Secret, plus the backend
+/// `auth` Secret when present and different. Deduped, order-stable (password
+/// first). The common single-secret setup (password + keys in one Secret)
+/// collapses to one entry.
+pub fn mover_creds_secrets(backend: &Backend, enc: &Encryption) -> Vec<String> {
+    let mut names = vec![enc.password_secret_ref.name.clone()];
+    if let Some(auth) = backend_auth_secret_ref(backend)
+        && !names.contains(&auth.name)
+    {
+        names.push(auth.name.clone());
+    }
+    names
+}
+
 /// The filesystem repo path for a `Filesystem` backend, or `None` for object
 /// stores. Used to decide whether to mount a repo PVC and run kopia in-process.
 pub fn filesystem_repo_path(backend: &Backend) -> Option<String> {
@@ -599,6 +635,84 @@ mod tests {
         });
         assert_eq!(filesystem_repo_path(&b), None);
         assert_eq!(filesystem_repo_pvc(&b), None);
+    }
+
+    #[test]
+    fn backend_auth_secret_for_s3_and_none_for_filesystem() {
+        use kopiur_api::backend::{BackendAuth, S3Backend};
+        use kopiur_api::common::SecretRef;
+        let s3 = Backend::S3(S3Backend {
+            bucket: "b".into(),
+            prefix: None,
+            endpoint: None,
+            region: None,
+            auth: Some(BackendAuth {
+                secret_ref: Some(SecretRef {
+                    name: "s3-creds".into(),
+                    namespace: Some("kopiur-system".into()),
+                }),
+                workload_identity: None,
+            }),
+            tls: None,
+        });
+        assert_eq!(
+            backend_auth_secret_ref(&s3).map(|s| s.name.as_str()),
+            Some("s3-creds")
+        );
+        let fs = Backend::Filesystem(FilesystemBackend {
+            path: "/repo".into(),
+            pvc_name: None,
+        });
+        assert!(backend_auth_secret_ref(&fs).is_none());
+    }
+
+    #[test]
+    fn mover_creds_dedupe_when_password_and_backend_share_a_secret() {
+        use kopiur_api::backend::{BackendAuth, S3Backend};
+        use kopiur_api::common::{SecretKeyRef, SecretRef};
+        let enc = Encryption {
+            password_secret_ref: SecretKeyRef {
+                name: "kopia-rustfs-creds".into(),
+                namespace: Some("kopiur-system".into()),
+                key: None,
+            },
+        };
+        // Same secret holds password + AWS keys (the homelab layout) -> one entry.
+        let same = Backend::S3(S3Backend {
+            bucket: "b".into(),
+            prefix: None,
+            endpoint: None,
+            region: None,
+            auth: Some(BackendAuth {
+                secret_ref: Some(SecretRef {
+                    name: "kopia-rustfs-creds".into(),
+                    namespace: Some("kopiur-system".into()),
+                }),
+                workload_identity: None,
+            }),
+            tls: None,
+        });
+        assert_eq!(mover_creds_secrets(&same, &enc), vec!["kopia-rustfs-creds"]);
+
+        // Separate secrets -> both, password first.
+        let split = Backend::S3(S3Backend {
+            bucket: "b".into(),
+            prefix: None,
+            endpoint: None,
+            region: None,
+            auth: Some(BackendAuth {
+                secret_ref: Some(SecretRef {
+                    name: "s3-creds".into(),
+                    namespace: Some("kopiur-system".into()),
+                }),
+                workload_identity: None,
+            }),
+            tls: None,
+        });
+        assert_eq!(
+            mover_creds_secrets(&split, &enc),
+            vec!["kopia-rustfs-creds", "s3-creds"]
+        );
     }
 
     #[test]

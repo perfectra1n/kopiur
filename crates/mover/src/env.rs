@@ -10,3 +10,9 @@ pub const WORK_SPEC_PATH: &str = "KOPIUR_WORK_SPEC_PATH";
 
 /// Optional override for the `kopia` binary path (defaults to `kopia` on PATH).
 pub const KOPIA_BINARY: &str = "KOPIUR_KOPIA_BINARY";
+
+/// Name of the `ConfigMap` (in the work spec's `targetRef.namespace`) the mover
+/// writes its bootstrap result into. Set by the controller only for
+/// `BootstrapRepository` runs; absent for backup/restore/delete. The controller
+/// reads the result back to drive the `Repository` status + catalog.
+pub const RESULT_CONFIGMAP: &str = "KOPIUR_RESULT_CONFIGMAP";
