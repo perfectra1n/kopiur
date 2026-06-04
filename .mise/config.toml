@@ -22,6 +22,10 @@ run = "cargo build --workspace --locked"
 description = "Compile the release binaries we ship (controller, webhook, mover)"
 run = "cargo build --release --locked -p kopiur-controller -p kopiur-webhook -p kopiur-mover"
 
+[tasks.rust-components]
+description = "Install Rust components required by project tasks"
+run = "rustup component add rustfmt clippy llvm-tools-preview"
+
 [tasks.test]
 description = "Hermetic test suite: unit + serde + validation (no cluster, no network)"
 run = "cargo test --workspace --locked"
