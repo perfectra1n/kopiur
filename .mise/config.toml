@@ -10,7 +10,7 @@ helm = "4.2.0"
 kubectl = "1.36.1"
 kind = "0.32.0"
 kopia = "0.23.0"
-kubeconform = "0.7.0"
+kubeconform = "0.8.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.19.8"
 "aqua:taiki-e/cargo-llvm-cov" = "0.8.7"
 
