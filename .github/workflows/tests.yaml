@@ -1,0 +1,93 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Run on Ubuntu
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup Mise
+        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+        with:
+          experimental: true
+          install_args: --locked
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: tests
+
+      - name: Build workspace
+        run: mise run build
+
+      - name: Run unit tests
+        run: mise run test
+
+      - name: Check generated manifests
+        run: mise run gen-check
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup Mise
+        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+        with:
+          experimental: true
+          install_args: --locked
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: integration
+
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: kopiur-it
+
+      - name: Apply CRDs
+        # Server-side apply is required: the BackupConfig CRD embeds a full
+        # JobSpec (runJob hook) and exceeds the 256KB last-applied-configuration
+        # annotation that a client-side apply would create.
+        run: |
+          cargo xtask gen-crds
+          kubectl apply --server-side -f deploy/crds/all-crds.yaml
+
+      - name: Run integration tests
+        run: cargo test --workspace --features integration --locked -- --include-ignored
