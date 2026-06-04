@@ -392,8 +392,9 @@ fn handle_repository(
         Err(e) => return resp.deny(format!("failed to decode Repository spec: {e}")),
     };
 
-    if let Err(e) = api::validate::validate_repository_no_inline_retention(&spec) {
-        return resp.deny(e.to_string());
+    let errs = api::validate::validate_repository(&spec);
+    if !errs.is_empty() {
+        return resp.deny(join_errors(&errs));
     }
     resp
 }

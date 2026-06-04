@@ -1,9 +1,14 @@
 # Example 08 — Maintenance (ADR-0001 §3.7, ADR-0003 §4.5)
 #
 # `kopia maintenance` is a first-class concern with its own CRD and an explicit
-# ownership lease (G11). At most one Maintenance owns a repository. A default is
-# created implicitly on first reference to a Repository; declare your own to tune
-# the schedules or ownership.
+# ownership lease (G11). At most one Maintenance owns a repository.
+#
+# Maintenance is default-managed: the operator creates and owns one for every
+# Repository/ClusterRepository (configure it inline via `spec.maintenance` — see
+# examples 01 and 02). This standalone Maintenance is the "external" path: author
+# it for fine-grained control (custom ownership lease / takeoverPolicy). When a
+# user-authored Maintenance like this references a repository, the operator
+# defers to it and does NOT create a duplicate.
 #
 # `schedule.quick` / `schedule.full` are CronSpec { cron, jitter }.
 # `ownership.takeoverPolicy` is a closed enum: Never (default, safest) |

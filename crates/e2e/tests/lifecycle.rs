@@ -20,8 +20,7 @@
 
 use std::time::Duration;
 
-use k8s_openapi::api::events::v1::Event as K8sEvent;
-use kube::api::{DeleteParams, ListParams, PostParams};
+use kube::api::{DeleteParams, Patch, PatchParams, PostParams};
 use kube::{Api, Client, ResourceExt};
 use serde::de::DeserializeOwned;
 
@@ -208,27 +207,6 @@ where
         || async {
             let s = status_json(api, name).await;
             Ok((condition_status(&s, type_).as_deref() == Some(want)).then_some(()))
-        },
-    )
-    .await
-}
-
-/// Poll the namespaced Events API until a `Warning` event with `reason` whose
-/// `regarding` names `obj` is present (the kube `Recorder` writes
-/// `events.k8s.io/v1` Events into the regarding object's namespace).
-async fn wait_warning_event(events: &Api<K8sEvent>, reason: &str, obj: &str) -> anyhow::Result<()> {
-    wait_until(
-        &format!("Warning event {reason} on {obj}"),
-        default_timeout(),
-        poll_interval(),
-        || async {
-            let list = events.list(&ListParams::default()).await?;
-            let found = list.items.iter().any(|e| {
-                e.reason.as_deref() == Some(reason)
-                    && e.type_.as_deref() == Some("Warning")
-                    && e.regarding.as_ref().and_then(|r| r.name.as_deref()) == Some(obj)
-            });
-            Ok(found.then_some(()))
         },
     )
     .await
@@ -632,23 +610,21 @@ async fn metrics_reflect_backup_lifecycle() {
     );
 }
 
-/// A namespaced `Repository` with no `Maintenance` referencing it must surface
-/// the gap (ADR §3.7): a `MaintenanceConfigured=False` condition + a Warning
-/// event. Creating a `Maintenance` that references it flips the condition to
-/// `True` (driven by the controller's `.watches(Maintenance)` trigger reading the
-/// shared informer store). Regression guard for the maintenance-not-configured
-/// surfacing.
+/// Default-managed maintenance (ADR §3.7): a `Repository` with no
+/// `spec.maintenance` (default-on) gets an operator-*owned* `Maintenance` created
+/// for it — same name as the repo, an `ownerReference` back to it, and the default
+/// schedule — and the repo reports `MaintenanceConfigured=True`. Replaces the old
+/// "warn when no Maintenance references the repo" behavior.
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
-async fn repository_without_maintenance_warns() {
+async fn repository_default_creates_managed_maintenance() {
     let Some(client) = try_client().await else {
         return;
     };
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let events: Api<K8sEvent> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
-    let repo = "e2e-nomaint-repo";
+    let repo = "e2e-defmaint-repo";
     let _ = repos
         .create(&PostParams::default(), &cr(repository_json(repo)))
         .await;
@@ -656,42 +632,98 @@ async fn repository_without_maintenance_warns() {
         .await
         .expect("Repository should reach Ready");
 
-    // With no Maintenance referencing it: condition False + a Warning event.
-    wait_condition(&repos, repo, "MaintenanceConfigured", "False")
+    // The operator creates a Maintenance named after the repo, owned by it.
+    let m = wait_managed_maintenance(&maints, repo, "Repository")
         .await
-        .expect("repo should report MaintenanceConfigured=False");
-    wait_warning_event(&events, "MaintenanceNotConfigured", repo)
-        .await
-        .expect("a MaintenanceNotConfigured Warning event should be recorded");
-
-    // Create a Maintenance referencing the repo; the condition flips to True.
-    maints
-        .create(
-            &PostParams::default(),
-            &cr::<Maintenance>(maintenance_json("e2e-nomaint-fix", "Repository", repo)),
-        )
-        .await
-        .expect("create Maintenance");
+        .expect("operator should create an owned Maintenance for the repo");
+    let mv = serde_json::to_value(&m).unwrap_or_default();
+    assert_eq!(
+        mv.pointer("/spec/schedule/quick/cron")
+            .and_then(|v| v.as_str()),
+        Some("0 */6 * * *"),
+        "managed Maintenance should carry the default quick schedule: {mv}"
+    );
+    assert_eq!(
+        mv.pointer("/spec/repository/name").and_then(|v| v.as_str()),
+        Some(repo)
+    );
     wait_condition(&repos, repo, "MaintenanceConfigured", "True")
         .await
-        .expect("repo should report MaintenanceConfigured=True after Maintenance created");
+        .expect("repo with default-managed maintenance should be MaintenanceConfigured=True");
 }
 
-/// Deleting the only `Maintenance` that references a repository must revert the
-/// condition back to `False` — proving the `.watches(Maintenance)` trigger fires
-/// on **deletion** and the membership read (shared store) re-evaluates, not just
-/// on creation. Guards against a "warn once, never recover" regression.
+/// Opting out: patching `spec.maintenance.enabled: false` removes the
+/// operator-managed `Maintenance` and flips the condition to `False` (reason
+/// `MaintenanceDisabled`, a deliberate opt-out — no Warning event).
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
-async fn maintenance_deletion_reverts_repository_condition() {
+async fn disabling_maintenance_removes_managed() {
     let Some(client) = try_client().await else {
         return;
     };
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
-    let repo = "e2e-revert-repo";
-    let maint = "e2e-revert-maint";
+    let repo = "e2e-optout-repo";
+    let _ = repos
+        .create(&PostParams::default(), &cr(repository_json(repo)))
+        .await;
+    wait_phase(&repos, repo, "Ready")
+        .await
+        .expect("Repository should reach Ready");
+    wait_managed_maintenance(&maints, repo, "Repository")
+        .await
+        .expect("managed Maintenance should exist before opt-out");
+
+    // Opt out.
+    let patch = serde_json::json!({ "spec": { "maintenance": { "enabled": false } } });
+    repos
+        .patch(repo, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .expect("patch spec.maintenance.enabled=false");
+
+    // The managed Maintenance is removed and the condition reports disabled.
+    wait_until(
+        "managed Maintenance removed after opt-out",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            match maints.get_opt(repo).await? {
+                Some(_) => Ok(None),
+                None => Ok(Some(())),
+            }
+        },
+    )
+    .await
+    .expect("operator should delete the managed Maintenance when disabled");
+    wait_condition(&repos, repo, "MaintenanceConfigured", "False")
+        .await
+        .expect("disabled repo should report MaintenanceConfigured=False");
+}
+
+/// Foreign precedence: a user-authored `Maintenance` for a repository means the
+/// operator must NOT create a duplicate managed one (named after the repo), and
+/// the repo reports `MaintenanceConfigured=True`. Disabling `spec.maintenance`
+/// must still leave the user's `Maintenance` untouched.
+#[tokio::test]
+#[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
+async fn external_maintenance_is_not_duplicated() {
+    let Some(client) = try_client().await else {
+        return;
+    };
+    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    let repo = "e2e-foreign-repo";
+    let foreign = "e2e-foreign-maint";
+    // Author the user's Maintenance first.
+    maints
+        .create(
+            &PostParams::default(),
+            &cr::<Maintenance>(maintenance_json(foreign, "Repository", repo)),
+        )
+        .await
+        .expect("create user Maintenance");
     let _ = repos
         .create(&PostParams::default(), &cr(repository_json(repo)))
         .await;
@@ -699,41 +731,48 @@ async fn maintenance_deletion_reverts_repository_condition() {
         .await
         .expect("Repository should reach Ready");
 
-    maints
-        .create(
-            &PostParams::default(),
-            &cr::<Maintenance>(maintenance_json(maint, "Repository", repo)),
-        )
-        .await
-        .expect("create Maintenance");
+    // Covered by the user's Maintenance.
     wait_condition(&repos, repo, "MaintenanceConfigured", "True")
         .await
-        .expect("repo should report MaintenanceConfigured=True");
+        .expect("repo covered by an external Maintenance should be True");
 
-    // Remove the Maintenance (no finalizer → immediate deletion).
-    maints
-        .delete(maint, &DeleteParams::default())
+    // The operator must NOT have created a managed Maintenance named after the repo.
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    assert!(
+        maints.get_opt(repo).await.expect("get").is_none(),
+        "operator must not duplicate a user-authored Maintenance"
+    );
+
+    // Disabling does not remove the user's Maintenance, nor change coverage.
+    let patch = serde_json::json!({ "spec": { "maintenance": { "enabled": false } } });
+    repos
+        .patch(repo, &PatchParams::default(), &Patch::Merge(&patch))
         .await
-        .expect("delete Maintenance");
-    wait_condition(&repos, repo, "MaintenanceConfigured", "False")
+        .expect("patch spec.maintenance.enabled=false");
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    assert!(
+        maints.get_opt(foreign).await.expect("get").is_some(),
+        "disabling spec.maintenance must never remove a user-authored Maintenance"
+    );
+    wait_condition(&repos, repo, "MaintenanceConfigured", "True")
         .await
-        .expect("repo should revert to MaintenanceConfigured=False after Maintenance deleted");
+        .expect("external-covered repo stays True even when spec.maintenance is disabled");
 }
 
-/// The cluster-scoped path: a `ClusterRepository` with no `Maintenance` reports
-/// `MaintenanceConfigured=False`; a `Maintenance` referencing it by
-/// `kind: ClusterRepository` (namespace ignored on both sides) flips it to
-/// `True`. Exercises the second reconciler and the cluster-scoped matcher.
+/// The cluster-scoped path: a `ClusterRepository` with no `spec.maintenance`
+/// default-manages a `Maintenance` placed in the operator's own namespace
+/// (`KOPIUR_NAMESPACE`, which the e2e harness installs as the e2e namespace),
+/// owned by the (cluster-scoped) ClusterRepository.
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
-async fn cluster_repository_maintenance_surfacing() {
+async fn cluster_repository_default_creates_managed_maintenance() {
     let Some(client) = try_client().await else {
         return;
     };
     let crepos: Api<ClusterRepository> = Api::all(client.clone());
     let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
-    let crepo = "e2e-maint-crepo";
+    let crepo = "e2e-defmaint-crepo";
     let _ = crepos
         .create(&PostParams::default(), &cr(cluster_repository_json(crepo)))
         .await;
@@ -741,73 +780,26 @@ async fn cluster_repository_maintenance_surfacing() {
         .await
         .expect("ClusterRepository should reach Ready");
 
-    wait_condition(&crepos, crepo, "MaintenanceConfigured", "False")
+    let m = wait_managed_maintenance(&maints, crepo, "ClusterRepository")
         .await
-        .expect("cluster repo should report MaintenanceConfigured=False");
-
-    // A namespaced Maintenance may reference a cluster-scoped repository.
-    maints
-        .create(
-            &PostParams::default(),
-            &cr::<Maintenance>(maintenance_json(
-                "e2e-crepo-maint",
-                "ClusterRepository",
-                crepo,
-            )),
-        )
-        .await
-        .expect("create Maintenance for ClusterRepository");
+        .expect(
+            "operator should create an owned Maintenance for the cluster repo in its namespace",
+        );
+    let mv = serde_json::to_value(&m).unwrap_or_default();
+    assert_eq!(
+        mv.pointer("/spec/repository/kind").and_then(|v| v.as_str()),
+        Some("ClusterRepository")
+    );
     wait_condition(&crepos, crepo, "MaintenanceConfigured", "True")
         .await
-        .expect("cluster repo should report MaintenanceConfigured=True after Maintenance created");
+        .expect("cluster repo with default-managed maintenance should be True");
+
+    let _ = crepos.delete(crepo, &DeleteParams::default()).await;
 }
 
-/// A `Maintenance` must only mark the repository it actually references: an
-/// unrelated repository stays `False`. End-to-end guard for the matcher's
-/// specificity (the store scan + `RepositoryRef::resolves_to`), so a single
-/// Maintenance can never silence the warning for every repository.
-#[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
-async fn maintenance_only_marks_its_referenced_repository() {
-    let Some(client) = try_client().await else {
-        return;
-    };
-    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-
-    let referenced = "e2e-spec-repo-a";
-    let other = "e2e-spec-repo-b";
-    for name in [referenced, other] {
-        let _ = repos
-            .create(&PostParams::default(), &cr(repository_json(name)))
-            .await;
-        wait_phase(&repos, name, "Ready")
-            .await
-            .expect("Repository should reach Ready");
-    }
-
-    // Maintenance references only repo A.
-    maints
-        .create(
-            &PostParams::default(),
-            &cr::<Maintenance>(maintenance_json("e2e-spec-maint", "Repository", referenced)),
-        )
-        .await
-        .expect("create Maintenance");
-
-    // A flips to True; B must remain False (it has no Maintenance of its own).
-    wait_condition(&repos, referenced, "MaintenanceConfigured", "True")
-        .await
-        .expect("referenced repo should be MaintenanceConfigured=True");
-    wait_condition(&repos, other, "MaintenanceConfigured", "False")
-        .await
-        .expect("unrelated repo must stay MaintenanceConfigured=False");
-}
-
-/// The `kopiur_repository_maintenance_configured` gauge reflects the live state
-/// through the controller's `/metrics` endpoint: `0` while unmaintained, `1`
-/// once a `Maintenance` references the repository. Proves the metric surface
-/// end-to-end (OTel gauge → Prometheus exposition), not just the condition.
+/// The `kopiur_repository_maintenance_configured` gauge reflects live state via
+/// `/metrics`: `1` once the operator manages a `Maintenance` for the repo
+/// (default-on), `0` after opting out. Proves the metric surface end-to-end.
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
 async fn maintenance_configured_reflected_in_metrics() {
@@ -815,7 +807,6 @@ async fn maintenance_configured_reflected_in_metrics() {
         return;
     };
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
     let repo = "e2e-mxmaint-repo";
     let _ = repos
@@ -825,34 +816,7 @@ async fn maintenance_configured_reflected_in_metrics() {
         .await
         .expect("Repository should reach Ready");
 
-    // Gauge present and 0 for this repo while unmaintained.
-    wait_until(
-        "maintenance_configured gauge == 0",
-        default_timeout(),
-        poll_interval(),
-        || {
-            let client = client.clone();
-            async move {
-                Ok(scrape_controller_metrics(&client)
-                    .await
-                    .ok()
-                    .filter(|t| maintenance_gauge_is(t, repo, "0"))
-                    .map(|_| ()))
-            }
-        },
-    )
-    .await
-    .expect("gauge should read 0 for an unmaintained repo");
-
-    maints
-        .create(
-            &PostParams::default(),
-            &cr::<Maintenance>(maintenance_json("e2e-mxmaint", "Repository", repo)),
-        )
-        .await
-        .expect("create Maintenance");
-
-    // ...and flips to 1 once a Maintenance references it.
+    // Default-on: gauge reads 1 once the managed Maintenance exists.
     wait_until(
         "maintenance_configured gauge == 1",
         default_timeout(),
@@ -869,7 +833,31 @@ async fn maintenance_configured_reflected_in_metrics() {
         },
     )
     .await
-    .expect("gauge should read 1 after a Maintenance references the repo");
+    .expect("gauge should read 1 for a default-managed repo");
+
+    // Opt out → gauge flips to 0.
+    let patch = serde_json::json!({ "spec": { "maintenance": { "enabled": false } } });
+    repos
+        .patch(repo, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .expect("patch spec.maintenance.enabled=false");
+    wait_until(
+        "maintenance_configured gauge == 0",
+        default_timeout(),
+        poll_interval(),
+        || {
+            let client = client.clone();
+            async move {
+                Ok(scrape_controller_metrics(&client)
+                    .await
+                    .ok()
+                    .filter(|t| maintenance_gauge_is(t, repo, "0"))
+                    .map(|_| ()))
+            }
+        },
+    )
+    .await
+    .expect("gauge should read 0 after opting out");
 }
 
 /// True if the exposition has a `kopiur_repository_maintenance_configured` series
@@ -880,6 +868,32 @@ fn maintenance_gauge_is(text: &str, name: &str, want: &str) -> bool {
             && l.contains(&format!("name=\"{name}\""))
             && l.trim_end().ends_with(&format!(" {want}"))
     })
+}
+
+/// Wait until a `Maintenance` named `name` exists and is owned (controller
+/// `ownerReference`) by `owner_kind`/`name` — i.e. the operator-managed one.
+async fn wait_managed_maintenance(
+    maints: &Api<Maintenance>,
+    name: &str,
+    owner_kind: &str,
+) -> anyhow::Result<Maintenance> {
+    wait_until(
+        &format!("managed Maintenance {name} owned by {owner_kind}"),
+        default_timeout(),
+        poll_interval(),
+        || async {
+            match maints.get_opt(name).await? {
+                Some(m) => {
+                    let owned = m.owner_references().iter().any(|o| {
+                        o.kind == owner_kind && o.name == name && o.controller == Some(true)
+                    });
+                    Ok(owned.then_some(m))
+                }
+                None => Ok(None),
+            }
+        },
+    )
+    .await
 }
 
 /// Compile-time guard that `Client` is reachable from this crate even when the

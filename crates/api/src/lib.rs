@@ -53,7 +53,10 @@ pub use cluster_repository::{
     IdentityTemplate,
 };
 pub use common::{ConfigRef, CronSpec, DeletionPolicy, ObjectRef, PhaseLabel};
-pub use maintenance::{Maintenance, MaintenanceSpec, MaintenanceStatus, TakeoverPolicy};
+pub use maintenance::{
+    Maintenance, MaintenanceSchedule, MaintenanceSpec, MaintenanceStatus, Ownership,
+    RepositoryMaintenanceSpec, TakeoverPolicy, default_maintenance_schedule,
+};
 pub use repository::{Repository, RepositoryPhase, RepositorySpec, RepositoryStatus};
 pub use restore::{
     OnMissingSnapshot, Restore, RestorePhase, RestoreSource, RestoreSpec, RestoreStatus,
