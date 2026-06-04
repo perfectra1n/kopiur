@@ -38,7 +38,9 @@ pub mod retention;
 pub mod validate;
 
 pub use backend::Backend;
-pub use backup::{Backup, BackupPhase, BackupSpec, BackupStatus, Origin};
+pub use backup::{
+    Backup, BackupPhase, BackupSpec, BackupStats, BackupStatus, BackupTiming, Origin,
+};
 pub use backup_config::{
     BackupConfig, BackupConfigSpec, BackupConfigStatus, CopyMethod, GroupBy, Hook,
     SourcePathStrategy,

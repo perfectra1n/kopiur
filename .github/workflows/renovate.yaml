@@ -1,12 +1,10 @@
 ---
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
-
 name: Renovate
 
 on:
   push:
     branches:
-      - master
       - main
     paths:
       - .renovaterc.json5
@@ -37,9 +35,9 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
           RUN_URL=$(gh workflow run renovate.yaml \
-          --repo "${{ github.repository_owner }}/.github" \
-          --ref main \
-          --field "autodiscoverFilter=${REPO_NAME}")
+            --repo "${{ github.repository_owner }}/.github" \
+            --ref main \
+            --field "autodiscoverFilter=${REPO_NAME}")
           echo "run_id=${RUN_URL##*/}" >> "$GITHUB_OUTPUT"
 
       - name: Await Renovate Completion
@@ -48,9 +46,9 @@ jobs:
           RUN_ID: ${{ steps.dispatch.outputs.run_id }}
         run: |
           gh run watch \
-          --repo "${{ github.repository_owner }}/.github" \
-          "${RUN_ID}" \
-          --exit-status
+            --repo "${{ github.repository_owner }}/.github" \
+            "${RUN_ID}" \
+            --exit-status
 
       - name: Renovate Output
         env:
@@ -58,5 +56,5 @@ jobs:
           RUN_ID: ${{ steps.dispatch.outputs.run_id }}
         run: |-
           gh run view \
-          --repo "${{ github.repository_owner }}/.github" \
-          --log "${RUN_ID}"
+            --repo "${{ github.repository_owner }}/.github" \
+            --log "${RUN_ID}"
