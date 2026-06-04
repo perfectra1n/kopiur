@@ -132,6 +132,16 @@ pub fn should_create_backup(
     concurrency_allows(schedule.concurrency_policy, run_active)
 }
 
+/// Whether a freshly-created schedule should fire one backup immediately on
+/// creation (`runOnCreate`), rather than waiting for the first cron slot. Pure
+/// decision: true only when `runOnCreate` is set, the schedule is not suspended,
+/// and no run has happened yet. The `already_ran` guard makes it idempotent —
+/// once the first run is recorded in `status.lastSchedule`, this returns false,
+/// so a retried/re-entered first reconcile never double-fires.
+pub fn should_run_on_create(schedule: &ScheduleSpec, already_ran: bool) -> bool {
+    schedule.run_on_create && !schedule.suspend && !already_ran
+}
+
 /// Reconcile a `BackupSchedule`.
 #[tracing::instrument(skip(schedule, ctx), fields(kind = "BackupSchedule", name = %schedule.name_any()))]
 pub async fn reconcile(schedule: Arc<BackupSchedule>, ctx: Arc<Context>) -> Result<Action> {
@@ -200,8 +210,43 @@ async fn reconcile_inner(schedule: &BackupSchedule, ctx: &Context) -> Result<Act
         return Ok(Action::requeue(until.max(StdDuration::from_secs(1))));
     }
 
-    // First reconcile: pin the next slot without firing.
+    // First reconcile (nextSchedule not yet pinned). Compute the upcoming slot.
     let next = next_fire(&schedule.spec.schedule.cron, jitter_window, &seed, now)?;
+
+    // Honor `runOnCreate`: fire one backup immediately instead of waiting for the
+    // first cron slot. The run is anchored to the schedule's creation time (not
+    // `now`) so its deterministic name is stable across retries — if the status
+    // patch below fails and we re-enter this branch, the server-side apply
+    // converges on the same Backup rather than creating a duplicate.
+    let already_ran = schedule
+        .status
+        .as_ref()
+        .and_then(|s| s.last_schedule.as_ref())
+        .is_some();
+    if should_run_on_create(&schedule.spec.schedule, already_ran) {
+        // metadata.creationTimestamp is a k8s-openapi `Time` wrapping a jiff
+        // `Timestamp`; convert via unix seconds to chrono (matches backup_config).
+        let anchor = schedule
+            .creation_timestamp()
+            .and_then(|t| DateTime::<Utc>::from_timestamp(t.0.as_second(), 0))
+            .unwrap_or(now);
+        let backup_name = scheduled_backup_name(&sched_name, anchor);
+        create_scheduled_backup(ctx, schedule, &namespace, &backup_name).await?;
+        io::patch_status(
+            &api,
+            &sched_name,
+            serde_json::json!({
+                "lastSchedule": { "at": anchor.to_rfc3339(), "backupRef": { "name": backup_name } },
+                "nextSchedule": { "at": next.to_rfc3339() },
+                "consecutiveFailures": 0,
+            }),
+        )
+        .await?;
+        let until = (next - now).to_std().unwrap_or(StdDuration::from_secs(60));
+        return Ok(Action::requeue(until.max(StdDuration::from_secs(1))));
+    }
+
+    // No runOnCreate: pin the next slot without firing (GitOps-friendly default).
     io::patch_status(
         &api,
         &sched_name,
@@ -358,6 +403,27 @@ mod tests {
         let after = at(2026, 5, 24, 3, 0);
         let err = next_fire("totally bad", None, "uid", after).unwrap_err();
         assert!(matches!(err, Error::InvalidSchedule(_)));
+    }
+
+    #[test]
+    fn run_on_create_fires_once_then_is_idempotent() {
+        // runOnCreate set, not suspended, no prior run -> fire on create.
+        let mut spec = schedule_spec("0 2 * * *", false, ConcurrencyPolicy::Allow, None);
+        spec.run_on_create = true;
+        assert!(should_run_on_create(&spec, false));
+        // Once a run is recorded (status.lastSchedule present), never re-fire.
+        assert!(!should_run_on_create(&spec, true));
+    }
+
+    #[test]
+    fn run_on_create_defaults_off_and_respects_suspend() {
+        // Default (runOnCreate unset) never fires on create.
+        let off = schedule_spec("0 2 * * *", false, ConcurrencyPolicy::Allow, None);
+        assert!(!should_run_on_create(&off, false));
+        // Suspended schedules do not fire on create even with runOnCreate set.
+        let mut suspended = schedule_spec("0 2 * * *", true, ConcurrencyPolicy::Allow, None);
+        suspended.run_on_create = true;
+        assert!(!should_run_on_create(&suspended, false));
     }
 
     #[test]
