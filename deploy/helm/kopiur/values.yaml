@@ -107,13 +107,21 @@ controller:
   # -- Extra volume mounts on the controller container (pairs with extraVolumes).
   extraVolumeMounts: []
   # -- Resource requests/limits for the controller pod.
+  # No CPU limit (CPU throttling on an operator only adds reconcile latency; the
+  # request reserves a fair share). The memory limit must cover the *burst* on
+  # startup/restart, not just steady state (~120Mi): on (re)start the controller
+  # reconciles every existing resource at once, spawning concurrent in-process
+  # `kopia` subprocesses (whose RSS counts against this container's cgroup) to
+  # list/connect a repository that may hold many snapshots. With the
+  # OpenTelemetry/OTLP stack linked in, 256Mi was too tight — the burst OOMKilled
+  # the controller, which then crash-looped (OOM -> restart -> re-reconcile burst
+  # -> OOM). 1Gi gives ample headroom. See crates/e2e/tests/lifecycle.rs.
   resources:
     requests:
       cpu: 50m
-      memory: 64Mi
+      memory: 128Mi
     limits:
-      cpu: 500m
-      memory: 256Mi
+      memory: 1Gi
   # -- Scheduling controls.
   nodeSelector: {}
   tolerations: []
@@ -154,13 +162,15 @@ webhook:
     labels: {}
     # -- The webhook serves a self-signed cert, so skip verification by default.
     insecureSkipVerify: true
+  # No CPU limit (see controller.resources). The webhook links the same
+  # OpenTelemetry/OTLP stack but does no kopia work, so it stays light; the
+  # generous memory limit is pure headroom.
   resources:
     requests:
       cpu: 25m
-      memory: 32Mi
+      memory: 64Mi
     limits:
-      cpu: 250m
-      memory: 128Mi
+      memory: 512Mi
   nodeSelector: {}
   tolerations: []
   affinity: {}
