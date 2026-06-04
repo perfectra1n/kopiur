@@ -10,9 +10,10 @@
 #
 # syntax=docker/dockerfile:1
 
-ARG KOPIA_VERSION=0.23.0
+ARG KOPIA_VERSION
+ARG RUST_VERSION
 
-FROM rust:1.95-bookworm AS builder
+FROM rust:${RUST_VERSION}-bookworm AS builder
 ARG BIN=kopiur-controller
 # TARGETARCH is supplied by buildx per platform. The cache mount ids below are
 # keyed on it so a concurrent multi-arch build (linux/amd64 + linux/arm64 in the
@@ -37,6 +38,7 @@ FROM debian:bookworm-slim AS kopia
 ARG KOPIA_VERSION
 ARG TARGETARCH
 RUN set -eux; \
+    test -n "${KOPIA_VERSION}" || { echo "KOPIA_VERSION build arg is required" >&2; exit 1; }; \
     apt-get update && apt-get install -y --no-install-recommends curl ca-certificates; \
     case "${TARGETARCH}" in \
       amd64) KARCH=x64 ;; \

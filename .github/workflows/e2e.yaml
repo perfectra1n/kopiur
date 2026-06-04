@@ -1,3 +1,5 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
 name: E2E
 
 # End-to-end tests: build the three component images, load them into an
@@ -8,16 +10,22 @@ name: E2E
 
 on:
   pull_request:
+    branches:
+      - main
   push:
-    branches: [main]
+    branches:
+      - main
   schedule:
     # 07:00 UTC nightly.
     - cron: "0 7 * * *"
   workflow_dispatch:
 
 concurrency:
-  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,31 +33,33 @@ env:
 
 jobs:
   e2e:
-    name: e2e (kind + helm)
+    name: E2E
     runs-on: ubuntu-latest
     # Don't let a hung wait burn the whole budget.
     timeout-minutes: 40
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master (2026)
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          toolchain: "1.95"
-
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          shared-key: e2e
+          persist-credentials: false
 
       # kind, kubectl, and helm come from .mise/config.toml [tools].
       - name: Setup Mise
         uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
         with:
+          cache_key: ${{ runner.os }}-mise-${{ hashFiles('.mise/config.toml', '.mise/mise.lock') }}
           experimental: true
           install_args: --locked
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: e2e
 
       # The harness builds the images, creates its own kind cluster, loads the
       # images, installs the chart, runs the e2e crate, and tears down. It uses
       # an isolated kubeconfig and only ever touches the throwaway cluster.
-      - name: Run e2e harness
+      - name: Run e2e tests
         run: mise run test-e2e

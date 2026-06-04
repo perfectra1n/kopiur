@@ -128,6 +128,38 @@ url = "https://github.com/kubernetes-sigs/kind/releases/download/v0.32.0/kind-da
 checksum = "sha256:0bcb2d1cfedc1912d664014db716937e8a0e843e91c6807b4db2025dbc8989fa"
 url = "https://github.com/kubernetes-sigs/kind/releases/download/v0.32.0/kind-windows-amd64"
 
+[[tools.kopia]]
+version = "0.23.0"
+backend = "aqua:kopia/kopia"
+
+[tools.kopia."platforms.linux-arm64"]
+checksum = "sha256:6fdceaf8cca13f8e79c0efa178dbd92afa6c845e74b6ad8168b94269166e587c"
+url = "https://github.com/kopia/kopia/releases/download/v0.23.0/kopia-0.23.0-linux-arm64.tar.gz"
+
+[tools.kopia."platforms.linux-arm64-musl"]
+checksum = "sha256:6fdceaf8cca13f8e79c0efa178dbd92afa6c845e74b6ad8168b94269166e587c"
+url = "https://github.com/kopia/kopia/releases/download/v0.23.0/kopia-0.23.0-linux-arm64.tar.gz"
+
+[tools.kopia."platforms.linux-x64"]
+checksum = "sha256:fe5ddf931b712b53547dab7e541ed6befd27fd48014bee26d8781126f2f25a64"
+url = "https://github.com/kopia/kopia/releases/download/v0.23.0/kopia-0.23.0-linux-x64.tar.gz"
+
+[tools.kopia."platforms.linux-x64-musl"]
+checksum = "sha256:fe5ddf931b712b53547dab7e541ed6befd27fd48014bee26d8781126f2f25a64"
+url = "https://github.com/kopia/kopia/releases/download/v0.23.0/kopia-0.23.0-linux-x64.tar.gz"
+
+[tools.kopia."platforms.macos-arm64"]
+checksum = "sha256:20a1eb89d7ed25190758d2f8394e788c2d82f65cd617f8e37ec848a860ba065b"
+url = "https://github.com/kopia/kopia/releases/download/v0.23.0/kopia-0.23.0-macOS-arm64.tar.gz"
+
+[tools.kopia."platforms.macos-x64"]
+checksum = "sha256:79bb117bd8f802a5772a117a97ef35ebe58ccef94514c26eabd5670bd66c4e03"
+url = "https://github.com/kopia/kopia/releases/download/v0.23.0/kopia-0.23.0-macOS-x64.tar.gz"
+
+[tools.kopia."platforms.windows-x64"]
+checksum = "sha256:85045291338f026e07af0775c1ec86debd0df10ae02253db8cff8646d28084c0"
+url = "https://github.com/kopia/kopia/releases/download/v0.23.0/kopia-0.23.0-windows-x64.zip"
+
 [[tools.kubeconform]]
 version = "0.7.0"
 backend = "aqua:yannh/kubeconform"
@@ -234,6 +266,13 @@ provenance = "github-attestations"
 [[tools.oxfmt]]
 version = "0.53.0"
 backend = "npm:oxfmt"
+
+[[tools.rust]]
+version = "1.95.0"
+backend = "core:rust"
+
+[tools.rust.options]
+components = "clippy,llvm-tools-preview,rustfmt"
 
 [[tools.zizmor]]
 version = "1.25.2"

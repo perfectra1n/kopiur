@@ -4,9 +4,10 @@
 #
 # syntax=docker/dockerfile:1
 
-ARG KOPIA_VERSION=0.23.0
+ARG KOPIA_VERSION
+ARG RUST_VERSION
 
-FROM rust:1.95-bookworm AS builder
+FROM rust:${RUST_VERSION}-bookworm AS builder
 # Per-arch cache mount ids: a concurrent multi-arch buildx run (amd64 + arm64)
 # must NOT share one cargo cache, or the two arches race unpacking the registry
 # (`.cargo-ok: File exists`, os error 17). See docker/Dockerfile for the detail.
@@ -24,6 +25,7 @@ FROM debian:bookworm-slim AS kopia
 ARG KOPIA_VERSION
 ARG TARGETARCH
 RUN set -eux; \
+    test -n "${KOPIA_VERSION}" || { echo "KOPIA_VERSION build arg is required" >&2; exit 1; }; \
     apt-get update && apt-get install -y --no-install-recommends curl ca-certificates; \
     case "${TARGETARCH}" in \
       amd64) KARCH=x64 ;; \

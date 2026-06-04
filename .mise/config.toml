@@ -1,15 +1,15 @@
 # mise tasks + tooling for kopiur. `mise tasks` lists them; `mise run <task>`.
-# The Rust toolchain itself stays pinned in rust-toolchain.toml (cargo/rustup
-# read it natively); mise carries the org meta-tools and the task dependencies
-# so developers and CI (.github/workflows) share one source of truth.
+# Mise is the source of truth for Rust and project tools in developer shells and CI.
 
 [tools]
+rust = { version = "1.95", components = "rustfmt,clippy,llvm-tools-preview" }
 lefthook = "2.1.9"
 oxfmt = "0.53.0"
 zizmor = "1.25.2"
 helm = "4.2.0"
 kubectl = "1.36.1"
 kind = "0.32.0"
+kopia = "0.23.0"
 kubeconform = "0.7.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.19.8"
 "aqua:taiki-e/cargo-llvm-cov" = "0.8.7"
@@ -68,15 +68,38 @@ run = "cargo llvm-cov --workspace --locked --summary-only"
 
 [tasks.image-controller]
 description = "Build the controller image locally"
-run = 'docker build -f docker/Dockerfile --build-arg BIN=kopiur-controller -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/controller:${KOPIUR_IMAGE_TAG:-dev}" .'
+run = '''
+KOPIA_VERSION="${KOPIA_VERSION:-$(mise config get tools.kopia)}"
+RUST_VERSION="${RUST_VERSION:-$(mise config get tools.rust.version)}"
+docker build -f docker/Dockerfile \
+  --build-arg BIN=kopiur-controller \
+  --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" \
+  --build-arg "RUST_VERSION=${RUST_VERSION}" \
+  -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/controller:${KOPIUR_IMAGE_TAG:-dev}" .
+'''
 
 [tasks.image-webhook]
 description = "Build the webhook image locally"
-run = 'docker build -f docker/Dockerfile --build-arg BIN=kopiur-webhook -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/webhook:${KOPIUR_IMAGE_TAG:-dev}" .'
+run = '''
+KOPIA_VERSION="${KOPIA_VERSION:-$(mise config get tools.kopia)}"
+RUST_VERSION="${RUST_VERSION:-$(mise config get tools.rust.version)}"
+docker build -f docker/Dockerfile \
+  --build-arg BIN=kopiur-webhook \
+  --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" \
+  --build-arg "RUST_VERSION=${RUST_VERSION}" \
+  -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/webhook:${KOPIUR_IMAGE_TAG:-dev}" .
+'''
 
 [tasks.image-mover]
 description = "Build the mover image locally (ships the kopia binary too)"
-run = 'docker build -f docker/Dockerfile.mover --build-arg KOPIA_VERSION="${KOPIA_VERSION:-0.23.0}" -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/mover:${KOPIUR_IMAGE_TAG:-dev}" .'
+run = '''
+KOPIA_VERSION="${KOPIA_VERSION:-$(mise config get tools.kopia)}"
+RUST_VERSION="${RUST_VERSION:-$(mise config get tools.rust.version)}"
+docker build -f docker/Dockerfile.mover \
+  --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" \
+  --build-arg "RUST_VERSION=${RUST_VERSION}" \
+  -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/mover:${KOPIUR_IMAGE_TAG:-dev}" .
+'''
 
 [tasks.images]
 description = "Build all three component images locally"
@@ -105,21 +128,8 @@ description = "Supply-chain + license audit"
 run = "cargo deny check"
 
 [tasks.ci]
-description = "The full hermetic gate, exactly what CI's lint-test job runs"
+description = "The full local hermetic gate: format, lint, build, test, and drift check"
 depends = ["fmt-check", "clippy", "build", "test", "gen-check"]
-
-[tasks.release]
-description = "Build release artifacts, package the chart, then tag & push v<version>"
-depends = ["gen-check", "build-release"]
-run = '''
-version="{{arg(name="version")}}"
-echo "==> packaging Helm chart $version"
-helm package deploy/helm/kopiur --version "$version" --app-version "$version" -d dist
-echo "==> tagging v$version"
-git tag -a "v$version" -m "kopiur v$version"
-git push origin "v$version"
-echo "==> pushed tag v$version; release.yml will publish images, chart, and the GitHub release"
-'''
 
 [hooks]
 postinstall = "lefthook install"
