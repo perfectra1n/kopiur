@@ -5,7 +5,12 @@
     {
       description: "Disable Auto Merge",
       matchManagers: ["mise"],
-      matchPackageNames: ["rust", "cargo-llvm-cov", "cargo-deny", "kopia"],
+      matchPackageNames: [
+        "rust-lang/rust",
+        "kopia/kopia",
+        "EmbarkStudios/cargo-deny",
+        "taiki-e/cargo-llvm-cov",
+      ],
       automerge: false,
     },
   ],
