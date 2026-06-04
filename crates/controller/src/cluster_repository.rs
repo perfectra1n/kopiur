@@ -12,9 +12,10 @@
 use std::sync::Arc;
 
 use kube::runtime::controller::Action;
-use kube::{Api, ResourceExt};
+use kube::{Api, Resource, ResourceExt};
 
 use kopiur_api::backend::Backend;
+use kopiur_api::common::RepositoryKind;
 use kopiur_api::{ClusterRepository, RepositoryPhase, validate};
 use kopiur_kopia::ConnectSpec;
 
@@ -153,6 +154,28 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
             // (placement_namespace below); wiring the cross-namespace creation
             // loop is a focused follow-up that reuses the namespaced Repository
             // catalog scan with the placement function selecting the target ns.
+
+            // Surface whether a Maintenance CR references this ClusterRepository
+            // (Warning event + condition + gauge). Cluster-scoped, so the metric
+            // namespace label is empty and ref-matching ignores namespace. ADR §3.7.
+            let conditions = repo
+                .status
+                .as_ref()
+                .map(|s| s.conditions.clone())
+                .unwrap_or_default();
+            io::check_maintenance(
+                ctx,
+                &api,
+                &repo.object_ref(&()),
+                RepositoryKind::ClusterRepository,
+                "ClusterRepository",
+                "",
+                None,
+                &name,
+                &conditions,
+                repo.metadata.generation,
+            )
+            .await;
         }
         other => {
             io::patch_status(

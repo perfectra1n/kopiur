@@ -18,9 +18,10 @@ use std::sync::Arc;
 
 use kube::api::ListParams;
 use kube::runtime::controller::Action;
-use kube::{Api, ResourceExt};
+use kube::{Api, Resource, ResourceExt};
 
 use kopiur_api::backend::Backend;
+use kopiur_api::common::RepositoryKind;
 use kopiur_api::{Backup, Repository, RepositoryPhase, validate};
 use kopiur_kopia::{ConnectSpec, SnapshotListEntry};
 
@@ -185,6 +186,27 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
             // Catalog scan: materialize discovered Backups for unseen snapshots,
             // bounded by catalog.retain.perIdentity.
             scan_catalog(ctx, repo, &namespace, &name, &repo_uid, &client).await?;
+
+            // Now that the repo is Ready, surface whether a Maintenance CR
+            // references it (Warning event + condition + gauge). ADR §3.7.
+            let conditions = repo
+                .status
+                .as_ref()
+                .map(|s| s.conditions.clone())
+                .unwrap_or_default();
+            io::check_maintenance(
+                ctx,
+                &api,
+                &repo.object_ref(&()),
+                RepositoryKind::Repository,
+                "Repository",
+                &namespace,
+                Some(&namespace),
+                &name,
+                &conditions,
+                repo.metadata.generation,
+            )
+            .await;
         }
         other => {
             // NOTE: object-store connect/create/status/catalog would run via a

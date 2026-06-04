@@ -8,21 +8,28 @@
 //! per-reconciler pure functions (which remain unit-tested without a cluster).
 
 use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
 
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::ConfigMap;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+use k8s_openapi::api::core::v1::{ConfigMap, ObjectReference};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference, Time};
 use kube::api::{Patch, PatchParams};
 use kube::core::ObjectMeta;
+use kube::runtime::events::{Event, EventType};
+use kube::runtime::reflector::Store;
 use kube::{Api, Resource, ResourceExt};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use kopiur_api::backend::Backend;
 use kopiur_api::common::{Encryption, RepositoryKind, RepositoryRef};
-use kopiur_api::{ClusterRepository, Repository};
+use kopiur_api::{ClusterRepository, Maintenance, Repository};
 
-use crate::consts::API_VERSION;
+use crate::consts::{
+    API_VERSION, CHECK_MAINTENANCE_ACTION, MAINTENANCE_CONFIGURED_CONDITION,
+    MAINTENANCE_CONFIGURED_REASON, MAINTENANCE_NOT_CONFIGURED_REASON,
+};
+use crate::context::Context;
 use crate::error::{Error, Result};
 
 /// The field-manager used for every server-side apply the controller performs.
@@ -335,6 +342,142 @@ pub fn child_meta(
     }
 }
 
+/// True if any `Maintenance` in the shared informer store references the given
+/// repository. **Synchronous** — reads the reflector cache built by the
+/// Maintenance controller, so a Repository reconcile answers "is maintenance
+/// configured for me?" without an `Api::list` round-trip. `namespace` is `None`
+/// for a cluster-scoped `ClusterRepository`. Matching is the pure, exhaustive
+/// [`RepositoryRef::resolves_to`].
+pub fn repository_has_maintenance(
+    store: &Store<Maintenance>,
+    kind: RepositoryKind,
+    name: &str,
+    namespace: Option<&str>,
+) -> bool {
+    store.state().iter().any(|m| {
+        let owner_ns = m.metadata.namespace.as_deref().unwrap_or_default();
+        m.spec
+            .repository
+            .resolves_to(owner_ns, kind, name, namespace)
+    })
+}
+
+/// Upsert a status condition by `type_`, returning the full conditions vector to
+/// patch. An existing condition of the same `type_` keeps its
+/// `lastTransitionTime` while its `status` is unchanged (the timestamp marks the
+/// last real transition, per the Kubernetes condition convention) and gets a
+/// fresh one on a flip or first set. Other conditions are preserved unchanged.
+pub fn upsert_condition(
+    existing: &[Condition],
+    type_: &str,
+    status: bool,
+    reason: &str,
+    message: &str,
+    observed_generation: Option<i64>,
+) -> Vec<Condition> {
+    let status_str = if status { "True" } else { "False" };
+    let prior = existing.iter().find(|c| c.type_ == type_);
+    let last_transition_time = match prior {
+        Some(c) if c.status == status_str => c.last_transition_time.clone(),
+        _ => Time(k8s_openapi::jiff::Timestamp::now()),
+    };
+    let updated = Condition {
+        type_: type_.to_string(),
+        status: status_str.to_string(),
+        reason: reason.to_string(),
+        message: message.to_string(),
+        last_transition_time,
+        observed_generation,
+    };
+    existing
+        .iter()
+        .filter(|c| c.type_ != type_)
+        .cloned()
+        .chain(std::iter::once(updated))
+        .collect()
+}
+
+/// Surface whether a `Maintenance` references this repository (ADR §3.7): a
+/// Warning Event when none does, the `MaintenanceConfigured` status condition,
+/// and the `kopiur_repository_maintenance_configured` gauge. Membership is read
+/// from the shared informer store ([`repository_has_maintenance`]).
+///
+/// Degrade-not-crash: if the store has not yet synced, the check is skipped (the
+/// `.watches` trigger and the periodic requeue re-evaluate once warm), so a cold
+/// cache never emits a false "not configured" warning. `metric_namespace` is the
+/// gauge's `namespace` label (empty for a `ClusterRepository`); `match_namespace`
+/// is the repository's namespace for ref-matching (`None` for `ClusterRepository`).
+#[allow(clippy::too_many_arguments)]
+pub async fn check_maintenance<K>(
+    ctx: &Context,
+    api: &Api<K>,
+    regarding: &ObjectReference,
+    kind: RepositoryKind,
+    metric_kind: &str,
+    metric_namespace: &str,
+    match_namespace: Option<&str>,
+    name: &str,
+    existing_conditions: &[Condition],
+    observed_generation: Option<i64>,
+) where
+    K: Resource + DeserializeOwned + Clone + std::fmt::Debug,
+{
+    if !ctx.maintenance_synced.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let configured =
+        repository_has_maintenance(&ctx.maintenance_store, kind, name, match_namespace);
+
+    ctx.metrics.set_repository_maintenance_configured(
+        metric_kind,
+        metric_namespace,
+        name,
+        configured,
+    );
+
+    let (reason, message) = if configured {
+        (
+            MAINTENANCE_CONFIGURED_REASON,
+            format!("a Maintenance resource references {metric_kind} {name}"),
+        )
+    } else {
+        let msg = format!(
+            "no Maintenance resource references {metric_kind} {name}; kopia storage will not be \
+             reclaimed — create a Maintenance referencing this repository"
+        );
+        if let Err(e) = ctx
+            .recorder
+            .publish(
+                &Event {
+                    type_: EventType::Warning,
+                    reason: MAINTENANCE_NOT_CONFIGURED_REASON.into(),
+                    note: Some(msg.clone()),
+                    action: CHECK_MAINTENANCE_ACTION.into(),
+                    secondary: None,
+                },
+                regarding,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, repo = %name, "failed to publish MaintenanceNotConfigured event");
+        }
+        (MAINTENANCE_NOT_CONFIGURED_REASON, msg)
+    };
+
+    let conditions = upsert_condition(
+        existing_conditions,
+        MAINTENANCE_CONFIGURED_CONDITION,
+        configured,
+        reason,
+        &message,
+        observed_generation,
+    );
+    if let Err(e) = patch_status(api, name, serde_json::json!({ "conditions": conditions })).await {
+        tracing::warn!(error = %e, repo = %name, "failed to patch MaintenanceConfigured condition");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,5 +606,91 @@ mod tests {
         let m = child_meta("n", "ns", BTreeMap::new(), None);
         assert_eq!(m.name.as_deref(), Some("n"));
         assert!(m.labels.is_none());
+    }
+
+    // --- upsert_condition ---------------------------------------------------
+
+    #[test]
+    fn upsert_condition_inserts_new_and_preserves_others() {
+        let other = Condition {
+            type_: "Ready".into(),
+            status: "True".into(),
+            reason: "Ok".into(),
+            message: "ready".into(),
+            last_transition_time: Time(k8s_openapi::jiff::Timestamp::now()),
+            observed_generation: Some(1),
+        };
+        let out = upsert_condition(
+            std::slice::from_ref(&other),
+            "MaintenanceConfigured",
+            false,
+            "MaintenanceNotConfigured",
+            "no maintenance",
+            Some(2),
+        );
+        assert_eq!(out.len(), 2);
+        // Pre-existing condition is untouched.
+        assert!(out.iter().any(|c| c.type_ == "Ready" && c.status == "True"));
+        let m = out
+            .iter()
+            .find(|c| c.type_ == "MaintenanceConfigured")
+            .unwrap();
+        assert_eq!(m.status, "False");
+        assert_eq!(m.reason, "MaintenanceNotConfigured");
+        assert_eq!(m.observed_generation, Some(2));
+    }
+
+    #[test]
+    fn upsert_condition_preserves_transition_time_when_status_unchanged() {
+        let t0 = Time(k8s_openapi::jiff::Timestamp::from_second(1_700_000_000).unwrap());
+        let existing = vec![Condition {
+            type_: "MaintenanceConfigured".into(),
+            status: "False".into(),
+            reason: "MaintenanceNotConfigured".into(),
+            message: "old".into(),
+            last_transition_time: t0.clone(),
+            observed_generation: Some(1),
+        }];
+        // Same status (still False) -> timestamp must NOT move, but message updates.
+        let out = upsert_condition(
+            &existing,
+            "MaintenanceConfigured",
+            false,
+            "MaintenanceNotConfigured",
+            "new message",
+            Some(2),
+        );
+        let m = &out[0];
+        assert_eq!(m.last_transition_time, t0, "timestamp moved on no-op");
+        assert_eq!(m.message, "new message");
+        assert_eq!(m.observed_generation, Some(2));
+    }
+
+    #[test]
+    fn upsert_condition_bumps_transition_time_on_flip() {
+        let t0 = Time(k8s_openapi::jiff::Timestamp::from_second(1_700_000_000).unwrap());
+        let existing = vec![Condition {
+            type_: "MaintenanceConfigured".into(),
+            status: "False".into(),
+            reason: "MaintenanceNotConfigured".into(),
+            message: "old".into(),
+            last_transition_time: t0.clone(),
+            observed_generation: Some(1),
+        }];
+        // Flip False -> True: timestamp must advance.
+        let out = upsert_condition(
+            &existing,
+            "MaintenanceConfigured",
+            true,
+            "MaintenanceConfigured",
+            "now configured",
+            Some(2),
+        );
+        let m = &out[0];
+        assert_eq!(m.status, "True");
+        assert_ne!(
+            m.last_transition_time, t0,
+            "timestamp did not advance on flip"
+        );
     }
 }

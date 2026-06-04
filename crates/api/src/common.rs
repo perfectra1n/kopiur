@@ -288,3 +288,94 @@ pub struct CronSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter: Option<String>,
 }
+
+impl RepositoryRef {
+    /// True if this reference points at the given repository.
+    ///
+    /// `owner_namespace` is the namespace of the resource that holds the ref
+    /// (e.g. the `Maintenance` CR's own namespace), used to resolve a namespaced
+    /// `Repository` reference that omits `namespace`. The match is exhaustive over
+    /// [`RepositoryKind`] (ADR §5.5):
+    ///
+    /// - [`RepositoryKind::Repository`]: kind+name must match AND the effective
+    ///   namespace (`self.namespace` or `owner_namespace`) must equal
+    ///   `target_namespace`.
+    /// - [`RepositoryKind::ClusterRepository`]: kind+name must match; namespace is
+    ///   ignored on both sides (cluster-scoped).
+    ///
+    /// `target_namespace` is `None` for a `ClusterRepository` target.
+    pub fn resolves_to(
+        &self,
+        owner_namespace: &str,
+        target_kind: RepositoryKind,
+        target_name: &str,
+        target_namespace: Option<&str>,
+    ) -> bool {
+        if self.kind != target_kind || self.name != target_name {
+            return false;
+        }
+        match self.kind {
+            RepositoryKind::Repository => {
+                Some(self.namespace.as_deref().unwrap_or(owner_namespace)) == target_namespace
+            }
+            RepositoryKind::ClusterRepository => true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ref_of(kind: RepositoryKind, name: &str, namespace: Option<&str>) -> RepositoryRef {
+        RepositoryRef {
+            kind,
+            name: name.into(),
+            namespace: namespace.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn resolves_to_same_namespace_when_ref_omits_it() {
+        // A Maintenance in `apps` referencing `{ kind: Repository, name: nas }`
+        // (no namespace) points at Repository apps/nas.
+        let r = ref_of(RepositoryKind::Repository, "nas", None);
+        assert!(r.resolves_to("apps", RepositoryKind::Repository, "nas", Some("apps")));
+        assert!(!r.resolves_to("apps", RepositoryKind::Repository, "nas", Some("other")));
+    }
+
+    #[test]
+    fn resolves_to_honors_explicit_cross_namespace_ref() {
+        let r = ref_of(RepositoryKind::Repository, "nas", Some("backups"));
+        // Owner namespace is irrelevant once the ref pins one.
+        assert!(r.resolves_to("apps", RepositoryKind::Repository, "nas", Some("backups")));
+        assert!(!r.resolves_to("apps", RepositoryKind::Repository, "nas", Some("apps")));
+    }
+
+    #[test]
+    fn resolves_to_name_mismatch_is_false() {
+        let r = ref_of(RepositoryKind::Repository, "nas", None);
+        assert!(!r.resolves_to("apps", RepositoryKind::Repository, "other", Some("apps")));
+    }
+
+    #[test]
+    fn resolves_to_kind_mismatch_is_false_even_with_same_name() {
+        // A `Repository` ref must never satisfy a `ClusterRepository` target and
+        // vice versa, even when the names collide.
+        let r = ref_of(RepositoryKind::Repository, "shared", None);
+        assert!(!r.resolves_to("apps", RepositoryKind::ClusterRepository, "shared", None));
+
+        let cr = ref_of(RepositoryKind::ClusterRepository, "shared", None);
+        assert!(!cr.resolves_to("apps", RepositoryKind::Repository, "shared", Some("apps")));
+    }
+
+    #[test]
+    fn resolves_to_cluster_repository_ignores_namespace() {
+        let cr = ref_of(RepositoryKind::ClusterRepository, "hetzner", None);
+        assert!(cr.resolves_to("apps", RepositoryKind::ClusterRepository, "hetzner", None));
+        // Even a stray namespace on the ref (webhook normally forbids it) still
+        // resolves cluster-scoped.
+        let stray = ref_of(RepositoryKind::ClusterRepository, "hetzner", Some("oops"));
+        assert!(stray.resolves_to("apps", RepositoryKind::ClusterRepository, "hetzner", None));
+    }
+}

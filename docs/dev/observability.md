@@ -57,6 +57,7 @@ the OTel→Prometheus conventions, so a counter instrument named
 | `kopiur_repo_size_bytes` | gauge | `namespace`, `name` | logical bytes under management (newest snapshot per source) |
 | `kopiur_repo_snapshot_count` | gauge | `namespace`, `name` | repository catalog scan |
 | `kopiur_repo_discovered_backups` | gauge | `namespace`, `name` | repository catalog scan |
+| `kopiur_repository_maintenance_configured` | gauge (0/1) | `kind`, `namespace`, `name` | Repository/ClusterRepository reconcile once Ready; 1 = a `Maintenance` references it, 0 = none (also emits a `MaintenanceNotConfigured` Warning event + `MaintenanceConfigured` condition) |
 | `kopiur_restore_duration_seconds` | gauge | `namespace`, `name` | restore Job completion − start |
 | `kopiur_maintenance_last_reclaimed_bytes` | gauge | `namespace`, `name` | full maintenance run |
 | `kopiur_webhook_admission_total` | counter | `kind`, `decision` (`allowed`/`denied`) | admission webhook |

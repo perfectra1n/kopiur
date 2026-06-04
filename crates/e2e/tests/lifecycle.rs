@@ -20,7 +20,8 @@
 
 use std::time::Duration;
 
-use kube::api::{DeleteParams, PostParams};
+use k8s_openapi::api::events::v1::Event as K8sEvent;
+use kube::api::{DeleteParams, ListParams, PostParams};
 use kube::{Api, Client, ResourceExt};
 use serde::de::DeserializeOwned;
 
@@ -160,6 +161,18 @@ where
             .unwrap_or(serde_json::Value::Null),
         None => serde_json::Value::Null,
     }
+}
+
+/// Extract a status condition's `status` ("True"/"False"/...) by `type`, or
+/// `None` if the condition is absent.
+fn condition_status(status: &serde_json::Value, type_: &str) -> Option<String> {
+    status
+        .get("conditions")
+        .and_then(|c| c.as_array())?
+        .iter()
+        .find(|c| c.get("type").and_then(|t| t.as_str()) == Some(type_))
+        .and_then(|c| c.get("status").and_then(|s| s.as_str()))
+        .map(str::to_string)
 }
 
 /// The headline scenario: Repository → Backup (real kopia snapshot) → Restore →
@@ -558,6 +571,99 @@ async fn metrics_reflect_backup_lifecycle() {
         text.contains("# TYPE kopiur_controller_reconciliations_total counter"),
         "exposition should carry # TYPE metadata"
     );
+}
+
+/// A `Repository` with no `Maintenance` referencing it must surface the gap
+/// (ADR §3.7): a `MaintenanceConfigured=False` condition + a Warning event.
+/// Creating a `Maintenance` that references it flips the condition to `True`
+/// (driven by the controller's `.watches(Maintenance)` trigger reading the
+/// shared informer store). Regression guard for the maintenance-not-configured
+/// surfacing.
+#[tokio::test]
+#[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
+async fn repository_without_maintenance_warns() {
+    let Some(client) = try_client().await else {
+        return;
+    };
+    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let events: Api<K8sEvent> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    let repo = "e2e-nomaint-repo";
+    let _ = repos
+        .create(&PostParams::default(), &cr(repository_json(repo)))
+        .await;
+    wait_phase(&repos, repo, "Ready")
+        .await
+        .expect("Repository should reach Ready");
+
+    // With no Maintenance referencing it, the condition reports False.
+    wait_until(
+        "MaintenanceConfigured=False",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let s = status_json(&repos, repo).await;
+            Ok(
+                (condition_status(&s, "MaintenanceConfigured").as_deref() == Some("False"))
+                    .then_some(()),
+            )
+        },
+    )
+    .await
+    .expect("repo should report MaintenanceConfigured=False");
+
+    // ...and a Warning event naming the repo is recorded on it.
+    wait_until(
+        "MaintenanceNotConfigured warning event",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let list = events.list(&ListParams::default()).await?;
+            let found = list.items.iter().any(|e| {
+                e.reason.as_deref() == Some("MaintenanceNotConfigured")
+                    && e.type_.as_deref() == Some("Warning")
+                    && e.regarding.as_ref().and_then(|r| r.name.as_deref()) == Some(repo)
+            });
+            Ok(found.then_some(()))
+        },
+    )
+    .await
+    .expect("a MaintenanceNotConfigured Warning event should be recorded");
+
+    // Create a Maintenance referencing the repo; the condition flips to True.
+    let maint = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "Maintenance",
+        "metadata": { "name": "e2e-nomaint-fix", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "repository": { "kind": "Repository", "name": repo },
+            "schedule": {
+                "quick": { "cron": "*/5 * * * *" },
+                "full": { "cron": "0 3 * * 0" }
+            },
+            "ownership": { "owner": "kopiur-e2e", "takeoverPolicy": "Force" }
+        }
+    });
+    maints
+        .create(&PostParams::default(), &cr::<Maintenance>(maint))
+        .await
+        .expect("create Maintenance");
+
+    wait_until(
+        "MaintenanceConfigured=True",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let s = status_json(&repos, repo).await;
+            Ok(
+                (condition_status(&s, "MaintenanceConfigured").as_deref() == Some("True"))
+                    .then_some(()),
+            )
+        },
+    )
+    .await
+    .expect("repo should report MaintenanceConfigured=True after Maintenance created");
 }
 
 /// Compile-time guard that `Client` is reachable from this crate even when the

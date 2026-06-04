@@ -22,3 +22,14 @@ pub const CONFIG_LABEL: &str = "kopiur.home-operations.com/config";
 
 /// The API version string for kopiur CRDs (used in mover `TargetRef`s).
 pub const API_VERSION: &str = "kopiur.home-operations.com/v1alpha1";
+
+/// Status condition `type` set on a `Repository`/`ClusterRepository` recording
+/// whether a `Maintenance` CR references it (ADR §3.7: maintenance is opt-in and
+/// an unmaintained repository never reclaims storage).
+pub const MAINTENANCE_CONFIGURED_CONDITION: &str = "MaintenanceConfigured";
+/// Event reason + condition reason when no `Maintenance` references the repo.
+pub const MAINTENANCE_NOT_CONFIGURED_REASON: &str = "MaintenanceNotConfigured";
+/// Condition reason when a `Maintenance` does reference the repo.
+pub const MAINTENANCE_CONFIGURED_REASON: &str = "MaintenanceConfigured";
+/// `action` for the maintenance-configuration check Event.
+pub const CHECK_MAINTENANCE_ACTION: &str = "CheckMaintenance";

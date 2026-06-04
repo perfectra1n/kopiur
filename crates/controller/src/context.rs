@@ -8,9 +8,14 @@
 //! thin builder used only where the design permits in-process invocation; the
 //! decision logic is kept pure and unit-tested separately.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
+use kopiur_api::Maintenance;
 use kopiur_kopia::{KopiaClient, KopiaClientBuilder};
 use kube::Client;
 use kube::runtime::events::Recorder;
+use kube::runtime::reflector::Store;
 
 use crate::metrics::Metrics;
 
@@ -77,6 +82,15 @@ pub struct Context {
     /// mover `Job` so mover traces/logs/metrics export to the same collector.
     /// Empty when OTLP is not configured. `(name, value)` pairs.
     pub mover_otlp_env: Vec<(String, String)>,
+    /// Shared informer cache of all `Maintenance` CRs, reused from the Maintenance
+    /// controller's reflector (`Controller::store()`). The `Repository`/
+    /// `ClusterRepository` reconcilers read it synchronously to answer "is a
+    /// Maintenance configured for me?" without a per-reconcile `Api::list`.
+    pub maintenance_store: Store<Maintenance>,
+    /// `true` once [`maintenance_store`](Self::maintenance_store) has completed its
+    /// initial list (the reflector synced). Until then the maintenance check is
+    /// skipped so a cold cache never produces a false "not configured" warning.
+    pub maintenance_synced: Arc<AtomicBool>,
 }
 
 impl Context {
@@ -91,6 +105,8 @@ impl Context {
         mover_image: String,
         mover_service_account: Option<String>,
         mover_otlp_env: Vec<(String, String)>,
+        maintenance_store: Store<Maintenance>,
+        maintenance_synced: Arc<AtomicBool>,
     ) -> Self {
         Context {
             client,
@@ -100,6 +116,8 @@ impl Context {
             mover_image,
             mover_service_account,
             mover_otlp_env,
+            maintenance_store,
+            maintenance_synced,
         }
     }
 }

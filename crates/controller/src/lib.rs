@@ -39,15 +39,18 @@ pub mod repository;
 pub mod restore;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::runtime::Controller;
 use kube::runtime::events::{Recorder, Reporter};
+use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher::Config as WatcherConfig;
-use kube::{Api, Client};
+use kube::{Api, Client, ResourceExt};
 
+use kopiur_api::common::RepositoryKind;
 use kopiur_api::{
     Backup, BackupConfig, BackupSchedule, ClusterRepository, Maintenance, Repository, Restore,
 };
@@ -97,6 +100,32 @@ pub async fn run() -> anyhow::Result<()> {
     // OTLP config the controller passes through to mover Jobs so their
     // traces/logs/metrics reach the same collector. Empty when OTLP is off.
     let mover_otlp_env = collect_mover_otlp_env();
+
+    // Build the Maintenance controller up front so its reflector-backed store can
+    // be shared with the Repository/ClusterRepository reconcilers (they answer
+    // "is a Maintenance configured for me?" from this cache instead of an
+    // `Api::list` per reconcile). `maintenance_synced` flips to `true` once the
+    // store completes its initial list, so a cold cache never yields a false
+    // "not configured" warning on startup.
+    let maint_controller = Controller::new(
+        Api::<Maintenance>::all(client.clone()),
+        WatcherConfig::default(),
+    );
+    let maintenance_store = maint_controller.store();
+    let maintenance_synced = Arc::new(AtomicBool::new(false));
+    {
+        let store = maintenance_store.clone();
+        let synced = maintenance_synced.clone();
+        tokio::spawn(async move {
+            if store.wait_until_ready().await.is_ok() {
+                synced.store(true, Ordering::Relaxed);
+                tracing::info!("maintenance informer cache synced");
+            } else {
+                tracing::warn!("maintenance informer writer dropped before sync");
+            }
+        });
+    }
+
     let ctx = Arc::new(Context::new(
         client.clone(),
         KopiaClientFactory::new(),
@@ -105,12 +134,14 @@ pub async fn run() -> anyhow::Result<()> {
         mover_image,
         mover_service_account,
         mover_otlp_env,
+        maintenance_store,
+        maintenance_synced,
     ));
 
     tracing::info!("starting kopiur controllers");
 
     let http_srv = tokio::spawn(serve_http(metrics.clone()));
-    let controllers = spawn_all(client, ctx);
+    let controllers = spawn_all(client, ctx, maint_controller);
 
     tokio::select! {
         _ = controllers => tracing::warn!("all controllers exited"),
@@ -133,8 +164,9 @@ fn collect_mover_otlp_env() -> Vec<(String, String)> {
 }
 
 /// Spawn all seven controllers and join them. Split out so it can be driven
-/// independently of the metrics server.
-async fn spawn_all(client: Client, ctx: Arc<Context>) {
+/// independently of the metrics server. `maint_controller` is built by the caller
+/// so its reflector store can be shared into [`Context`] before it runs here.
+async fn spawn_all(client: Client, ctx: Arc<Context>, maint_controller: Controller<Maintenance>) {
     let cfg = WatcherConfig::default();
 
     macro_rules! controller {
@@ -180,11 +212,75 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
             }
         });
 
-    let repo_ctrl = controller!(Repository, repository);
-    let crepo_ctrl = controller!(ClusterRepository, cluster_repository);
+    // Repository/ClusterRepository additionally watch Maintenance: a Maintenance
+    // create/delete maps to the repo it references and triggers an immediate
+    // re-reconcile, so the MaintenanceConfigured condition/warning clears within
+    // seconds instead of waiting for the 300s requeue. The mappers are exhaustive
+    // over RepositoryKind (a Repository ref never triggers a ClusterRepository
+    // reconcile and vice versa).
+    let repo_api: Api<Repository> = Api::all(client.clone());
+    let repo_ctx = ctx.clone();
+    let repo_ctrl = Controller::new(repo_api, cfg.clone())
+        .watches(
+            Api::<Maintenance>::all(client.clone()),
+            cfg.clone(),
+            |m: Maintenance| {
+                let r = &m.spec.repository;
+                match r.kind {
+                    RepositoryKind::Repository => {
+                        let ns = r.namespace.clone().or_else(|| m.namespace());
+                        ns.map(|ns| ObjectRef::<Repository>::new(&r.name).within(&ns))
+                    }
+                    RepositoryKind::ClusterRepository => None,
+                }
+            },
+        )
+        .run(repository::reconcile, repository::error_policy, repo_ctx)
+        .for_each(|res| async move {
+            if let Err(e) = res {
+                tracing::debug!(error = %e, "repository reconcile error");
+            }
+        });
+
+    let crepo_api: Api<ClusterRepository> = Api::all(client.clone());
+    let crepo_ctx = ctx.clone();
+    let crepo_ctrl = Controller::new(crepo_api, cfg.clone())
+        .watches(
+            Api::<Maintenance>::all(client.clone()),
+            cfg.clone(),
+            |m: Maintenance| {
+                let r = &m.spec.repository;
+                match r.kind {
+                    RepositoryKind::ClusterRepository => {
+                        Some(ObjectRef::<ClusterRepository>::new(&r.name))
+                    }
+                    RepositoryKind::Repository => None,
+                }
+            },
+        )
+        .run(
+            cluster_repository::reconcile,
+            cluster_repository::error_policy,
+            crepo_ctx,
+        )
+        .for_each(|res| async move {
+            if let Err(e) = res {
+                tracing::debug!(error = %e, "cluster_repository reconcile error");
+            }
+        });
+
     let config_ctrl = controller!(BackupConfig, backup_config);
     let restore_ctrl = controller!(Restore, restore);
-    let maint_ctrl = controller!(Maintenance, maintenance);
+
+    // The pre-built Maintenance controller (its store is already shared into ctx).
+    let maint_ctx = ctx.clone();
+    let maint_ctrl = maint_controller
+        .run(maintenance::reconcile, maintenance::error_policy, maint_ctx)
+        .for_each(|res| async move {
+            if let Err(e) = res {
+                tracing::debug!(error = %e, "maintenance reconcile error");
+            }
+        });
 
     tokio::join!(
         backup_ctrl,

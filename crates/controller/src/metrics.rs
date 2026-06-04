@@ -52,6 +52,7 @@ pub struct Metrics {
     repo_size_bytes: Gauge<i64>,
     repo_snapshot_count: Gauge<i64>,
     repo_discovered_backups: Gauge<i64>,
+    repo_maintenance_configured: Gauge<i64>,
 
     // Restore + maintenance.
     restore_duration_seconds: Gauge<i64>,
@@ -140,6 +141,13 @@ impl Metrics {
             .i64_gauge("kopiur_repo_discovered_backups")
             .with_description("Number of backups discovered in the repository catalog.")
             .build();
+        let repo_maintenance_configured = m
+            .i64_gauge("kopiur_repository_maintenance_configured")
+            .with_description(
+                "1 if a Maintenance CR references the repository, 0 otherwise (unmaintained \
+                 repositories never reclaim storage).",
+            )
+            .build();
 
         let restore_duration_seconds = m
             .i64_gauge("kopiur_restore_duration_seconds")
@@ -167,6 +175,7 @@ impl Metrics {
             repo_size_bytes,
             repo_snapshot_count,
             repo_discovered_backups,
+            repo_maintenance_configured,
             restore_duration_seconds,
             maintenance_reclaimed_bytes,
         }
@@ -311,6 +320,26 @@ impl Metrics {
         }
     }
 
+    /// Set the maintenance-configured gauge for a repository: 1 if a `Maintenance`
+    /// CR references it, 0 otherwise. `kind` is `Repository`/`ClusterRepository`;
+    /// `ns` is empty for a cluster-scoped `ClusterRepository`.
+    pub fn set_repository_maintenance_configured(
+        &self,
+        kind: &str,
+        ns: &str,
+        name: &str,
+        configured: bool,
+    ) {
+        self.repo_maintenance_configured.record(
+            configured as i64,
+            &[
+                KeyValue::new("kind", kind.to_string()),
+                KeyValue::new("namespace", ns.to_string()),
+                KeyValue::new("name", name.to_string()),
+            ],
+        );
+    }
+
     /// Set the last restore's duration gauge.
     pub fn set_restore_duration(&self, ns: &str, name: &str, seconds: i64) {
         self.restore_duration_seconds
@@ -350,6 +379,7 @@ mod tests {
         m.inc_orphaned_snapshot("ns");
         m.set_backup_phase("ns", "db", BackupPhase::Succeeded);
         m.set_backup_stats("ns", "db", Some(1234), Some(10), Some(5));
+        m.set_repository_maintenance_configured("Repository", "ns", "nas", false);
         let text = String::from_utf8(m.gather()).unwrap();
         // The Prometheus exporter appends `_total` to counters.
         assert!(
@@ -359,6 +389,10 @@ mod tests {
         assert!(text.contains("kopiur_orphaned_snapshots_total"), "{text}");
         assert!(text.contains("kopiur_resource_phase"), "{text}");
         assert!(text.contains("kopiur_backup_size_bytes"), "{text}");
+        assert!(
+            text.contains("kopiur_repository_maintenance_configured"),
+            "{text}"
+        );
     }
 
     #[test]
