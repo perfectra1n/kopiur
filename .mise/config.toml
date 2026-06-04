@@ -2,7 +2,7 @@
 # Mise is the source of truth for Rust and project tools in developer shells and CI.
 
 [tools]
-rust = { version = "1.96.0", components = "rustfmt,clippy,llvm-tools-preview" }
+rust = { version = "1.95.0", components = "rustfmt,clippy,llvm-tools-preview" }
 lefthook = "2.1.9"
 oxfmt = "0.53.0"
 zizmor = "1.25.2"
