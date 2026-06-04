@@ -91,7 +91,7 @@ pub fn populator_state(has_target: bool) -> PopulatorState {
 }
 
 /// Reconcile a `Restore`.
-#[tracing::instrument(skip(restore, ctx), fields(kind = "Restore", name = %restore.name_any()))]
+#[tracing::instrument(skip(restore, ctx), fields(kind = "Restore", namespace = %restore.namespace().unwrap_or_default(), name = %restore.name_any()))]
 pub async fn reconcile(restore: Arc<Restore>, ctx: Arc<Context>) -> Result<Action> {
     let start = std::time::Instant::now();
     let result = reconcile_inner(&restore, &ctx).await;
@@ -332,7 +332,7 @@ async fn drive_direct_restore(
         repo_pvc,
         creds_secret: Some(&creds.secret_name),
         service_account: ctx.mover_service_account.as_deref(),
-        otlp_env: ctx.mover_otlp_env.clone(),
+        passthrough_env: ctx.mover_env_passthrough.clone(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);

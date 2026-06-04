@@ -74,7 +74,7 @@ pub fn logical_bytes_under_management(listing: &[SnapshotListEntry]) -> i64 {
 }
 
 /// Reconcile a `Repository`.
-#[tracing::instrument(skip(repo, ctx), fields(kind = "Repository", name = %repo.name_any()))]
+#[tracing::instrument(skip(repo, ctx), fields(kind = "Repository", namespace = %repo.namespace().unwrap_or_default(), name = %repo.name_any()))]
 pub async fn reconcile(repo: Arc<Repository>, ctx: Arc<Context>) -> Result<Action> {
     let start = std::time::Instant::now();
     let result = reconcile_inner(&repo, &ctx).await;

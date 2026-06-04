@@ -143,3 +143,18 @@ Usage: {{- include "kopiur.otlpEnv" . | nindent 12 }}
 {{- end }}
 {{- end }}
 {{- end }}
+
+{{/*
+Logging environment for the controller + webhook (and, via the controller, mover
+Jobs — the controller forwards RUST_LOG + KOPIUR_LOG_FORMAT from its own env).
+RUST_LOG resolves from logging.level, falling back to the deprecated
+controller.logLevel. KOPIUR_LOG_FORMAT selects text|json. The env var NAMES match
+crates/telemetry/src/env.rs.
+Usage: {{- include "kopiur.loggingEnv" . | nindent 12 }}
+*/}}
+{{- define "kopiur.loggingEnv" -}}
+- name: RUST_LOG
+  value: {{ .Values.logging.level | default .Values.controller.logLevel | quote }}
+- name: KOPIUR_LOG_FORMAT
+  value: {{ .Values.logging.format | default "text" | quote }}
+{{- end }}

@@ -78,10 +78,11 @@ pub struct Context {
     /// `.status`, so this SA must be bound to the operator's status-patch rules.
     /// `None` falls back to the namespace `default` SA.
     pub mover_service_account: Option<String>,
-    /// OTLP env (`OTEL_EXPORTER_OTLP_*`) the controller passes through to every
-    /// mover `Job` so mover traces/logs/metrics export to the same collector.
-    /// Empty when OTLP is not configured. `(name, value)` pairs.
-    pub mover_otlp_env: Vec<(String, String)>,
+    /// Env the controller passes through to every mover `Job`: OTLP
+    /// (`OTEL_EXPORTER_OTLP_*`, only when a collector is configured) plus logging
+    /// (`RUST_LOG`, `KOPIUR_LOG_FORMAT`, whenever set) so movers inherit the
+    /// controller's telemetry export and log level/format. `(name, value)` pairs.
+    pub mover_env_passthrough: Vec<(String, String)>,
     /// Shared informer cache of all `Maintenance` CRs, reused from the Maintenance
     /// controller's reflector (`Controller::store()`). The `Repository`/
     /// `ClusterRepository` reconcilers read it synchronously to answer "is a
@@ -104,7 +105,7 @@ impl Context {
         recorder: Recorder,
         mover_image: String,
         mover_service_account: Option<String>,
-        mover_otlp_env: Vec<(String, String)>,
+        mover_env_passthrough: Vec<(String, String)>,
         maintenance_store: Store<Maintenance>,
         maintenance_synced: Arc<AtomicBool>,
     ) -> Self {
@@ -115,7 +116,7 @@ impl Context {
             recorder,
             mover_image,
             mover_service_account,
-            mover_otlp_env,
+            mover_env_passthrough,
             maintenance_store,
             maintenance_synced,
         }

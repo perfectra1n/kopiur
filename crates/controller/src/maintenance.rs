@@ -52,7 +52,7 @@ pub fn lease_action(policy: TakeoverPolicy, held_by_other: bool) -> LeaseAction 
 }
 
 /// Reconcile a `Maintenance`.
-#[tracing::instrument(skip(maint, ctx), fields(kind = "Maintenance", name = %maint.name_any()))]
+#[tracing::instrument(skip(maint, ctx), fields(kind = "Maintenance", namespace = %maint.namespace().unwrap_or_default(), name = %maint.name_any()))]
 pub async fn reconcile(maint: Arc<Maintenance>, ctx: Arc<Context>) -> Result<Action> {
     let start = std::time::Instant::now();
     let result = reconcile_inner(&maint, &ctx).await;

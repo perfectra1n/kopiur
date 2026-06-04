@@ -93,6 +93,40 @@ fn resource(service_name: &str) -> Resource {
         .build()
 }
 
+/// Console log format for the fmt layer. Selected by `KOPIUR_LOG_FORMAT`.
+///
+/// `Text` is the default and preserves the human-readable console output;
+/// `Json` emits one structured JSON object per event for log aggregators
+/// (Loki/ELK/Datadog). An unrecognized value degrades to `Text` rather than
+/// failing a backup operator's startup (see [`LogFormat::from_env`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFormat {
+    Text,
+    Json,
+}
+
+impl LogFormat {
+    /// Resolve the format from `KOPIUR_LOG_FORMAT`. Unset/empty → `Text`. An
+    /// unknown value → `Text` plus `Err(unknown_value)` so the caller can defer
+    /// a degrade warning until after the subscriber is installed.
+    fn from_env() -> (Self, Option<String>) {
+        match std::env::var(env::KOPIUR_LOG_FORMAT) {
+            Ok(v) => Self::parse(&v),
+            Err(_) => (Self::Text, None),
+        }
+    }
+
+    /// Parse a single value. Returns the resolved format and, when the input was
+    /// non-empty but unrecognized, the offending string for a degrade message.
+    fn parse(value: &str) -> (Self, Option<String>) {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "text" | "plain" | "fmt" => (Self::Text, None),
+            "json" => (Self::Json, None),
+            _ => (Self::Text, Some(value.trim().to_string())),
+        }
+    }
+}
+
 /// Owns the metrics meter provider and the Prometheus registry it feeds.
 ///
 /// Each binary (and each test) builds its own — there is no global meter
@@ -236,6 +270,7 @@ impl Drop for TelemetryGuard {
 /// Idempotent-ish: uses `try_init`, so a second call (e.g. controller + webhook
 /// in one test binary) is a no-op for the subscriber.
 pub fn init_tracing(service_name: &str) -> Result<TelemetryGuard, TelemetryError> {
+    use std::io::IsTerminal;
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::{EnvFilter, fmt};
 
@@ -246,6 +281,28 @@ pub fn init_tracing(service_name: &str) -> Result<TelemetryGuard, TelemetryError
     // with no hint that OTLP was silently disabled. Strict mode still fails fast
     // (returns Err before any global subscriber is installed).
     let mut deferred: Vec<String> = Vec::new();
+
+    // Console format: text (default) or json. An unrecognized value degrades to
+    // text rather than failing startup — the message is deferred like the rest.
+    let (log_format, bad_format) = LogFormat::from_env();
+    if let Some(v) = bad_format {
+        deferred.push(format!(
+            "{}={v:?} not recognized (use `text` or `json`); defaulting to text",
+            env::KOPIUR_LOG_FORMAT
+        ));
+    }
+    // Suppress ANSI escapes when stdout is not a TTY (i.e. inside a container),
+    // so `kubectl logs` shows clean text instead of color control codes.
+    let fmt_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = match log_format {
+        LogFormat::Text => fmt::layer()
+            .with_ansi(std::io::stdout().is_terminal())
+            .boxed(),
+        LogFormat::Json => fmt::layer()
+            .json()
+            .with_current_span(true)
+            .with_span_list(false)
+            .boxed(),
+    };
 
     let otlp = match OtlpConfig::from_env() {
         Ok(o) => o,
@@ -287,7 +344,7 @@ pub fn init_tracing(service_name: &str) -> Result<TelemetryGuard, TelemetryError
 
     let _ = tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer())
+        .with(fmt_layer)
         .with(otel_layers)
         .try_init();
 
@@ -353,6 +410,32 @@ mod tests {
             text.contains("kopiur_test_total"),
             "exposition missing counter: {text}"
         );
+    }
+
+    #[test]
+    fn log_format_parses_text_json_and_degrades_unknown() {
+        // Default / explicit text variants → Text, no degrade message.
+        for v in ["", "text", "TEXT", " plain ", "fmt"] {
+            assert_eq!(LogFormat::parse(v), (LogFormat::Text, None), "input {v:?}");
+        }
+        // json (case-insensitive) → Json, no degrade message.
+        assert_eq!(LogFormat::parse("json"), (LogFormat::Json, None));
+        assert_eq!(LogFormat::parse("JSON"), (LogFormat::Json, None));
+        // Unknown non-empty value → Text, carries the offending string so the
+        // caller can warn.
+        let (fmt, bad) = LogFormat::parse("yaml");
+        assert_eq!(fmt, LogFormat::Text);
+        assert_eq!(bad.as_deref(), Some("yaml"));
+    }
+
+    #[test]
+    fn log_format_from_env_defaults_to_text_when_unset() {
+        let prev = std::env::var(env::KOPIUR_LOG_FORMAT).ok();
+        unsafe { std::env::remove_var(env::KOPIUR_LOG_FORMAT) };
+        assert_eq!(LogFormat::from_env(), (LogFormat::Text, None));
+        if let Some(v) = prev {
+            unsafe { std::env::set_var(env::KOPIUR_LOG_FORMAT, v) };
+        }
     }
 
     #[test]

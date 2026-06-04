@@ -97,9 +97,10 @@ pub async fn run() -> anyhow::Result<()> {
         .ok()
         .filter(|s| !s.is_empty());
     tracing::info!(mover_service_account = ?mover_service_account, "mover SA configured");
-    // OTLP config the controller passes through to mover Jobs so their
-    // traces/logs/metrics reach the same collector. Empty when OTLP is off.
-    let mover_otlp_env = collect_mover_otlp_env();
+    // Telemetry + logging env the controller passes through to mover Jobs: OTLP
+    // (when a collector is configured) plus RUST_LOG / KOPIUR_LOG_FORMAT so movers
+    // inherit the controller's log level and format.
+    let mover_env_passthrough = collect_mover_env_passthrough();
 
     // Shared Maintenance informer: a single reflector-backed cache the
     // Repository/ClusterRepository reconcilers read to answer "is a Maintenance
@@ -148,7 +149,7 @@ pub async fn run() -> anyhow::Result<()> {
         recorder,
         mover_image,
         mover_service_account,
-        mover_otlp_env,
+        mover_env_passthrough,
         maintenance_store,
         maintenance_synced,
     ));
@@ -165,17 +166,36 @@ pub async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Collect the standard `OTEL_EXPORTER_OTLP_*` env vars that are set in the
-/// controller's environment so they can be stamped onto mover `Job`s. Returns
-/// empty when OTLP is not configured (no endpoint), so movers stay fmt-only.
-fn collect_mover_otlp_env() -> Vec<(String, String)> {
-    if std::env::var(config::OTEL_EXPORTER_OTLP_ENDPOINT).is_err() {
-        return Vec::new();
+/// Collect the env vars the controller stamps onto every mover `Job` so a mover
+/// inherits the controller's telemetry + logging configuration. Two groups:
+///
+/// - **OTLP** (`OTEL_EXPORTER_OTLP_*`): forwarded only when a collector endpoint
+///   is set, so movers stay fully offline (fmt-only) otherwise.
+/// - **Logging** (`RUST_LOG`, `KOPIUR_LOG_FORMAT`): forwarded whenever present,
+///   regardless of OTLP, so `kubectl logs` on a mover Job honors the same level
+///   and format the controller runs with.
+///
+/// `(name, value)` pairs, de-duplicated by name (the two groups don't overlap).
+fn collect_mover_env_passthrough() -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = Vec::new();
+
+    // OTLP only when a collector is configured.
+    if std::env::var(config::OTEL_EXPORTER_OTLP_ENDPOINT).is_ok() {
+        env.extend(
+            config::OTLP_PASSTHROUGH
+                .iter()
+                .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v))),
+        );
     }
-    config::OTLP_PASSTHROUGH
-        .iter()
-        .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
-        .collect()
+
+    // Logging always (when set in the controller's env).
+    env.extend(
+        config::LOG_PASSTHROUGH
+            .iter()
+            .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v))),
+    );
+
+    env
 }
 
 /// Spawn all seven controllers and join them. Split out so it can be driven

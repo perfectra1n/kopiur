@@ -16,6 +16,9 @@ pub const MOVER_SERVICE_ACCOUNT_ENV: &str = "KOPIUR_MOVER_SERVICE_ACCOUNT";
 /// binds to. Matches the chart's `controller.probePort` (8080).
 pub const HTTP_ADDR: &str = "0.0.0.0:8080";
 
-/// The OTLP env vars the controller passes through to mover `Job`s, owned by
-/// the telemetry crate so the name list has a single definition.
-pub use kopiur_telemetry::env::{OTEL_EXPORTER_OTLP_ENDPOINT, OTLP_PASSTHROUGH};
+/// The OTLP + logging env vars the controller passes through to mover `Job`s,
+/// owned by the telemetry crate so the name lists have a single definition.
+/// OTLP vars are only forwarded when a collector endpoint is set; the logging
+/// vars (`RUST_LOG`, `KOPIUR_LOG_FORMAT`) are forwarded whenever present so a
+/// mover inherits the controller's log level and format regardless of OTLP.
+pub use kopiur_telemetry::env::{LOG_PASSTHROUGH, OTEL_EXPORTER_OTLP_ENDPOINT, OTLP_PASSTHROUGH};

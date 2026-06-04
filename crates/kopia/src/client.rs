@@ -19,7 +19,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::error::{KopiaError, KopiaErrorClass, tail_lines};
@@ -441,15 +441,36 @@ impl KopiaClient {
         // Take the pipes so we can read both concurrently without deadlocking
         // on a full pipe buffer.
         let mut stdout_pipe = child.stdout.take().expect("stdout piped");
-        let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+        let stderr_pipe = child.stderr.take().expect("stderr piped");
 
         let read_out = async {
             let mut buf = String::new();
             stdout_pipe.read_to_string(&mut buf).await.map(|_| buf)
         };
         let read_err = async {
+            // Stream kopia's stderr line-by-line so its real progress and log
+            // output is visible in `kubectl logs` (at debug, target `kopia`) for
+            // both the controller's short ops and the long-running mover Job —
+            // while still accumulating the full text byte-for-byte for the
+            // failure tail carried by `KopiaError::NonZeroExit`.
+            let mut reader = BufReader::new(stderr_pipe);
             let mut buf = String::new();
-            stderr_pipe.read_to_string(&mut buf).await.map(|_| buf)
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim_end_matches(['\n', '\r']);
+                        if !trimmed.is_empty() {
+                            tracing::debug!(target: "kopia", "{trimmed}");
+                        }
+                        buf.push_str(&line);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(buf)
         };
 
         let wait_with_io = async {

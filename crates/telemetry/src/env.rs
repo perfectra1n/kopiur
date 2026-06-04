@@ -13,6 +13,14 @@ pub const OTEL_EXPORTER_OTLP_HEADERS: &str = "OTEL_EXPORTER_OTLP_HEADERS";
 /// `true`/`1` makes telemetry misconfiguration fail-fast instead of degrading.
 pub const KOPIUR_OTEL_STRICT: &str = "KOPIUR_OTEL_STRICT";
 
+/// Standard `tracing` filter directive (e.g. `info`, `info,kopia=debug`). Read by
+/// `EnvFilter::try_from_default_env`; named here so the controller can pass it
+/// through to mover `Job`s and the Helm chart can set it from one place.
+pub const RUST_LOG: &str = "RUST_LOG";
+/// Console log format for the fmt layer: `text` (default) or `json`. Unknown
+/// values degrade to `text` with a warning.
+pub const KOPIUR_LOG_FORMAT: &str = "KOPIUR_LOG_FORMAT";
+
 /// The OTLP env vars a parent process should pass through to children so their
 /// telemetry reaches the same collector. Ordered with the endpoint first.
 pub const OTLP_PASSTHROUGH: &[&str] = &[
@@ -20,3 +28,8 @@ pub const OTLP_PASSTHROUGH: &[&str] = &[
     OTEL_EXPORTER_OTLP_PROTOCOL,
     OTEL_EXPORTER_OTLP_HEADERS,
 ];
+
+/// The logging env vars a parent process should pass through to children so a
+/// mover `Job` inherits the controller's log level and format. Unlike
+/// [`OTLP_PASSTHROUGH`] these apply even with no collector configured.
+pub const LOG_PASSTHROUGH: &[&str] = &[RUST_LOG, KOPIUR_LOG_FORMAT];

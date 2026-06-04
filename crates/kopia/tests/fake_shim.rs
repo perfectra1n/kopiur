@@ -135,6 +135,44 @@ exit 1
 }
 
 #[tokio::test]
+async fn stderr_streamed_lines_still_fully_captured_in_tail() {
+    // Regression for the stderr line-streaming refactor: kopia's stderr is read
+    // line-by-line (and echoed to logs at debug, target `kopia`) instead of
+    // slurped whole. Prove every line — including a final line with NO trailing
+    // newline — still reaches the failure tail.
+    let s = shim(
+        r#"#!/bin/sh
+echo "first progress line" 1>&2
+echo "second progress line" 1>&2
+printf "final line without newline" 1>&2
+exit 3
+"#,
+    );
+    let client = client_for(&s);
+    let err = client
+        .repository_status()
+        .await
+        .expect_err("nonzero exit should surface");
+    match err {
+        KopiaError::NonZeroExit {
+            code, stderr_tail, ..
+        } => {
+            assert_eq!(code, Some(3));
+            assert!(stderr_tail.contains("first progress line"), "{stderr_tail}");
+            assert!(
+                stderr_tail.contains("second progress line"),
+                "{stderr_tail}"
+            );
+            assert!(
+                stderr_tail.contains("final line without newline"),
+                "{stderr_tail}"
+            );
+        }
+        other => panic!("expected NonZeroExit, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn auth_failure_classified() {
     let s = shim(
         r#"#!/bin/sh

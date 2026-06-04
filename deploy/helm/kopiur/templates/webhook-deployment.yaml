@@ -39,8 +39,7 @@ spec:
           image: {{ include "kopiur.image" (dict "root" $ "img" .Values.image.webhook) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
-            - name: RUST_LOG
-              value: {{ .Values.controller.logLevel | quote }}
+            {{- include "kopiur.loggingEnv" . | nindent 12 }}
             - name: KOPIUR_WEBHOOK_ADDR
               value: {{ .Values.webhook.listenAddr | quote }}
             - name: KOPIUR_WEBHOOK_TLS_CERT

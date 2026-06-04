@@ -94,7 +94,9 @@ controller:
   # -- Enable leader election. Required when replicaCount > 1; harmless at 1.
   leaderElection:
     enabled: true
-  # -- Log level passed to the controller (RUST_LOG style: error|warn|info|debug|trace).
+  # -- DEPRECATED: use the top-level `logging.level` instead. Kept as a fallback
+  # for existing values files — `logging.level` wins when both are set. Applies to
+  # the controller and webhook (RUST_LOG style: error|warn|info|debug|trace).
   logLevel: info
   # -- Extra CLI args appended to the controller container.
   extraArgs: []
@@ -264,6 +266,21 @@ observability:
     strict: false
     # -- Extra raw env (e.g. OTEL_TRACES_SAMPLER) added to every component.
     extraEnv: []
+
+# =============================================================================
+# Logging (stdout / `kubectl logs`)
+# =============================================================================
+# Controls the fmt logging that every component writes to stdout. The controller
+# passes RUST_LOG + KOPIUR_LOG_FORMAT through to mover Jobs, so a mover honors the
+# same level and format. Env var names match crates/telemetry/src/env.rs.
+logging:
+  # -- Log level / filter directive (RUST_LOG style: error|warn|info|debug|trace;
+  # per-target works too, e.g. "info,kopia=debug" to see kopia's own progress in
+  # mover logs). When empty, falls back to the deprecated `controller.logLevel`.
+  level: ""
+  # -- Console format: "text" (human-readable, default) or "json" (one structured
+  # object per line for Loki/ELK/Datadog). Unknown values degrade to text.
+  format: text
 
 # =============================================================================
 # Pod security (shared defaults; per-component sections may override)

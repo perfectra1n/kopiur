@@ -114,7 +114,7 @@ pub fn resolve_origin(b: &Backup) -> Origin {
 /// IO is intentionally thin here: the decision logic ([`plan_deletion`],
 /// [`effective_deletion_policy`], the job builders in [`crate::jobs`]) is pure
 /// and unit-tested; this function wires those decisions to the cluster.
-#[tracing::instrument(skip(backup, ctx), fields(kind = "Backup", name = %backup.name_any()))]
+#[tracing::instrument(skip(backup, ctx), fields(kind = "Backup", namespace = %backup.namespace().unwrap_or_default(), name = %backup.name_any()))]
 pub async fn reconcile(backup: Arc<Backup>, ctx: Arc<Context>) -> Result<Action> {
     let start = std::time::Instant::now();
     let result = reconcile_inner(&backup, &ctx).await;
@@ -263,7 +263,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         repo_pvc,
         creds_secret: Some(&creds_secret),
         service_account: ctx.mover_service_account.as_deref(),
-        otlp_env: ctx.mover_otlp_env.clone(),
+        passthrough_env: ctx.mover_env_passthrough.clone(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -424,7 +424,7 @@ async fn delete_snapshot_via_job(
         repo_pvc,
         creds_secret: Some(&creds.secret_name),
         service_account: ctx.mover_service_account.as_deref(),
-        otlp_env: ctx.mover_otlp_env.clone(),
+        passthrough_env: ctx.mover_env_passthrough.clone(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);

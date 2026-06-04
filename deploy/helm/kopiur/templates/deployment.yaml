@@ -50,8 +50,7 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
-            - name: RUST_LOG
-              value: {{ .Values.controller.logLevel | quote }}
+            {{- include "kopiur.loggingEnv" . | nindent 12 }}
             - name: KOPIUR_NAMESPACE
               valueFrom:
                 fieldRef:

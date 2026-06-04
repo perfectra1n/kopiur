@@ -26,6 +26,43 @@ test suite stays offline. A misconfiguration is logged with an actionable error
 and **degrades** to fmt-logging + the Prometheus pull rather than crashing a
 backup operator — unless `KOPIUR_OTEL_STRICT=true`, which makes it fail fast.
 
+## Logging (stdout / `kubectl logs`)
+
+Every component writes structured `tracing` events to **stdout** via an fmt layer
+installed by `kopiur_telemetry::init_tracing`. No collector is needed — this is the
+always-on path that `kubectl logs` shows. Reconcilers carry a `#[instrument]` span
+with `kind`, `namespace`, and `name`, so each line is attributable to the resource
+being reconciled.
+
+**Level** — the standard `RUST_LOG` filter (default `info`). Per-target directives
+work: `RUST_LOG=info,kopia=debug` keeps the operator at `info` while surfacing
+**kopia's own progress and log output** (emitted line-by-line under the `kopia`
+target) in mover and controller logs. Without it, kopia's output is captured for the
+failure tail but not printed.
+
+**Format** — `KOPIUR_LOG_FORMAT` selects `text` (human-readable, default) or `json`
+(one structured object per line for Loki/ELK/Datadog). An unrecognized value
+degrades to `text` with a warning. In `text` mode ANSI color is suppressed when
+stdout is not a TTY (i.e. in a container), so `kubectl logs` stays clean.
+
+**Movers inherit the controller's config.** The controller forwards both `RUST_LOG`
+and `KOPIUR_LOG_FORMAT` (alongside the OTLP vars) onto every mover `Job`, so a
+backup/restore Job logs at the same level and format — set it once on the controller.
+
+Helm knobs (`logging.*`, applied to controller + webhook, and through to movers):
+
+| Key | Default | Effect |
+|---|---|---|
+| `logging.level` | `""` → falls back to `controller.logLevel` | sets `RUST_LOG` (e.g. `info,kopia=debug`) |
+| `logging.format` | `text` | sets `KOPIUR_LOG_FORMAT` (`text`/`json`) |
+| `controller.logLevel` | `info` | **deprecated** alias for `logging.level` (kept for back-compat) |
+
+```bash
+# JSON logs everywhere, and show kopia's progress in mover logs:
+helm upgrade --install kopiur deploy/helm/kopiur -n kopiur-system \
+  --set logging.format=json --set logging.level='info,kopia=debug'
+```
+
 ## HTTP endpoints
 
 | Component | Endpoint | Notes |
@@ -113,10 +150,15 @@ every mover `Job` it creates, so mover traces/logs/metrics reach the same collec
 
 The env var **names** are centralized in `crates/telemetry/src/env.rs`
 (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`,
-`OTEL_EXPORTER_OTLP_HEADERS`, `KOPIUR_OTEL_STRICT`); the Helm `observability.otlp`
-block sets them. Only gRPC is compiled in — point the endpoint at the collector's
+`OTEL_EXPORTER_OTLP_HEADERS`, `KOPIUR_OTEL_STRICT`, plus the logging vars
+`RUST_LOG` and `KOPIUR_LOG_FORMAT`); the Helm `observability.otlp` and `logging`
+blocks set them. Only gRPC is compiled in — point the endpoint at the collector's
 gRPC port (4317). Setting `OTEL_EXPORTER_OTLP_PROTOCOL` to anything other than
 `grpc` is rejected with an actionable error.
+
+`OTLP_PASSTHROUGH` and `LOG_PASSTHROUGH` (same module) list the vars the controller
+forwards onto mover `Job`s: OTLP only when a collector is configured, logging
+whenever set.
 
 ## Dashboard
 

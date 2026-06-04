@@ -143,7 +143,7 @@ pub fn should_run_on_create(schedule: &ScheduleSpec, already_ran: bool) -> bool 
 }
 
 /// Reconcile a `BackupSchedule`.
-#[tracing::instrument(skip(schedule, ctx), fields(kind = "BackupSchedule", name = %schedule.name_any()))]
+#[tracing::instrument(skip(schedule, ctx), fields(kind = "BackupSchedule", namespace = %schedule.namespace().unwrap_or_default(), name = %schedule.name_any()))]
 pub async fn reconcile(schedule: Arc<BackupSchedule>, ctx: Arc<Context>) -> Result<Action> {
     let start = std::time::Instant::now();
     let result = reconcile_inner(&schedule, &ctx).await;

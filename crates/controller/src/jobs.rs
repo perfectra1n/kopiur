@@ -102,10 +102,11 @@ pub struct MoverJobInputs<'a> {
     /// (which generally cannot patch `*/status`), so the controller should
     /// always supply one in a real deployment.
     pub service_account: Option<&'a str>,
-    /// Extra environment passed through to the mover container — used for the
-    /// `OTEL_EXPORTER_OTLP_*` config so mover telemetry reaches the collector.
-    /// `(name, value)` pairs; empty when OTLP is not configured.
-    pub otlp_env: Vec<(String, String)>,
+    /// Extra environment passed through to the mover container: the
+    /// `OTEL_EXPORTER_OTLP_*` config (when a collector is set) plus the logging
+    /// vars (`RUST_LOG`, `KOPIUR_LOG_FORMAT`) so the mover inherits the
+    /// controller's level/format. `(name, value)` pairs; may be empty.
+    pub passthrough_env: Vec<(String, String)>,
 }
 
 /// The restricted-PSA-compatible default security context (§4.11/G16):
@@ -218,8 +219,9 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
         }]
     });
 
-    // Work-spec path env, plus any OTLP passthrough so mover telemetry exports
-    // to the same collector as the controller.
+    // Work-spec path env, plus any passthrough (OTLP + RUST_LOG/KOPIUR_LOG_FORMAT)
+    // so the mover exports to the same collector and logs at the same level/format
+    // as the controller.
     let mut env = vec![k8s_openapi::api::core::v1::EnvVar {
         name: WORK_SPEC_ENV.to_string(),
         value: Some(format!("{WORK_SPEC_MOUNT}/{WORK_SPEC_FILE}")),
@@ -227,7 +229,7 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
     }];
     env.extend(
         inputs
-            .otlp_env
+            .passthrough_env
             .iter()
             .map(|(k, v)| k8s_openapi::api::core::v1::EnvVar {
                 name: k.clone(),
@@ -347,7 +349,7 @@ mod tests {
             repo_pvc: None,
             creds_secret: None,
             service_account: Some("kopiur-operator"),
-            otlp_env: Vec::new(),
+            passthrough_env: Vec::new(),
         }
     }
 

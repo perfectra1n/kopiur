@@ -122,7 +122,7 @@ pub fn consecutive_failures(backups: &[Backup]) -> i64 {
 }
 
 /// Reconcile a `BackupConfig`.
-#[tracing::instrument(skip(config, ctx), fields(kind = "BackupConfig", name = %config.name_any()))]
+#[tracing::instrument(skip(config, ctx), fields(kind = "BackupConfig", namespace = %config.namespace().unwrap_or_default(), name = %config.name_any()))]
 pub async fn reconcile(config: Arc<BackupConfig>, ctx: Arc<Context>) -> Result<Action> {
     let start = std::time::Instant::now();
     let result = reconcile_inner(&config, &ctx).await;
