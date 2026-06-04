@@ -203,22 +203,27 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
             let total = listing.len() as i64;
             scan_catalog(ctx, repo, &namespace, &name, &repo_uid, &listing, total).await?;
 
-            // Now that the repo is Ready, surface whether a Maintenance CR
-            // references it (Warning event + condition + gauge). ADR §3.7.
+            // Now that the repo is Ready, ensure its managed Maintenance exists
+            // (default-on) and surface the MaintenanceConfigured condition. A
+            // namespaced Repository's Maintenance lives in the repo's namespace.
+            // ADR §3.7.
             let conditions = repo
                 .status
                 .as_ref()
                 .map(|s| s.conditions.clone())
                 .unwrap_or_default();
-            io::check_maintenance(
+            io::ensure_maintenance(
                 ctx,
                 &api,
+                repo,
                 &repo.object_ref(&()),
                 RepositoryKind::Repository,
                 "Repository",
                 &namespace,
                 Some(&namespace),
+                Some(&namespace),
                 &name,
+                repo.spec.maintenance.as_ref(),
                 &conditions,
                 repo.metadata.generation,
             )
@@ -483,19 +488,22 @@ async fn finalize_bootstrap(
     )
     .await?;
 
-    // Surface whether a Maintenance CR references this repo (ADR §3.7). Build on
-    // the conditions we just patched (which include `Bootstrapped`), NOT the
-    // stale cached object — otherwise this patch would drop the `Bootstrapped`
+    // Ensure the managed Maintenance for this repo (ADR §3.7). Build on the
+    // conditions we just patched (which include `Bootstrapped`), NOT the stale
+    // cached object — otherwise this patch would drop the `Bootstrapped`
     // condition we set above (both writes replace the whole conditions array).
-    io::check_maintenance(
+    io::ensure_maintenance(
         ctx,
         api,
+        repo,
         &repo.object_ref(&()),
         RepositoryKind::Repository,
         "Repository",
         namespace,
         Some(namespace),
+        Some(namespace),
         name,
+        repo.spec.maintenance.as_ref(),
         &conditions,
         repo.metadata.generation,
     )

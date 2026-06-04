@@ -97,6 +97,12 @@ pub async fn run() -> anyhow::Result<()> {
         .ok()
         .filter(|s| !s.is_empty());
     tracing::info!(mover_service_account = ?mover_service_account, "mover SA configured");
+    // The operator's own namespace (downward API: KOPIUR_NAMESPACE). Default
+    // placement for a ClusterRepository's managed (namespaced) Maintenance CR.
+    let operator_namespace = std::env::var(config::OPERATOR_NAMESPACE_ENV)
+        .ok()
+        .filter(|s| !s.is_empty());
+    tracing::info!(operator_namespace = ?operator_namespace, "operator namespace configured");
     // Telemetry + logging env the controller passes through to mover Jobs: OTLP
     // (when a collector is configured) plus RUST_LOG / KOPIUR_LOG_FORMAT so movers
     // inherit the controller's log level and format.
@@ -152,6 +158,7 @@ pub async fn run() -> anyhow::Result<()> {
         mover_env_passthrough,
         maintenance_store,
         maintenance_synced,
+        operator_namespace,
     ));
 
     tracing::info!("starting kopiur controllers");

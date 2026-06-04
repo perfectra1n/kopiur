@@ -63,6 +63,7 @@ fn sample_repository(name: &str) -> Repository {
             create: None,
             cache_defaults: None,
             catalog: None,
+            maintenance: None,
         },
     )
 }

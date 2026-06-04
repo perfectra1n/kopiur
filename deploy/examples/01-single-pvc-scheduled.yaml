@@ -42,6 +42,16 @@ spec:
       key: KOPIA_PASSWORD
   create:
     enabled: true
+  # Maintenance is default-managed: omit this block entirely and the operator
+  # creates and owns a Maintenance for this Repository with sensible defaults
+  # (quick every 6h, full daily at 03:00). Set it to tune the schedule, or
+  # `enabled: false` to opt out. An externally-authored Maintenance (see
+  # example 08) is always honored — the operator never duplicates it.
+  maintenance:
+    enabled: true
+    schedule:
+      quick: { cron: "0 */6 * * *", jitter: 30m }
+      full: { cron: "0 3 * * *", jitter: 1h }
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
 kind: BackupConfig

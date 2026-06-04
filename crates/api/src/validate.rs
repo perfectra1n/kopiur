@@ -20,7 +20,7 @@ use crate::backup_schedule::BackupScheduleSpec;
 use crate::cluster_repository::{AllowedNamespaces, ClusterRepositorySpec};
 use crate::common::{DeletionPolicy, RepositoryKind, RepositoryRef};
 use crate::error::{ValidationError, ValidationResult};
-use crate::maintenance::MaintenanceSpec;
+use crate::maintenance::{MaintenanceSpec, RepositoryMaintenanceSpec};
 use crate::repository::RepositorySpec;
 use crate::restore::{RestoreSource, RestoreSpec, RestoreTarget};
 use std::collections::BTreeMap;
@@ -173,6 +173,36 @@ pub fn validate_repository_no_inline_retention(_spec: &RepositorySpec) -> Valida
     Ok(())
 }
 
+/// Validate a `spec.maintenance` block on a `Repository`/`ClusterRepository`,
+/// accumulating problems (ADR §3.7):
+/// - any override schedule's quick/full crons must parse (same parser as runtime);
+/// - `namespace` is **cluster-scope only** — it selects where the namespaced
+///   managed `Maintenance` lands for a `ClusterRepository`, and is forbidden on a
+///   namespaced `Repository` (whose `Maintenance` always lives in its own ns).
+///
+/// `cluster_scoped` is the only thing that differs between the two repository
+/// kinds, so one validator serves both call sites.
+pub fn validate_repository_maintenance(
+    maintenance: &RepositoryMaintenanceSpec,
+    cluster_scoped: bool,
+) -> Vec<ValidationError> {
+    let mut errs = Vec::new();
+    if let Some(schedule) = &maintenance.schedule {
+        if let Err(e) = validate_cron(&schedule.quick.cron) {
+            errs.push(e);
+        }
+        if let Err(e) = validate_cron(&schedule.full.cron) {
+            errs.push(e);
+        }
+    }
+    if !cluster_scoped && let Some(ns) = &maintenance.namespace {
+        errs.push(ValidationError::MaintenanceNamespaceOnNamespacedRepo {
+            namespace: ns.clone(),
+        });
+    }
+    errs
+}
+
 /// A cron expression parses with the same parser the controller uses at runtime, so
 /// bad expressions are rejected at apply time, not at first reconcile (ADR §4.1).
 ///
@@ -237,6 +267,18 @@ pub fn validate_backup_schedule(spec: &BackupScheduleSpec) -> Vec<ValidationErro
     errs
 }
 
+/// Validate a `Repository` spec, accumulating all problems (ADR §3.1).
+pub fn validate_repository(spec: &RepositorySpec) -> Vec<ValidationError> {
+    let mut errs = Vec::new();
+    if let Err(e) = validate_repository_no_inline_retention(spec) {
+        errs.push(e);
+    }
+    if let Some(m) = &spec.maintenance {
+        errs.extend(validate_repository_maintenance(m, false));
+    }
+    errs
+}
+
 /// Validate a `Maintenance` spec, accumulating all problems (ADR §3.7).
 pub fn validate_maintenance(spec: &MaintenanceSpec) -> Vec<ValidationError> {
     let mut errs = Vec::new();
@@ -262,6 +304,9 @@ pub fn validate_cluster_repository(spec: &ClusterRepositorySpec) -> Vec<Validati
             field: "allowedNamespaces.all must be true to grant access (false is meaningless)"
                 .to_string(),
         });
+    }
+    if let Some(m) = &spec.maintenance {
+        errs.extend(validate_repository_maintenance(m, true));
     }
     errs
 }
@@ -628,6 +673,7 @@ mod tests {
             create: None,
             cache_defaults: None,
             catalog: None,
+            maintenance: None,
         };
         assert!(validate_repository_no_inline_retention(&spec).is_ok());
     }
@@ -731,6 +777,92 @@ mod tests {
         );
     }
 
+    // --- validate_repository_maintenance / validate_repository ---
+
+    fn repo_spec_with_maintenance(m: Option<RepositoryMaintenanceSpec>) -> RepositorySpec {
+        use crate::backend::{Backend, FilesystemBackend};
+        use crate::common::{Encryption, SecretKeyRef};
+        RepositorySpec {
+            backend: Backend::Filesystem(FilesystemBackend {
+                path: "/repo".into(),
+                pvc_name: None,
+            }),
+            encryption: Encryption {
+                password_secret_ref: SecretKeyRef {
+                    name: "s".into(),
+                    namespace: None,
+                    key: None,
+                },
+            },
+            create: None,
+            cache_defaults: None,
+            catalog: None,
+            maintenance: m,
+        }
+    }
+
+    #[test]
+    fn repository_default_managed_maintenance_is_valid() {
+        // Absent `maintenance` (default-on) and an empty block both pass.
+        assert!(validate_repository(&repo_spec_with_maintenance(None)).is_empty());
+        assert!(
+            validate_repository(&repo_spec_with_maintenance(Some(
+                RepositoryMaintenanceSpec::default()
+            )))
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn repository_maintenance_namespace_rejected_on_namespaced_repo() {
+        let m = RepositoryMaintenanceSpec {
+            namespace: Some("kopia-system".into()),
+            ..Default::default()
+        };
+        let errs = validate_repository(&repo_spec_with_maintenance(Some(m)));
+        assert_eq!(
+            errs,
+            vec![ValidationError::MaintenanceNamespaceOnNamespacedRepo {
+                namespace: "kopia-system".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn repository_maintenance_namespace_allowed_on_cluster_repo() {
+        let m = RepositoryMaintenanceSpec {
+            namespace: Some("kopia-system".into()),
+            ..Default::default()
+        };
+        // cluster_scoped = true: the namespace field is the placement selector.
+        assert!(validate_repository_maintenance(&m, true).is_empty());
+    }
+
+    #[test]
+    fn repository_maintenance_bad_override_cron_is_rejected() {
+        use crate::common::CronSpec;
+        use crate::maintenance::MaintenanceSchedule;
+        let m = RepositoryMaintenanceSpec {
+            schedule: Some(MaintenanceSchedule {
+                quick: CronSpec {
+                    cron: "totally bad".into(),
+                    jitter: None,
+                },
+                full: CronSpec {
+                    cron: "0 3 * * *".into(),
+                    jitter: None,
+                },
+                timezone: None,
+            }),
+            ..Default::default()
+        };
+        let errs = validate_repository_maintenance(&m, false);
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::InvalidCron { .. }))
+        );
+    }
+
     #[test]
     fn cluster_repository_rejects_all_false() {
         use crate::backend::{Backend, FilesystemBackend};
@@ -752,6 +884,7 @@ mod tests {
             catalog: None,
             allowed_namespaces: AllowedNamespaces::All(false),
             identity_defaults: None,
+            maintenance: None,
         };
         assert!(!validate_cluster_repository(&spec).is_empty());
     }

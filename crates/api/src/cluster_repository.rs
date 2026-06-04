@@ -7,6 +7,7 @@
 
 use crate::backend::Backend;
 use crate::common::{CacheDefaults, CatalogBounds, CreateBehavior, Encryption};
+use crate::maintenance::RepositoryMaintenanceSpec;
 use crate::repository::{CatalogStatus, RepositoryPhase, StorageStats};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector};
 use kube::CustomResource;
@@ -47,6 +48,12 @@ pub struct ClusterRepositorySpec {
     /// Identity defaults applied when consumers don't override. ADR §3.2/§4.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_defaults: Option<IdentityTemplate>,
+    /// Maintenance control. Default-managed: when absent or `enabled: true`, the
+    /// reconciler creates and owns a `Maintenance` CR for this cluster repository.
+    /// As `Maintenance` is namespaced, `maintenance.namespace` selects where it
+    /// lands (defaulting to the operator's namespace). ADR §3.2/§3.7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<RepositoryMaintenanceSpec>,
 }
 
 /// The set of namespaces permitted to reference this `ClusterRepository`. ADR §3.2.

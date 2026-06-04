@@ -12,6 +12,13 @@ pub const MOVER_IMAGE_ENV: &str = "KOPIUR_MOVER_IMAGE";
 /// status-patch RBAC (the mover PATCHes the owning CR `.status`).
 pub const MOVER_SERVICE_ACCOUNT_ENV: &str = "KOPIUR_MOVER_SERVICE_ACCOUNT";
 
+/// The operator's own namespace, injected by the chart via the downward API
+/// (`fieldRef: metadata.namespace`). Used as the default placement namespace for
+/// a `ClusterRepository`'s managed (namespaced) `Maintenance` CR when
+/// `spec.maintenance.namespace` is unset. Absent → that placement is unresolved
+/// and surfaced as an actionable condition rather than guessed.
+pub const OPERATOR_NAMESPACE_ENV: &str = "KOPIUR_NAMESPACE";
+
 /// Address the controller's HTTP server (`/metrics`, `/healthz`, `/readyz`)
 /// binds to. Matches the chart's `controller.probePort` (8080).
 pub const HTTP_ADDR: &str = "0.0.0.0:8080";

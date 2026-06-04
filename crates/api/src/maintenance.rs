@@ -7,6 +7,25 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// The schedule an operator-managed `Maintenance` uses when the owning
+/// `Repository`/`ClusterRepository` does not override it: quick every 6h (30m
+/// jitter), full daily at 03:00 (1h jitter). Shared by the webhook (defaulting),
+/// the controller (projection), and tests, so the default lives in exactly one
+/// place. ADR §3.7.
+pub fn default_maintenance_schedule() -> MaintenanceSchedule {
+    MaintenanceSchedule {
+        quick: CronSpec {
+            cron: "0 */6 * * *".to_string(),
+            jitter: Some("30m".to_string()),
+        },
+        full: CronSpec {
+            cron: "0 3 * * *".to_string(),
+            jitter: Some("1h".to_string()),
+        },
+        timezone: None,
+    }
+}
+
 /// Maintenance schedule + ownership lease for one `Repository`/`ClusterRepository`. ADR §3.7.
 ///
 /// Not `Eq`: `mover` transitively embeds k8s-openapi types.
@@ -64,6 +83,63 @@ pub enum TakeoverPolicy {
     PromptCondition,
     /// Forcibly claim the lease.
     Force,
+}
+
+/// Inline maintenance control on a `Repository`/`ClusterRepository`
+/// (`spec.maintenance`). ADR §3.1/§3.7.
+///
+/// Maintenance is **default-managed**: when this is absent (or `enabled: true`),
+/// the repository reconciler projects it into an *owned* `Maintenance` child CR,
+/// so kopia storage is reclaimed without the user remembering to author a
+/// separate `Maintenance`. The reconciler honors an externally-authored
+/// `Maintenance` referencing the repository regardless of `enabled` — setting
+/// `enabled: false` only tells the operator not to create its own; it never
+/// deletes, ignores, or warns about a user-managed one.
+///
+/// Not `Eq`: `mover` transitively embeds k8s-openapi types.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryMaintenanceSpec {
+    /// Whether the operator manages a `Maintenance` CR for this repository.
+    /// Defaults to `true` (default-on). When `false`, the operator does not
+    /// create or manage one — but an externally-authored `Maintenance` is still
+    /// honored.
+    #[serde(default = "crate::common::default_true")]
+    pub enabled: bool,
+    /// Schedule override. When absent, the operator uses
+    /// [`default_maintenance_schedule`] (quick 6h / full daily).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<MaintenanceSchedule>,
+    /// Mover overrides for the managed `Maintenance` (object-store repositories).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mover: Option<MoverSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_policy: Option<FailurePolicy>,
+    /// Lease takeover policy for the managed `Maintenance`. Defaults to
+    /// [`TakeoverPolicy::Never`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takeover_policy: Option<TakeoverPolicy>,
+    /// **ClusterRepository only** — namespace the managed (namespaced)
+    /// `Maintenance` CR is created in. Defaults to the operator's own namespace.
+    /// Forbidden on a namespaced `Repository` (its `Maintenance` always lives in
+    /// the repository's namespace), rejected by the admission webhook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+}
+
+impl Default for RepositoryMaintenanceSpec {
+    /// Default-on with no overrides. `enabled` is `true` here to match the serde
+    /// `default_true` so a constructed default and a deserialized `{}` agree.
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            schedule: None,
+            mover: None,
+            failure_policy: None,
+            takeover_policy: None,
+            namespace: None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, JsonSchema)]
@@ -200,6 +276,59 @@ full:
         let json = serde_json::to_value(&status).unwrap();
         let reparsed: MaintenanceStatus = serde_json::from_value(json).unwrap();
         assert_eq!(status, reparsed);
+    }
+
+    #[test]
+    fn repository_maintenance_defaults_to_enabled() {
+        // An empty `spec.maintenance: {}` is default-on with no overrides.
+        let m: RepositoryMaintenanceSpec = from_yaml("{}\n");
+        assert!(
+            m.enabled,
+            "absent `enabled` must default to true (default-on)"
+        );
+        assert!(m.schedule.is_none());
+        assert!(m.namespace.is_none());
+        assert!(m.takeover_policy.is_none());
+        // The constructed Default agrees with the deserialized `{}`.
+        assert_eq!(m, RepositoryMaintenanceSpec::default());
+    }
+
+    #[test]
+    fn repository_maintenance_roundtrip_with_overrides() {
+        let yaml = r#"
+enabled: false
+schedule:
+  quick: { cron: "0 */4 * * *", jitter: 20m }
+  full:  { cron: "30 2 * * *", jitter: 45m }
+  timezone: America/Chicago
+takeoverPolicy: Force
+namespace: kopia-system
+failurePolicy:
+  backoffLimit: 2
+"#;
+        let m: RepositoryMaintenanceSpec = from_yaml(yaml);
+        assert!(!m.enabled);
+        let s = m.schedule.as_ref().expect("schedule");
+        assert_eq!(s.quick.cron, "0 */4 * * *");
+        assert_eq!(s.full.jitter.as_deref(), Some("45m"));
+        assert_eq!(s.timezone.as_deref(), Some("America/Chicago"));
+        assert_eq!(m.takeover_policy, Some(TakeoverPolicy::Force));
+        assert_eq!(m.namespace.as_deref(), Some("kopia-system"));
+        assert_eq!(m.failure_policy.as_ref().unwrap().backoff_limit, Some(2));
+
+        let json = serde_json::to_value(&m).expect("serialize");
+        let reparsed: RepositoryMaintenanceSpec = serde_json::from_value(json).expect("reparse");
+        assert_eq!(m, reparsed);
+    }
+
+    #[test]
+    fn default_maintenance_schedule_is_quick_6h_full_daily() {
+        let s = default_maintenance_schedule();
+        assert_eq!(s.quick.cron, "0 */6 * * *");
+        assert_eq!(s.quick.jitter.as_deref(), Some("30m"));
+        assert_eq!(s.full.cron, "0 3 * * *");
+        assert_eq!(s.full.jitter.as_deref(), Some("1h"));
+        assert!(s.timezone.is_none());
     }
 
     #[test]

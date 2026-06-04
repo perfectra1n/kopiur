@@ -9,6 +9,14 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// serde `default` for a `bool` field whose absent value is `true`. Used by
+/// "enabled by default, opt out explicitly" surfaces (e.g.
+/// `RepositoryMaintenanceSpec.enabled`). `bool::default()` is `false`, so a
+/// default-true field cannot lean on `#[serde(default)]` alone.
+pub(crate) fn default_true() -> bool {
+    true
+}
+
 /// A lifecycle-phase enum that can be rendered as a metric label.
 ///
 /// The single source of truth for a CRD's phase labels: [`PhaseLabel::ALL`]

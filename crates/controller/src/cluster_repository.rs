@@ -52,6 +52,19 @@ pub fn placement_namespace<'a>(
     }
 }
 
+/// Resolve where a `ClusterRepository`'s managed (namespaced) `Maintenance` CR
+/// should live (ADR §3.7): `spec.maintenance.namespace` if set, else the
+/// operator's own namespace (`KOPIUR_NAMESPACE`). `None` when neither is available —
+/// `ensure_maintenance` then surfaces an actionable `MaintenanceNamespaceUnresolved`
+/// condition rather than guessing.
+fn cluster_maintenance_placement(ctx: &Context, repo: &ClusterRepository) -> Option<String> {
+    repo.spec
+        .maintenance
+        .as_ref()
+        .and_then(|m| m.namespace.clone())
+        .or_else(|| ctx.operator_namespace.clone())
+}
+
 /// Reconcile a `ClusterRepository`.
 #[tracing::instrument(skip(repo, ctx), fields(kind = "ClusterRepository", name = %repo.name_any()))]
 pub async fn reconcile(repo: Arc<ClusterRepository>, ctx: Arc<Context>) -> Result<Action> {
@@ -167,23 +180,28 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
             // loop is a focused follow-up that reuses the namespaced Repository
             // catalog scan with the placement function selecting the target ns.
 
-            // Surface whether a Maintenance CR references this ClusterRepository
-            // (Warning event + condition + gauge). Cluster-scoped, so the metric
-            // namespace label is empty and ref-matching ignores namespace. ADR §3.7.
+            // Ensure the managed Maintenance for this ClusterRepository (ADR §3.7).
+            // Cluster-scoped, so the metric namespace label is empty and
+            // ref-matching ignores namespace. The (namespaced) Maintenance lands in
+            // spec.maintenance.namespace, else the operator's own namespace.
             let conditions = repo
                 .status
                 .as_ref()
                 .map(|s| s.conditions.clone())
                 .unwrap_or_default();
-            io::check_maintenance(
+            let placement = cluster_maintenance_placement(ctx, repo);
+            io::ensure_maintenance(
                 ctx,
                 &api,
+                repo,
                 &repo.object_ref(&()),
                 RepositoryKind::ClusterRepository,
                 "ClusterRepository",
                 "",
                 None,
+                placement.as_deref(),
                 &name,
+                repo.spec.maintenance.as_ref(),
                 &conditions,
                 repo.metadata.generation,
             )
@@ -403,18 +421,22 @@ async fn finalize_cluster_bootstrap(
     )
     .await?;
 
-    // Surface whether a Maintenance CR references this ClusterRepository (§3.7).
-    // Build on the conditions we just patched (including `Bootstrapped`), not the
-    // stale cached object, so this patch doesn't drop the `Bootstrapped` set above.
-    io::check_maintenance(
+    // Ensure the managed Maintenance for this ClusterRepository (§3.7). Build on
+    // the conditions we just patched (including `Bootstrapped`), not the stale
+    // cached object, so this patch doesn't drop the `Bootstrapped` set above.
+    let placement = cluster_maintenance_placement(ctx, repo);
+    io::ensure_maintenance(
         ctx,
         api,
+        repo,
         &repo.object_ref(&()),
         RepositoryKind::ClusterRepository,
         "ClusterRepository",
         "",
         None,
+        placement.as_deref(),
         name,
+        repo.spec.maintenance.as_ref(),
         &conditions,
         repo.metadata.generation,
     )

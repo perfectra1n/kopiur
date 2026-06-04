@@ -96,6 +96,16 @@ pub enum ValidationError {
          were not available to evaluate; denying (fail-closed)"
     )]
     SelectorLabelsUnavailable { namespace: String, repo: String },
+
+    /// A namespaced `Repository` set `spec.maintenance.namespace`, which only
+    /// applies to a cluster-scoped `ClusterRepository` (a namespaced
+    /// `Repository`'s managed `Maintenance` always lives in the repository's own
+    /// namespace). ADR §3.7.
+    #[error(
+        "spec.maintenance.namespace ({namespace:?}) is only valid on a ClusterRepository; \
+         a namespaced Repository's managed Maintenance always lives in the repository's namespace"
+    )]
+    MaintenanceNamespaceOnNamespacedRepo { namespace: String },
 }
 
 /// Result alias for validators. Defaults to `()` for the common "pass/fail with no

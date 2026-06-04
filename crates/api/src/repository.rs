@@ -2,6 +2,7 @@
 
 use crate::backend::Backend;
 use crate::common::{CacheDefaults, CatalogBounds, CreateBehavior, Encryption};
+use crate::maintenance::RepositoryMaintenanceSpec;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -34,6 +35,11 @@ pub struct RepositorySpec {
     pub cache_defaults: Option<CacheDefaults>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogBounds>,
+    /// Maintenance control. Default-managed: when absent or `enabled: true`, the
+    /// reconciler creates and owns a `Maintenance` CR for this repository in this
+    /// namespace. ADR §3.1/§3.7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<RepositoryMaintenanceSpec>,
 }
 
 /// Lifecycle phase of a repository. ADR §3.1 status.

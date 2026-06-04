@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{ConfigMap, ObjectReference};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference, Time};
-use kube::api::{Patch, PatchParams};
+use kube::api::{DeleteParams, Patch, PatchParams};
 use kube::core::ObjectMeta;
 use kube::runtime::events::{Event, EventType};
 use kube::runtime::reflector::Store;
@@ -23,11 +23,15 @@ use serde::de::DeserializeOwned;
 
 use kopiur_api::backend::Backend;
 use kopiur_api::common::{Encryption, RepositoryKind, RepositoryRef};
+use kopiur_api::maintenance::{
+    MaintenanceSpec, Ownership, RepositoryMaintenanceSpec, default_maintenance_schedule,
+};
 use kopiur_api::{ClusterRepository, Maintenance, Repository};
 
 use crate::consts::{
     API_VERSION, CHECK_MAINTENANCE_ACTION, MAINTENANCE_CONFIGURED_CONDITION,
-    MAINTENANCE_CONFIGURED_REASON, MAINTENANCE_NOT_CONFIGURED_REASON,
+    MAINTENANCE_CONFIGURED_REASON, MAINTENANCE_DISABLED_REASON,
+    MAINTENANCE_NAMESPACE_UNRESOLVED_REASON,
 };
 use crate::context::Context;
 use crate::error::{Error, Result};
@@ -398,6 +402,137 @@ pub fn repository_has_maintenance(
     })
 }
 
+/// True if `m` is an operator-*managed* `Maintenance` owned by the repository
+/// `(owner_kind, repo_name)` — i.e. it carries a controller `ownerReference` back
+/// to that repository. Managed CRs are projected from `spec.maintenance`; a CR a
+/// user hand-authored has no such owner reference and is treated as *foreign*.
+fn is_managed_by(m: &Maintenance, owner_kind: &str, repo_name: &str) -> bool {
+    m.metadata
+        .owner_references
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|o| o.kind == owner_kind && o.name == repo_name && o.controller == Some(true))
+}
+
+/// What the reconciler should do with the operator-managed `Maintenance` for a
+/// repository, given the inputs. A closed enum matched exhaustively so a new
+/// state can't slip past a reconcile branch (ADR §5.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaintenanceAction {
+    /// Create or converge the operator-managed `Maintenance`.
+    Manage,
+    /// Remove the operator-managed `Maintenance` (it exists but is no longer wanted).
+    Unmanage,
+    /// Nothing to do (not wanted, and none is managed).
+    Leave,
+    /// Wanted, but the (cluster-repo) placement namespace is unresolved.
+    Unresolved,
+}
+
+/// Pure decision for the managed `Maintenance` (the design matrix in the plan):
+/// the operator manages its own only when `enabled` AND no `foreign`
+/// (user-authored) `Maintenance` already covers the repo. When it shouldn't,
+/// any previously-`managed` one is removed. A wanted-but-unplaceable cluster repo
+/// is `Unresolved`.
+pub fn maintenance_action(
+    enabled: bool,
+    foreign: bool,
+    managed_exists: bool,
+    placement_resolved: bool,
+) -> MaintenanceAction {
+    if enabled && !foreign {
+        if placement_resolved {
+            MaintenanceAction::Manage
+        } else {
+            MaintenanceAction::Unresolved
+        }
+    } else if managed_exists {
+        MaintenanceAction::Unmanage
+    } else {
+        MaintenanceAction::Leave
+    }
+}
+
+/// Partition the `Maintenance` CRs referencing repository `(kind, name)` into
+/// "is there a *foreign* (user-authored) one?" and "the operator-*managed* one,
+/// if present". Pure over an iterator of `Maintenance` so it is unit-tested
+/// without a cluster. `match_namespace` is the repository's namespace (`None` for
+/// a cluster-scoped `ClusterRepository`); `owner_kind` is the literal CR kind
+/// (`"Repository"`/`"ClusterRepository"`) used to recognize our own owner ref.
+pub fn classify_maintenance(
+    items: impl IntoIterator<Item = Maintenance>,
+    kind: RepositoryKind,
+    owner_kind: &str,
+    name: &str,
+    match_namespace: Option<&str>,
+) -> (bool, Option<Maintenance>) {
+    let mut foreign = false;
+    let mut managed = None;
+    for m in items {
+        let owner_ns = m.metadata.namespace.as_deref().unwrap_or_default();
+        if !m
+            .spec
+            .repository
+            .resolves_to(owner_ns, kind, name, match_namespace)
+        {
+            continue;
+        }
+        if is_managed_by(&m, owner_kind, name) {
+            managed = Some(m);
+        } else {
+            foreign = true;
+        }
+    }
+    (foreign, managed)
+}
+
+/// Build the operator-managed `Maintenance` CR projected from a repository's
+/// `spec.maintenance` (ADR §3.7). Pure — the reconciler server-side-applies the
+/// result. Naming is 1:1 with the repository (at most one `Maintenance` per
+/// repository); the `ownership.owner` lease string is deterministic so the same
+/// repository always claims the same lease.
+///
+/// `placement_namespace` is where the (namespaced) `Maintenance` lives: the
+/// repository's own namespace for a `Repository`, or the resolved placement
+/// namespace for a `ClusterRepository`. The `repository` ref omits a namespace —
+/// a `Repository` ref resolves via the Maintenance's own namespace, and a
+/// `ClusterRepository` ref must not carry one.
+pub fn build_managed_maintenance(
+    kind: RepositoryKind,
+    name: &str,
+    placement_namespace: &str,
+    spec: &RepositoryMaintenanceSpec,
+    owner: OwnerReference,
+) -> Maintenance {
+    let owner_lease = match kind {
+        RepositoryKind::Repository => format!("kopiur/{placement_namespace}/{name}"),
+        RepositoryKind::ClusterRepository => format!("kopiur/clusterrepository/{name}"),
+    };
+    let mut m = Maintenance::new(
+        name,
+        MaintenanceSpec {
+            repository: RepositoryRef {
+                kind,
+                name: name.to_string(),
+                namespace: None,
+            },
+            schedule: spec
+                .schedule
+                .clone()
+                .unwrap_or_else(default_maintenance_schedule),
+            ownership: Ownership {
+                owner: owner_lease,
+                takeover_policy: spec.takeover_policy.unwrap_or_default(),
+            },
+            mover: spec.mover.clone(),
+            failure_policy: spec.failure_policy.clone(),
+        },
+    );
+    m.metadata = child_meta(name, placement_namespace, BTreeMap::new(), Some(owner));
+    m
+}
+
 /// Upsert a status condition by `type_`, returning the full conditions vector to
 /// patch. An existing condition of the same `type_` keeps its
 /// `lastTransitionTime` while its `status` is unchanged (the timestamp marks the
@@ -433,78 +568,169 @@ pub fn upsert_condition(
         .collect()
 }
 
-/// Surface whether a `Maintenance` references this repository (ADR §3.7): a
-/// Warning Event when none does, the `MaintenanceConfigured` status condition,
-/// and the `kopiur_repository_maintenance_configured` gauge. Membership is read
-/// from the shared informer store ([`repository_has_maintenance`]).
+/// Project a repository's `spec.maintenance` into an operator-managed
+/// `Maintenance` CR, honoring an externally-authored one, and surface the
+/// `MaintenanceConfigured` status condition + `kopiur_repository_maintenance_configured`
+/// gauge. The replacement for the old "warn when missing" check: maintenance is
+/// **default-managed** (ADR §3.7), so the common path creates a `Maintenance`
+/// rather than nagging.
 ///
-/// Degrade-not-crash: if the store has not yet synced, the check is skipped (the
-/// `.watches` trigger and the periodic requeue re-evaluate once warm), so a cold
-/// cache never emits a false "not configured" warning. `metric_namespace` is the
-/// gauge's `namespace` label (empty for a `ClusterRepository`); `match_namespace`
-/// is the repository's namespace for ref-matching (`None` for `ClusterRepository`).
+/// Behavior (see also the design matrix in the plan):
+/// - `enabled` (default) **and no foreign Maintenance** → server-side-apply the
+///   managed `Maintenance` (create or converge). Condition `True`.
+/// - a **foreign** (user-authored) `Maintenance` referencing the repo exists →
+///   defer to it; delete any stale managed one. Condition `True`. This holds
+///   regardless of `enabled` — `enabled: false` never ignores a user's Maintenance.
+/// - `enabled: false` and **no** Maintenance covers it → delete any managed one;
+///   condition `False` (reason `MaintenanceDisabled`), **no Warning event** (a
+///   deliberate opt-out).
+/// - `ClusterRepository` whose managed Maintenance has no resolvable placement
+///   namespace → condition `False` + Warning (`MaintenanceNamespaceUnresolved`).
+///
+/// Degrade-not-crash: if the shared informer store has not synced yet, the whole
+/// step is skipped (the `.watches` trigger + periodic requeue re-run it warm), so
+/// a cold cache never deletes a managed CR or emits a false signal. `metric_kind`
+/// doubles as the owner-reference kind (`"Repository"`/`"ClusterRepository"`);
+/// `match_namespace` is the repository's namespace for ref-matching (`None` for a
+/// `ClusterRepository`); `placement_namespace` is where the namespaced managed
+/// `Maintenance` lives (`None` → unresolved, only possible for a `ClusterRepository`).
 #[allow(clippy::too_many_arguments)]
-pub async fn check_maintenance<K>(
+pub async fn ensure_maintenance<K>(
     ctx: &Context,
     api: &Api<K>,
+    obj: &K,
     regarding: &ObjectReference,
     kind: RepositoryKind,
     metric_kind: &str,
     metric_namespace: &str,
     match_namespace: Option<&str>,
+    placement_namespace: Option<&str>,
     name: &str,
+    maintenance: Option<&RepositoryMaintenanceSpec>,
     existing_conditions: &[Condition],
     observed_generation: Option<i64>,
 ) where
-    K: Resource + DeserializeOwned + Clone + std::fmt::Debug,
+    K: Resource<DynamicType = ()> + DeserializeOwned + Clone + std::fmt::Debug,
 {
     if !ctx.maintenance_synced.load(Ordering::Relaxed) {
         return;
     }
 
-    let configured =
-        repository_has_maintenance(&ctx.maintenance_store, kind, name, match_namespace);
+    let spec = maintenance.cloned().unwrap_or_default();
+    let enabled = spec.enabled;
 
-    ctx.metrics.set_repository_maintenance_configured(
+    let (foreign, managed) = classify_maintenance(
+        ctx.maintenance_store.state().iter().map(|m| (**m).clone()),
+        kind,
         metric_kind,
-        metric_namespace,
         name,
-        configured,
+        match_namespace,
     );
 
-    let (reason, message) = if configured {
+    let mut covered = foreign;
+    let mut unresolved = false;
+
+    // Exhaustive match on the pure decision so every state is handled (ADR §5.5).
+    match maintenance_action(
+        enabled,
+        foreign,
+        managed.is_some(),
+        placement_namespace.is_some(),
+    ) {
+        MaintenanceAction::Manage => {
+            let ns = placement_namespace.expect("Manage implies a resolved placement namespace");
+            match owner_ref_for(obj, metric_kind) {
+                Ok(owner) => {
+                    let desired = build_managed_maintenance(kind, name, ns, &spec, owner);
+                    let mapi: Api<Maintenance> = Api::namespaced(ctx.client.clone(), ns);
+                    match apply(&mapi, name, &desired).await {
+                        Ok(_) => covered = true,
+                        Err(e) => {
+                            tracing::warn!(error = %e, repo = %name, namespace = %ns, "failed to apply managed Maintenance")
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, repo = %name, "cannot build owner reference for managed Maintenance")
+                }
+            }
+        }
+        MaintenanceAction::Unmanage => {
+            // Disabled, or a foreign Maintenance now covers the repo: remove the
+            // operator-managed one (idempotent; ignore NotFound).
+            if let Some(existing) = &managed {
+                let mns = existing
+                    .metadata
+                    .namespace
+                    .as_deref()
+                    .unwrap_or(metric_namespace);
+                let mapi: Api<Maintenance> = Api::namespaced(ctx.client.clone(), mns);
+                if let Err(e) = mapi.delete(name, &DeleteParams::default()).await
+                    && !matches!(&e, kube::Error::Api(ae) if ae.code == 404)
+                {
+                    tracing::warn!(error = %e, repo = %name, "failed to delete managed Maintenance");
+                }
+            }
+        }
+        MaintenanceAction::Unresolved => unresolved = true,
+        MaintenanceAction::Leave => {}
+    }
+
+    ctx.metrics
+        .set_repository_maintenance_configured(metric_kind, metric_namespace, name, covered);
+
+    let (status, reason, message, warn) = if unresolved {
         (
-            MAINTENANCE_CONFIGURED_REASON,
-            format!("a Maintenance resource references {metric_kind} {name}"),
+            false,
+            MAINTENANCE_NAMESPACE_UNRESOLVED_REASON,
+            format!(
+                "managed Maintenance for {metric_kind} {name} cannot be placed: set \
+                 spec.maintenance.namespace, or the operator's KOPIUR_NAMESPACE, so the namespaced \
+                 Maintenance CR has a home"
+            ),
+            true,
         )
+    } else if covered {
+        let msg = if foreign {
+            format!("an externally-authored Maintenance references {metric_kind} {name}")
+        } else {
+            format!("the operator manages a Maintenance for {metric_kind} {name}")
+        };
+        (true, MAINTENANCE_CONFIGURED_REASON, msg, false)
     } else {
-        let msg = format!(
-            "no Maintenance resource references {metric_kind} {name}; kopia storage will not be \
-             reclaimed — create a Maintenance referencing this repository"
-        );
-        if let Err(e) = ctx
+        (
+            false,
+            MAINTENANCE_DISABLED_REASON,
+            format!(
+                "maintenance is disabled for {metric_kind} {name} (spec.maintenance.enabled: \
+                 false) and no Maintenance references it; kopia storage will not be reclaimed"
+            ),
+            false,
+        )
+    };
+
+    if warn
+        && let Err(e) = ctx
             .recorder
             .publish(
                 &Event {
                     type_: EventType::Warning,
-                    reason: MAINTENANCE_NOT_CONFIGURED_REASON.into(),
-                    note: Some(msg.clone()),
+                    reason: reason.into(),
+                    note: Some(message.clone()),
                     action: CHECK_MAINTENANCE_ACTION.into(),
                     secondary: None,
                 },
                 regarding,
             )
             .await
-        {
-            tracing::warn!(error = %e, repo = %name, "failed to publish MaintenanceNotConfigured event");
-        }
-        (MAINTENANCE_NOT_CONFIGURED_REASON, msg)
-    };
+    {
+        tracing::warn!(error = %e, repo = %name, "failed to publish {reason} event");
+    }
 
     let conditions = upsert_condition(
         existing_conditions,
         MAINTENANCE_CONFIGURED_CONDITION,
-        configured,
+        status,
         reason,
         &message,
         observed_generation,
@@ -806,5 +1032,201 @@ mod tests {
             m.last_transition_time, t0,
             "timestamp did not advance on flip"
         );
+    }
+
+    // --- managed Maintenance projection (ADR §3.7, default-on) ---------------
+
+    fn dummy_owner(kind: &str, name: &str) -> OwnerReference {
+        OwnerReference {
+            api_version: API_VERSION.into(),
+            kind: kind.into(),
+            name: name.into(),
+            uid: "uid-1".into(),
+            controller: Some(true),
+            block_owner_deletion: Some(false),
+        }
+    }
+
+    #[test]
+    fn build_managed_maintenance_for_namespaced_repository() {
+        let spec = RepositoryMaintenanceSpec::default();
+        let m = build_managed_maintenance(
+            RepositoryKind::Repository,
+            "nas",
+            "apps",
+            &spec,
+            dummy_owner("Repository", "nas"),
+        );
+        // 1:1 naming, lives in the repository's namespace, owned by the repo.
+        assert_eq!(m.metadata.name.as_deref(), Some("nas"));
+        assert_eq!(m.metadata.namespace.as_deref(), Some("apps"));
+        assert!(is_managed_by(&m, "Repository", "nas"));
+        // Same-namespace ref (namespace omitted), default schedule, default lease.
+        assert_eq!(m.spec.repository.kind, RepositoryKind::Repository);
+        assert_eq!(m.spec.repository.name, "nas");
+        assert!(m.spec.repository.namespace.is_none());
+        assert_eq!(m.spec.schedule, default_maintenance_schedule());
+        assert_eq!(m.spec.ownership.owner, "kopiur/apps/nas");
+        assert_eq!(
+            m.spec.ownership.takeover_policy,
+            kopiur_api::TakeoverPolicy::Never
+        );
+    }
+
+    #[test]
+    fn build_managed_maintenance_for_cluster_repository_uses_overrides() {
+        use kopiur_api::common::CronSpec;
+        use kopiur_api::{MaintenanceSchedule, TakeoverPolicy};
+        let spec = RepositoryMaintenanceSpec {
+            enabled: true,
+            schedule: Some(MaintenanceSchedule {
+                quick: CronSpec {
+                    cron: "0 */2 * * *".into(),
+                    jitter: None,
+                },
+                full: CronSpec {
+                    cron: "0 1 * * *".into(),
+                    jitter: None,
+                },
+                timezone: Some("UTC".into()),
+            }),
+            takeover_policy: Some(TakeoverPolicy::Force),
+            namespace: Some("kopia-system".into()),
+            ..Default::default()
+        };
+        let m = build_managed_maintenance(
+            RepositoryKind::ClusterRepository,
+            "hetzner",
+            "kopia-system",
+            &spec,
+            dummy_owner("ClusterRepository", "hetzner"),
+        );
+        assert_eq!(m.metadata.namespace.as_deref(), Some("kopia-system"));
+        assert_eq!(m.spec.repository.kind, RepositoryKind::ClusterRepository);
+        // Cluster ref must never carry a namespace.
+        assert!(m.spec.repository.namespace.is_none());
+        assert_eq!(m.spec.schedule.quick.cron, "0 */2 * * *");
+        assert_eq!(m.spec.ownership.owner, "kopiur/clusterrepository/hetzner");
+        assert_eq!(m.spec.ownership.takeover_policy, TakeoverPolicy::Force);
+    }
+
+    #[test]
+    fn maintenance_action_covers_the_matrix() {
+        use MaintenanceAction::*;
+        // enabled, no foreign, placement resolved -> manage.
+        assert_eq!(maintenance_action(true, false, false, true), Manage);
+        assert_eq!(maintenance_action(true, false, true, true), Manage);
+        // enabled, no foreign, placement UNresolved -> unresolved.
+        assert_eq!(maintenance_action(true, false, false, false), Unresolved);
+        // foreign present -> never manage; remove a stale managed one.
+        assert_eq!(maintenance_action(true, true, true, true), Unmanage);
+        assert_eq!(maintenance_action(true, true, false, true), Leave);
+        // disabled -> remove managed if any, else leave (never warns/ignores foreign).
+        assert_eq!(maintenance_action(false, false, true, true), Unmanage);
+        assert_eq!(maintenance_action(false, false, false, true), Leave);
+        assert_eq!(maintenance_action(false, true, true, true), Unmanage);
+        assert_eq!(maintenance_action(false, true, false, true), Leave);
+    }
+
+    fn maint_referencing(
+        name: &str,
+        ns: &str,
+        r: RepositoryRef,
+        owner: Option<OwnerReference>,
+    ) -> Maintenance {
+        let mut m = Maintenance::new(
+            name,
+            MaintenanceSpec {
+                repository: r,
+                schedule: default_maintenance_schedule(),
+                ownership: Ownership {
+                    owner: "lease".into(),
+                    takeover_policy: Default::default(),
+                },
+                mover: None,
+                failure_policy: None,
+            },
+        );
+        m.metadata.namespace = Some(ns.into());
+        m.metadata.owner_references = owner.map(|o| vec![o]);
+        m
+    }
+
+    #[test]
+    fn classify_maintenance_distinguishes_managed_foreign_and_unrelated() {
+        let managed = maint_referencing(
+            "nas",
+            "apps",
+            ref_of(RepositoryKind::Repository, "nas", None),
+            Some(dummy_owner("Repository", "nas")),
+        );
+        let foreign = maint_referencing(
+            "user-maint",
+            "apps",
+            ref_of(RepositoryKind::Repository, "nas", None),
+            None,
+        );
+        let unrelated = maint_referencing(
+            "other",
+            "apps",
+            ref_of(RepositoryKind::Repository, "different", None),
+            None,
+        );
+
+        // Managed only.
+        let (f, m) = classify_maintenance(
+            vec![managed.clone(), unrelated.clone()],
+            RepositoryKind::Repository,
+            "Repository",
+            "nas",
+            Some("apps"),
+        );
+        assert!(!f);
+        assert_eq!(
+            m.as_ref().and_then(|m| m.metadata.name.as_deref()),
+            Some("nas")
+        );
+
+        // Foreign only.
+        let (f, m) = classify_maintenance(
+            vec![foreign.clone()],
+            RepositoryKind::Repository,
+            "Repository",
+            "nas",
+            Some("apps"),
+        );
+        assert!(f);
+        assert!(m.is_none());
+
+        // Both present: foreign flagged AND managed found (so a stale managed one
+        // is removed while deferring to the user's).
+        let (f, m) = classify_maintenance(
+            vec![managed, foreign],
+            RepositoryKind::Repository,
+            "Repository",
+            "nas",
+            Some("apps"),
+        );
+        assert!(f);
+        assert!(m.is_some());
+    }
+
+    #[test]
+    fn classify_maintenance_matches_cluster_repository_by_owner_ref() {
+        let managed = maint_referencing(
+            "hetzner",
+            "kopia-system",
+            ref_of(RepositoryKind::ClusterRepository, "hetzner", None),
+            Some(dummy_owner("ClusterRepository", "hetzner")),
+        );
+        let (f, m) = classify_maintenance(
+            vec![managed],
+            RepositoryKind::ClusterRepository,
+            "ClusterRepository",
+            "hetzner",
+            None,
+        );
+        assert!(!f);
+        assert!(m.is_some());
     }
 }

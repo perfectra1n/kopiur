@@ -92,6 +92,12 @@ pub struct Context {
     /// initial list (the reflector synced). Until then the maintenance check is
     /// skipped so a cold cache never produces a false "not configured" warning.
     pub maintenance_synced: Arc<AtomicBool>,
+    /// The operator's own namespace (`KOPIUR_NAMESPACE`), if known. Used as the
+    /// default placement namespace for a `ClusterRepository`'s managed
+    /// `Maintenance` CR when `spec.maintenance.namespace` is unset. `None` when
+    /// unset (e.g. running out-of-cluster), in which case the cluster-repo
+    /// placement is surfaced as unresolved rather than guessed.
+    pub operator_namespace: Option<String>,
 }
 
 impl Context {
@@ -108,6 +114,7 @@ impl Context {
         mover_env_passthrough: Vec<(String, String)>,
         maintenance_store: Store<Maintenance>,
         maintenance_synced: Arc<AtomicBool>,
+        operator_namespace: Option<String>,
     ) -> Self {
         Context {
             client,
@@ -119,6 +126,7 @@ impl Context {
             mover_env_passthrough,
             maintenance_store,
             maintenance_synced,
+            operator_namespace,
         }
     }
 }

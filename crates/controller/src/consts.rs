@@ -24,15 +24,22 @@ pub const CONFIG_LABEL: &str = "kopiur.home-operations.com/config";
 pub const API_VERSION: &str = "kopiur.home-operations.com/v1alpha1";
 
 /// Status condition `type` set on a `Repository`/`ClusterRepository` recording
-/// whether a `Maintenance` CR references it (ADR §3.7: maintenance is opt-in and
-/// an unmaintained repository never reclaims storage).
+/// whether a `Maintenance` covers it (ADR §3.7). Maintenance is default-managed:
+/// `True` once the operator manages one (or an external one exists); `False` only
+/// when explicitly disabled or a `ClusterRepository`'s placement is unresolved.
 pub const MAINTENANCE_CONFIGURED_CONDITION: &str = "MaintenanceConfigured";
-/// Event reason + condition reason when no `Maintenance` references the repo.
-pub const MAINTENANCE_NOT_CONFIGURED_REASON: &str = "MaintenanceNotConfigured";
-/// Condition reason when a `Maintenance` does reference the repo.
+/// Condition reason when a `Maintenance` (managed or external) covers the repo.
 pub const MAINTENANCE_CONFIGURED_REASON: &str = "MaintenanceConfigured";
 /// `action` for the maintenance-configuration check Event.
 pub const CHECK_MAINTENANCE_ACTION: &str = "CheckMaintenance";
+/// Condition reason when `spec.maintenance.enabled: false` and no external
+/// `Maintenance` covers the repo — a deliberate opt-out, surfaced informationally
+/// (no Warning event).
+pub const MAINTENANCE_DISABLED_REASON: &str = "MaintenanceDisabled";
+/// Event + condition reason when a `ClusterRepository`'s managed `Maintenance`
+/// cannot be placed: neither `spec.maintenance.namespace` nor the operator
+/// namespace (`KOPIUR_NAMESPACE`) is set. A real misconfiguration, so it warns.
+pub const MAINTENANCE_NAMESPACE_UNRESOLVED_REASON: &str = "MaintenanceNamespaceUnresolved";
 
 /// Status condition `type` recording the outcome of an object-store repository
 /// bootstrap Job (connect/create). `True` once the repository is reachable;

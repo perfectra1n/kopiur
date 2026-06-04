@@ -52,6 +52,12 @@ spec:
   identityDefaults:
     hostnameTemplate: "{{ .Namespace }}"
     usernameTemplate: "{{ .Namespace }}-{{ .ConfigName }}"
+  # Maintenance is default-managed here too. Because Maintenance is namespaced
+  # but a ClusterRepository is not, `namespace` selects where the managed
+  # Maintenance CR lands; it defaults to the operator's own namespace
+  # (KOPIUR_NAMESPACE) when omitted.
+  maintenance:
+    namespace: kopiur-system
 ---
 # In the tenant namespace — no need to know the secret name or platform details.
 apiVersion: kopiur.home-operations.com/v1alpha1

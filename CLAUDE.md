@@ -77,6 +77,7 @@ Do not add controller-runtime dependencies to `crates/api`.
 | API version         | `v1alpha1` only; no conversion webhooks yet (ADR §8)                                                                                                                                                                          |
 | Retention           | GFS-only (`BackupConfig.spec.retention`); failures bounded by flat `failedJobsHistoryLimit`; NO `successfulJobsHistoryLimit`                                                                                                  |
 | Deletion            | `Backup` CR owns its snapshot via finalizer; `deletionPolicy: Delete`(default produced) / `Retain`(forced for discovered) / `Orphan`                                                                                          |
+| Maintenance         | Default-managed: `Repository`/`ClusterRepository` `spec.maintenance` (default-on) is projected into an *owned* `Maintenance` CR; an externally-authored `Maintenance` is always honored (never duplicated), even with `enabled: false`. ClusterRepo placement: `spec.maintenance.namespace` else `KOPIUR_NAMESPACE`. ADR §3.7 |
 
 Pinned dep triad (Rust 1.95): `kube` 3.1, `k8s-openapi` 0.27 (feature `v1_33`,
 `schemars` on), `schemars` 1.2, `axum` 0.8, `croner` 2, `tera` 1.
