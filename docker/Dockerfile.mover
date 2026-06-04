@@ -4,9 +4,10 @@
 #
 # syntax=docker/dockerfile:1
 
-ARG KOPIA_VERSION=0.23.0
+ARG KOPIA_VERSION
+ARG RUST_VERSION
 
-FROM rust:1.95-bookworm AS builder
+FROM rust:${RUST_VERSION}-slim-trixie AS builder
 # Per-arch cache mount ids: a concurrent multi-arch buildx run (amd64 + arm64)
 # must NOT share one cargo cache, or the two arches race unpacking the registry
 # (`.cargo-ok: File exists`, os error 17). See docker/Dockerfile for the detail.
@@ -20,10 +21,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
     cp target/release/kopiur-mover /usr/local/bin/kopiur-mover
 
 # Pull the official kopia release binary at a pinned version.
-FROM debian:bookworm-slim AS kopia
+FROM debian:trixie-slim AS kopia
 ARG KOPIA_VERSION
 ARG TARGETARCH
 RUN set -eux; \
+    test -n "${KOPIA_VERSION}" || { echo "KOPIA_VERSION build arg is required" >&2; exit 1; }; \
     apt-get update && apt-get install -y --no-install-recommends curl ca-certificates; \
     case "${TARGETARCH}" in \
       amd64) KARCH=x64 ;; \
@@ -35,7 +37,7 @@ RUN set -eux; \
     tar -xzf /tmp/kopia.tar.gz -C /tmp; \
     install -m 0755 "/tmp/kopia-${KOPIA_VERSION}-linux-${KARCH}/kopia" /usr/local/bin/kopia
 
-FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 LABEL org.opencontainers.image.source="https://github.com/home-operations/kopiur"
 COPY --from=builder /usr/local/bin/kopiur-mover /usr/local/bin/kopiur-mover
 COPY --from=kopia /usr/local/bin/kopia /usr/local/bin/kopia

@@ -10,9 +10,10 @@
 #
 # syntax=docker/dockerfile:1
 
-ARG KOPIA_VERSION=0.23.0
+ARG KOPIA_VERSION
+ARG RUST_VERSION
 
-FROM rust:1.95-bookworm AS builder
+FROM rust:${RUST_VERSION}-slim-trixie AS builder
 ARG BIN=kopiur-controller
 # TARGETARCH is supplied by buildx per platform. The cache mount ids below are
 # keyed on it so a concurrent multi-arch build (linux/amd64 + linux/arm64 in the
@@ -33,10 +34,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
 
 # Pull the official kopia release binary at a pinned version (matches
 # docker/Dockerfile.mover so the controller and movers run identical kopia).
-FROM debian:bookworm-slim AS kopia
+FROM debian:trixie-slim AS kopia
 ARG KOPIA_VERSION
 ARG TARGETARCH
 RUN set -eux; \
+    test -n "${KOPIA_VERSION}" || { echo "KOPIA_VERSION build arg is required" >&2; exit 1; }; \
     apt-get update && apt-get install -y --no-install-recommends curl ca-certificates; \
     case "${TARGETARCH}" in \
       amd64) KARCH=x64 ;; \
@@ -49,7 +51,7 @@ RUN set -eux; \
     install -m 0755 "/tmp/kopia-${KOPIA_VERSION}-linux-${KARCH}/kopia" /usr/local/bin/kopia
 
 # Distroless runtime: glibc + CA certs, non-root (uid 65532), no shell.
-FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 LABEL org.opencontainers.image.source="https://github.com/home-operations/kopiur"
 COPY --from=builder /usr/local/bin/app /usr/local/bin/app
 COPY --from=kopia /usr/local/bin/kopia /usr/local/bin/kopia

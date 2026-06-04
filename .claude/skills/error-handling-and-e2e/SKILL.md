@@ -6,7 +6,7 @@ description: How Kopiur does strongly-typed, actionable error handling and end-t
 # Errors & e2e testing in Kopiur
 
 Two linked disciplines. Strong typed errors make invalid states unrepresentable
-and tell the operator *exactly* how to recover; e2e tests prove the whole
+and tell the operator _exactly_ how to recover; e2e tests prove the whole
 pipeline reaches the user-visible success condition. Both exist because this is
 **data-protection software** — a silently-swallowed error or an untested path can
 lose backups.
@@ -88,7 +88,7 @@ observability work — metrics that must actually be emitted and scrapable.
   and `#[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]` on each
   `#[tokio::test]`. So the suite compiles everywhere and is skipped without a
   cluster; it only runs under the harness.
-- **Run it:** `just test-e2e` (or `scripts/with-e2e.sh`). The script builds +
+- **Run it:** `mise run test-e2e` (or `scripts/with-e2e.sh`). The script builds +
   loads the controller/mover images into kind, installs the Helm chart, and
   provisions a hostPath-backed repo PVC + a pre-populated source PVC. The webhook
   is disabled in the harness (its admission logic is covered by unit/integration
