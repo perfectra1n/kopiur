@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.2](https://github.com/home-operations/kopiur/compare/0.1.1...0.1.2) (2026-06-04)
+
+
+### Features
+
+* **controller:** also add warning events if maintenace isn't configured ([5ba636b](https://github.com/home-operations/kopiur/commit/5ba636bcec78527bb267bc6aef1f293a6375ff5c))
+* **rbac:** gonna need increased rbac perms for kubernetes event api push ([2f9f0a5](https://github.com/home-operations/kopiur/commit/2f9f0a5a47e992c270adf7d86221e583278a0735))
+
+
+### Bug Fixes
+
+* **mise:** pin rust to 1.95.0; correct renovate mise packageNames ([#36](https://github.com/home-operations/kopiur/issues/36)) ([5956f32](https://github.com/home-operations/kopiur/commit/5956f3249fe34ffbf35ce3d7eb98d4c69117b263))
+* **schedule:** make sure to support `runOnCreate` ([0ebf046](https://github.com/home-operations/kopiur/commit/0ebf0463b3119599484b9e95dc4a2df03ac408d6))
+
+
+### Miscellaneous Chores
+
+* add 'cargo-llvm-cov' and 'cargo-deny' to package rules ([10db21b](https://github.com/home-operations/kopiur/commit/10db21b6c99be7c73b1014a29de1da1f37ffeedb))
+* **mise:** lock file maintenance tool ([#38](https://github.com/home-operations/kopiur/issues/38)) ([31d117e](https://github.com/home-operations/kopiur/commit/31d117efb23b22b8efbd6931f9ddf03c703d7828))
+
 ## [0.1.1](https://github.com/home-operations/kopiur/compare/0.1.0...0.1.1) (2026-06-04)
 
 
