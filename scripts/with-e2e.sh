@@ -14,21 +14,24 @@
 # Env knobs:
 #   KOPIUR_E2E_SKIP_BUILD=1   reuse already-built kopiur/*:e2e images
 #   KOPIUR_KEEP_KIND=1        leave the cluster running for inspection
-#   KOPIA_VERSION=0.23.0      kopia version baked into the images
+#   KOPIA_VERSION=x.y.z       override the mise-pinned kopia image version
+#   RUST_VERSION=x.y.z        override the mise-pinned Rust builder version
 set -euo pipefail
 
 CLUSTER="${KOPIUR_KIND_CLUSTER:-kopiur-e2e}"
 NS="kopiur-e2e"
 TAG="e2e"
-KOPIA_VERSION="${KOPIA_VERSION:-0.23.0}"
 NODE="${CLUSTER}-control-plane"
 KUBECONFIG_PATH="$(mktemp -t kopiur-e2e-kubeconfig.XXXXXX)"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-for bin in docker kind kubectl helm; do
+for bin in docker kind kubectl helm mise; do
   command -v "$bin" >/dev/null 2>&1 || { echo "error: '$bin' is required" >&2; exit 127; }
 done
+
+KOPIA_VERSION="${KOPIA_VERSION:-$(mise config get tools.kopia)}"
+RUST_VERSION="${RUST_VERSION:-$(mise config get tools.rust.version)}"
 
 cleanup() {
   local rc=$?
@@ -47,11 +50,14 @@ trap cleanup EXIT
 if [[ "${KOPIUR_E2E_SKIP_BUILD:-0}" != "1" ]]; then
   echo "==> building images (controller ships kopia for in-process ops)"
   docker build -f docker/Dockerfile --build-arg BIN=kopiur-controller \
-    --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" -t "kopiur/controller:${TAG}" .
+    --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" \
+    --build-arg "RUST_VERSION=${RUST_VERSION}" -t "kopiur/controller:${TAG}" .
   docker build -f docker/Dockerfile --build-arg BIN=kopiur-webhook \
-    --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" -t "kopiur/webhook:${TAG}" .
+    --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" \
+    --build-arg "RUST_VERSION=${RUST_VERSION}" -t "kopiur/webhook:${TAG}" .
   docker build -f docker/Dockerfile.mover \
-    --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" -t "kopiur/mover:${TAG}" .
+    --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" \
+    --build-arg "RUST_VERSION=${RUST_VERSION}" -t "kopiur/mover:${TAG}" .
 fi
 
 # --- 2. Cluster ----------------------------------------------------------------
