@@ -5,7 +5,7 @@
     {
       description: "Disable Auto Merge",
       matchManagers: ["mise"],
-      matchPackageNames: ["rust", "kopia"],
+      matchPackageNames: ["rust", "cargo-llvm-cov", "cargo-deny", "kopia"],
       automerge: false,
     },
   ],
