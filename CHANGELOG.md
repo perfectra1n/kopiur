@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.5](https://github.com/home-operations/kopiur/compare/0.1.4...0.1.5) (2026-06-05)
+
+
+### Features
+
+* **errors:** provide more useful errors ([469947a](https://github.com/home-operations/kopiur/commit/469947aa00b460b145b050b3ef2cd15e74f2cf93))
+* **tests:** also update tests so this writeable dir issue doesn't come back ([a6196f9](https://github.com/home-operations/kopiur/commit/a6196f912dce3cee82a9218f8dcdaa7ed4b7fa9c))
+
+
+### Bug Fixes
+
+* **controller:** make sure to mount writable paths for kopia ([f9fd3d5](https://github.com/home-operations/kopiur/commit/f9fd3d56d0543907ce07530fcf9ef2c4b1612ae1))
+
 ## [0.1.4](https://github.com/home-operations/kopiur/compare/0.1.3...0.1.4) (2026-06-05)
 
 
