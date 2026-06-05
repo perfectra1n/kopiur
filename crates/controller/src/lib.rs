@@ -86,6 +86,21 @@ pub async fn run() -> anyhow::Result<()> {
     // inherit the controller's log level and format.
     let mover_env_passthrough = collect_mover_env_passthrough();
 
+    // The writable base for the controller's in-process kopia cache/logs/config
+    // (an emptyDir the chart mounts at the default). Overridable only if that
+    // mount is relocated; without it kopia would try $HOME (/nonexistent) on the
+    // read-only rootfs and fail to create its cache.
+    let kopia_factory = match std::env::var(config::KOPIA_CACHE_DIR_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        Some(dir) => {
+            tracing::info!(kopia_cache_dir = %dir, "kopia cache dir overridden");
+            KopiaClientFactory::new().with_cache_dir(dir)
+        }
+        None => KopiaClientFactory::new(),
+    };
+
     // Shared Maintenance informer: a single reflector-backed cache the
     // Repository/ClusterRepository reconcilers read to answer "is a Maintenance
     // configured for me?" without an `Api::list` per reconcile. We drive the
@@ -128,7 +143,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     let ctx = Arc::new(Context::new(
         client.clone(),
-        KopiaClientFactory::new(),
+        kopia_factory,
         metrics.clone(),
         recorder,
         mover_image,

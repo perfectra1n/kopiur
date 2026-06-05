@@ -440,6 +440,12 @@ impl KopiaClient {
         &self.binary
     }
 
+    /// The environment applied to every invocation (useful for tests asserting
+    /// that the cache/log/config dirs were injected).
+    pub fn common_env(&self) -> &BTreeMap<String, String> {
+        &self.common_env
+    }
+
     /// Run kopia with the given subcommand args, returning raw output. Applies
     /// `common_env` and inserts `common_args` immediately after the
     /// subcommand. stdout and stderr are fully captured. Honors the default

@@ -771,14 +771,49 @@ pub async fn ensure_maintenance<K>(
     }
 }
 
+/// Kubernetes caps an Event's `note` at 1024 bytes (the apiserver validates with
+/// Go's `len`, i.e. bytes). A longer note is rejected with a 422, so the
+/// *actionable* warning never reaches `kubectl describe`. We clamp every
+/// composed note to this.
+const EVENT_NOTE_MAX_BYTES: usize = 1024;
+
+/// Budget for the kopia error message embedded *inside* a note. Capping the
+/// message before composing keeps the surrounding remediation text — the part a
+/// user actually acts on — from being eaten by a huge kopia stderr tail when the
+/// whole note is finally clamped to [`EVENT_NOTE_MAX_BYTES`].
+const EVENT_MESSAGE_BUDGET_BYTES: usize = 512;
+
+/// Appended to a string that was truncated, signalling the cut to readers.
+const TRUNCATION_MARKER: &str = "…";
+
+/// Truncate `s` to at most `max` bytes on a UTF-8 char boundary, appending
+/// [`TRUNCATION_MARKER`] when anything was dropped. The result is always
+/// `<= max` bytes (assuming `max >= TRUNCATION_MARKER.len()`).
+fn truncate_for_note(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max.saturating_sub(TRUNCATION_MARKER.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{TRUNCATION_MARKER}", &s[..end])
+}
+
 /// Map a kopia failure class to the `(action, note)` of the Warning Event we
 /// surface on the repository CR. The Event `reason` is the class label itself
 /// (`class.as_str()`, set by the caller) so it matches the `Bootstrapped=False`
 /// condition reason and is machine-readable; only the remediation hint and the
 /// human note vary here. Exhaustive on `KopiaErrorClass` so a new class forces an
 /// explicit decision (ADR §5.5).
+///
+/// The kopia `message` (which carries the stderr tail, up to ~4 KB) is truncated
+/// to [`EVENT_MESSAGE_BUDGET_BYTES`] before composing and the whole note is
+/// clamped to [`EVENT_NOTE_MAX_BYTES`], so the Event always publishes and the
+/// remediation hint always survives.
 fn backend_failure_event(class: KopiaErrorClass, message: &str) -> (&'static str, String) {
-    match class {
+    let message = truncate_for_note(message, EVENT_MESSAGE_BUDGET_BYTES);
+    let (action, note) = match class {
         KopiaErrorClass::AccessDenied => (
             CHECK_CREDENTIALS_ACTION,
             format!(
@@ -811,7 +846,8 @@ fn backend_failure_event(class: KopiaErrorClass, message: &str) -> (&'static str
             CHECK_BACKEND_ACTION,
             format!("repository backend error ({}): {message}", class.as_str()),
         ),
-    }
+    };
+    (action, truncate_for_note(&note, EVENT_NOTE_MAX_BYTES))
 }
 
 /// Surface a repository connect/create failure as a Warning Event on the CR, so
@@ -887,6 +923,82 @@ mod tests {
         assert_eq!(action, CHECK_BACKEND_ACTION);
         assert!(note.contains("RepositoryUnavailable"));
         assert!(note.contains("connection refused"));
+    }
+
+    // --- note truncation: a huge kopia stderr tail must not blow past the
+    // Kubernetes 1024-byte Event note limit (regression: the apiserver rejected
+    // the Event with a 422 "can have at most 1024 characters", so the actionable
+    // PermissionDenied warning never reached `kubectl describe`). ---
+
+    #[test]
+    fn backend_failure_note_is_clamped_to_the_event_limit() {
+        // A kopia error several KB long (the /nonexistent cache spam + real error)
+        // across every class — none may exceed the Event note limit, and the
+        // oversized message must visibly carry the truncation marker.
+        let huge = "x".repeat(5000);
+        for class in [
+            KopiaErrorClass::AccessDenied,
+            KopiaErrorClass::PermissionDenied,
+            KopiaErrorClass::AuthFailure,
+            KopiaErrorClass::RepositoryUnavailable,
+            KopiaErrorClass::NotFound,
+            KopiaErrorClass::Locked,
+            KopiaErrorClass::SourceError,
+            KopiaErrorClass::Unknown,
+        ] {
+            let (_, note) = backend_failure_event(class, &huge);
+            assert!(
+                note.len() <= EVENT_NOTE_MAX_BYTES,
+                "{class:?} note is {} bytes, exceeds the {EVENT_NOTE_MAX_BYTES}-byte Event limit",
+                note.len()
+            );
+            assert!(
+                note.contains(TRUNCATION_MARKER),
+                "{class:?} note should carry the truncation marker for the cut message"
+            );
+        }
+    }
+
+    #[test]
+    fn backend_failure_truncation_keeps_the_remediation_hint() {
+        // Even with an oversized message, the static remediation text (the part a
+        // user acts on) must survive — the message budget protects it, not just
+        // the final clamp.
+        let huge = "x".repeat(5000);
+        let (action, note) = backend_failure_event(KopiaErrorClass::PermissionDenied, &huge);
+        assert_eq!(action, CHECK_PERMISSIONS_ACTION);
+        assert!(
+            note.contains("not writable"),
+            "remediation hint lost to truncation: {note}"
+        );
+        assert!(
+            note.contains("65534"),
+            "remediation hint lost to truncation: {note}"
+        );
+    }
+
+    #[test]
+    fn truncate_for_note_is_a_noop_under_budget() {
+        let s = "short message";
+        assert_eq!(truncate_for_note(s, EVENT_NOTE_MAX_BYTES), s);
+    }
+
+    #[test]
+    fn truncate_for_note_clamps_and_marks_when_over_budget() {
+        let s = "x".repeat(5000);
+        let out = truncate_for_note(&s, EVENT_NOTE_MAX_BYTES);
+        assert_eq!(out.len(), EVENT_NOTE_MAX_BYTES);
+        assert!(out.ends_with(TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn truncate_for_note_respects_utf8_boundaries() {
+        // A multibyte char straddling the cut must not panic or produce invalid
+        // UTF-8 — the result is always valid and within budget.
+        let s = "é".repeat(100); // each 'é' is 2 bytes
+        let out = truncate_for_note(&s, 51);
+        assert!(out.len() <= 51);
+        assert!(out.ends_with(TRUNCATION_MARKER));
     }
 
     fn ref_of(kind: RepositoryKind, name: &str, namespace: Option<&str>) -> RepositoryRef {

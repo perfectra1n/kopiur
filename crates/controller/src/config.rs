@@ -19,6 +19,12 @@ pub const MOVER_SERVICE_ACCOUNT_ENV: &str = "KOPIUR_MOVER_SERVICE_ACCOUNT";
 /// and surfaced as an actionable condition rather than guessed.
 pub const OPERATOR_NAMESPACE_ENV: &str = "KOPIUR_NAMESPACE";
 
+/// Override for the writable base directory the controller's in-process kopia
+/// uses for its cache/logs/config. Defaults to
+/// [`kopiur_kopia::env::DEFAULT_CACHE_DIR`] (`/var/cache/kopia`), where the chart
+/// mounts an `emptyDir`; set this only when relocating that mount.
+pub const KOPIA_CACHE_DIR_ENV: &str = "KOPIUR_KOPIA_CACHE_DIR";
+
 /// Address the controller's HTTP server (`/metrics`, `/healthz`, `/readyz`)
 /// binds to. Matches the chart's `controller.probePort` (8080).
 pub const HTTP_ADDR: &str = "0.0.0.0:8080";

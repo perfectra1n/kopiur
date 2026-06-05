@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, ConfigMapVolumeSource, Container, EnvFromSource, PersistentVolumeClaimVolumeSource,
-    PodSpec, PodTemplateSpec, ResourceRequirements, SeccompProfile, SecretEnvSource,
-    SecurityContext, Volume, VolumeMount,
+    ConfigMap, ConfigMapVolumeSource, Container, EmptyDirVolumeSource, EnvFromSource,
+    PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec, ResourceRequirements,
+    SeccompProfile, SecretEnvSource, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use kopiur_mover::workspec::MoverWorkSpec;
@@ -183,6 +183,21 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
         ..Default::default()
     }];
 
+    // Writable cache/logs/config for kopia. kopia defaults these under $HOME,
+    // which is /nonexistent on distroless:nonroot; without this emptyDir (and the
+    // KOPIA_* env below) every mover kopia call fails to create its cache. Mount
+    // path is the shared default kopiur_kopia::env::DEFAULT_CACHE_DIR.
+    volumes.push(Volume {
+        name: "kopia-cache".to_string(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Default::default()
+    });
+    volume_mounts.push(VolumeMount {
+        name: "kopia-cache".to_string(),
+        mount_path: kopiur_kopia::env::DEFAULT_CACHE_DIR.to_string(),
+        ..Default::default()
+    });
+
     if let Some(src) = &inputs.source_pvc {
         volumes.push(Volume {
             name: "source".to_string(),
@@ -241,11 +256,31 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
     // Work-spec path env, plus any passthrough (OTLP + RUST_LOG/KOPIUR_LOG_FORMAT)
     // so the mover exports to the same collector and logs at the same level/format
     // as the controller.
-    let mut env = vec![k8s_openapi::api::core::v1::EnvVar {
-        name: WORK_SPEC_ENV.to_string(),
-        value: Some(format!("{WORK_SPEC_MOUNT}/{WORK_SPEC_FILE}")),
-        value_from: None,
-    }];
+    let base = kopiur_kopia::env::DEFAULT_CACHE_DIR;
+    let mut env = vec![
+        k8s_openapi::api::core::v1::EnvVar {
+            name: WORK_SPEC_ENV.to_string(),
+            value: Some(format!("{WORK_SPEC_MOUNT}/{WORK_SPEC_FILE}")),
+            value_from: None,
+        },
+        // Redirect kopia's cache/logs/config onto the writable emptyDir mounted
+        // above (one mover pod = one op, so a fixed config path is safe).
+        k8s_openapi::api::core::v1::EnvVar {
+            name: kopiur_kopia::env::CACHE_DIRECTORY_ENV.to_string(),
+            value: Some(format!("{base}/cache")),
+            value_from: None,
+        },
+        k8s_openapi::api::core::v1::EnvVar {
+            name: kopiur_kopia::env::LOG_DIR_ENV.to_string(),
+            value: Some(format!("{base}/logs")),
+            value_from: None,
+        },
+        k8s_openapi::api::core::v1::EnvVar {
+            name: kopiur_kopia::env::CONFIG_PATH_ENV.to_string(),
+            value: Some(format!("{base}/repository.config")),
+            value_from: None,
+        },
+    ];
     if let Some(cm) = inputs.result_configmap {
         env.push(k8s_openapi::api::core::v1::EnvVar {
             name: RESULT_CONFIGMAP_ENV.to_string(),
@@ -535,14 +570,66 @@ mod tests {
     }
 
     #[test]
-    fn job_without_pvcs_or_secret_has_only_work_spec_volume() {
+    fn job_without_pvcs_or_secret_has_only_work_spec_and_cache_volumes() {
         let ws = sample_work_spec();
         let job = build_job(&inputs(&ws, JobLimits::default()));
         let pod = job.spec.unwrap().template.spec.unwrap();
         let vols = pod.volumes.as_ref().unwrap();
-        assert_eq!(vols.len(), 1);
-        assert_eq!(vols[0].name, "work-spec");
+        // work-spec ConfigMap + the always-present writable kopia cache emptyDir.
+        let names: Vec<&str> = vols.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["work-spec", "kopia-cache"]);
         assert!(pod.containers[0].env_from.is_none());
+    }
+
+    // --- regression: the mover used to inherit no writable kopia cache, so on a
+    // distroless:nonroot pod ($HOME=/nonexistent) every kopia call failed with
+    // `mkdir /nonexistent: read-only file system`. The Job must mount a writable
+    // emptyDir and point kopia's cache/log/config env at it. ---
+    #[test]
+    fn job_mounts_writable_kopia_cache_volume_and_env() {
+        let ws = sample_work_spec();
+        let job = build_job(&inputs(&ws, JobLimits::default()));
+        let pod = job.spec.unwrap().template.spec.unwrap();
+
+        // emptyDir volume present.
+        let vol = pod
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == "kopia-cache")
+            .expect("kopia-cache volume missing");
+        assert!(vol.empty_dir.is_some(), "kopia-cache must be an emptyDir");
+
+        // Mounted at the shared default base.
+        let container = &pod.containers[0];
+        let mount = container
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.name == "kopia-cache")
+            .expect("kopia-cache mount missing");
+        assert_eq!(mount.mount_path, kopiur_kopia::env::DEFAULT_CACHE_DIR);
+
+        // kopia env redirected under that base.
+        let env = container.env.as_ref().unwrap();
+        let get = |name: &str| {
+            env.iter()
+                .find(|e| e.name == name)
+                .and_then(|e| e.value.clone())
+                .unwrap_or_else(|| panic!("env {name} missing"))
+        };
+        let base = kopiur_kopia::env::DEFAULT_CACHE_DIR;
+        assert_eq!(
+            get(kopiur_kopia::env::CACHE_DIRECTORY_ENV),
+            format!("{base}/cache")
+        );
+        assert_eq!(get(kopiur_kopia::env::LOG_DIR_ENV), format!("{base}/logs"));
+        assert_eq!(
+            get(kopiur_kopia::env::CONFIG_PATH_ENV),
+            format!("{base}/repository.config")
+        );
     }
 
     #[test]

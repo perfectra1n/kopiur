@@ -2,6 +2,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod client;
+pub mod env;
 pub mod error;
 pub mod model;
 

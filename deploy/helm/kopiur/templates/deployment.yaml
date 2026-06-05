@@ -89,14 +89,24 @@ spec:
             {{- toYaml .Values.controller.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          {{- with .Values.controller.extraVolumeMounts }}
+          # The controller runs short, in-process kopia ops (repository
+          # connect/create). kopia defaults its cache/logs/config under $HOME,
+          # which is /nonexistent on distroless:nonroot with a read-only rootfs;
+          # this writable emptyDir (matched by KOPIA_* env the binary sets) gives
+          # it somewhere to write. Mount path must match
+          # kopiur_kopia::env::DEFAULT_CACHE_DIR.
           volumeMounts:
+            - name: kopia-cache
+              mountPath: /var/cache/kopia
+            {{- with .Values.controller.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
-          {{- end }}
-      {{- with .Values.controller.extraVolumes }}
+            {{- end }}
       volumes:
+        - name: kopia-cache
+          emptyDir: {}
+        {{- with .Values.controller.extraVolumes }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       {{- with .Values.controller.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
