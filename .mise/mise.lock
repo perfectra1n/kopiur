@@ -36,6 +36,26 @@ url = "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.8/carg
 version = "0.4.52"
 backend = "aqua:rust-lang/mdBook"
 
+[tools."aqua:rust-lang/mdBook"."platforms.linux-x64"]
+checksum = "sha256:c96bdabf3754d9e016fb803c1565a41050434479b2dc1e02a87c8d0da7524c6c"
+url = "https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-unknown-linux-musl.tar.gz"
+
+[tools."aqua:rust-lang/mdBook"."platforms.linux-x64-musl"]
+checksum = "sha256:c96bdabf3754d9e016fb803c1565a41050434479b2dc1e02a87c8d0da7524c6c"
+url = "https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-unknown-linux-musl.tar.gz"
+
+[tools."aqua:rust-lang/mdBook"."platforms.macos-arm64"]
+checksum = "sha256:4768a2a3cd6bff139feffd855dd8fb82ee356ecf822ae12ed9abcbde0633205b"
+url = "https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-apple-darwin.tar.gz"
+
+[tools."aqua:rust-lang/mdBook"."platforms.macos-x64"]
+checksum = "sha256:4768a2a3cd6bff139feffd855dd8fb82ee356ecf822ae12ed9abcbde0633205b"
+url = "https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-apple-darwin.tar.gz"
+
+[tools."aqua:rust-lang/mdBook"."platforms.windows-x64"]
+checksum = "sha256:33510a5745c593e06f4b8e21f531d9204c6f4444846b4bd57994e82a7bdfec98"
+url = "https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-pc-windows-msvc.zip"
+
 [[tools."aqua:taiki-e/cargo-llvm-cov"]]
 version = "0.8.7"
 backend = "aqua:taiki-e/cargo-llvm-cov"
@@ -76,9 +96,74 @@ backend = "cargo:mdbook-linkcheck"
 version = "0.16.2"
 backend = "github:badboy/mdbook-mermaid"
 
+[tools."github:badboy/mdbook-mermaid"."platforms.linux-arm64"]
+checksum = "sha256:b0b01c471c93ff0e413ba9fe205884498811c74694608436c1cf9c36d2fc7e3b"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465688"
+
+[tools."github:badboy/mdbook-mermaid"."platforms.linux-arm64-musl"]
+checksum = "sha256:b0b01c471c93ff0e413ba9fe205884498811c74694608436c1cf9c36d2fc7e3b"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465688"
+
+[tools."github:badboy/mdbook-mermaid"."platforms.linux-x64"]
+checksum = "sha256:53212493f30f15248236b26964355fd84bd5ac66359242e42f5aa2fa8d2e4997"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465687"
+
+[tools."github:badboy/mdbook-mermaid"."platforms.linux-x64-musl"]
+checksum = "sha256:8221c0a60aaa19b342d04fffe395be4f91ec1492ab659a2ea849328a2c1dff37"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465689"
+
+[tools."github:badboy/mdbook-mermaid"."platforms.macos-arm64"]
+checksum = "sha256:1fc7813ea56bf3e889c3dcd13b0149ff8c7aa8d1e18530b13a0dc882f6383cc2"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465686"
+
+[tools."github:badboy/mdbook-mermaid"."platforms.macos-x64"]
+checksum = "sha256:f3b7bc35819b457cf64d63ae4c21cfff90726d12306db4be4d037ddc9a2a073b"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-x86_64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465685"
+
+[tools."github:badboy/mdbook-mermaid"."platforms.windows-x64"]
+checksum = "sha256:acd0f6481512d54cc9df9dfbb2a3a5630b3b036173670131c4a6a1b7b08b0d48"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465690"
+
 [[tools."github:tommilligan/mdbook-admonish"]]
 version = "1.20.0"
 backend = "github:tommilligan/mdbook-admonish"
+
+[tools."github:tommilligan/mdbook-admonish"."platforms.linux-arm64"]
+checksum = "sha256:748db4005b62b6212090806835d4447103f43bf70fec33da607b1e9a64baec04"
+url = "https://github.com/tommilligan/mdbook-admonish/releases/download/v1.20.0/mdbook-admonish-v1.20.0-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/tommilligan/mdbook-admonish/releases/assets/261571840"
+
+[tools."github:tommilligan/mdbook-admonish"."platforms.linux-arm64-musl"]
+checksum = "sha256:748db4005b62b6212090806835d4447103f43bf70fec33da607b1e9a64baec04"
+url = "https://github.com/tommilligan/mdbook-admonish/releases/download/v1.20.0/mdbook-admonish-v1.20.0-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/tommilligan/mdbook-admonish/releases/assets/261571840"
+
+[tools."github:tommilligan/mdbook-admonish"."platforms.linux-x64"]
+checksum = "sha256:64ce6dad3d20d3723c149e333d9cf85a9f7d057f18c2707d264698afdfc6679f"
+url = "https://github.com/tommilligan/mdbook-admonish/releases/download/v1.20.0/mdbook-admonish-v1.20.0-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/tommilligan/mdbook-admonish/releases/assets/261571837"
+
+[tools."github:tommilligan/mdbook-admonish"."platforms.linux-x64-musl"]
+checksum = "sha256:abe3eb5ec70a427cd922684e27d709a52dc53b7abe588a036a6af903f376695e"
+url = "https://github.com/tommilligan/mdbook-admonish/releases/download/v1.20.0/mdbook-admonish-v1.20.0-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/tommilligan/mdbook-admonish/releases/assets/261571836"
+
+[tools."github:tommilligan/mdbook-admonish"."platforms.macos-x64"]
+checksum = "sha256:f78237e9335554377fb4a83a7cb4ac382743729e1f3ca67d2e0e23314bcacab9"
+url = "https://github.com/tommilligan/mdbook-admonish/releases/download/v1.20.0/mdbook-admonish-v1.20.0-x86_64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/tommilligan/mdbook-admonish/releases/assets/261571838"
+
+[tools."github:tommilligan/mdbook-admonish"."platforms.windows-x64"]
+checksum = "sha256:4eebd35bddb2bfb6a4aa99121b3f15103fdc2ec2429403482046ca605a3d1285"
+url = "https://github.com/tommilligan/mdbook-admonish/releases/download/v1.20.0/mdbook-admonish-v1.20.0-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/tommilligan/mdbook-admonish/releases/assets/261571839"
 
 [[tools.helm]]
 version = "4.2.0"
