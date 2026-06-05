@@ -57,8 +57,8 @@ docs/adr/        Architecture Decision Records (0003 is canonical)
 
 ## Documentation
 
-📖 **Docs site: <https://home-operations.github.io/kopiur/>** — user guide, ADRs,
-and the generated [Rust API reference](https://home-operations.github.io/kopiur/rustdoc/).
+📖 **Docs site: <https://kopiur.home-operations.com/>** — user guide, ADRs,
+and the generated [Rust API reference](https://kopiur.home-operations.com/rustdoc/).
 
 - [Install guide](docs/install.md)
 - [Helm chart values & modes](deploy/helm/kopiur/README.md)

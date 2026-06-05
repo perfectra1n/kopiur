@@ -6,8 +6,10 @@
 # without disturbing the rest of the repo.
 #
 # `mise run docs` (scripts/build-docs.sh) builds this book *and* nests the
-# workspace rustdoc under /rustdoc/. The site is published to GitHub project
-# pages at https://home-operations.github.io/kopiur/ — hence site-url = "/kopiur/".
+# workspace rustdoc under /rustdoc/. The site is published to the custom domain
+# https://kopiur.home-operations.com/ (served at the root, so site-url = "/").
+# The domain is pinned by the CNAME file scripts/build-docs.sh writes into the
+# artifact; the repo's Settings -> Pages custom-domain field must match.
 #
 # Preprocessor assets under assets/ are generated and committed (see
 # `mdbook-admonish install` / `mdbook-mermaid install`); CI does not regenerate
@@ -24,7 +26,7 @@ language = "en"
 build-dir = "book"
 
 [output.html]
-site-url = "/kopiur/"
+site-url = "/" # served at the root of the kopiur.home-operations.com custom domain
 git-repository-url = "https://github.com/home-operations/kopiur"
 edit-url-template = "https://github.com/home-operations/kopiur/edit/main/{path}"
 default-theme = "navy"

@@ -22,6 +22,9 @@ cd "$REPO_ROOT"
 OUT="book/html"
 # The crate the rustdoc redirect lands on (kopiur-api is the public entry point).
 LANDING_CRATE="kopiur_api"
+# Custom domain the site is served from. Written into the artifact as a CNAME so
+# the domain survives every deploy (must match Settings -> Pages custom domain).
+SITE_DOMAIN="kopiur.home-operations.com"
 
 echo "==> cargo doc (workspace, no deps)"
 cargo doc --no-deps --workspace --locked
@@ -54,4 +57,7 @@ EOF
 # _-prefixed paths; .nojekyll keeps it explicit and future-proof.
 touch "${OUT}/.nojekyll"
 
-echo "==> docs site assembled at ${OUT}/ (book + rustdoc)"
+# Pin the custom domain in the published artifact.
+echo "${SITE_DOMAIN}" > "${OUT}/CNAME"
+
+echo "==> docs site assembled at ${OUT}/ (book + rustdoc) for https://${SITE_DOMAIN}/"
