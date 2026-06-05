@@ -88,6 +88,22 @@ pub enum TelemetryError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    /// The global tracing subscriber could not be installed. **Fatal** — the
+    /// process would run with no logs at all, which for a backup operator is
+    /// operationally blind, so [`crate::init_tracing`] returns this and the
+    /// caller exits. In practice this only happens if a subscriber was already
+    /// installed in the same process at startup (a bug worth filing).
+    #[error(
+        "failed to install the global tracing subscriber: {source}. \
+         The process would run with no logs; refusing to continue. This usually means a \
+         tracing subscriber was already installed in this process — please file a bug."
+    )]
+    SubscriberInit {
+        /// The underlying `try_init` error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl TelemetryError {

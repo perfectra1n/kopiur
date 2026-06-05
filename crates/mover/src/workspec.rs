@@ -224,6 +224,21 @@ pub enum RepositoryConnect {
 }
 
 impl RepositoryConnect {
+    /// Stable backend discriminant for logging. Exhaustive: a new backend
+    /// variant fails to compile until handled.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            RepositoryConnect::Filesystem { .. } => "Filesystem",
+            RepositoryConnect::S3 { .. } => "S3",
+            RepositoryConnect::Azure { .. } => "Azure",
+            RepositoryConnect::Gcs { .. } => "Gcs",
+            RepositoryConnect::B2 { .. } => "B2",
+            RepositoryConnect::Sftp { .. } => "Sftp",
+            RepositoryConnect::WebDav { .. } => "WebDav",
+            RepositoryConnect::Rclone { .. } => "Rclone",
+        }
+    }
+
     /// Convert to the kopia client's connect spec. Exhaustive: a new backend
     /// variant fails to compile until handled.
     pub fn to_connect_spec(&self) -> kopiur_kopia::ConnectSpec {

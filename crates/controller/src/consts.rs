@@ -45,3 +45,18 @@ pub const MAINTENANCE_NAMESPACE_UNRESOLVED_REASON: &str = "MaintenanceNamespaceU
 /// bootstrap Job (connect/create). `True` once the repository is reachable;
 /// `False` carries the kopia error class + message so a failure is actionable.
 pub const REPOSITORY_BOOTSTRAPPED_CONDITION: &str = "Bootstrapped";
+
+// A repository connect/create (bootstrap) failure is surfaced as a Warning Event
+// whose `reason` is the kopia error class itself (`KopiaErrorClass::as_str`, e.g.
+// `AccessDenied`/`PermissionDenied`) so it matches the `Bootstrapped=False`
+// condition reason and is machine-readable. Only the Event `action` (the
+// remediation hint) is a controller-side constant:
+
+/// `action` for credential-class failures (`AccessDenied`/`AuthFailure`): check
+/// the repository credentials Secret and bucket/path grants.
+pub const CHECK_CREDENTIALS_ACTION: &str = "CheckCredentials";
+/// `action` for a `PermissionDenied` failure: make the repository path/PVC
+/// writable by the operator's UID.
+pub const CHECK_PERMISSIONS_ACTION: &str = "CheckPermissions";
+/// `action` for any other backend failure: check the backend configuration.
+pub const CHECK_BACKEND_ACTION: &str = "CheckBackend";

@@ -26,7 +26,7 @@ use kube::{Api, Resource, ResourceExt};
 use kopiur_api::backend::Backend;
 use kopiur_api::common::RepositoryKind;
 use kopiur_api::{Backup, Repository, RepositoryPhase, validate};
-use kopiur_kopia::{ConnectSpec, SnapshotListEntry};
+use kopiur_kopia::{ConnectSpec, KopiaErrorClass, SnapshotListEntry};
 use kopiur_mover::bootstrap::{BootstrapResult, RESULT_CONFIGMAP_KEY};
 use kopiur_mover::workspec::{
     BootstrapRepositoryOp, MoverOptions, MoverWorkSpec, Operation, ResolvedIdentity, TargetRef,
@@ -170,16 +170,36 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
                     .as_ref()
                     .map(|c| c.enabled)
                     .unwrap_or(false);
-                if kopiur_mover::bootstrap::should_attempt_create(create_enabled, e.class()) {
-                    client.repository_create(&spec).await?;
-                    client.repository_connect(&spec).await?;
-                } else {
+                // Try create-then-connect when enabled and the failure isn't
+                // "repo already there" (auth/locked); otherwise the connect error
+                // is terminal. A terminal failure (connect OR a failed create)
+                // surfaces Failed + an actionable Event (e.g. filesystem "Access
+                // Denied") rather than an invisible reconcile error with no status.
+                let outcome =
+                    if kopiur_mover::bootstrap::should_attempt_create(create_enabled, e.class()) {
+                        match client.repository_create(&spec).await {
+                            Ok(_) => client.repository_connect(&spec).await,
+                            Err(ce) => Err(ce),
+                        }
+                    } else {
+                        Err(e)
+                    };
+                if let Err(e) = outcome {
+                    let class = e.class();
+                    let message = e.to_string();
+                    let conditions = bootstrap_condition(repo, false, class.as_str(), &message);
                     io::patch_status(
                         &api,
                         &name,
-                        serde_json::json!({ "phase": "Failed", "backend": "Filesystem" }),
+                        serde_json::json!({
+                            "phase": "Failed",
+                            "backend": "Filesystem",
+                            "conditions": conditions,
+                        }),
                     )
                     .await?;
+                    io::publish_backend_failure(ctx, &repo.object_ref(&()), &name, class, &message)
+                        .await;
                     return Err(Error::Kopia(e));
                 }
             }
@@ -442,6 +462,14 @@ async fn finalize_bootstrap(
             }),
         )
         .await?;
+        io::publish_backend_failure(
+            ctx,
+            &repo.object_ref(&()),
+            name,
+            KopiaErrorClass::from_label(class),
+            message,
+        )
+        .await;
         tracing::warn!(repo = %name, class, "repository bootstrap failed");
         return Ok(Action::requeue(Duration::from_secs(120)));
     }

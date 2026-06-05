@@ -263,16 +263,61 @@ impl Drop for TelemetryGuard {
     }
 }
 
+/// A type-erased `tracing` layer over the root [`tracing_subscriber::Registry`].
+/// We collect every active layer (the always-on fmt layer first, then any OTLP
+/// layers) into a single `Vec` of these and attach it in one `.with(..)` call.
+type BoxedLayer = Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>;
+
+/// Build the ordered list of subscriber layers: the fmt (console) layer **first**
+/// so the `Vec` is *never empty*, then any caller-supplied OTLP layers.
+///
+/// The "fmt first / never empty" invariant is load-bearing, not cosmetic: an
+/// **empty** `Vec<L>` is a valid `Layer` whose `register_callsite` returns
+/// `Interest::never()`, which `Layered::pick_interest` short-circuits to disable
+/// **every** event for the whole subscriber — silently, while `try_init()` still
+/// returns `Ok`. That is the exact bug this function exists to make impossible
+/// (regressions are caught by `no_otlp_layer_stack_still_emits`). Keeping fmt at
+/// index 0 guarantees ≥1 element on every path, including the common no-OTLP one.
+fn build_layers<W>(
+    log_format: LogFormat,
+    make_writer: W,
+    ansi: bool,
+    mut otel_layers: Vec<BoxedLayer>,
+) -> Vec<BoxedLayer>
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+{
+    use tracing_subscriber::Layer as _;
+    let fmt_layer: BoxedLayer = match log_format {
+        LogFormat::Text => tracing_subscriber::fmt::layer()
+            .with_ansi(ansi)
+            .with_writer(make_writer)
+            .boxed(),
+        LogFormat::Json => tracing_subscriber::fmt::layer()
+            .json()
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_writer(make_writer)
+            .boxed(),
+    };
+    let mut layers = Vec::with_capacity(1 + otel_layers.len());
+    layers.push(fmt_layer);
+    layers.append(&mut otel_layers);
+    layers
+}
+
 /// Install the tracing subscriber for `service_name`: an fmt layer (preserving
 /// the previous console behavior) plus OTLP trace + log layers when an endpoint
 /// is configured. Returns a guard that flushes the OTLP providers on drop.
 ///
-/// Idempotent-ish: uses `try_init`, so a second call (e.g. controller + webhook
-/// in one test binary) is a no-op for the subscriber.
+/// Installs the global subscriber exactly once per process (guarded by an
+/// `AtomicBool`), so a second call (e.g. controller + webhook in one test
+/// binary) is a no-op. A genuine **first**-install failure is fatal
+/// ([`TelemetryError::SubscriberInit`]) — a backup operator must not run blind.
 pub fn init_tracing(service_name: &str) -> Result<TelemetryGuard, TelemetryError> {
     use std::io::IsTerminal;
+    use tracing_subscriber::EnvFilter;
     use tracing_subscriber::prelude::*;
-    use tracing_subscriber::{EnvFilter, fmt};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -293,16 +338,7 @@ pub fn init_tracing(service_name: &str) -> Result<TelemetryGuard, TelemetryError
     }
     // Suppress ANSI escapes when stdout is not a TTY (i.e. inside a container),
     // so `kubectl logs` shows clean text instead of color control codes.
-    let fmt_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = match log_format {
-        LogFormat::Text => fmt::layer()
-            .with_ansi(std::io::stdout().is_terminal())
-            .boxed(),
-        LogFormat::Json => fmt::layer()
-            .json()
-            .with_current_span(true)
-            .with_span_list(false)
-            .boxed(),
-    };
+    let ansi = std::io::stdout().is_terminal();
 
     let otlp = match OtlpConfig::from_env() {
         Ok(o) => o,
@@ -317,7 +353,7 @@ pub fn init_tracing(service_name: &str) -> Result<TelemetryGuard, TelemetryError
 
     let mut tracer_provider = None;
     let mut logger_provider = None;
-    let mut otel_layers: Vec<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = Vec::new();
+    let mut otel_layers: Vec<BoxedLayer> = Vec::new();
 
     if let Some(cfg) = otlp.as_ref() {
         match build_trace_provider(service_name, cfg) {
@@ -342,11 +378,35 @@ pub fn init_tracing(service_name: &str) -> Result<TelemetryGuard, TelemetryError
         }
     }
 
-    let _ = tracing_subscriber::registry()
+    // Build the layer list with the fmt layer ALWAYS first (never an empty Vec —
+    // see `build_layers`). Production logs to stdout.
+    let layers = build_layers(log_format, std::io::stdout, ansi, otel_layers);
+
+    // Install the global subscriber exactly once per process. The `AtomicBool`
+    // swap means a second `init_tracing` (controller + webhook in one test
+    // binary) is a clean no-op instead of a spurious `SetGlobalDefaultError`.
+    if INITIALIZED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(TelemetryGuard {
+            tracer_provider,
+            logger_provider,
+        });
+    }
+
+    if let Err(e) = tracing_subscriber::registry()
+        .with(layers)
         .with(filter)
-        .with(fmt_layer)
-        .with(otel_layers)
-        .try_init();
+        .try_init()
+    {
+        // No subscriber is installed, so `tracing::*` would go nowhere — write
+        // straight to stderr and fail fast: a backup operator must not run blind.
+        eprintln!(
+            "kopiur-telemetry: FATAL: could not install the tracing subscriber for \
+             {service_name}: {e}"
+        );
+        return Err(TelemetryError::SubscriberInit {
+            source: Box::new(e),
+        });
+    }
 
     // Subscriber is now installed — surface any deferred degrade messages.
     for msg in deferred {
@@ -358,6 +418,10 @@ pub fn init_tracing(service_name: &str) -> Result<TelemetryGuard, TelemetryError
         logger_provider,
     })
 }
+
+/// Set the first time [`init_tracing`] attempts to install the global subscriber,
+/// so subsequent calls in the same process are no-ops (test binaries init twice).
+static INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn build_trace_provider(
     service_name: &str,
@@ -448,5 +512,58 @@ mod tests {
         if let Some(v) = prev {
             unsafe { std::env::set_var(env::OTEL_EXPORTER_OTLP_ENDPOINT, v) };
         }
+    }
+
+    /// A `MakeWriter` that captures everything written into a shared buffer, so a
+    /// test can assert what the fmt layer actually emitted.
+    #[derive(Clone)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Regression guard for the silent-logs bug: the no-OTLP layer stack (an
+    /// fmt layer + ZERO OTLP layers) MUST still emit. Before the fix, the OTLP
+    /// layers were attached as a separate **empty** `Vec`, whose `register_callsite`
+    /// returns `Interest::never()` and disabled every event for the whole
+    /// subscriber (while `try_init()` happily returned `Ok`). This exercises the
+    /// exact production assembly via `build_layers` against a scoped dispatcher,
+    /// so it fails if anyone reintroduces an empty outer layer.
+    #[test]
+    fn no_otlp_layer_stack_still_emits() {
+        use tracing_subscriber::prelude::*;
+
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer = CaptureWriter(buf.clone());
+
+        // Same call as production's no-OTLP path: fmt first, no OTLP layers.
+        let layers = build_layers(LogFormat::Text, writer, false, Vec::new());
+        let subscriber = tracing_subscriber::registry()
+            .with(layers)
+            .with(tracing_subscriber::EnvFilter::new("info"));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("PROBE-LINE-9f3a");
+        });
+
+        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            out.contains("PROBE-LINE-9f3a"),
+            "no-OTLP subscriber emitted nothing (empty-outer-layer regression); captured: {out:?}"
+        );
     }
 }

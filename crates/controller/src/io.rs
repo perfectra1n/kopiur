@@ -27,11 +27,12 @@ use kopiur_api::maintenance::{
     MaintenanceSpec, Ownership, RepositoryMaintenanceSpec, default_maintenance_schedule,
 };
 use kopiur_api::{ClusterRepository, Maintenance, Repository};
+use kopiur_kopia::KopiaErrorClass;
 
 use crate::consts::{
-    API_VERSION, CHECK_MAINTENANCE_ACTION, MAINTENANCE_CONFIGURED_CONDITION,
-    MAINTENANCE_CONFIGURED_REASON, MAINTENANCE_DISABLED_REASON,
-    MAINTENANCE_NAMESPACE_UNRESOLVED_REASON,
+    API_VERSION, CHECK_BACKEND_ACTION, CHECK_CREDENTIALS_ACTION, CHECK_MAINTENANCE_ACTION,
+    CHECK_PERMISSIONS_ACTION, MAINTENANCE_CONFIGURED_CONDITION, MAINTENANCE_CONFIGURED_REASON,
+    MAINTENANCE_DISABLED_REASON, MAINTENANCE_NAMESPACE_UNRESOLVED_REASON,
 };
 use crate::context::Context;
 use crate::error::{Error, Result};
@@ -740,11 +741,123 @@ pub async fn ensure_maintenance<K>(
     }
 }
 
+/// Map a kopia failure class to the `(action, note)` of the Warning Event we
+/// surface on the repository CR. The Event `reason` is the class label itself
+/// (`class.as_str()`, set by the caller) so it matches the `Bootstrapped=False`
+/// condition reason and is machine-readable; only the remediation hint and the
+/// human note vary here. Exhaustive on `KopiaErrorClass` so a new class forces an
+/// explicit decision (ADR §5.5).
+fn backend_failure_event(class: KopiaErrorClass, message: &str) -> (&'static str, String) {
+    match class {
+        KopiaErrorClass::AccessDenied => (
+            CHECK_CREDENTIALS_ACTION,
+            format!(
+                "the storage backend denied access: {message}. The credentials Secret may lack \
+                 permission, or the configured bucket/container/path does not exist (some backends \
+                 report a missing bucket as \"Access Denied\"). Verify the credentials Secret and \
+                 that the bucket/path exists and is reachable."
+            ),
+        ),
+        KopiaErrorClass::PermissionDenied => (
+            CHECK_PERMISSIONS_ACTION,
+            format!(
+                "the repository path is not writable by the operator: {message}. The filesystem \
+                 export or PVC must be writable by the operator's UID (commonly 65534) — fix its \
+                 ownership/mode (e.g. `chown` to that UID) and reconcile again."
+            ),
+        ),
+        KopiaErrorClass::AuthFailure => (
+            CHECK_CREDENTIALS_ACTION,
+            format!(
+                "the repository password was rejected: {message}. Check the encryption password \
+                 Secret (the `KOPIA_PASSWORD` key) referenced by this repository."
+            ),
+        ),
+        KopiaErrorClass::RepositoryUnavailable
+        | KopiaErrorClass::NotFound
+        | KopiaErrorClass::Locked
+        | KopiaErrorClass::SourceError
+        | KopiaErrorClass::Unknown => (
+            CHECK_BACKEND_ACTION,
+            format!("repository backend error ({}): {message}", class.as_str()),
+        ),
+    }
+}
+
+/// Surface a repository connect/create failure as a Warning Event on the CR, so
+/// *what* the backend rejected (e.g. S3 "Access Denied") is visible from
+/// `kubectl get events` / `describe` and not buried in a status condition. The
+/// Event `reason` is the kopia class (matching the `Bootstrapped=False`
+/// condition). Best-effort: a failed publish is logged, never fatal.
+pub async fn publish_backend_failure(
+    ctx: &Context,
+    regarding: &ObjectReference,
+    name: &str,
+    class: KopiaErrorClass,
+    message: &str,
+) {
+    let reason = class.as_str();
+    let (action, note) = backend_failure_event(class, message);
+    if let Err(e) = ctx
+        .recorder
+        .publish(
+            &Event {
+                type_: EventType::Warning,
+                reason: reason.into(),
+                note: Some(note),
+                action: action.into(),
+                secondary: None,
+            },
+            regarding,
+        )
+        .await
+    {
+        tracing::warn!(error = %e, repo = %name, "failed to publish {reason} event");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use kopiur_api::backend::FilesystemBackend;
     use kopiur_api::common::SecretKeyRef;
+
+    // --- backend_failure_event: the typed kopia class drives the Event's
+    // remediation `action` + human note; the `reason` (asserted at the call site)
+    // is the class label itself, so it matches the `Bootstrapped=False` condition.
+    // (regression: S3 Access Denied used to land as Unknown, only visible via
+    // `kubectl describe`.)
+    #[test]
+    fn backend_failure_access_denied_points_at_credentials_and_bucket() {
+        let (action, note) = backend_failure_event(
+            KopiaErrorClass::AccessDenied,
+            "error retrieving storage config from bucket \"kopiur\": Access Denied",
+        );
+        assert_eq!(action, CHECK_CREDENTIALS_ACTION);
+        assert!(note.contains("denied access"));
+        assert!(note.contains("credentials Secret"));
+        assert!(note.contains("bucket/path"));
+    }
+
+    #[test]
+    fn backend_failure_permission_denied_points_at_uid_ownership() {
+        let (action, note) = backend_failure_event(
+            KopiaErrorClass::PermissionDenied,
+            "unable to create directory /repo: permission denied",
+        );
+        assert_eq!(action, CHECK_PERMISSIONS_ACTION);
+        assert!(note.contains("not writable"));
+        assert!(note.contains("65534"));
+    }
+
+    #[test]
+    fn backend_failure_other_classes_stay_generic_with_class_and_message() {
+        let (action, note) =
+            backend_failure_event(KopiaErrorClass::RepositoryUnavailable, "connection refused");
+        assert_eq!(action, CHECK_BACKEND_ACTION);
+        assert!(note.contains("RepositoryUnavailable"));
+        assert!(note.contains("connection refused"));
+    }
 
     fn ref_of(kind: RepositoryKind, name: &str, namespace: Option<&str>) -> RepositoryRef {
         RepositoryRef {

@@ -180,6 +180,12 @@ async fn run_bootstrap_flow(
     spec: &MoverWorkSpec,
     op: &BootstrapRepositoryOp,
 ) -> Result<()> {
+    info!(
+        backend = spec.repository.kind_str(),
+        auto_create = op.auto_create,
+        repository = %spec.target_ref.name,
+        "bootstrapping repository"
+    );
     let result = run_bootstrap(client, spec, op).await;
     // Persist BEFORE returning: a failed bootstrap still exits non-zero (so the
     // Job is marked Failed and backoff is bounded), but the controller must be
@@ -187,6 +193,7 @@ async fn run_bootstrap_flow(
     write_bootstrap_result(spec, &result).await;
     if result.success {
         info!(
+            backend = spec.repository.kind_str(),
             created = result.created,
             unique_id = ?result.unique_id,
             snapshot_count = result.snapshot_count,
@@ -194,14 +201,26 @@ async fn run_bootstrap_flow(
         );
         Ok(())
     } else {
-        let class = result
+        // Surface the full failure on stdout (class + human message + the kopia
+        // stderr tail) so `kubectl logs` on the bootstrap Job tells the whole
+        // story without needing the result ConfigMap.
+        let (class, message, stderr_tail) = result
             .failure
             .as_ref()
-            .map(|f| f.kopia_error_class.as_str())
-            .unwrap_or("Unknown");
-        error!(class, "repository bootstrap failed terminally");
+            .map(|f| {
+                (
+                    f.kopia_error_class.as_str(),
+                    f.message.as_str(),
+                    f.stderr_tail.as_deref().unwrap_or(""),
+                )
+            })
+            .unwrap_or(("Unknown", "repository bootstrap failed", ""));
+        error!(
+            backend = spec.repository.kind_str(),
+            class, stderr_tail, "repository bootstrap failed terminally: {message}"
+        );
         Err(anyhow::anyhow!(
-            "repository bootstrap failed (class {class})"
+            "repository bootstrap failed (class {class}): {message}"
         ))
     }
 }

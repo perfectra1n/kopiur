@@ -123,12 +123,22 @@ where
 
 /// A status condition's `status` ("True"/"False"/…) by `type`, or `None`.
 fn condition_status(status: &serde_json::Value, type_: &str) -> Option<String> {
+    condition_field(status, type_, "status")
+}
+
+/// A status condition's `reason` by `type`, or `None`. The reason is the kopia
+/// error class (`AuthFailure`/`AccessDenied`/…), so it must be machine-readable.
+fn condition_reason(status: &serde_json::Value, type_: &str) -> Option<String> {
+    condition_field(status, type_, "reason")
+}
+
+fn condition_field(status: &serde_json::Value, type_: &str, field: &str) -> Option<String> {
     status
         .get("conditions")
         .and_then(|c| c.as_array())?
         .iter()
         .find(|c| c.get("type").and_then(|t| t.as_str()) == Some(type_))
-        .and_then(|c| c.get("status").and_then(|s| s.as_str()))
+        .and_then(|c| c.get(field).and_then(|s| s.as_str()))
         .map(str::to_string)
 }
 
@@ -290,6 +300,14 @@ async fn s3_bootstrap_backup_restore_adopt_and_guard() {
         condition_status(&guard, "Bootstrapped").as_deref(),
         Some("False"),
         "wrong-password Repository must carry Bootstrapped=False, got {guard}"
+    );
+    // The condition reason is the typed kopia error class — a wrong repository
+    // password classifies as AuthFailure, surfaced machine-readably (not the old
+    // opaque "Unknown"). This proves the typed-error path flows to the CR status.
+    assert_eq!(
+        condition_reason(&guard, "Bootstrapped").as_deref(),
+        Some("AuthFailure"),
+        "wrong-password Repository must carry Bootstrapped reason=AuthFailure, got {guard}"
     );
     // The original repository is untouched: its uniqueId is unchanged and it is
     // still Ready (the guard must not have recreated/clobbered it).

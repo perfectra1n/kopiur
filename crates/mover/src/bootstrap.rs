@@ -95,10 +95,14 @@ impl BootstrapResult {
 /// create`. Pure so it is unit-tested without kopia.
 ///
 /// Create is attempted only when `auto_create` is set AND the failure class does
-/// not indicate an *existing* repository:
+/// not indicate an *existing* repository or a problem that `create` cannot fix:
 /// - `AuthFailure` ⇒ a repo exists here that the password can't open — never
 ///   recreate (would risk a second repo / mask the real wrong-password error).
 /// - `Locked` ⇒ a repo exists and is held by another writer — retry, don't create.
+/// - `AccessDenied` ⇒ the backend denied access (bad creds, or the bucket/path
+///   doesn't exist) — `create` would be denied too; don't mask it, surface the fix.
+/// - `PermissionDenied` ⇒ the repo path isn't writable by our UID — `create`
+///   would also fail with EACCES; surface the ownership/mode fix instead.
 /// - everything else (`NotFound`, `RepositoryUnavailable`, `SourceError`,
 ///   `Unknown`) ⇒ attempt create. kopia's own `create` refuses to overwrite an
 ///   existing repository (the format blob backstop), so this can never smash
@@ -108,7 +112,10 @@ pub fn should_attempt_create(auto_create: bool, class: KopiaErrorClass) -> bool 
     auto_create
         && !matches!(
             class,
-            KopiaErrorClass::AuthFailure | KopiaErrorClass::Locked
+            KopiaErrorClass::AuthFailure
+                | KopiaErrorClass::Locked
+                | KopiaErrorClass::AccessDenied
+                | KopiaErrorClass::PermissionDenied
         )
 }
 

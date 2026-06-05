@@ -22,14 +22,25 @@ pub enum KopiaErrorClass {
     /// Repository could not be reached / opened (network, backend down,
     /// bad endpoint). Typically transient → retry.
     RepositoryUnavailable,
-    /// Authentication / password / credential failure. Not retryable without
-    /// a config change.
+    /// Authentication / password / credential failure (wrong repository
+    /// password). Not retryable without a config change.
     AuthFailure,
+    /// The storage backend **denied access** to the bucket/container/object
+    /// (e.g. S3/B2/GCS "Access Denied", HTTP 403). The credentials usually
+    /// authenticate fine but lack permission — or the bucket/path doesn't exist
+    /// and the backend masks that as access-denied (RustFS/S3 do this). Not
+    /// retryable without a credentials/permission/bucket fix.
+    AccessDenied,
+    /// The repository **path is not writable by this process** — e.g. a
+    /// filesystem repo whose PVC/NFS export is not writable by the operator's
+    /// UID ("permission denied" / EACCES when connecting or creating). Not
+    /// retryable without fixing ownership/mode.
+    PermissionDenied,
     /// The requested source path / snapshot / target was not found.
     NotFound,
     /// A repository lock is held by another writer. Often transient → retry.
     Locked,
-    /// Source filesystem error during upload (permission, I/O).
+    /// Source filesystem error during upload (I/O, prepare failure).
     SourceError,
     /// Anything we could not classify.
     Unknown,
@@ -41,10 +52,29 @@ impl KopiaErrorClass {
         match self {
             KopiaErrorClass::RepositoryUnavailable => "RepositoryUnavailable",
             KopiaErrorClass::AuthFailure => "AuthFailure",
+            KopiaErrorClass::AccessDenied => "AccessDenied",
+            KopiaErrorClass::PermissionDenied => "PermissionDenied",
             KopiaErrorClass::NotFound => "NotFound",
             KopiaErrorClass::Locked => "Locked",
             KopiaErrorClass::SourceError => "SourceError",
             KopiaErrorClass::Unknown => "Unknown",
+        }
+    }
+
+    /// Inverse of [`as_str`](Self::as_str): reconstruct the class from its stable
+    /// label. Used when only the persisted string is available (the controller
+    /// reads `result.failure.kopiaErrorClass` from a bootstrap Job's ConfigMap).
+    /// An unrecognized label maps to [`KopiaErrorClass::Unknown`].
+    pub fn from_label(s: &str) -> KopiaErrorClass {
+        match s {
+            "RepositoryUnavailable" => KopiaErrorClass::RepositoryUnavailable,
+            "AuthFailure" => KopiaErrorClass::AuthFailure,
+            "AccessDenied" => KopiaErrorClass::AccessDenied,
+            "PermissionDenied" => KopiaErrorClass::PermissionDenied,
+            "NotFound" => KopiaErrorClass::NotFound,
+            "Locked" => KopiaErrorClass::Locked,
+            "SourceError" => KopiaErrorClass::SourceError,
+            _ => KopiaErrorClass::Unknown,
         }
     }
 
@@ -70,6 +100,23 @@ impl KopiaErrorClass {
             || s.contains("unable to derive")
         {
             KopiaErrorClass::AuthFailure
+        } else if s.contains("access denied")
+            || s.contains("accessdenied")
+            || s.contains("forbidden")
+            || s.contains("not authorized")
+        {
+            // Backend authorization (e.g. S3 "Access Denied"). Checked before the
+            // generic permission/not-found arms because the backend phrasing is
+            // specific and the fix (creds/bucket) is distinct.
+            KopiaErrorClass::AccessDenied
+        } else if s.contains("permission denied")
+            || s.contains("operation not permitted")
+            || s.contains("eacces")
+        {
+            // Local repo path not writable by our UID. Checked before SourceError
+            // (which used to absorb "permission denied" and wrongly mark it
+            // retryable) and before NotFound.
+            KopiaErrorClass::PermissionDenied
         } else if s.contains("repository is locked")
             || s.contains("another process")
             || s.contains("lock")
@@ -89,10 +136,7 @@ impl KopiaErrorClass {
             || s.contains("timeout")
         {
             KopiaErrorClass::RepositoryUnavailable
-        } else if s.contains("upload error")
-            || s.contains("failed to prepare source")
-            || s.contains("permission denied")
-        {
+        } else if s.contains("upload error") || s.contains("failed to prepare source") {
             KopiaErrorClass::SourceError
         } else {
             KopiaErrorClass::Unknown
@@ -230,10 +274,59 @@ mod tests {
     }
 
     #[test]
+    fn classify_access_denied_and_permission_denied() {
+        // The exact RustFS/S3 message we observed live (bucket missing, masked as
+        // Access Denied) must classify as AccessDenied, not Unknown.
+        assert_eq!(
+            KopiaErrorClass::classify(
+                "can't connect to storage: error retrieving storage config from bucket \
+                 \"kopiur\": Access Denied"
+            ),
+            KopiaErrorClass::AccessDenied
+        );
+        assert_eq!(
+            KopiaErrorClass::classify("403 Forbidden"),
+            KopiaErrorClass::AccessDenied
+        );
+        // Filesystem repo path not writable by our UID → PermissionDenied, NOT
+        // the old SourceError (which marked it retryable).
+        assert_eq!(
+            KopiaErrorClass::classify("unable to create directory /repo: permission denied"),
+            KopiaErrorClass::PermissionDenied
+        );
+        assert_eq!(
+            KopiaErrorClass::classify("open /repo/kopia.repository: operation not permitted"),
+            KopiaErrorClass::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn from_label_roundtrips_every_variant() {
+        for c in [
+            KopiaErrorClass::RepositoryUnavailable,
+            KopiaErrorClass::AuthFailure,
+            KopiaErrorClass::AccessDenied,
+            KopiaErrorClass::PermissionDenied,
+            KopiaErrorClass::NotFound,
+            KopiaErrorClass::Locked,
+            KopiaErrorClass::SourceError,
+            KopiaErrorClass::Unknown,
+        ] {
+            assert_eq!(KopiaErrorClass::from_label(c.as_str()), c);
+        }
+        assert_eq!(
+            KopiaErrorClass::from_label("not-a-real-class"),
+            KopiaErrorClass::Unknown
+        );
+    }
+
+    #[test]
     fn retryable_classification() {
         assert!(KopiaErrorClass::RepositoryUnavailable.is_retryable());
         assert!(KopiaErrorClass::Locked.is_retryable());
         assert!(!KopiaErrorClass::AuthFailure.is_retryable());
+        assert!(!KopiaErrorClass::AccessDenied.is_retryable());
+        assert!(!KopiaErrorClass::PermissionDenied.is_retryable());
         assert!(!KopiaErrorClass::NotFound.is_retryable());
         assert!(!KopiaErrorClass::Unknown.is_retryable());
     }
