@@ -22,7 +22,7 @@ kubeconform = "0.8.0"
 # compatible (warns only) and mermaid 0.16.2 parses its preprocessor input
 # (0.17.0 targets mdBook 0.5 and fails).
 "aqua:rust-lang/mdBook" = "0.5.3"
-"github:badboy/mdbook-mermaid" = "0.16.2"
+"github:badboy/mdbook-mermaid" = "v0.17.0"
 "github:tommilligan/mdbook-admonish" = "1.20.0"
 "cargo:mdbook-linkcheck" = "0.7.7"
 
