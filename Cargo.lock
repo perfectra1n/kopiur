@@ -1278,6 +1278,7 @@ dependencies = [
  "kopiur-mover",
  "kopiur-telemetry",
  "kube",
+ "libc",
  "opentelemetry",
  "rustls",
  "schemars",

@@ -811,7 +811,16 @@ fn truncate_for_note(s: &str, max: usize) -> String {
 /// to [`EVENT_MESSAGE_BUDGET_BYTES`] before composing and the whole note is
 /// clamped to [`EVENT_NOTE_MAX_BYTES`], so the Event always publishes and the
 /// remediation hint always survives.
-fn backend_failure_event(class: KopiaErrorClass, message: &str) -> (&'static str, String) {
+///
+/// `uid` is the operator's effective UID (from [`operator_uid`]) — reported
+/// verbatim in the `PermissionDenied` hint so the `chown` advice names the real
+/// UID the operator runs as, not a hardcoded guess (it varies with the chart's
+/// `podSecurityContext.runAsUser`).
+fn backend_failure_event(
+    class: KopiaErrorClass,
+    message: &str,
+    uid: u32,
+) -> (&'static str, String) {
     let message = truncate_for_note(message, EVENT_MESSAGE_BUDGET_BYTES);
     let (action, note) = match class {
         KopiaErrorClass::AccessDenied => (
@@ -827,8 +836,8 @@ fn backend_failure_event(class: KopiaErrorClass, message: &str) -> (&'static str
             CHECK_PERMISSIONS_ACTION,
             format!(
                 "the repository path is not writable by the operator: {message}. The filesystem \
-                 export or PVC must be writable by the operator's UID (commonly 65534) — fix its \
-                 ownership/mode (e.g. `chown` to that UID) and reconcile again."
+                 export or PVC must be writable by the operator's UID ({uid}) — fix its \
+                 ownership/mode (e.g. `chown -R {uid} <path>`) and reconcile again."
             ),
         ),
         KopiaErrorClass::AuthFailure => (
@@ -850,6 +859,16 @@ fn backend_failure_event(class: KopiaErrorClass, message: &str) -> (&'static str
     (action, truncate_for_note(&note, EVENT_NOTE_MAX_BYTES))
 }
 
+/// The operator's effective UID — the identity that writes a filesystem repo in
+/// the controller's in-process kopia ops, and (by default) the mover pods' UID.
+/// Surfaced in the `PermissionDenied` remediation hint so it names the real UID
+/// rather than a hardcoded constant.
+fn operator_uid() -> u32 {
+    // SAFETY: geteuid() is always-succeeds and thread-safe; it has no
+    // preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
 /// Surface a repository connect/create failure as a Warning Event on the CR, so
 /// *what* the backend rejected (e.g. S3 "Access Denied") is visible from
 /// `kubectl get events` / `describe` and not buried in a status condition. The
@@ -863,7 +882,7 @@ pub async fn publish_backend_failure(
     message: &str,
 ) {
     let reason = class.as_str();
-    let (action, note) = backend_failure_event(class, message);
+    let (action, note) = backend_failure_event(class, message, operator_uid());
     if let Err(e) = ctx
         .recorder
         .publish(
@@ -888,6 +907,11 @@ mod tests {
     use kopiur_api::backend::FilesystemBackend;
     use kopiur_api::common::SecretKeyRef;
 
+    /// A representative operator UID for the pure-function tests. Deliberately
+    /// NOT the old hardcoded 65534, so the assertions prove the UID is now
+    /// interpolated from the argument rather than baked into the message.
+    const TEST_UID: u32 = 65532;
+
     // --- backend_failure_event: the typed kopia class drives the Event's
     // remediation `action` + human note; the `reason` (asserted at the call site)
     // is the class label itself, so it matches the `Bootstrapped=False` condition.
@@ -898,6 +922,7 @@ mod tests {
         let (action, note) = backend_failure_event(
             KopiaErrorClass::AccessDenied,
             "error retrieving storage config from bucket \"kopiur\": Access Denied",
+            TEST_UID,
         );
         assert_eq!(action, CHECK_CREDENTIALS_ACTION);
         assert!(note.contains("denied access"));
@@ -906,20 +931,38 @@ mod tests {
     }
 
     #[test]
-    fn backend_failure_permission_denied_points_at_uid_ownership() {
+    fn backend_failure_permission_denied_points_at_the_live_uid() {
+        // Regression: the hint used to hardcode "commonly 65534"; it must now
+        // report the operator's actual UID (here the e2e/distroless 65532) so the
+        // `chown` advice is correct under any `podSecurityContext.runAsUser`.
         let (action, note) = backend_failure_event(
             KopiaErrorClass::PermissionDenied,
             "unable to create directory /repo: permission denied",
+            TEST_UID,
         );
         assert_eq!(action, CHECK_PERMISSIONS_ACTION);
         assert!(note.contains("not writable"));
-        assert!(note.contains("65534"));
+        assert!(
+            note.contains("65532"),
+            "note should name the live UID: {note}"
+        );
+        assert!(
+            note.contains("chown -R 65532"),
+            "the chown example should use the live UID: {note}"
+        );
+        assert!(
+            !note.contains("65534"),
+            "the old hardcoded UID must be gone: {note}"
+        );
     }
 
     #[test]
     fn backend_failure_other_classes_stay_generic_with_class_and_message() {
-        let (action, note) =
-            backend_failure_event(KopiaErrorClass::RepositoryUnavailable, "connection refused");
+        let (action, note) = backend_failure_event(
+            KopiaErrorClass::RepositoryUnavailable,
+            "connection refused",
+            TEST_UID,
+        );
         assert_eq!(action, CHECK_BACKEND_ACTION);
         assert!(note.contains("RepositoryUnavailable"));
         assert!(note.contains("connection refused"));
@@ -946,7 +989,7 @@ mod tests {
             KopiaErrorClass::SourceError,
             KopiaErrorClass::Unknown,
         ] {
-            let (_, note) = backend_failure_event(class, &huge);
+            let (_, note) = backend_failure_event(class, &huge, TEST_UID);
             assert!(
                 note.len() <= EVENT_NOTE_MAX_BYTES,
                 "{class:?} note is {} bytes, exceeds the {EVENT_NOTE_MAX_BYTES}-byte Event limit",
@@ -965,14 +1008,15 @@ mod tests {
         // user acts on) must survive — the message budget protects it, not just
         // the final clamp.
         let huge = "x".repeat(5000);
-        let (action, note) = backend_failure_event(KopiaErrorClass::PermissionDenied, &huge);
+        let (action, note) =
+            backend_failure_event(KopiaErrorClass::PermissionDenied, &huge, TEST_UID);
         assert_eq!(action, CHECK_PERMISSIONS_ACTION);
         assert!(
             note.contains("not writable"),
             "remediation hint lost to truncation: {note}"
         );
         assert!(
-            note.contains("65534"),
+            note.contains("65532"),
             "remediation hint lost to truncation: {note}"
         );
     }

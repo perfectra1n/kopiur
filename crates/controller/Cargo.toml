@@ -29,6 +29,7 @@ croner = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
 serial_test = { workspace = true }
