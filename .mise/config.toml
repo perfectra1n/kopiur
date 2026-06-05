@@ -18,11 +18,17 @@ kubeconform = "0.8.0"
 # them with the exec bit intact. mdbook-linkcheck only ships a .zip, which the
 # github backend extracts as non-executable (0644) and ubi is deprecated, so we
 # build it from source via the cargo backend (always executable; cached by
-# mise-action in CI). mdBook is pinned to 0.4.52: admonish 1.20.0 is forward-
-# compatible (warns only) and mermaid 0.16.2 parses its preprocessor input
-# (0.17.0 targets mdBook 0.5 and fails).
-"aqua:rust-lang/mdBook" = "0.5.3"
-"github:badboy/mdbook-mermaid" = "v0.17.0"
+# mise-action in CI).
+#
+# VERSION LOCK — do not bump mdBook to 0.5.x yet. mdbook-admonish 1.20.0 (its
+# latest release) is built against mdBook 0.4's preprocessor protocol and cannot
+# parse mdBook 0.5's `Book` JSON (it aborts with `missing field \`sections\``).
+# mdbook-mermaid 0.17.0 is the inverse — it requires mdBook 0.5 and fails on 0.4.
+# So admonish (0.4-only) and mermaid 0.17 (0.5-only) cannot share one mdBook.
+# Verified matrix: mdBook 0.4.52 works with admonish 1.20.0 + mermaid 0.16.2.
+# Revisit the 0.5 bump once mdbook-admonish ships an mdBook-0.5 release.
+"aqua:rust-lang/mdBook" = "0.4.52"
+"github:badboy/mdbook-mermaid" = "0.16.2"
 "github:tommilligan/mdbook-admonish" = "1.20.0"
 "cargo:mdbook-linkcheck" = "0.7.7"
 

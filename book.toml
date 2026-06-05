@@ -21,6 +21,12 @@ description = "A Kopia-native Kubernetes backup operator written in Rust on kube
 authors = ["kopiur contributors"]
 src = "docs"
 language = "en"
+# Set explicitly: when unset, mdBook serializes `text-direction` (and any other
+# absent [book] field) as JSON `null` in the preprocessor context, and
+# mdbook-admonish deserializes config via `toml::Value`, which has no null type —
+# so it aborts with "invalid type: null, expected any valid TOML value". Keeping
+# every [book] string field set to a real value keeps that context null-free.
+text-direction = "ltr"
 
 [build]
 build-dir = "book"

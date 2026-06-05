@@ -33,28 +33,28 @@ checksum = "sha256:7db40a864ea299304e3a6c1d9f647fa8f554bb0353e181f63955b21c0dc57
 url = "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.8/cargo-deny-0.19.8-x86_64-pc-windows-msvc.tar.gz"
 
 [[tools."aqua:rust-lang/mdBook"]]
-version = "0.5.3"
+version = "0.4.52"
 backend = "aqua:rust-lang/mdBook"
 
 [tools."aqua:rust-lang/mdBook"."platforms.linux-x64"]
-checksum = "sha256:dfb86d8e20a3fed91bf549aa450b9d7f46a275b700292e050cdfd3171732e7fd"
-url = "https://github.com/rust-lang/mdBook/releases/download/v0.5.3/mdbook-v0.5.3-x86_64-unknown-linux-musl.tar.gz"
+checksum = "sha256:c96bdabf3754d9e016fb803c1565a41050434479b2dc1e02a87c8d0da7524c6c"
+url = "https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-unknown-linux-musl.tar.gz"
 
 [tools."aqua:rust-lang/mdBook"."platforms.linux-x64-musl"]
-checksum = "sha256:dfb86d8e20a3fed91bf549aa450b9d7f46a275b700292e050cdfd3171732e7fd"
-url = "https://github.com/rust-lang/mdBook/releases/download/v0.5.3/mdbook-v0.5.3-x86_64-unknown-linux-musl.tar.gz"
+checksum = "sha256:c96bdabf3754d9e016fb803c1565a41050434479b2dc1e02a87c8d0da7524c6c"
+url = "https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-unknown-linux-musl.tar.gz"
 
 [tools."aqua:rust-lang/mdBook"."platforms.macos-arm64"]
-checksum = "sha256:9b74591168f8dbf19fcdf2386b68031fecc4b847b2e81e2de2d23ed502618875"
-url = "https://github.com/rust-lang/mdBook/releases/download/v0.5.3/mdbook-v0.5.3-x86_64-apple-darwin.tar.gz"
+checksum = "sha256:4768a2a3cd6bff139feffd855dd8fb82ee356ecf822ae12ed9abcbde0633205b"
+url = "https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-apple-darwin.tar.gz"
 
 [tools."aqua:rust-lang/mdBook"."platforms.macos-x64"]
-checksum = "sha256:9b74591168f8dbf19fcdf2386b68031fecc4b847b2e81e2de2d23ed502618875"
-url = "https://github.com/rust-lang/mdBook/releases/download/v0.5.3/mdbook-v0.5.3-x86_64-apple-darwin.tar.gz"
+checksum = "sha256:4768a2a3cd6bff139feffd855dd8fb82ee356ecf822ae12ed9abcbde0633205b"
+url = "https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-apple-darwin.tar.gz"
 
 [tools."aqua:rust-lang/mdBook"."platforms.windows-x64"]
-checksum = "sha256:6bf1019d15e4cfa24d25d3a8571384ba1c703ca58029aac29b7c490f57e3ab85"
-url = "https://github.com/rust-lang/mdBook/releases/download/v0.5.3/mdbook-v0.5.3-x86_64-pc-windows-msvc.zip"
+checksum = "sha256:33510a5745c593e06f4b8e21f531d9204c6f4444846b4bd57994e82a7bdfec98"
+url = "https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-pc-windows-msvc.zip"
 
 [[tools."aqua:taiki-e/cargo-llvm-cov"]]
 version = "0.8.7"
@@ -93,43 +93,43 @@ version = "0.7.7"
 backend = "cargo:mdbook-linkcheck"
 
 [[tools."github:badboy/mdbook-mermaid"]]
-version = "0.17.0"
+version = "0.16.2"
 backend = "github:badboy/mdbook-mermaid"
 
 [tools."github:badboy/mdbook-mermaid"."platforms.linux-arm64"]
-checksum = "sha256:372c2e8ef1f59f65e40887517ecf353587c3c30fb7f4911e2ec250e0ca61d806"
-url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-aarch64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/317854743"
+checksum = "sha256:b0b01c471c93ff0e413ba9fe205884498811c74694608436c1cf9c36d2fc7e3b"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465688"
 
 [tools."github:badboy/mdbook-mermaid"."platforms.linux-arm64-musl"]
-checksum = "sha256:372c2e8ef1f59f65e40887517ecf353587c3c30fb7f4911e2ec250e0ca61d806"
-url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-aarch64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/317854743"
+checksum = "sha256:b0b01c471c93ff0e413ba9fe205884498811c74694608436c1cf9c36d2fc7e3b"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465688"
 
 [tools."github:badboy/mdbook-mermaid"."platforms.linux-x64"]
-checksum = "sha256:8aced70d781830fb0e81988f081c4abdd49e056a001ae2f1e4d484e1f6385c57"
-url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-x86_64-unknown-linux-gnu.tar.gz"
-url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/317854744"
+checksum = "sha256:53212493f30f15248236b26964355fd84bd5ac66359242e42f5aa2fa8d2e4997"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465687"
 
 [tools."github:badboy/mdbook-mermaid"."platforms.linux-x64-musl"]
-checksum = "sha256:c3a924da1c1895d694f0544fb8ce71ae01508138d8e9b02374e9bf608ae765d7"
-url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-x86_64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/317854741"
+checksum = "sha256:8221c0a60aaa19b342d04fffe395be4f91ec1492ab659a2ea849328a2c1dff37"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465689"
 
 [tools."github:badboy/mdbook-mermaid"."platforms.macos-arm64"]
-checksum = "sha256:6e4a6bb7423a03d68c2f5869bfe7d3eab339304452129779a9d9abe4c510034f"
-url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-aarch64-apple-darwin.tar.gz"
-url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/317854742"
+checksum = "sha256:1fc7813ea56bf3e889c3dcd13b0149ff8c7aa8d1e18530b13a0dc882f6383cc2"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465686"
 
 [tools."github:badboy/mdbook-mermaid"."platforms.macos-x64"]
-checksum = "sha256:88c6bee0226a8947837344c96ae7f86b4ad3447f91049b2c877772a2732ac752"
-url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-x86_64-apple-darwin.tar.gz"
-url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/317854745"
+checksum = "sha256:f3b7bc35819b457cf64d63ae4c21cfff90726d12306db4be4d037ddc9a2a073b"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-x86_64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465685"
 
 [tools."github:badboy/mdbook-mermaid"."platforms.windows-x64"]
-checksum = "sha256:6ff34f3c008ca6905d49ec9eedd1a25b2d0d17e2affe95e959196756daf96886"
-url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-x86_64-pc-windows-msvc.zip"
-url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/317854740"
+checksum = "sha256:acd0f6481512d54cc9df9dfbb2a3a5630b3b036173670131c4a6a1b7b08b0d48"
+url = "https://github.com/badboy/mdbook-mermaid/releases/download/v0.16.2/mdbook-mermaid-v0.16.2-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/badboy/mdbook-mermaid/releases/assets/305465690"
 
 [[tools."github:tommilligan/mdbook-admonish"]]
 version = "1.20.0"
