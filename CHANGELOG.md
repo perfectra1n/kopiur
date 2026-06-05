@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.4](https://github.com/home-operations/kopiur/compare/0.1.3...0.1.4) (2026-06-05)
+
+
+### Features
+
+* **docs:** continue implementing rustdocs in crates ([b60b86a](https://github.com/home-operations/kopiur/commit/b60b86a7813510c9d73c8602b3499f480438c390))
+* **docs:** make mdbook happy ([6d7f3d2](https://github.com/home-operations/kopiur/commit/6d7f3d2916470a2e241ca16633ff7a30eb9f88f6))
+* **docs:** publish mdBook + rustdoc site to GitHub Pages ([74d7518](https://github.com/home-operations/kopiur/commit/74d7518a2dd6e6d382337c3abda6674dcbf3c85f))
+* **docs:** serve docs site from kopiur.home-operations.com ([51d9ace](https://github.com/home-operations/kopiur/commit/51d9ace809125c42cb76aeecab4478a7cd0ac99a))
+* **errors:** implement more error capturing for ease of use ([7fb10a1](https://github.com/home-operations/kopiur/commit/7fb10a1516662a0e9debe38b0d7e1267005de218))
+
+
+### Bug Fixes
+
+* **e2e:** resolve e2e errors for non-terminating pods ([cc83f67](https://github.com/home-operations/kopiur/commit/cc83f67b047c0bf851eccfb9e8d4475a5afeeafd))
+* **mise:** try to resolve merge conflicts, again ([2b17028](https://github.com/home-operations/kopiur/commit/2b170282e1969dab4275b0608f34401bc41bdb22))
+
 ## [0.1.3](https://github.com/home-operations/kopiur/compare/0.1.2...0.1.3) (2026-06-04)
 
 
