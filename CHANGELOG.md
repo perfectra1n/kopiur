@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.3](https://github.com/home-operations/kopiur/compare/0.1.2...0.1.3) (2026-06-04)
+
+
+### Features
+
+* **import:** allow Repository CRDs to be bootstrapped and imported ([b95d719](https://github.com/home-operations/kopiur/commit/b95d719b0741e4feb4d79de58dad1273d0cdb59f))
+* **logs:** add some useful stdout logging to each container ([e44a9ca](https://github.com/home-operations/kopiur/commit/e44a9caf98aed5918bae0ef1a631a8b7ff93dfe3))
+* **maintenance:** enable maintenance by default, but obviously allow overrides ([#48](https://github.com/home-operations/kopiur/issues/48)) ([c193929](https://github.com/home-operations/kopiur/commit/c193929a55f33bc06168febd51984a02921ebdba))
+
 ## [0.1.2](https://github.com/home-operations/kopiur/compare/0.1.1...0.1.2) (2026-06-04)
 
 
