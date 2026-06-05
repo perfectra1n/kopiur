@@ -73,6 +73,26 @@ export KUBECONFIG="${KUBECONFIG_PATH}"
 echo "==> loading images into kind"
 kind load docker-image "kopiur/controller:${TAG}" "kopiur/webhook:${TAG}" "kopiur/mover:${TAG}" --name "${CLUSTER}"
 
+# Pre-load third-party images (MinIO + mc) into the node so the in-cluster pull
+# from docker.io can't time out the rollout on a slow/flaky network — the
+# original failure mode. `kind load docker-image` chokes on docker's manifest-list
+# image store (digest-not-found), so import the saved tarball straight into the
+# node's containerd k8s.io namespace instead. Best-effort: if the host pull fails
+# the pods fall back to pulling in-cluster (IfNotPresent).
+preload_image() {
+  local img="$1" attempt
+  for attempt in 1 2 3; do
+    if docker pull "$img" >/dev/null 2>&1; then break; fi
+    echo "   (retry $attempt) pulling $img"; sleep 3
+  done
+  docker save "$img" | docker exec -i "${NODE}" ctr --namespace=k8s.io images import - \
+    >/dev/null 2>&1 && echo "   preloaded $img into ${NODE}" \
+    || echo "   warn: could not preload $img; pods will pull in-cluster"
+}
+echo "==> preloading MinIO images into the node"
+preload_image "minio/minio:latest"
+preload_image "minio/mc:latest"
+
 # --- 3. hostPath fixtures on the node ------------------------------------------
 # The kopia repo dir must be writable by the controller (uid 65532) AND the
 # mover Jobs (uid 65532); the source dir holds known data to back up.
@@ -169,6 +189,7 @@ spec:
       containers:
         - name: minio
           image: minio/minio:latest
+          imagePullPolicy: IfNotPresent
           args: ["server", "/data", "--console-address", ":9001"]
           env:
             - { name: MINIO_ROOT_USER, value: "${MINIO_USER}" }
@@ -190,11 +211,11 @@ spec:
     - { name: s3, port: 9000, targetPort: 9000 }
 YAML
 echo "==> waiting for MinIO rollout"
-kubectl -n "${NS}" rollout status deploy/minio --timeout=120s
+kubectl -n "${NS}" rollout status deploy/minio --timeout=300s
 
 echo "==> creating S3 buckets via mc"
 kubectl -n "${NS}" run mc-mkbucket --rm -i --restart=Never \
-  --image=minio/mc:latest --command -- /bin/sh -c "
+  --image=minio/mc:latest --image-pull-policy=IfNotPresent --command -- /bin/sh -c "
     set -e
     until mc alias set local http://minio:9000 ${MINIO_USER} ${MINIO_PASS} >/dev/null 2>&1; do sleep 2; done
     mc mb --ignore-existing local/kopiur
