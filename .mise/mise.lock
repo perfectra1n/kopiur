@@ -32,6 +32,10 @@ url = "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.8/carg
 checksum = "sha256:7db40a864ea299304e3a6c1d9f647fa8f554bb0353e181f63955b21c0dc57cd0"
 url = "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.8/cargo-deny-0.19.8-x86_64-pc-windows-msvc.tar.gz"
 
+[[tools."aqua:rust-lang/mdBook"]]
+version = "0.4.52"
+backend = "aqua:rust-lang/mdBook"
+
 [[tools."aqua:taiki-e/cargo-llvm-cov"]]
 version = "0.8.7"
 backend = "aqua:taiki-e/cargo-llvm-cov"
@@ -63,6 +67,18 @@ url = "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.8.7/cargo-
 [tools."aqua:taiki-e/cargo-llvm-cov"."platforms.windows-x64"]
 checksum = "sha256:56bce7aef6bf906af0fe025d2459f8be483d65ed4c105760671f9c92449c966d"
 url = "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.8.7/cargo-llvm-cov-x86_64-pc-windows-msvc.tar.gz"
+
+[[tools."cargo:mdbook-linkcheck"]]
+version = "0.7.7"
+backend = "cargo:mdbook-linkcheck"
+
+[[tools."github:badboy/mdbook-mermaid"]]
+version = "0.16.2"
+backend = "github:badboy/mdbook-mermaid"
+
+[[tools."github:tommilligan/mdbook-admonish"]]
+version = "1.20.0"
+backend = "github:tommilligan/mdbook-admonish"
 
 [[tools.helm]]
 version = "4.2.0"
