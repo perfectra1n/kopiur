@@ -57,6 +57,9 @@ docs/adr/        Architecture Decision Records (0003 is canonical)
 
 ## Documentation
 
+📖 **Docs site: <https://home-operations.github.io/kopiur/>** — user guide, ADRs,
+and the generated [Rust API reference](https://home-operations.github.io/kopiur/rustdoc/).
+
 - [Install guide](docs/install.md)
 - [Helm chart values & modes](deploy/helm/kopiur/README.md)
 - [ADR-0003 — Kopiur, a Kopia-native backup operator in Rust](docs/adr/0003-kopiur-rust-operator.md)

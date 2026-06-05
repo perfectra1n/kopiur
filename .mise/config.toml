@@ -13,6 +13,18 @@ kopia = "0.23.0"
 kubeconform = "0.8.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.19.8"
 "aqua:taiki-e/cargo-llvm-cov" = "0.8.7"
+# Docs site toolchain (mdBook + preprocessors + link checker). See `mise run docs`.
+# mermaid/admonish ship .tar.gz, so the (non-deprecated) github backend extracts
+# them with the exec bit intact. mdbook-linkcheck only ships a .zip, which the
+# github backend extracts as non-executable (0644) and ubi is deprecated, so we
+# build it from source via the cargo backend (always executable; cached by
+# mise-action in CI). mdBook is pinned to 0.4.52: admonish 1.20.0 is forward-
+# compatible (warns only) and mermaid 0.16.2 parses its preprocessor input
+# (0.17.0 targets mdBook 0.5 and fails).
+"aqua:rust-lang/mdBook" = "0.4.52"
+"github:badboy/mdbook-mermaid" = "0.16.2"
+"github:tommilligan/mdbook-admonish" = "1.20.0"
+"cargo:mdbook-linkcheck" = "0.7.7"
 
 [tasks.build]
 description = "Compile the whole workspace (debug, locked deps)"
@@ -130,6 +142,14 @@ run = 'kind delete cluster --name "${KOPIUR_KIND_CLUSTER:-kopiur-it}"'
 [tasks.audit]
 description = "Supply-chain + license audit"
 run = "cargo deny check"
+
+[tasks.docs]
+description = "Build the full docs site (mdBook user docs + workspace rustdoc) into book/html"
+run = "scripts/build-docs.sh"
+
+[tasks.docs-serve]
+description = "Serve the mdBook user docs locally with live reload (HTML renderer only; no rustdoc)"
+run = "mdbook serve --open"
 
 [tasks.ci]
 description = "The full local hermetic gate: format, lint, build, test, and drift check"

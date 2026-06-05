@@ -122,7 +122,7 @@ helm upgrade --install kopiur deploy/helm/kopiur -n kopiur-system \
 ```
 
 A ready-to-use values overlay is at
-[`deploy/observability-values.yaml`](../../deploy/observability-values.yaml):
+[`deploy/observability-values.yaml`](https://github.com/home-operations/kopiur/blob/main/deploy/observability-values.yaml):
 
 ```bash
 helm upgrade --install kopiur deploy/helm/kopiur -n kopiur-system \

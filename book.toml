@@ -1,0 +1,54 @@
+# mdBook configuration for the Kopiur documentation site.
+#
+# The book source is the existing `docs/` tree (so nothing had to move and the
+# many in-repo references to docs/adr/0003-*.md etc. keep resolving). mdBook only
+# renders files listed in docs/SUMMARY.md, so the ADRs and dev notes are surfaced
+# without disturbing the rest of the repo.
+#
+# `mise run docs` (scripts/build-docs.sh) builds this book *and* nests the
+# workspace rustdoc under /rustdoc/. The site is published to GitHub project
+# pages at https://home-operations.github.io/kopiur/ — hence site-url = "/kopiur/".
+#
+# Preprocessor assets under assets/ are generated and committed (see
+# `mdbook-admonish install` / `mdbook-mermaid install`); CI does not regenerate
+# them. Bumping the mise-pinned tool versions requires re-running those installs.
+
+[book]
+title = "Kopiur"
+description = "A Kopia-native Kubernetes backup operator written in Rust on kube-rs."
+authors = ["kopiur contributors"]
+src = "docs"
+language = "en"
+
+[build]
+build-dir = "book"
+
+[output.html]
+site-url = "/kopiur/"
+git-repository-url = "https://github.com/home-operations/kopiur"
+edit-url-template = "https://github.com/home-operations/kopiur/edit/main/{path}"
+default-theme = "navy"
+additional-css = ["assets/mdbook-admonish.css"]
+additional-js = ["assets/mermaid.min.js", "assets/mermaid-init.js"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[preprocessor.admonish]
+command = "mdbook-admonish"
+assets_version = "3.0.4" # do not edit directly; set by `mdbook-admonish install`
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+# A second renderer: validate links at build time and fail on broken ones, so
+# `mise run docs` doubles as our link-lint. Enabling it moves the HTML output to
+# book/html/ (each renderer gets its own subdir) — scripts/build-docs.sh and the
+# Pages workflow upload from book/html accordingly.
+[output.linkcheck]
+follow-web-links = false
+warning-policy = "error"
+# The API-reference page links into the separately-assembled /rustdoc/ tree, which
+# does not exist at `mdbook build` time; skip it (regex matched against the href).
+exclude = ['^rustdoc/']
