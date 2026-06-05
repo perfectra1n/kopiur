@@ -13,7 +13,7 @@
 //! ```
 
 /// Path to the mounted work-spec JSON (the controller↔mover contract). The
-/// controller sets this on the Job; the mover reads it (falling back to argv[1]).
+/// controller sets this on the Job; the mover reads it (falling back to `argv[1]`).
 pub const WORK_SPEC_PATH: &str = "KOPIUR_WORK_SPEC_PATH";
 
 /// Optional override for the `kopia` binary path (defaults to `kopia` on PATH).

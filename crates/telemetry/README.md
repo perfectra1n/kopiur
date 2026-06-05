@@ -41,7 +41,7 @@ run blind).
 
 ## Environment variables
 
-The names are centralized in the [`env`] module — read sites use the constants,
+The names are centralized in the [`env`](mod@crate::env) module — read sites use the constants,
 never string literals.
 
 | Constant | Variable | Effect |

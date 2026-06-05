@@ -24,7 +24,7 @@
 //! (`hostnameTemplate: "{{ .Namespace }}"`), but `tera` uses `{{ Namespace }}`.
 //! Rather than force users to learn that `kopiur` templates are tera, we
 //! **preprocess** the leading dot away: `{{ .Foo }}` → `{{ Foo }}` (see
-//! [`strip_leading_dots`]). Both spellings therefore work, and the exact ADR
+//! `strip_leading_dots`). Both spellings therefore work, and the exact ADR
 //! example renders correctly (proven in tests). Context variables exposed:
 //! `Namespace` and `ConfigName`.
 

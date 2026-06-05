@@ -28,7 +28,7 @@ subprocess. Only the cluster-free layers are public:
   [`status::FailureBlock`], [`status::MoverPhase`]).
 - [`bootstrap`] — the repository connect-vs-create decision ([`bootstrap::BootstrapResult`],
   [`bootstrap::should_attempt_create`]).
-- [`env`] — the mover's environment-variable contract.
+- [`env`](mod@crate::env) — the mover's environment-variable contract.
 
 The kube `PATCH` path lives in `main.rs` and is intentionally *not* part of the
 library surface.

@@ -48,8 +48,10 @@ spec:
                 nullable: true
                 properties:
                   name:
+                    description: Name of the referenced `BackupConfig`.
                     type: string
                   namespace:
+                    description: Namespace of the `BackupConfig`; absent = same namespace as the referrer.
                     nullable: true
                     type: string
                 required:
@@ -65,6 +67,16 @@ spec:
                   enforces that any new variant added later must be handled in every match site,
                   preventing the class of bug where a new policy slips into production without a
                   corresponding reconcile branch.
+
+                  ```
+                  use kopiur_api::common::DeletionPolicy;
+
+                  // Produced backups default to deleting the snapshot with the CR.
+                  assert_eq!(DeletionPolicy::default(), DeletionPolicy::Delete);
+                  // Variants serialize to their bare PascalCase names (plain string enum).
+                  assert_eq!(serde_json::to_value(DeletionPolicy::Retain).unwrap(), "Retain");
+                  assert_eq!(serde_json::to_value(DeletionPolicy::Orphan).unwrap(), "Orphan");
+                  ```
                 enum:
                 - Delete
                 - Retain
@@ -76,10 +88,16 @@ spec:
                 nullable: true
                 properties:
                   activeDeadlineSeconds:
+                    description: |-
+                      Passed through to the mover `Job.spec.activeDeadlineSeconds` — wall-clock cap
+                      after which a still-running run is killed.
                     format: int64
                     nullable: true
                     type: integer
                   backoffLimit:
+                    description: |-
+                      Passed through to the mover `Job.spec.backoffLimit` — how many times a failed
+                      run is retried before the Job is marked failed.
                     format: int32
                     nullable: true
                     type: integer
@@ -92,9 +110,13 @@ spec:
                 type: object
             type: object
           status:
+            description: Observed state of a [`Backup`]. ADR §3.4 status.
             nullable: true
             properties:
               conditions:
+                description: |-
+                  Standard Kubernetes conditions (e.g. `SourcesQuiesced`, `SnapshotCreated`).
+                  ADR §3.4 status.
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
                   properties:
@@ -131,10 +153,12 @@ spec:
                 nullable: true
                 properties:
                   attempts:
+                    description: Number of attempts so far (bounded by `failurePolicy.backoffLimit`). ADR §3.4 status.
                     format: int32
                     nullable: true
                     type: integer
                   name:
+                    description: Name of the mover `Job`. ADR §3.4 status.
                     nullable: true
                     type: string
                 type: object
@@ -143,6 +167,7 @@ spec:
                 nullable: true
                 type: string
               observedGeneration:
+                description: '`metadata.generation` last reconciled, for staleness detection. ADR §3.4 status.'
                 format: int64
                 nullable: true
                 type: integer
@@ -150,15 +175,36 @@ spec:
                 description: |-
                   How a `Backup` came to exist. Canonical value mirrored from the `kopiur.home-operations.com/origin`
                   label. Closed enum. ADR §3.4.
+
+                  Origin drives the deletion-policy default (ADR §4.5): `discovered` backups are
+                  forced to `Retain` because the operator did not create those snapshots.
+
+                  ```
+                  use kopiur_api::Origin;
+
+                  assert_eq!(Origin::default(), Origin::Scheduled);
+                  // Serializes camelCase, matching the `origin` label/status value.
+                  assert_eq!(serde_json::to_value(Origin::Discovered).unwrap(), "discovered");
+                  ```
                 enum:
                 - scheduled
                 - manual
                 - discovered
-                - null
                 nullable: true
                 type: string
               phase:
-                description: Lifecycle phase of a `Backup`. Closed enum. ADR §3.4 status.
+                description: |-
+                  Lifecycle phase of a `Backup`. Closed enum. ADR §3.4 status.
+
+                  ```
+                  use kopiur_api::{BackupPhase, PhaseLabel};
+
+                  assert_eq!(BackupPhase::default(), BackupPhase::Pending);
+                  // `PhaseLabel::label` gives the stable string used in status/metrics.
+                  assert_eq!(BackupPhase::Succeeded.label(), "Succeeded");
+                  // Every variant is enumerated for metric reset.
+                  assert_eq!(BackupPhase::ALL.len(), 6);
+                  ```
                 enum:
                 - Pending
                 - Running
@@ -166,7 +212,6 @@ spec:
                 - Failed
                 - Deleting
                 - Discovered
-                - null
                 nullable: true
                 type: string
               resolved:
@@ -174,27 +219,18 @@ spec:
                 nullable: true
                 properties:
                   repository:
-                    description: |-
-                      Discriminated reference from a consumer CR (`BackupConfig`, `Backup`,
-                      `Restore`, `Maintenance`) to a `Repository` or `ClusterRepository`. ADR §3.2.
-
-                      When `kind == ClusterRepository`, `namespace` MUST be absent — enforced by the
-                      admission webhook (`api::validate`), since the type system cannot express
-                      "this field is forbidden only for one variant of a sibling field".
+                    description: The repository this run targeted, frozen at run time. ADR §3.4 status.
                     nullable: true
                     properties:
                       kind:
                         default: Repository
-                        description: |-
-                          Which kind of repository a consumer CR references. ADR §3.2/§3.3.
-
-                          This is a closed enum: a consumer's `repository.kind` is always exactly one
-                          of these two values, so reconcilers `match` it exhaustively.
+                        description: Which repository CRD this points at; defaults to [`RepositoryKind::Repository`].
                         enum:
                         - Repository
                         - ClusterRepository
                         type: string
                       name:
+                        description: Name of the referenced `Repository`/`ClusterRepository`.
                         type: string
                       namespace:
                         description: Cross-namespace `Repository` reference; ignored/forbidden for `ClusterRepository`.
@@ -204,13 +240,16 @@ spec:
                     - name
                     type: object
                   sources:
+                    description: The concrete PVCs + source paths backed up this run. ADR §3.4 status.
                     items:
+                      description: One resolved source backed up by a run — a concrete PVC and its kopia path. ADR §3.4 status.
                       properties:
                         pvc:
                           description: '`namespace/name` of the PVC, as kopia sees it. ADR §3.4.'
                           nullable: true
                           type: string
                         sourcePath:
+                          description: The source path kopia recorded for this PVC. ADR §3.4/§4.2.
                           nullable: true
                           type: string
                       type: object
@@ -221,14 +260,17 @@ spec:
                 nullable: true
                 properties:
                   identity:
-                    description: Fully-resolved identity pinned into status; never re-rendered after admission. ADR §4.2.
+                    description: The `username@hostname:path` identity recorded for this snapshot. ADR §3.4/§4.2.
                     properties:
                       hostname:
+                        description: The final `hostname` kopia records, fixed at admission.
                         type: string
                       sourcePath:
+                        description: The resolved snapshot source path, when applicable (`username@hostname:path`).
                         nullable: true
                         type: string
                       username:
+                        description: The final `username` kopia records, fixed at admission.
                         type: string
                     required:
                     - hostname
@@ -236,6 +278,8 @@ spec:
                     type: object
                   kopiaSnapshotID:
                     description: |-
+                      kopia's snapshot ID — the handle the finalizer uses to delete content.
+
                       Renamed to match the ADR wire shape exactly (`kopiaSnapshotID`, capital `ID`);
                       serde's `camelCase` would otherwise produce `kopiaSnapshotId`.
                     type: string
@@ -244,41 +288,50 @@ spec:
                 - kopiaSnapshotID
                 type: object
               stats:
-                description: Stats populated from kopia's JSON output. ADR §3.4.
+                description: Byte/file counts parsed from kopia's JSON output. ADR §3.4 status.
                 nullable: true
                 properties:
                   bytesNew:
+                    description: Bytes newly uploaded this run (after dedup/compression). ADR §3.4 status.
                     format: int64
                     nullable: true
                     type: integer
                   filesModified:
+                    description: Count of files changed since the previous snapshot. ADR §3.4 status.
                     format: int64
                     nullable: true
                     type: integer
                   filesNew:
+                    description: Count of files new since the previous snapshot. ADR §3.4 status.
                     format: int64
                     nullable: true
                     type: integer
                   filesUnchanged:
+                    description: Count of files unchanged since the previous snapshot. ADR §3.4 status.
                     format: int64
                     nullable: true
                     type: integer
                   sizeBytes:
+                    description: Total logical size of the snapshot in bytes. ADR §3.4 status.
                     format: int64
                     nullable: true
                     type: integer
                 type: object
               timing:
+                description: Start/end/duration of the snapshot run. ADR §3.4 status.
                 nullable: true
                 properties:
                   durationSeconds:
+                    description: Wall-clock duration in seconds. ADR §3.4 status.
                     format: int64
                     nullable: true
                     type: integer
                   endTime:
+                    description: RFC3339 end time of the run. ADR §3.4 status.
                     nullable: true
                     type: string
                   startTime:
+                    description: RFC3339 start time of the run. ADR §3.4 status.
                     nullable: true
                     type: string
                 type: object

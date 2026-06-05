@@ -80,7 +80,7 @@ fn resource(service_name: &str) -> Resource {
 /// `Text` is the default and preserves the human-readable console output;
 /// `Json` emits one structured JSON object per event for log aggregators
 /// (Loki/ELK/Datadog). An unrecognized value degrades to `Text` rather than
-/// failing a backup operator's startup (see [`LogFormat::from_env`]).
+/// failing a backup operator's startup (see `LogFormat::from_env`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
     /// Human-readable console output (the default).

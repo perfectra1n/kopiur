@@ -3,7 +3,7 @@
 //! Errors are classified [`ErrorClass::Transient`] (kopia subprocess, API
 //! server, webhook outage — short retry) or [`ErrorClass::Structural`] (a bug
 //! in the CRD/our logic — long retry, clamped at 5 min). The generic
-//! [`error_policy`] logs, increments `controller_reconcile_errors_total`, and
+//! [`error_policy_for`] logs, increments `controller_reconcile_errors_total`, and
 //! requeues accordingly. Each per-CRD controller wires it via a tiny closure
 //! that supplies the `kind` label.
 
