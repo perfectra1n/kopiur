@@ -270,23 +270,18 @@ image:
   mover:      { repository: kopiur/mover,       tag: ${TAG}, pullPolicy: Never }
 controller:
   logLevel: debug
-  extraEnv:
-    - name: HOME
-      value: /work
-    - name: KOPIA_CONFIG_PATH
-      value: /work/repository.config
-    - name: KOPIA_CACHE_DIRECTORY
-      value: /work/cache
+  # The repo hostPath must be visible to the controller's in-process kopia
+  # (filesystem connect/create). kopia's cache/logs/config come from the chart's
+  # built-in writable `kopia-cache` emptyDir + the KOPIA_* env the binary sets —
+  # deliberately NOT a manual workaround here. That is exactly the regression the
+  # cache_and_events e2e guards: production had no such workaround, so the chart
+  # itself must give kopia a writable home on the read-only rootfs.
   extraVolumes:
     - name: repo
       hostPath: { path: /kopiur-e2e/repo, type: Directory }
-    - name: work
-      emptyDir: {}
   extraVolumeMounts:
     - name: repo
       mountPath: /repo
-    - name: work
-      mountPath: /work
 YAML
 
 echo "==> waiting for controller rollout"
