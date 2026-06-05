@@ -28,7 +28,7 @@ kubeconform = "0.8.0"
 # Verified matrix: mdBook 0.4.52 works with admonish 1.20.0 + mermaid 0.16.2.
 # Revisit the 0.5 bump once mdbook-admonish ships an mdBook-0.5 release.
 "aqua:rust-lang/mdBook" = "0.4.52"
-"github:badboy/mdbook-mermaid" = "0.16.2"
+"github:badboy/mdbook-mermaid" = "v0.17.0"
 "github:tommilligan/mdbook-admonish" = "1.20.0"
 "cargo:mdbook-linkcheck" = "0.7.7"
 
