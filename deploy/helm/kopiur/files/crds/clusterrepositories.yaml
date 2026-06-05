@@ -111,20 +111,26 @@ spec:
                   - rclone
                 properties:
                   azure:
+                    description: Azure Blob Storage.
                     properties:
                       auth:
-                        description: Credentials for an object-store backend. Always a Secret reference. ADR §3.1.
+                        description: Access credentials (Secret ref / workload identity).
                         nullable: true
                         properties:
                           secretRef:
                             description: |-
-                              Reference to an entire `Secret` (the operator reads well-known keys from it,
-                              e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                              Secret holding the backend's access credentials. The operator reads
+                              well-known keys (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3).
+                              ADR §3.1.
                             nullable: true
                             properties:
                               name:
+                                description: Name of the `Secret`.
                                 type: string
                               namespace:
+                                description: |-
+                                  Namespace of the `Secret`. Absent = same namespace as the referrer;
+                                  required for cluster-scoped CRs (ADR §3.2).
                                 nullable: true
                                 type: string
                             required:
@@ -137,37 +143,49 @@ spec:
                             nullable: true
                             properties:
                               serviceAccountName:
+                                description: |-
+                                  Name of the `ServiceAccount` the mover pod runs as, federated to the
+                                  cloud IAM role/identity that grants backend access.
                                 type: string
                             required:
                             - serviceAccountName
                             type: object
                         type: object
                       container:
+                        description: Blob container holding the kopia repository.
                         type: string
                       prefix:
+                        description: Blob-name prefix within the container; empty/absent means the container root.
                         nullable: true
                         type: string
                       storageAccount:
+                        description: Storage-account name (when not inferred from credentials).
                         nullable: true
                         type: string
                     required:
                     - container
                     type: object
                   b2:
+                    description: Backblaze B2.
                     properties:
                       auth:
-                        description: Credentials for an object-store backend. Always a Secret reference. ADR §3.1.
+                        description: Access credentials (application key ID/key Secret).
                         nullable: true
                         properties:
                           secretRef:
                             description: |-
-                              Reference to an entire `Secret` (the operator reads well-known keys from it,
-                              e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                              Secret holding the backend's access credentials. The operator reads
+                              well-known keys (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3).
+                              ADR §3.1.
                             nullable: true
                             properties:
                               name:
+                                description: Name of the `Secret`.
                                 type: string
                               namespace:
+                                description: |-
+                                  Namespace of the `Secret`. Absent = same namespace as the referrer;
+                                  required for cluster-scoped CRs (ADR §3.2).
                                 nullable: true
                                 type: string
                             required:
@@ -180,45 +198,60 @@ spec:
                             nullable: true
                             properties:
                               serviceAccountName:
+                                description: |-
+                                  Name of the `ServiceAccount` the mover pod runs as, federated to the
+                                  cloud IAM role/identity that grants backend access.
                                 type: string
                             required:
                             - serviceAccountName
                             type: object
                         type: object
                       bucket:
+                        description: B2 bucket holding the kopia repository.
                         type: string
                       prefix:
+                        description: Object-name prefix within the bucket; empty/absent means the bucket root.
                         nullable: true
                         type: string
                     required:
                     - bucket
                     type: object
                   filesystem:
+                    description: A local filesystem path, backed by a PVC the operator mounts into the mover.
                     properties:
                       path:
                         description: Mount path inside the mover pod. Backed by a PVC the operator mounts.
                         type: string
                       pvcName:
+                        description: |-
+                          Name of the `PersistentVolumeClaim` to mount at `path`. Absent for a path
+                          already present on the node/image.
                         nullable: true
                         type: string
                     required:
                     - path
                     type: object
                   gcs:
+                    description: Google Cloud Storage.
                     properties:
                       auth:
-                        description: Credentials for an object-store backend. Always a Secret reference. ADR §3.1.
+                        description: Access credentials (service-account key Secret / workload identity).
                         nullable: true
                         properties:
                           secretRef:
                             description: |-
-                              Reference to an entire `Secret` (the operator reads well-known keys from it,
-                              e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                              Secret holding the backend's access credentials. The operator reads
+                              well-known keys (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3).
+                              ADR §3.1.
                             nullable: true
                             properties:
                               name:
+                                description: Name of the `Secret`.
                                 type: string
                               namespace:
+                                description: |-
+                                  Namespace of the `Secret`. Absent = same namespace as the referrer;
+                                  required for cluster-scoped CRs (ADR §3.2).
                                 nullable: true
                                 type: string
                             required:
@@ -231,55 +264,76 @@ spec:
                             nullable: true
                             properties:
                               serviceAccountName:
+                                description: |-
+                                  Name of the `ServiceAccount` the mover pod runs as, federated to the
+                                  cloud IAM role/identity that grants backend access.
                                 type: string
                             required:
                             - serviceAccountName
                             type: object
                         type: object
                       bucket:
+                        description: GCS bucket holding the kopia repository.
                         type: string
                       prefix:
+                        description: Object-name prefix within the bucket; empty/absent means the bucket root.
                         nullable: true
                         type: string
                     required:
                     - bucket
                     type: object
                   rclone:
+                    description: |-
+                      Any rclone remote (kopia shells out to `rclone`), broadening reach to
+                      providers without a native kopia backend.
                     properties:
                       configSecretRef:
                         description: |-
-                          Reference to an entire `Secret` (the operator reads well-known keys from it,
-                          e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                          Secret holding the `rclone.conf` that defines the remote referenced by
+                          `remote_path`.
                         nullable: true
                         properties:
                           name:
+                            description: Name of the `Secret`.
                             type: string
                           namespace:
+                            description: |-
+                              Namespace of the `Secret`. Absent = same namespace as the referrer;
+                              required for cluster-scoped CRs (ADR §3.2).
                             nullable: true
                             type: string
                         required:
                         - name
                         type: object
                       remotePath:
+                        description: |-
+                          rclone path in `remote:path` form (the remote name must exist in the
+                          supplied rclone config).
                         type: string
                     required:
                     - remotePath
                     type: object
                   s3:
+                    description: Amazon S3 or any S3-compatible object store (MinIO, RustFS, Ceph RGW, …).
                     properties:
                       auth:
-                        description: Credentials for an object-store backend. Always a Secret reference. ADR §3.1.
+                        description: Access credentials (Secret ref / workload identity). ADR §3.1.
                         nullable: true
                         properties:
                           secretRef:
                             description: |-
-                              Reference to an entire `Secret` (the operator reads well-known keys from it,
-                              e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                              Secret holding the backend's access credentials. The operator reads
+                              well-known keys (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3).
+                              ADR §3.1.
                             nullable: true
                             properties:
                               name:
+                                description: Name of the `Secret`.
                                 type: string
                               namespace:
+                                description: |-
+                                  Namespace of the `Secret`. Absent = same namespace as the referrer;
+                                  required for cluster-scoped CRs (ADR §3.2).
                                 nullable: true
                                 type: string
                             required:
@@ -292,34 +346,49 @@ spec:
                             nullable: true
                             properties:
                               serviceAccountName:
+                                description: |-
+                                  Name of the `ServiceAccount` the mover pod runs as, federated to the
+                                  cloud IAM role/identity that grants backend access.
                                 type: string
                             required:
                             - serviceAccountName
                             type: object
                         type: object
                       bucket:
+                        description: Bucket holding the kopia repository.
                         type: string
                       endpoint:
+                        description: |-
+                          S3 endpoint host. Omit for AWS; set it for MinIO/RustFS/other
+                          S3-compatible stores.
                         nullable: true
                         type: string
                       prefix:
+                        description: |-
+                          Key prefix under the bucket, letting several repositories share one bucket
+                          (e.g. `clusters/prod/`). Empty/absent means the bucket root.
                         nullable: true
                         type: string
                       region:
+                        description: S3 region. Required by AWS and some compatible providers.
                         nullable: true
                         type: string
                       tls:
-                        description: TLS settings for object-store backends. ADR §3.1.
+                        description: TLS overrides for self-signed CAs or HTTP-only endpoints.
                         nullable: true
                         properties:
                           caBundleRef:
-                            description: Reference to a key within a `ConfigMap` (e.g. a CA bundle). ADR §3.1 `tls.caBundleRef`.
+                            description: |-
+                              CA bundle (PEM) used to verify the endpoint's certificate, sourced from a
+                              `ConfigMap`. Preferred over `insecureSkipVerify` for self-signed endpoints.
                             nullable: true
                             properties:
                               configMapName:
+                                description: Name of the `ConfigMap` holding the value (e.g. a CA bundle).
                                 nullable: true
                                 type: string
                               key:
+                                description: Which key inside the `ConfigMap` to read.
                                 nullable: true
                                 type: string
                             type: object
@@ -340,20 +409,26 @@ spec:
                     - bucket
                     type: object
                   sftp:
+                    description: SFTP server.
                     properties:
                       auth:
-                        description: Credentials for an object-store backend. Always a Secret reference. ADR §3.1.
+                        description: Credentials (e.g. SSH private key / known-hosts) sourced from a Secret.
                         nullable: true
                         properties:
                           secretRef:
                             description: |-
-                              Reference to an entire `Secret` (the operator reads well-known keys from it,
-                              e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                              Secret holding the backend's access credentials. The operator reads
+                              well-known keys (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3).
+                              ADR §3.1.
                             nullable: true
                             properties:
                               name:
+                                description: Name of the `Secret`.
                                 type: string
                               namespace:
+                                description: |-
+                                  Namespace of the `Secret`. Absent = same namespace as the referrer;
+                                  required for cluster-scoped CRs (ADR §3.2).
                                 nullable: true
                                 type: string
                             required:
@@ -366,22 +441,29 @@ spec:
                             nullable: true
                             properties:
                               serviceAccountName:
+                                description: |-
+                                  Name of the `ServiceAccount` the mover pod runs as, federated to the
+                                  cloud IAM role/identity that grants backend access.
                                 type: string
                             required:
                             - serviceAccountName
                             type: object
                         type: object
                       host:
+                        description: SFTP server hostname or IP.
                         type: string
                       path:
+                        description: Remote path on the server that holds the kopia repository.
                         type: string
                       port:
+                        description: TCP port; defaults to 22 when absent.
                         format: uint16
                         maximum: 65535.0
                         minimum: 0.0
                         nullable: true
                         type: integer
                       username:
+                        description: SSH username to connect as.
                         nullable: true
                         type: string
                     required:
@@ -389,20 +471,26 @@ spec:
                     - path
                     type: object
                   webDav:
+                    description: WebDAV endpoint.
                     properties:
                       auth:
-                        description: Credentials for an object-store backend. Always a Secret reference. ADR §3.1.
+                        description: HTTP basic-auth credentials sourced from a Secret.
                         nullable: true
                         properties:
                           secretRef:
                             description: |-
-                              Reference to an entire `Secret` (the operator reads well-known keys from it,
-                              e.g. `AWS_ACCESS_KEY_ID`). See ADR §3.1 backend `auth.secretRef`.
+                              Secret holding the backend's access credentials. The operator reads
+                              well-known keys (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3).
+                              ADR §3.1.
                             nullable: true
                             properties:
                               name:
+                                description: Name of the `Secret`.
                                 type: string
                               namespace:
+                                description: |-
+                                  Namespace of the `Secret`. Absent = same namespace as the referrer;
+                                  required for cluster-scoped CRs (ADR §3.2).
                                 nullable: true
                                 type: string
                             required:
@@ -415,38 +503,49 @@ spec:
                             nullable: true
                             properties:
                               serviceAccountName:
+                                description: |-
+                                  Name of the `ServiceAccount` the mover pod runs as, federated to the
+                                  cloud IAM role/identity that grants backend access.
                                 type: string
                             required:
                             - serviceAccountName
                             type: object
                         type: object
                       url:
+                        description: WebDAV collection URL holding the kopia repository.
                         type: string
                     required:
                     - url
                     type: object
                 type: object
               cacheDefaults:
-                description: Cache defaults inherited by `Backup`/`Restore` movers unless overridden. ADR §3.1.
+                description: Cache sizing inherited by consumer `Backup`/`Restore` movers unless overridden. ADR §3.1.
                 nullable: true
                 properties:
                   capacity:
+                    description: Size of the PVC backing the mover's kopia cache (e.g. `10Gi`).
                     nullable: true
                     type: string
                   contentCacheSizeMb:
+                    description: kopia content cache budget in MiB (`--content-cache-size-mb`).
                     format: int64
                     nullable: true
                     type: integer
                   metadataCacheSizeMb:
+                    description: kopia metadata cache budget in MiB (`--metadata-cache-size-mb`).
                     format: int64
                     nullable: true
                     type: integer
                   storageClassName:
+                    description: StorageClass for the cache PVC; absent uses the cluster default.
                     nullable: true
                     type: string
                 type: object
               catalog:
-                description: 'Bounds on materialization of `origin: discovered` `Backup` CRs. ADR §3.1 `catalog`.'
+                description: |-
+                  Bounds materialization of `origin: discovered` `Backup` CRs from the kopia
+                  catalog. For a shared repo this also picks where to land discovered backups
+                  via `catalog.fallbackNamespace`. ADR §3.1/§3.2.
                 nullable: true
                 properties:
                   fallbackNamespace:
@@ -456,12 +555,20 @@ spec:
                     nullable: true
                     type: string
                   refreshInterval:
+                    description: |-
+                      How often to re-scan the repository for new snapshots to materialize
+                      (Go-style duration, e.g. `1h`).
                     nullable: true
                     type: string
                   retain:
+                    description: |-
+                      How many discovered `Backup` CRs to keep materialized; bounds etcd footprint
+                      for large repositories. Never deletes real snapshots (discovered backups are
+                      always `deletionPolicy: Retain`). ADR §3.1/§4.5.
                     nullable: true
                     properties:
                       maxAgeDays:
+                        description: Drop materialized discovered `Backup`s for snapshots older than this many days.
                         format: int64
                         nullable: true
                         type: integer
@@ -473,37 +580,53 @@ spec:
                     type: object
                 type: object
               create:
-                description: Behavior when the repository does not yet exist. ADR §3.1 `create`.
+                description: |-
+                  What to do when the repository does not yet exist. Same semantics as
+                  `Repository.spec.create`. ADR §3.1/§3.2.
                 nullable: true
                 properties:
                   enabled:
                     default: false
+                    description: |-
+                      Create the repository if it does not exist yet. Off by default, so a typo'd
+                      backend can't silently spin up a brand-new empty repository.
                     type: boolean
                   encryption:
+                    description: |-
+                      kopia encryption algorithm for a freshly-created repository (e.g.
+                      `AES256-GCM-HMAC-SHA256`); only consulted at creation time.
                     nullable: true
                     type: string
                   hash:
+                    description: kopia content hash algorithm for a freshly-created repository; creation-time only.
                     nullable: true
                     type: string
                   splitter:
+                    description: kopia object splitter for a freshly-created repository; creation-time only.
                     nullable: true
                     type: string
                 type: object
               encryption:
                 description: |-
-                  Repository encryption settings. A sub-object so future rotation fields
-                  (`rotation`, `previousPasswords`) slot in without breakage (ADR §4.11).
+                  Repository password, always a Secret reference. As this CR is cluster-scoped,
+                  the ref MUST carry an explicit `namespace` (webhook-enforced). ADR §3.1/§3.2.
                 properties:
                   passwordSecretRef:
                     description: Always a Secret ref; never inline. ADR §3.1.
                     properties:
                       key:
-                        description: Defaults are documented per-field on the consuming struct.
+                        description: |-
+                          Which key inside the `Secret` to read. Defaults are documented per-field on
+                          the consuming struct.
                         nullable: true
                         type: string
                       name:
+                        description: Name of the `Secret`.
                         type: string
                       namespace:
+                        description: |-
+                          Namespace of the `Secret`. Absent = same namespace as the referrer;
+                          required for cluster-scoped CRs which have no own namespace (ADR §3.2).
                         nullable: true
                         type: string
                     required:
@@ -517,9 +640,15 @@ spec:
                 nullable: true
                 properties:
                   hostnameTemplate:
+                    description: |-
+                      Tera/Jinja2 template for the kopia identity *hostname*, rendered at admission
+                      (e.g. `{{ .Namespace }}`). ADR §3.2/§4.2.
                     nullable: true
                     type: string
                   usernameTemplate:
+                    description: |-
+                      Tera/Jinja2 template for the kopia identity *username*, rendered at admission
+                      (e.g. `{{ .Namespace }}-{{ .ConfigName }}`). ADR §3.2/§4.2.
                     nullable: true
                     type: string
                 type: object
@@ -540,14 +669,20 @@ spec:
                       honored.
                     type: boolean
                   failurePolicy:
-                    description: Per-run failure controls passed through to the mover `Job`. ADR §3.4/§4.10 (G6).
+                    description: Failure handling (backoff/deadline) for the managed `Maintenance` run.
                     nullable: true
                     properties:
                       activeDeadlineSeconds:
+                        description: |-
+                          Passed through to the mover `Job.spec.activeDeadlineSeconds` — wall-clock cap
+                          after which a still-running run is killed.
                         format: int64
                         nullable: true
                         type: integer
                       backoffLimit:
+                        description: |-
+                          Passed through to the mover `Job.spec.backoffLimit` — how many times a failed
+                          run is retried before the Job is marked failed.
                         format: int32
                         nullable: true
                         type: integer
@@ -557,21 +692,25 @@ spec:
                     nullable: true
                     properties:
                       cache:
-                        description: Cache defaults inherited by `Backup`/`Restore` movers unless overridden. ADR §3.1.
+                        description: Override the repository's [`CacheDefaults`] for this recipe's movers.
                         nullable: true
                         properties:
                           capacity:
+                            description: Size of the PVC backing the mover's kopia cache (e.g. `10Gi`).
                             nullable: true
                             type: string
                           contentCacheSizeMb:
+                            description: kopia content cache budget in MiB (`--content-cache-size-mb`).
                             format: int64
                             nullable: true
                             type: integer
                           metadataCacheSizeMb:
+                            description: kopia metadata cache budget in MiB (`--metadata-cache-size-mb`).
                             format: int64
                             nullable: true
                             type: integer
                           storageClassName:
+                            description: StorageClass for the cache PVC; absent uses the cluster default.
                             nullable: true
                             type: string
                         type: object
@@ -580,10 +719,11 @@ spec:
                         nullable: true
                         properties:
                           container:
+                            description: Which container within the matched pod; absent uses the first/only container.
                             nullable: true
                             type: string
                           podSelector:
-                            description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                            description: Label selector matching the workload pod(s) to read context/hooks from.
                             properties:
                               matchExpressions:
                                 description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
@@ -620,7 +760,7 @@ spec:
                         nullable: true
                         type: boolean
                       resources:
-                        description: ResourceRequirements describes the compute resource requirements.
+                        description: Resource requests/limits for the mover container.
                         nullable: true
                         properties:
                           claims:
@@ -657,7 +797,7 @@ spec:
                             type: object
                         type: object
                       securityContext:
-                        description: SecurityContext holds security configuration that will be applied to a container. Some fields are present in both SecurityContext and PodSecurityContext.  When both are set, the values in SecurityContext take precedence.
+                        description: Security context applied to the mover container.
                         nullable: true
                         properties:
                           allowPrivilegeEscalation:
@@ -777,32 +917,41 @@ spec:
                     nullable: true
                     properties:
                       full:
-                        description: |-
-                          A single cron entry with optional deterministic jitter. Shared by `Maintenance`'s
-                          quick/full schedules. ADR §3.7. `jitter` is a Go-style duration string (e.g. `30m`).
+                        description: Cron + jitter for `kopia maintenance run --full` (content reclamation).
                         properties:
                           cron:
+                            description: |-
+                              The cron expression, parsed by `croner`. May contain an `H` placeholder for
+                              deterministic per-schedule jitter (ADR §3.7).
                             type: string
                           jitter:
+                            description: |-
+                              Optional deterministic jitter window as a Go-style duration string (e.g.
+                              `30m`), derived from `(scheduleUID, slot)` so it is stable across restarts.
                             nullable: true
                             type: string
                         required:
                         - cron
                         type: object
                       quick:
-                        description: |-
-                          A single cron entry with optional deterministic jitter. Shared by `Maintenance`'s
-                          quick/full schedules. ADR §3.7. `jitter` is a Go-style duration string (e.g. `30m`).
+                        description: Cron + jitter for `kopia maintenance run` (quick = cheap index/log work).
                         properties:
                           cron:
+                            description: |-
+                              The cron expression, parsed by `croner`. May contain an `H` placeholder for
+                              deterministic per-schedule jitter (ADR §3.7).
                             type: string
                           jitter:
+                            description: |-
+                              Optional deterministic jitter window as a Go-style duration string (e.g.
+                              `30m`), derived from `(scheduleUID, slot)` so it is stable across restarts.
                             nullable: true
                             type: string
                         required:
                         - cron
                         type: object
                       timezone:
+                        description: IANA timezone both crons are evaluated in; absent means controller default.
                         nullable: true
                         type: string
                     required:
@@ -810,7 +959,19 @@ spec:
                     - quick
                     type: object
                   takeoverPolicy:
-                    description: What to do when another owner already holds the lease. Closed enum. ADR §3.7.
+                    description: |-
+                      What to do when another owner already holds the lease. Closed enum. ADR §3.7.
+
+                      ```
+                      use kopiur_api::TakeoverPolicy;
+
+                      // The safest default: never seize a lease another owner holds.
+                      assert_eq!(TakeoverPolicy::default(), TakeoverPolicy::Never);
+                      assert_eq!(
+                          serde_json::to_value(TakeoverPolicy::PromptCondition).unwrap(),
+                          serde_json::json!("PromptCondition"),
+                      );
+                      ```
                     enum:
                     - Never
                     - PromptCondition
@@ -837,17 +998,21 @@ spec:
                 nullable: true
                 type: string
               catalog:
+                description: Catalog-materialization status (discovered-backup count, last refresh).
                 nullable: true
                 properties:
                   discoveredBackupCount:
+                    description: How many `Backup` CRs were materialized from the catalog scan.
                     format: int64
                     nullable: true
                     type: integer
                   lastRefreshAt:
+                    description: RFC 3339 timestamp of the last catalog refresh.
                     nullable: true
                     type: string
                 type: object
               conditions:
+                description: Standard Kubernetes conditions (e.g. `Connected`, `MaintenanceOwned`). ADR §3.2.
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
                   properties:
@@ -880,31 +1045,49 @@ spec:
                   type: object
                 type: array
               observedGeneration:
+                description: '`metadata.generation` of the `spec` last reconciled; drives staleness detection.'
                 format: int64
                 nullable: true
                 type: integer
               phase:
-                description: Lifecycle phase of a repository. ADR §3.1 status.
+                description: |-
+                  Lifecycle phase of a repository. ADR §3.1 status.
+
+                  A freshly admitted CR starts in the `#[default]` [`RepositoryPhase::Pending`]:
+
+                  ```
+                  use kopiur_api::repository::RepositoryPhase;
+
+                  assert_eq!(RepositoryPhase::default(), RepositoryPhase::Pending);
+                  // Serializes as a bare string (closed unit enum).
+                  assert_eq!(
+                      serde_json::to_value(RepositoryPhase::Ready).unwrap(),
+                      serde_json::json!("Ready")
+                  );
+                  ```
                 enum:
                 - Pending
                 - Initializing
                 - Ready
                 - Degraded
                 - Failed
-                - null
                 nullable: true
                 type: string
               storageStats:
+                description: Repository size and snapshot counts from the last catalog scan.
                 nullable: true
                 properties:
                   lastObservedAt:
+                    description: RFC 3339 timestamp these stats were last observed.
                     nullable: true
                     type: string
                   snapshotCount:
+                    description: Total snapshots present in the repository (across all identities).
                     format: int64
                     nullable: true
                     type: integer
                   totalSize:
+                    description: Human-readable total on-disk size (e.g. `412Gi`).
                     nullable: true
                     type: string
                 type: object

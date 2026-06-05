@@ -36,11 +36,19 @@ use serde::{Deserialize, Serialize};
 pub struct ClusterRepositorySpec {
     /// Exactly one backend, enforced at the type level by the `Backend` enum. ADR §3.1.
     pub backend: Backend,
+    /// Repository password, always a Secret reference. As this CR is cluster-scoped,
+    /// the ref MUST carry an explicit `namespace` (webhook-enforced). ADR §3.1/§3.2.
     pub encryption: Encryption,
+    /// What to do when the repository does not yet exist. Same semantics as
+    /// `Repository.spec.create`. ADR §3.1/§3.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create: Option<CreateBehavior>,
+    /// Cache sizing inherited by consumer `Backup`/`Restore` movers unless overridden. ADR §3.1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_defaults: Option<CacheDefaults>,
+    /// Bounds materialization of `origin: discovered` `Backup` CRs from the kopia
+    /// catalog. For a shared repo this also picks where to land discovered backups
+    /// via `catalog.fallbackNamespace`. ADR §3.1/§3.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogBounds>,
     /// Tenancy gate — webhook-enforced on every consumer CR. ADR §3.2.
@@ -75,6 +83,14 @@ pub enum AllowedNamespaces {
 
 impl AllowedNamespaces {
     /// Stable discriminant string for status/metrics.
+    ///
+    /// ```
+    /// use kopiur_api::cluster_repository::AllowedNamespaces;
+    ///
+    /// let ns = AllowedNamespaces::List(vec!["production".into(), "staging".into()]);
+    /// assert_eq!(ns.kind_str(), "List");
+    /// assert_eq!(AllowedNamespaces::All(true).kind_str(), "All");
+    /// ```
     pub fn kind_str(&self) -> &'static str {
         match self {
             AllowedNamespaces::List(_) => "List",
@@ -89,8 +105,12 @@ impl AllowedNamespaces {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentityTemplate {
+    /// Tera/Jinja2 template for the kopia identity *hostname*, rendered at admission
+    /// (e.g. `{{ .Namespace }}`). ADR §3.2/§4.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname_template: Option<String>,
+    /// Tera/Jinja2 template for the kopia identity *username*, rendered at admission
+    /// (e.g. `{{ .Namespace }}-{{ .ConfigName }}`). ADR §3.2/§4.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username_template: Option<String>,
 }
@@ -99,8 +119,10 @@ pub struct IdentityTemplate {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ClusterRepositoryStatus {
+    /// Current lifecycle phase (shared with `Repository`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<RepositoryPhase>,
+    /// `metadata.generation` of the `spec` last reconciled; drives staleness detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
     /// Kopia repository unique ID.
@@ -112,10 +134,13 @@ pub struct ClusterRepositoryStatus {
     /// Number of namespaces currently resolved by `spec.allowedNamespaces`. ADR §3.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_namespace_count: Option<i64>,
+    /// Repository size and snapshot counts from the last catalog scan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_stats: Option<StorageStats>,
+    /// Catalog-materialization status (discovered-backup count, last refresh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogStatus>,
+    /// Standard Kubernetes conditions (e.g. `Connected`, `MaintenanceOwned`). ADR §3.2.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
 }

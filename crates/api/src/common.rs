@@ -37,10 +37,14 @@ pub trait PhaseLabel: Copy + PartialEq + 'static {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretKeyRef {
+    /// Name of the `Secret`.
     pub name: String,
+    /// Namespace of the `Secret`. Absent = same namespace as the referrer;
+    /// required for cluster-scoped CRs which have no own namespace (ADR §3.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
-    /// Defaults are documented per-field on the consuming struct.
+    /// Which key inside the `Secret` to read. Defaults are documented per-field on
+    /// the consuming struct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 }
@@ -50,7 +54,10 @@ pub struct SecretKeyRef {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretRef {
+    /// Name of the `Secret`.
     pub name: String,
+    /// Namespace of the `Secret`. Absent = same namespace as the referrer;
+    /// required for cluster-scoped CRs (ADR §3.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
 }
@@ -59,8 +66,10 @@ pub struct SecretRef {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigMapKeyRef {
+    /// Name of the `ConfigMap` holding the value (e.g. a CA bundle).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_map_name: Option<String>,
+    /// Which key inside the `ConfigMap` to read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 }
@@ -69,6 +78,8 @@ pub struct ConfigMapKeyRef {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TlsConfig {
+    /// CA bundle (PEM) used to verify the endpoint's certificate, sourced from a
+    /// `ConfigMap`. Preferred over `insecureSkipVerify` for self-signed endpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_bundle_ref: Option<ConfigMapKeyRef>,
     /// Skip TLS certificate verification (still uses TLS). Maps to kopia's
@@ -87,10 +98,24 @@ pub struct TlsConfig {
 ///
 /// This is a closed enum: a consumer's `repository.kind` is always exactly one
 /// of these two values, so reconcilers `match` it exhaustively.
+///
+/// ```
+/// use kopiur_api::common::RepositoryKind;
+///
+/// // Defaults to the namespaced `Repository`, so a same-namespace ref needs no `kind`.
+/// assert_eq!(RepositoryKind::default(), RepositoryKind::Repository);
+/// // Serializes to the bare CRD kind name (no payload — a plain string).
+/// assert_eq!(
+///     serde_json::to_value(RepositoryKind::ClusterRepository).unwrap(),
+///     "ClusterRepository"
+/// );
+/// ```
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 pub enum RepositoryKind {
+    /// The namespaced `Repository` CRD; the default when `kind` is omitted.
     #[default]
     Repository,
+    /// The cluster-scoped `ClusterRepository` CRD; namespace is meaningless for it.
     ClusterRepository,
 }
 
@@ -103,8 +128,10 @@ pub enum RepositoryKind {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryRef {
+    /// Which repository CRD this points at; defaults to [`RepositoryKind::Repository`].
     #[serde(default)]
     pub kind: RepositoryKind,
+    /// Name of the referenced `Repository`/`ClusterRepository`.
     pub name: String,
     /// Cross-namespace `Repository` reference; ignored/forbidden for `ClusterRepository`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,12 +151,18 @@ pub struct Encryption {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateBehavior {
+    /// Create the repository if it does not exist yet. Off by default, so a typo'd
+    /// backend can't silently spin up a brand-new empty repository.
     #[serde(default)]
     pub enabled: bool,
+    /// kopia encryption algorithm for a freshly-created repository (e.g.
+    /// `AES256-GCM-HMAC-SHA256`); only consulted at creation time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption: Option<String>,
+    /// kopia object splitter for a freshly-created repository; creation-time only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub splitter: Option<String>,
+    /// kopia content hash algorithm for a freshly-created repository; creation-time only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
 }
@@ -138,12 +171,16 @@ pub struct CreateBehavior {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheDefaults {
+    /// Size of the PVC backing the mover's kopia cache (e.g. `10Gi`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<String>,
+    /// StorageClass for the cache PVC; absent uses the cluster default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_class_name: Option<String>,
+    /// kopia metadata cache budget in MiB (`--metadata-cache-size-mb`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_cache_size_mb: Option<i64>,
+    /// kopia content cache budget in MiB (`--content-cache-size-mb`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_cache_size_mb: Option<i64>,
 }
@@ -152,8 +189,13 @@ pub struct CacheDefaults {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogBounds {
+    /// How many discovered `Backup` CRs to keep materialized; bounds etcd footprint
+    /// for large repositories. Never deletes real snapshots (discovered backups are
+    /// always `deletionPolicy: Retain`). ADR §3.1/§4.5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain: Option<CatalogRetain>,
+    /// How often to re-scan the repository for new snapshots to materialize
+    /// (Go-style duration, e.g. `1h`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_interval: Option<String>,
     /// Where to materialize discovered `Backup`s whose identity hostname does not
@@ -162,12 +204,14 @@ pub struct CatalogBounds {
     pub fallback_namespace: Option<String>,
 }
 
+/// Bounds on the *number* of discovered `Backup` CRs kept materialized. ADR §3.1 `catalog.retain`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogRetain {
     /// Most-recent N per `username@hostname:path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_identity: Option<i64>,
+    /// Drop materialized discovered `Backup`s for snapshots older than this many days.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age_days: Option<i64>,
 }
@@ -176,16 +220,22 @@ pub struct CatalogRetain {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Retention {
+    /// Keep the N most-recent snapshots regardless of age.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_latest: Option<u32>,
+    /// Keep one snapshot per hour for the most-recent N hours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_hourly: Option<u32>,
+    /// Keep one snapshot per day for the most-recent N days.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_daily: Option<u32>,
+    /// Keep one snapshot per week for the most-recent N weeks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_weekly: Option<u32>,
+    /// Keep one snapshot per month for the most-recent N months.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_monthly: Option<u32>,
+    /// Keep one snapshot per year for the most-recent N years.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_annual: Option<u32>,
 }
@@ -194,8 +244,12 @@ pub struct Retention {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
+    /// Override the `username` portion of `username@hostname:path`; absent uses the
+    /// resolved default. Templated with `tera` and pinned at admission (ADR §4.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    /// Override the `hostname` portion of `username@hostname:path`; absent uses the
+    /// resolved default. Templated with `tera` and pinned at admission (ADR §4.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
 }
@@ -204,8 +258,11 @@ pub struct Identity {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedIdentity {
+    /// The final `username` kopia records, fixed at admission.
     pub username: String,
+    /// The final `hostname` kopia records, fixed at admission.
     pub hostname: String,
+    /// The resolved snapshot source path, when applicable (`username@hostname:path`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
 }
@@ -214,8 +271,12 @@ pub struct ResolvedIdentity {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FailurePolicy {
+    /// Passed through to the mover `Job.spec.backoffLimit` — how many times a failed
+    /// run is retried before the Job is marked failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backoff_limit: Option<i32>,
+    /// Passed through to the mover `Job.spec.activeDeadlineSeconds` — wall-clock cap
+    /// after which a still-running run is killed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_deadline_seconds: Option<i64>,
 }
@@ -227,10 +288,13 @@ pub struct FailurePolicy {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MoverSpec {
+    /// Resource requests/limits for the mover container.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<k8s_openapi::api::core::v1::ResourceRequirements>,
+    /// Override the repository's [`CacheDefaults`] for this recipe's movers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<CacheDefaults>,
+    /// Security context applied to the mover container.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_context: Option<k8s_openapi::api::core::v1::SecurityContext>,
     /// Opt-in, namespace-gated; preserves UID/GID on restore. ADR §4.11/§G16.
@@ -247,7 +311,9 @@ pub struct MoverSpec {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PodSelector {
+    /// Label selector matching the workload pod(s) to read context/hooks from.
     pub pod_selector: LabelSelector,
+    /// Which container within the matched pod; absent uses the first/only container.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
 }
@@ -257,7 +323,9 @@ pub struct PodSelector {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigRef {
+    /// Name of the referenced `BackupConfig`.
     pub name: String,
+    /// Namespace of the `BackupConfig`; absent = same namespace as the referrer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
 }
@@ -267,7 +335,9 @@ pub struct ConfigRef {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectRef {
+    /// Name of the referenced object.
     pub name: String,
+    /// Namespace of the referenced object; absent = same namespace as the referrer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
 }
@@ -280,6 +350,16 @@ pub struct ObjectRef {
 /// enforces that any new variant added later must be handled in every match site,
 /// preventing the class of bug where a new policy slips into production without a
 /// corresponding reconcile branch.
+///
+/// ```
+/// use kopiur_api::common::DeletionPolicy;
+///
+/// // Produced backups default to deleting the snapshot with the CR.
+/// assert_eq!(DeletionPolicy::default(), DeletionPolicy::Delete);
+/// // Variants serialize to their bare PascalCase names (plain string enum).
+/// assert_eq!(serde_json::to_value(DeletionPolicy::Retain).unwrap(), "Retain");
+/// assert_eq!(serde_json::to_value(DeletionPolicy::Orphan).unwrap(), "Orphan");
+/// ```
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 pub enum DeletionPolicy {
     /// Default for `origin: scheduled`/`manual`. Finalizer runs
@@ -300,7 +380,11 @@ pub enum DeletionPolicy {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CronSpec {
+    /// The cron expression, parsed by `croner`. May contain an `H` placeholder for
+    /// deterministic per-schedule jitter (ADR §3.7).
     pub cron: String,
+    /// Optional deterministic jitter window as a Go-style duration string (e.g.
+    /// `30m`), derived from `(scheduleUID, slot)` so it is stable across restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter: Option<String>,
 }
@@ -320,6 +404,25 @@ impl RepositoryRef {
     ///   ignored on both sides (cluster-scoped).
     ///
     /// `target_namespace` is `None` for a `ClusterRepository` target.
+    ///
+    /// ```
+    /// use kopiur_api::common::{RepositoryKind, RepositoryRef};
+    ///
+    /// // A namespaced ref that omits `namespace` resolves against the owner's namespace.
+    /// let r = RepositoryRef { kind: RepositoryKind::Repository, name: "nas".into(), namespace: None };
+    /// assert!(r.resolves_to("apps", RepositoryKind::Repository, "nas", Some("apps")));
+    /// assert!(!r.resolves_to("apps", RepositoryKind::Repository, "nas", Some("other")));
+    ///
+    /// // A cluster-scoped target ignores namespace entirely.
+    /// let cr = RepositoryRef {
+    ///     kind: RepositoryKind::ClusterRepository,
+    ///     name: "hetzner".into(),
+    ///     namespace: None,
+    /// };
+    /// assert!(cr.resolves_to("apps", RepositoryKind::ClusterRepository, "hetzner", None));
+    /// // Kind must match even when names collide.
+    /// assert!(!r.resolves_to("apps", RepositoryKind::ClusterRepository, "nas", None));
+    /// ```
     pub fn resolves_to(
         &self,
         owner_namespace: &str,

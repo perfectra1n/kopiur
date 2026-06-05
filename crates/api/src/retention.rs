@@ -106,6 +106,32 @@ where
 /// Returns a [`KeptSet`] partitioning every input id into `keep`/`delete`. Input
 /// order is irrelevant; `keep` is returned newest-first, `delete` newest-first too.
 /// Ties on `end_time` are broken by id for determinism.
+///
+/// ```
+/// use chrono::{DateTime, TimeZone, Utc};
+/// use kopiur_api::{select_kept, BackupLike};
+/// use kopiur_api::common::Retention;
+///
+/// // A trivial fake honoring BackupLike — no kube CRs needed for selection.
+/// struct Snap { id: String, end: DateTime<Utc> }
+/// impl BackupLike for Snap {
+///     fn end_time(&self) -> DateTime<Utc> { self.end }
+///     fn id(&self) -> &str { &self.id }
+/// }
+/// let day = |d: u32| Utc.with_ymd_and_hms(2026, 5, d, 2, 0, 0).single().unwrap();
+/// let snaps = vec![
+///     Snap { id: "d24".into(), end: day(24) },
+///     Snap { id: "d23".into(), end: day(23) },
+///     Snap { id: "d22".into(), end: day(22) },
+/// ];
+///
+/// // keepDaily: 2 — keep the newest per day for the 2 newest days; prune the rest.
+/// let policy: Retention =
+///     serde_json::from_value(serde_json::json!({ "keepDaily": 2 })).unwrap();
+/// let kept = select_kept(&snaps, &policy);
+/// assert_eq!(kept.keep, vec!["d24", "d23"]); // newest-first
+/// assert_eq!(kept.delete, vec!["d22"]);
+/// ```
 pub fn select_kept<T: BackupLike>(backups: &[T], policy: &Retention) -> KeptSet {
     if backups.is_empty() {
         return KeptSet::default();

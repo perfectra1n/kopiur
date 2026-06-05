@@ -28,6 +28,29 @@ use std::collections::BTreeMap;
 /// A `RepositoryRef` is well-formed: a `ClusterRepository` reference is by name
 /// only, so `namespace` MUST be absent (ADR §3.2/§3.3). A namespaced `Repository`
 /// reference may carry a namespace (cross-namespace references are allowed).
+///
+/// ```
+/// use kopiur_api::common::RepositoryRef;
+/// use kopiur_api::validate::validate_repository_ref;
+/// use kopiur_api::ValidationError;
+///
+/// // OK: a namespaced Repository reference may name a namespace.
+/// let ok: RepositoryRef = serde_json::from_value(serde_json::json!({
+///     "kind": "Repository", "name": "nas-primary", "namespace": "backups",
+/// }))
+/// .unwrap();
+/// assert!(validate_repository_ref(&ok).is_ok());
+///
+/// // Err: a ClusterRepository is referenced by name alone — a namespace is forbidden.
+/// let bad: RepositoryRef = serde_json::from_value(serde_json::json!({
+///     "kind": "ClusterRepository", "name": "shared", "namespace": "oops",
+/// }))
+/// .unwrap();
+/// assert_eq!(
+///     validate_repository_ref(&bad).unwrap_err(),
+///     ValidationError::ClusterRepoNamespaceForbidden { namespace: "oops".to_string() },
+/// );
+/// ```
 pub fn validate_repository_ref(r: &RepositoryRef) -> ValidationResult {
     match r.kind {
         RepositoryKind::ClusterRepository => match &r.namespace {
@@ -210,6 +233,21 @@ pub fn validate_repository_maintenance(
 /// deterministically in [`crate::jitter::substitute_h`] (not in the parser), we
 /// substitute every `H` field with the fixed placeholder `0` purely to validate the
 /// expression's *shape* here. The real `H` spread is produced at scheduling time.
+///
+/// ```
+/// use kopiur_api::validate::validate_cron;
+/// use kopiur_api::ValidationError;
+///
+/// // Valid 5-field crons pass — including Jenkins-style `H` (resolved later).
+/// assert!(validate_cron("0 2 * * *").is_ok());
+/// assert!(validate_cron("H 2 * * *").is_ok());
+///
+/// // Garbage is rejected at apply time, not at first reconcile (ADR §4.1).
+/// assert!(matches!(
+///     validate_cron("not a cron"),
+///     Err(ValidationError::InvalidCron { .. }),
+/// ));
+/// ```
 pub fn validate_cron(expr: &str) -> ValidationResult {
     let probe = expr
         .split_whitespace()

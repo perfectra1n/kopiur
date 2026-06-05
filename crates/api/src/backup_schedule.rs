@@ -1,5 +1,21 @@
 //! The `BackupSchedule` CRD — *when* a backup runs. Creates `Backup` CRs on a
 //! cron schedule in the `BackupConfig`'s namespace. ADR-0001 §3.5, ADR-0003 §4.4.
+//!
+//! ```
+//! use kopiur_api::{BackupScheduleSpec, ConcurrencyPolicy};
+//!
+//! // The cluster path: YAML -> JSON value -> typed (never serde_yaml -> typed).
+//! let spec: BackupScheduleSpec = serde_json::from_value(serde_json::json!({
+//!     "configRef": { "name": "postgres-data" },
+//!     "schedule": { "cron": "H 2 * * *", "jitter": "30m" },
+//! }))
+//! .unwrap();
+//! assert_eq!(spec.config_ref.name, "postgres-data");
+//! // GitOps-friendly defaults: no immediate fire, not suspended, Forbid overlap.
+//! assert!(!spec.schedule.run_on_create);
+//! assert!(!spec.schedule.suspend);
+//! assert_eq!(spec.schedule.concurrency_policy, ConcurrencyPolicy::Forbid);
+//! ```
 
 use crate::common::ConfigRef;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
@@ -25,7 +41,10 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(rename_all = "camelCase")]
 pub struct BackupScheduleSpec {
+    /// The `BackupConfig` (the recipe) this schedule invokes; resolved in the
+    /// schedule's own namespace. ADR §3.5 separates recipe from schedule.
     pub config_ref: ConfigRef,
+    /// Cron, jitter, timezone, and concurrency for the firing cadence. ADR §3.5.
     pub schedule: ScheduleSpec,
     /// Bounds *failed* `Backup` CRs from this schedule. Successful retention is
     /// GFS-driven on `BackupConfig.spec.retention` — there is deliberately NO
@@ -43,6 +62,8 @@ pub struct ScheduleSpec {
     /// Deterministic jitter (Go-style duration), derived from `(scheduleUID, slot)`. ADR §4.1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter: Option<String>,
+    /// IANA timezone the cron is evaluated in (e.g. `America/Los_Angeles`).
+    /// Absent means the controller's configured default. ADR §4.1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
     /// GitOps-friendly default: do NOT fire immediately on create. ADR §4.1 (G3).
@@ -51,36 +72,59 @@ pub struct ScheduleSpec {
     /// Skip future firings while true. ADR §5.9.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub suspend: bool,
+    /// How to handle a firing while a prior run is still in flight. ADR §4.1.
     #[serde(default)]
     pub concurrency_policy: ConcurrencyPolicy,
+    /// If a slot is missed by more than this many seconds (e.g. operator was
+    /// down), skip it instead of firing late. ADR §4.1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub starting_deadline_seconds: Option<i64>,
 }
 
 /// What to do when a previous run is still in flight. Closed enum, default `Forbid`. ADR §4.1 (G5/G18).
+///
+/// ```
+/// use kopiur_api::ConcurrencyPolicy;
+///
+/// // The safe default: never let runs pile up.
+/// assert_eq!(ConcurrencyPolicy::default(), ConcurrencyPolicy::Forbid);
+/// // Serializes as the bare PascalCase string the CRD schema expects.
+/// assert_eq!(
+///     serde_json::to_value(ConcurrencyPolicy::Replace).unwrap(),
+///     serde_json::json!("Replace"),
+/// );
+/// ```
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 pub enum ConcurrencyPolicy {
     /// Skip the new run; surface a condition rather than pile up (default).
     #[default]
     Forbid,
+    /// Allow the new run to start alongside the in-flight one.
     Allow,
+    /// Cancel the in-flight run and start the new one in its place.
     Replace,
 }
 
+/// Observed state of a `BackupSchedule`: pinned firing slots and failure run. ADR §3.5.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupScheduleStatus {
+    /// The `metadata.generation` this status reflects, for staleness detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
     /// Most recent firing (cron + jitter, pinned). ADR §3.5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_schedule: Option<ScheduleRef>,
+    /// The next firing slot the controller has computed (cron + jitter, pinned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_schedule: Option<ScheduleRef>,
+    /// The most recent firing whose `Backup` succeeded. ADR §3.5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_successful_schedule: Option<ScheduleRef>,
+    /// Count of back-to-back failed runs; resets on success. Drives alerting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consecutive_failures: Option<i64>,
+    /// Standard Kubernetes conditions surfacing schedule health. ADR §5 status conventions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
 }
@@ -93,19 +137,25 @@ pub struct BackupScheduleStatus {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleRef {
+    /// The RFC3339 instant this slot fired (or is scheduled to). Accepts the
+    /// `scheduledAt` alias on the wire (see the struct docs) but always
+    /// serializes back as `at`.
     #[serde(
         default,
         alias = "scheduledAt",
         skip_serializing_if = "Option::is_none"
     )]
     pub at: Option<String>,
+    /// The `Backup` CR this slot produced, when one was created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_ref: Option<BackupReference>,
 }
 
+/// A by-name reference to a `Backup` CR created by a schedule slot. ADR §3.5.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupReference {
+    /// The `Backup`'s `metadata.name` (same namespace as the schedule).
     pub name: String,
 }
 

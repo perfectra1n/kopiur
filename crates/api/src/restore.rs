@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
+/// Desired state of a [`Restore`]: where to read from, where to write to, and how
+/// to behave when the snapshot is missing. ADR §3.6/§4.6.
 pub struct RestoreSpec {
     /// Derived from `source` when omitted; REQUIRED only with `source.identity`. ADR §3.6/§4.6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -31,8 +33,10 @@ pub struct RestoreSpec {
     /// Absence = passive populator mode. ADR §3.6/§4.7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<RestoreTarget>,
+    /// kopia restore behavior (file deletion, permission/atomicity handling). ADR §4.6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<RestoreOptions>,
+    /// Missing-snapshot handling and wait timeout. ADR §4.6 (G7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<RestorePolicy>,
 }
@@ -55,6 +59,19 @@ pub enum RestoreSource {
 
 impl RestoreSource {
     /// Stable discriminant string for status/metrics.
+    ///
+    /// ```
+    /// use kopiur_api::common::ObjectRef;
+    /// use kopiur_api::restore::RestoreSource;
+    ///
+    /// let src = RestoreSource::BackupRef(ObjectRef { name: "pg-20260524".into(), namespace: None });
+    /// assert_eq!(src.kind_str(), "BackupRef");
+    ///
+    /// // Externally tagged: each variant deserializes under its own camelCase key.
+    /// let from_cfg: RestoreSource =
+    ///     serde_json::from_value(serde_json::json!({ "fromConfig": { "name": "pg" } })).unwrap();
+    /// assert_eq!(from_cfg.kind_str(), "FromConfig");
+    /// ```
     pub fn kind_str(&self) -> &'static str {
         match self {
             RestoreSource::BackupRef(_) => "BackupRef",
@@ -64,12 +81,17 @@ impl RestoreSource {
     }
 }
 
+/// The `fromConfig` source: resolve a snapshot via a `BackupConfig`'s identity,
+/// even when no `Backup` CR exists yet (deploy-or-restore). ADR §4.6.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FromConfig {
+    /// Name of the `BackupConfig` whose identity selects the snapshot.
     pub name: String,
+    /// Namespace of the `BackupConfig`; absent = the `Restore`'s own namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+    /// Restore the newest snapshot at or before this RFC3339 timestamp (point-in-time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub as_of: Option<String>,
     /// 0 = latest, 1 = previous, ... ADR §3.6.
@@ -77,22 +99,30 @@ pub struct FromConfig {
     pub offset: Option<i64>,
 }
 
+/// The `identity` source: a raw kopia `username@hostname:path` identity for
+/// foreign writers or snapshots aged out of the catalog. Requires `spec.repository`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentitySource {
+    /// The kopia `username` to match.
     pub username: String,
+    /// The kopia `hostname` to match.
     pub hostname: String,
+    /// The kopia source path to match; absent matches any path for the identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
-    /// Renamed to match the ADR wire shape exactly (`snapshotID`, capital `ID`).
+    /// Pin an exact kopia snapshot by ID. Renamed to match the ADR wire shape
+    /// exactly (`snapshotID`, capital `ID`).
     #[serde(
         default,
         rename = "snapshotID",
         skip_serializing_if = "Option::is_none"
     )]
     pub snapshot_id: Option<String>,
+    /// Restore the newest snapshot at or before this RFC3339 timestamp (point-in-time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub as_of: Option<String>,
+    /// 0 = latest, 1 = previous, ... mutually exclusive with `snapshotID`/`asOf` in practice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<i64>,
 }
@@ -112,6 +142,19 @@ pub enum RestoreTarget {
 
 impl RestoreTarget {
     /// Stable discriminant string for status/metrics.
+    ///
+    /// ```
+    /// use kopiur_api::common::ObjectRef;
+    /// use kopiur_api::restore::RestoreTarget;
+    ///
+    /// let into_existing = RestoreTarget::PvcRef(ObjectRef { name: "data".into(), namespace: None });
+    /// assert_eq!(into_existing.kind_str(), "PvcRef");
+    ///
+    /// // Externally tagged: `{ pvc: {...} }` selects the create-PVC variant.
+    /// let created: RestoreTarget =
+    ///     serde_json::from_value(serde_json::json!({ "pvc": { "name": "restored" } })).unwrap();
+    /// assert_eq!(created.kind_str(), "Pvc");
+    /// ```
     pub fn kind_str(&self) -> &'static str {
         match self {
             RestoreTarget::Pvc(_) => "Pvc",
@@ -120,21 +163,29 @@ impl RestoreTarget {
     }
 }
 
+/// Template for a PVC the operator creates as the restore target. ADR §3.6.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PvcTemplate {
+    /// Name of the PVC to create.
     pub name: String,
+    /// StorageClass for the new PVC; absent uses the cluster default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_class_name: Option<String>,
+    /// Requested size of the new PVC (e.g. `100Gi`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<String>,
+    /// Access modes for the new PVC (e.g. `["ReadWriteOnce"]`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub access_modes: Vec<String>,
 }
 
+/// kopia restore behavior knobs. ADR §4.6.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreOptions {
+    /// Delete files in the target that are not present in the snapshot (make the
+    /// target an exact mirror). Off by default — additive restore is the safe default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub enable_file_deletion: bool,
     /// Default true; surfaces a condition if any errors occurred. ADR §4.6.
@@ -145,17 +196,28 @@ pub struct RestoreOptions {
     pub write_files_atomically: Option<bool>,
 }
 
+/// How the restore reacts to a missing snapshot and how long it waits. ADR §4.6 (G7).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestorePolicy {
     /// Default `Fail` for explicit sources; `Continue` for `fromConfig`. ADR §4.6 (G7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_missing_snapshot: Option<OnMissingSnapshot>,
+    /// How long to wait for the source snapshot to appear before giving up
+    /// (Go-style duration string, e.g. `5m`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_timeout: Option<String>,
 }
 
 /// What to do when the resolved source matches no snapshot. Closed enum. ADR §4.6 (G7).
+///
+/// ```
+/// use kopiur_api::restore::OnMissingSnapshot;
+///
+/// // Fail-closed is the default so an explicit restore can't silently no-op.
+/// assert_eq!(OnMissingSnapshot::default(), OnMissingSnapshot::Fail);
+/// assert_eq!(serde_json::to_value(OnMissingSnapshot::Continue).unwrap(), "Continue");
+/// ```
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 pub enum OnMissingSnapshot {
     /// Fail-closed; the default for explicit `backupRef`/`identity` sources.
@@ -168,11 +230,16 @@ pub enum OnMissingSnapshot {
 /// Lifecycle phase of a restore. Closed enum. ADR §3.6 status.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 pub enum RestorePhase {
+    /// Admitted but not yet acted on; the default initial phase.
     #[default]
     Pending,
+    /// Resolving the source to a concrete snapshot and pinning it to status.
     Resolving,
+    /// The mover `Job` is actively writing data into the target.
     Restoring,
+    /// The restore finished successfully.
     Completed,
+    /// The restore terminally failed; see `conditions` for the reason.
     Failed,
 }
 
@@ -195,63 +262,83 @@ impl crate::common::PhaseLabel for RestorePhase {
     }
 }
 
+/// Observed state of a [`Restore`], written by the controller/mover. ADR §3.6 status.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreStatus {
+    /// Current lifecycle phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<RestorePhase>,
+    /// `metadata.generation` last reconciled, so stale status is detectable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
     /// Pinned at admission; never re-resolved. ADR §3.6/§4.6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved: Option<ResolvedRestore>,
+    /// Resolved target details (the PVC written to / populator handshake).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<RestoreTargetStatus>,
+    /// Start/end timestamps for the restore run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing: Option<RestoreTiming>,
+    /// Bytes/files restored so far, patched periodically by the mover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<RestoreProgress>,
+    /// Standard Kubernetes conditions carrying the human-readable status/reason.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
 }
 
+/// The source resolved and pinned at admission, so a restore never silently retargets. ADR §4.6.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedRestore {
+    /// The concrete `Backup` CR the source resolved to, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_ref: Option<ObjectRef>,
+    /// The repository the snapshot lives in, resolved from the source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<RepositoryRef>,
+    /// Timestamp at which the source was pinned (RFC3339).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_at: Option<String>,
+    /// The resolved kopia identity (`username@hostname:path`) of the snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<ResolvedIdentity>,
 }
 
+/// Resolved restore target details written to status. ADR §3.6.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreTargetStatus {
     /// Populator handshake (passive / pvc-create modes). ADR §3.6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pvc_prime: Option<String>,
+    /// The PVC actually written to (created or pre-existing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pvc_ref: Option<ObjectRef>,
 }
 
+/// Start/end timestamps of a restore run. ADR §3.6 status.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreTiming {
+    /// When the mover began restoring (RFC3339).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_time: Option<String>,
+    /// When the restore reached a terminal phase (RFC3339).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_time: Option<String>,
 }
 
+/// Live progress counters patched by the mover during a restore. ADR §3.6 status.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreProgress {
+    /// Total bytes restored so far.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_restored: Option<i64>,
+    /// Total files restored so far.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files_restored: Option<i64>,
 }

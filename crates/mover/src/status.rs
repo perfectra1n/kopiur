@@ -64,6 +64,27 @@ fn timing_from_result(r: &SnapshotCreateResult) -> BackupTiming {
 /// A structured terminal-failure block (ADR §4.10): kopia error class, the last
 /// stderr lines, and a retry recommendation. Written to `status.failure` before
 /// the mover exits non-zero.
+///
+/// Built directly from a [`kopiur_kopia::KopiaError`]; the class, stderr tail,
+/// exit code, and retry hint all carry through:
+///
+/// ```
+/// use kopiur_kopia::{KopiaError, KopiaErrorClass};
+/// use kopiur_mover::status::FailureBlock;
+///
+/// let err = KopiaError::NonZeroExit {
+///     args: "repository connect".into(),
+///     code: Some(1),
+///     class: KopiaErrorClass::AuthFailure,
+///     stderr_tail: "invalid repository password".into(),
+/// };
+/// let fb = FailureBlock::from(&err);
+/// assert_eq!(fb.kopia_error_class, "AuthFailure");
+/// assert_eq!(fb.exit_code, Some(1));
+/// assert_eq!(fb.stderr_tail.as_deref(), Some("invalid repository password"));
+/// // A wrong password is not worth a blind retry.
+/// assert!(!fb.retry_recommended);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FailureBlock {
@@ -99,6 +120,14 @@ impl From<&KopiaError> for FailureBlock {
 }
 
 /// The phase a mover run reports.
+///
+/// ```
+/// use kopiur_mover::status::MoverPhase;
+///
+/// assert_eq!(MoverPhase::Running.as_str(), "Running");
+/// assert_eq!(MoverPhase::Succeeded.as_str(), "Succeeded");
+/// assert_eq!(MoverPhase::Failed.as_str(), "Failed");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MoverPhase {
     /// kopia is running.
@@ -122,6 +151,21 @@ impl MoverPhase {
 
 /// A status update the mover PATCHes onto the CR. This is the payload shape;
 /// the kube call wraps it under `{ "status": ... }`.
+///
+/// [`StatusUpdate::as_patch_body`] nests the payload under `status` for a
+/// status-subresource merge PATCH:
+///
+/// ```
+/// use chrono::{DateTime, Utc};
+/// use kopiur_mover::status::StatusUpdate;
+///
+/// let observed_at: DateTime<Utc> = "2026-06-01T12:00:00Z".parse().unwrap();
+/// let update = StatusUpdate::running(observed_at);
+/// assert_eq!(update.phase, "Running");
+///
+/// let body = update.as_patch_body();
+/// assert_eq!(body["status"]["phase"], "Running");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusUpdate {

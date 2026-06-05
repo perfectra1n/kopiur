@@ -17,6 +17,29 @@ pub const STDERR_TAIL_LINES: usize = 20;
 /// "should we retry?" decision in the mover, not to be exhaustive. Unknown
 /// failures map to [`KopiaErrorClass::Unknown`] and are treated as
 /// non-retryable by default.
+///
+/// Classification reads kopia's stderr; the class then drives the retry hint and
+/// round-trips through its stable label:
+///
+/// ```
+/// use kopiur_kopia::KopiaErrorClass;
+///
+/// // A backend down / unreachable error is transient → worth a retry.
+/// let class = KopiaErrorClass::classify("ERROR error connecting to repository: dial tcp");
+/// assert_eq!(class, KopiaErrorClass::RepositoryUnavailable);
+/// assert!(class.is_retryable());
+///
+/// // A wrong repository password is not retryable without a config change.
+/// let auth = KopiaErrorClass::classify("invalid repository password");
+/// assert_eq!(auth, KopiaErrorClass::AuthFailure);
+/// assert!(!auth.is_retryable());
+///
+/// // The stable label round-trips through from_label/as_str.
+/// assert_eq!(class.as_str(), "RepositoryUnavailable");
+/// assert_eq!(KopiaErrorClass::from_label("RepositoryUnavailable"), class);
+/// // An unrecognized label degrades to Unknown.
+/// assert_eq!(KopiaErrorClass::from_label("bogus"), KopiaErrorClass::Unknown);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KopiaErrorClass {
     /// Repository could not be reached / opened (network, backend down,
@@ -151,6 +174,35 @@ impl fmt::Display for KopiaErrorClass {
 }
 
 /// Errors produced while invoking kopia or parsing its `--json` output.
+///
+/// Each variant's `Display` is actionable — it names the operation, the failure,
+/// and (for non-zero exits) the error class plus the stderr tail — so it can be
+/// dropped straight into a `status.failure` block (ADR §4.10):
+///
+/// ```
+/// use kopiur_kopia::{KopiaError, KopiaErrorClass};
+///
+/// let err = KopiaError::NonZeroExit {
+///     args: "snapshot create".into(),
+///     code: Some(1),
+///     class: KopiaErrorClass::Locked,
+///     stderr_tail: "repository is locked by another process".into(),
+/// };
+/// assert_eq!(
+///     err.to_string(),
+///     "kopia `snapshot create` exited with code Some(1) (class Locked): \
+///      repository is locked by another process",
+/// );
+/// // The class drives the retry decision; the stderr tail is recoverable.
+/// assert_eq!(err.class(), KopiaErrorClass::Locked);
+/// assert!(err.class().is_retryable());
+/// assert_eq!(err.stderr_tail(), Some("repository is locked by another process"));
+///
+/// // A timeout names the args and elapsed seconds, and maps to a retryable class.
+/// let to = KopiaError::Timeout { args: "maintenance run --full".into(), seconds: 3600 };
+/// assert_eq!(to.to_string(), "kopia `maintenance run --full` timed out after 3600s");
+/// assert_eq!(to.class(), KopiaErrorClass::RepositoryUnavailable);
+/// ```
 #[derive(thiserror::Error, Debug)]
 pub enum KopiaError {
     /// The kopia binary could not be spawned at all (missing binary, not

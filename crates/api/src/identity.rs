@@ -104,6 +104,26 @@ use std::error::Error as _;
 /// Precedence per component: **explicit override > template > default**. Returns a
 /// [`ValidationError::IdentityTemplateRender`] if a supplied template fails to
 /// render (so the webhook rejects it at admission rather than pinning garbage).
+///
+/// ```
+/// use kopiur_api::{IdentityInputs, resolve_identity, identity_string};
+///
+/// // Bare defaults: username <- object name, hostname <- namespace,
+/// // sourcePath <- /pvc/<pvcName> (ADR §4.2).
+/// let inputs = IdentityInputs {
+///     object_name: "postgres-data",
+///     namespace: "billing",
+///     overrides: None,
+///     template: None,
+///     pvc_name: Some("postgres-data"),
+///     source_path_override: None,
+/// };
+/// let id = resolve_identity(&inputs).unwrap();
+/// assert_eq!(id.username, "postgres-data");
+/// assert_eq!(id.hostname, "billing");
+/// assert_eq!(id.source_path.as_deref(), Some("/pvc/postgres-data"));
+/// assert_eq!(identity_string(&id), "postgres-data@billing:/pvc/postgres-data");
+/// ```
 pub fn resolve_identity(inputs: &IdentityInputs<'_>) -> ValidationResult<ResolvedIdentity> {
     let mut ctx = Context::new();
     ctx.insert("Namespace", inputs.namespace);
@@ -143,6 +163,23 @@ pub fn resolve_identity(inputs: &IdentityInputs<'_>) -> ValidationResult<Resolve
 /// Format a kopia identity string. With a source path: `username@hostname:path`;
 /// without one: `username@hostname` (kopia's identity-only form, used for catalog
 /// queries that aren't pinned to a path).
+///
+/// ```
+/// use kopiur_api::{IdentityInputs, resolve_identity, identity_string};
+///
+/// // No PVC => no sourcePath => kopia's identity-only `username@hostname` form.
+/// let inputs = IdentityInputs {
+///     object_name: "cfg",
+///     namespace: "ns",
+///     overrides: None,
+///     template: None,
+///     pvc_name: None,
+///     source_path_override: None,
+/// };
+/// let id = resolve_identity(&inputs).unwrap();
+/// assert_eq!(id.source_path, None);
+/// assert_eq!(identity_string(&id), "cfg@ns");
+/// ```
 pub fn identity_string(id: &ResolvedIdentity) -> String {
     match &id.source_path {
         Some(p) => format!("{}@{}:{}", id.username, id.hostname, p),

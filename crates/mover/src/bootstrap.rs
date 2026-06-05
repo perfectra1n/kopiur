@@ -28,6 +28,23 @@ pub const RESULT_CONFIGMAP_KEY: &str = "result.json";
 pub const MAX_RETURNED_SNAPSHOTS: usize = 1000;
 
 /// The outcome of a bootstrap run, serialized into the work-spec `ConfigMap`.
+///
+/// Constructed via [`BootstrapResult::ready`] (success) or
+/// [`BootstrapResult::failed`] (a [`kopiur_kopia::KopiaError`]); it round-trips
+/// through serde for the controller to read back:
+///
+/// ```
+/// use kopiur_mover::bootstrap::BootstrapResult;
+///
+/// let r = BootstrapResult::ready(true, Some("deadbeef".into()), 3, vec![], false);
+/// assert!(r.success && r.created);
+/// assert_eq!(r.unique_id.as_deref(), Some("deadbeef"));
+/// assert_eq!(r.snapshot_count, 3);
+///
+/// let json = serde_json::to_string(&r).unwrap();
+/// let back: BootstrapResult = serde_json::from_str(&json).unwrap();
+/// assert_eq!(back, r);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapResult {
@@ -108,6 +125,18 @@ impl BootstrapResult {
 ///   existing repository (the format blob backstop), so this can never smash
 ///   data; a genuinely unreachable backend simply fails `create` too, surfacing
 ///   the real error.
+///
+/// ```
+/// use kopiur_kopia::KopiaErrorClass;
+/// use kopiur_mover::bootstrap::should_attempt_create;
+///
+/// // Repo absent (or some other unclassified miss) + auto-create ⇒ create it.
+/// assert!(should_attempt_create(true, KopiaErrorClass::NotFound));
+/// // An existing repo we can't open (wrong password) must never be recreated.
+/// assert!(!should_attempt_create(true, KopiaErrorClass::AuthFailure));
+/// // auto-create off ⇒ never create, whatever the class.
+/// assert!(!should_attempt_create(false, KopiaErrorClass::NotFound));
+/// ```
 pub fn should_attempt_create(auto_create: bool, class: KopiaErrorClass) -> bool {
     auto_create
         && !matches!(

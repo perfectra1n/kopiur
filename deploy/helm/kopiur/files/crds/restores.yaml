@@ -31,11 +31,17 @@ spec:
             description: |-
               A restore operation. `target` is optional: absence = passive populator mode,
               consumed by a PVC's `spec.dataSourceRef`. ADR §3.6/§4.7.
+              Desired state of a [`Restore`]: where to read from, where to write to, and how
+              to behave when the snapshot is missing. ADR §3.6/§4.6.
             properties:
               options:
+                description: kopia restore behavior (file deletion, permission/atomicity handling). ADR §4.6.
                 nullable: true
                 properties:
                   enableFileDeletion:
+                    description: |-
+                      Delete files in the target that are not present in the snapshot (make the
+                      target an exact mirror). Off by default — additive restore is the safe default.
                     type: boolean
                   ignorePermissionErrors:
                     description: Default true; surfaces a condition if any errors occurred. ADR §4.6.
@@ -47,16 +53,29 @@ spec:
                     type: boolean
                 type: object
               policy:
+                description: Missing-snapshot handling and wait timeout. ADR §4.6 (G7).
                 nullable: true
                 properties:
                   onMissingSnapshot:
-                    description: What to do when the resolved source matches no snapshot. Closed enum. ADR §4.6 (G7).
+                    description: |-
+                      What to do when the resolved source matches no snapshot. Closed enum. ADR §4.6 (G7).
+
+                      ```
+                      use kopiur_api::restore::OnMissingSnapshot;
+
+                      // Fail-closed is the default so an explicit restore can't silently no-op.
+                      assert_eq!(OnMissingSnapshot::default(), OnMissingSnapshot::Fail);
+                      assert_eq!(serde_json::to_value(OnMissingSnapshot::Continue).unwrap(), "Continue");
+                      ```
                     enum:
                     - Fail
                     - Continue
                     nullable: true
                     type: string
                   waitTimeout:
+                    description: |-
+                      How long to wait for the source snapshot to appear before giving up
+                      (Go-style duration string, e.g. `5m`).
                     nullable: true
                     type: string
                 type: object
@@ -66,16 +85,13 @@ spec:
                 properties:
                   kind:
                     default: Repository
-                    description: |-
-                      Which kind of repository a consumer CR references. ADR §3.2/§3.3.
-
-                      This is a closed enum: a consumer's `repository.kind` is always exactly one
-                      of these two values, so reconcilers `match` it exhaustively.
+                    description: Which repository CRD this points at; defaults to [`RepositoryKind::Repository`].
                     enum:
                     - Repository
                     - ClusterRepository
                     type: string
                   name:
+                    description: Name of the referenced `Repository`/`ClusterRepository`.
                     type: string
                   namespace:
                     description: Cross-namespace `Repository` reference; ignored/forbidden for `ClusterRepository`.
@@ -98,8 +114,10 @@ spec:
                     description: A `Backup` CR (scheduled, manual, or discovered — all the same kind). Default mode.
                     properties:
                       name:
+                        description: Name of the referenced object.
                         type: string
                       namespace:
+                        description: Namespace of the referenced object; absent = same namespace as the referrer.
                         nullable: true
                         type: string
                     required:
@@ -111,11 +129,14 @@ spec:
                       (deploy-or-restore). Default `onMissingSnapshot: Continue`. ADR §4.6.
                     properties:
                       asOf:
+                        description: Restore the newest snapshot at or before this RFC3339 timestamp (point-in-time).
                         nullable: true
                         type: string
                       name:
+                        description: Name of the `BackupConfig` whose identity selects the snapshot.
                         type: string
                       namespace:
+                        description: Namespace of the `BackupConfig`; absent = the `Restore`'s own namespace.
                         nullable: true
                         type: string
                       offset:
@@ -130,22 +151,29 @@ spec:
                     description: A raw kopia identity (foreign writers / aged-out catalog). Requires `spec.repository`.
                     properties:
                       asOf:
+                        description: Restore the newest snapshot at or before this RFC3339 timestamp (point-in-time).
                         nullable: true
                         type: string
                       hostname:
+                        description: The kopia `hostname` to match.
                         type: string
                       offset:
+                        description: 0 = latest, 1 = previous, ... mutually exclusive with `snapshotID`/`asOf` in practice.
                         format: int64
                         nullable: true
                         type: integer
                       snapshotID:
-                        description: Renamed to match the ADR wire shape exactly (`snapshotID`, capital `ID`).
+                        description: |-
+                          Pin an exact kopia snapshot by ID. Renamed to match the ADR wire shape
+                          exactly (`snapshotID`, capital `ID`).
                         nullable: true
                         type: string
                       sourcePath:
+                        description: The kopia source path to match; absent matches any path for the identity.
                         nullable: true
                         type: string
                       username:
+                        description: The kopia `username` to match.
                         type: string
                     required:
                     - hostname
@@ -165,15 +193,19 @@ spec:
                     description: Operator creates the PVC.
                     properties:
                       accessModes:
+                        description: Access modes for the new PVC (e.g. `["ReadWriteOnce"]`).
                         items:
                           type: string
                         type: array
                       capacity:
+                        description: Requested size of the new PVC (e.g. `100Gi`).
                         nullable: true
                         type: string
                       name:
+                        description: Name of the PVC to create.
                         type: string
                       storageClassName:
+                        description: StorageClass for the new PVC; absent uses the cluster default.
                         nullable: true
                         type: string
                     required:
@@ -183,8 +215,10 @@ spec:
                     description: Write into an existing PVC.
                     properties:
                       name:
+                        description: Name of the referenced object.
                         type: string
                       namespace:
+                        description: Namespace of the referenced object; absent = same namespace as the referrer.
                         nullable: true
                         type: string
                     required:
@@ -195,9 +229,11 @@ spec:
             - source
             type: object
           status:
+            description: Observed state of a [`Restore`], written by the controller/mover. ADR §3.6 status.
             nullable: true
             properties:
               conditions:
+                description: Standard Kubernetes conditions carrying the human-readable status/reason.
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
                   properties:
@@ -230,6 +266,7 @@ spec:
                   type: object
                 type: array
               observedGeneration:
+                description: '`metadata.generation` last reconciled, so stale status is detectable.'
                 format: int64
                 nullable: true
                 type: integer
@@ -241,17 +278,19 @@ spec:
                 - Restoring
                 - Completed
                 - Failed
-                - null
                 nullable: true
                 type: string
               progress:
+                description: Bytes/files restored so far, patched periodically by the mover.
                 nullable: true
                 properties:
                   bytesRestored:
+                    description: Total bytes restored so far.
                     format: int64
                     nullable: true
                     type: integer
                   filesRestored:
+                    description: Total files restored so far.
                     format: int64
                     nullable: true
                     type: integer
@@ -261,59 +300,54 @@ spec:
                 nullable: true
                 properties:
                   backupRef:
-                    description: |-
-                      Generic name/namespace reference to another namespaced object — e.g. a `Backup`
-                      CR (`Restore.spec.source.backupRef`) or a PVC (`Restore.spec.target.pvcRef`). ADR §3.6.
+                    description: The concrete `Backup` CR the source resolved to, when applicable.
                     nullable: true
                     properties:
                       name:
+                        description: Name of the referenced object.
                         type: string
                       namespace:
+                        description: Namespace of the referenced object; absent = same namespace as the referrer.
                         nullable: true
                         type: string
                     required:
                     - name
                     type: object
                   identity:
-                    description: Fully-resolved identity pinned into status; never re-rendered after admission. ADR §4.2.
+                    description: The resolved kopia identity (`username@hostname:path`) of the snapshot.
                     nullable: true
                     properties:
                       hostname:
+                        description: The final `hostname` kopia records, fixed at admission.
                         type: string
                       sourcePath:
+                        description: The resolved snapshot source path, when applicable (`username@hostname:path`).
                         nullable: true
                         type: string
                       username:
+                        description: The final `username` kopia records, fixed at admission.
                         type: string
                     required:
                     - hostname
                     - username
                     type: object
                   pinnedAt:
+                    description: Timestamp at which the source was pinned (RFC3339).
                     nullable: true
                     type: string
                   repository:
-                    description: |-
-                      Discriminated reference from a consumer CR (`BackupConfig`, `Backup`,
-                      `Restore`, `Maintenance`) to a `Repository` or `ClusterRepository`. ADR §3.2.
-
-                      When `kind == ClusterRepository`, `namespace` MUST be absent — enforced by the
-                      admission webhook (`api::validate`), since the type system cannot express
-                      "this field is forbidden only for one variant of a sibling field".
+                    description: The repository the snapshot lives in, resolved from the source.
                     nullable: true
                     properties:
                       kind:
                         default: Repository
-                        description: |-
-                          Which kind of repository a consumer CR references. ADR §3.2/§3.3.
-
-                          This is a closed enum: a consumer's `repository.kind` is always exactly one
-                          of these two values, so reconcilers `match` it exhaustively.
+                        description: Which repository CRD this points at; defaults to [`RepositoryKind::Repository`].
                         enum:
                         - Repository
                         - ClusterRepository
                         type: string
                       name:
+                        description: Name of the referenced `Repository`/`ClusterRepository`.
                         type: string
                       namespace:
                         description: Cross-namespace `Repository` reference; ignored/forbidden for `ClusterRepository`.
@@ -324,6 +358,7 @@ spec:
                     type: object
                 type: object
               target:
+                description: Resolved target details (the PVC written to / populator handshake).
                 nullable: true
                 properties:
                   pvcPrime:
@@ -331,14 +366,14 @@ spec:
                     nullable: true
                     type: string
                   pvcRef:
-                    description: |-
-                      Generic name/namespace reference to another namespaced object — e.g. a `Backup`
-                      CR (`Restore.spec.source.backupRef`) or a PVC (`Restore.spec.target.pvcRef`). ADR §3.6.
+                    description: The PVC actually written to (created or pre-existing).
                     nullable: true
                     properties:
                       name:
+                        description: Name of the referenced object.
                         type: string
                       namespace:
+                        description: Namespace of the referenced object; absent = same namespace as the referrer.
                         nullable: true
                         type: string
                     required:
@@ -346,12 +381,15 @@ spec:
                     type: object
                 type: object
               timing:
+                description: Start/end timestamps for the restore run.
                 nullable: true
                 properties:
                   endTime:
+                    description: When the restore reached a terminal phase (RFC3339).
                     nullable: true
                     type: string
                   startTime:
+                    description: When the mover began restoring (RFC3339).
                     nullable: true
                     type: string
                 type: object

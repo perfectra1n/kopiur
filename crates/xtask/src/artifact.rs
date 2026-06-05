@@ -24,6 +24,13 @@ pub struct Artifact {
 }
 
 impl Artifact {
+    /// Construct an artifact from its `deploy/`-relative path and full content.
+    ///
+    /// ```
+    /// use xtask::artifact::Artifact;
+    /// let a = Artifact::new("crds/repositories.yaml".into(), "# ...".into());
+    /// assert_eq!(a.rel_path, "crds/repositories.yaml");
+    /// ```
     pub fn new(rel_path: String, content: String) -> Self {
         Self { rel_path, content }
     }

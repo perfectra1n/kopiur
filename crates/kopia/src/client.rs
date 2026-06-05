@@ -157,6 +157,24 @@ pub enum ConnectSpec {
 impl ConnectSpec {
     /// Stable discriminant string for logging/metrics (mirrors
     /// `kopiur_api::backend::Backend::kind_str`).
+    ///
+    /// ```
+    /// use std::path::PathBuf;
+    /// use kopiur_kopia::ConnectSpec;
+    ///
+    /// let fs = ConnectSpec::Filesystem { path: PathBuf::from("/repo") };
+    /// assert_eq!(fs.kind_str(), "filesystem");
+    ///
+    /// let s3 = ConnectSpec::S3 {
+    ///     bucket: "backups".into(),
+    ///     endpoint: Some("https://minio.local".into()),
+    ///     prefix: None,
+    ///     region: None,
+    ///     disable_tls: false,
+    ///     disable_tls_verification: false,
+    /// };
+    /// assert_eq!(s3.kind_str(), "s3");
+    /// ```
     pub fn kind_str(&self) -> &'static str {
         match self {
             ConnectSpec::Filesystem { .. } => "filesystem",
@@ -378,6 +396,24 @@ impl KopiaClientBuilder {
 }
 
 /// A kopia client backed by the real `kopia` binary via `tokio::process`.
+///
+/// Construction is pure — building a client never spawns a process. Only the
+/// `async` methods invoke `kopia`. The builder defaults the binary to `kopia`
+/// (resolved via `PATH`); inject a path for tests or non-standard images:
+///
+/// ```
+/// use std::path::PathBuf;
+/// use kopiur_kopia::KopiaClient;
+///
+/// let client = KopiaClient::builder().build();
+/// assert_eq!(client.binary(), &PathBuf::from("kopia"));
+///
+/// let custom = KopiaClient::builder()
+///     .binary("/usr/local/bin/kopia")
+///     .env("KOPIA_PASSWORD", "s3cr3t")
+///     .build();
+/// assert_eq!(custom.binary(), &PathBuf::from("/usr/local/bin/kopia"));
+/// ```
 #[derive(Debug, Clone)]
 pub struct KopiaClient {
     binary: PathBuf,
@@ -733,6 +769,22 @@ impl KopiaClient {
     }
 
     /// Get repository status (`kopia repository status --json`).
+    ///
+    /// This spawns `kopia`, so the example is `no_run` (it would need a real
+    /// binary + connected repository):
+    ///
+    /// ```no_run
+    /// # async fn run() -> Result<(), kopiur_kopia::KopiaError> {
+    /// use kopiur_kopia::KopiaClient;
+    ///
+    /// let client = KopiaClient::builder()
+    ///     .env("KOPIA_PASSWORD", "s3cr3t")
+    ///     .build();
+    /// let status = client.repository_status().await?;
+    /// println!("repository unique id: {}", status.unique_id_hex);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn repository_status(&self) -> Result<RepositoryStatus, KopiaError> {
         let args = vec!["repository".into(), "status".into(), "--json".into()];
         self.run_json(&args, "repository status").await

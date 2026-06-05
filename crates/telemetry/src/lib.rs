@@ -1,23 +1,5 @@
-//! # kopiur-telemetry
-//!
-//! Shared observability for the controller, webhook, and mover. One idea:
-//! **instrument once against the OpenTelemetry metrics API, fan out to two
-//! readers** —
-//!
-//! 1. an [`opentelemetry-prometheus`] exporter that populates a
-//!    [`prometheus::Registry`] for the always-on `/metrics` pull endpoint
-//!    (so the existing `ServiceMonitor` keeps working, no topology change), and
-//! 2. an OTLP [`PeriodicReader`] that *pushes* the same measurements to a
-//!    collector — added only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
-//!
-//! Traces (the controller's existing `#[instrument]` spans) and logs (bridged
-//! from `tracing` events) export over OTLP via the maintained crates, also
-//! env-gated. With no OTLP endpoint configured the behavior is identical to the
-//! previous fmt-only setup, so `cargo test` stays hermetic and offline.
-//!
-//! OTLP setup is **non-critical**: a misconfiguration is logged with an
-//! actionable [`TelemetryError`] and the operator degrades to fmt-logging +
-//! the Prometheus pull, unless `KOPIUR_OTEL_STRICT=true`.
+#![warn(missing_docs)]
+#![doc = include_str!("../README.md")]
 
 pub mod env;
 mod error;
@@ -101,7 +83,9 @@ fn resource(service_name: &str) -> Resource {
 /// failing a backup operator's startup (see [`LogFormat::from_env`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
+    /// Human-readable console output (the default).
     Text,
+    /// One structured JSON object per event, for log aggregators (Loki/ELK/Datadog).
     Json,
 }
 

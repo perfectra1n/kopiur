@@ -15,6 +15,20 @@
 //! every independent problem into a `Vec<ValidationError>` so a user fixing one
 //! manifest sees all issues at once rather than playing whack-a-mole across
 //! re-applies. Both styles share this one error enum.
+//!
+//! ```
+//! use kopiur_api::ValidationError;
+//!
+//! // Messages are written for a human reading a rejected `kubectl apply` — they
+//! // say what is wrong and why, embedding the offending value.
+//! let err = ValidationError::DiscoveredMustRetain { got: "Delete".to_string() };
+//! assert!(err.to_string().contains("origin: discovered"));
+//! assert!(err.to_string().contains("Delete"));
+//!
+//! // `ValidationResult` defaults its Ok type to `()` for the pass/fail case.
+//! let ok: kopiur_api::ValidationResult = Ok(());
+//! assert!(ok.is_ok());
+//! ```
 
 use thiserror::Error;
 
@@ -30,14 +44,22 @@ pub enum ValidationError {
         "repository.namespace must not be set when repository.kind is ClusterRepository \
          (a ClusterRepository is referenced by name only; got namespace {namespace:?})"
     )]
-    ClusterRepoNamespaceForbidden { namespace: String },
+    ClusterRepoNamespaceForbidden {
+        /// The forbidden namespace that was set on the reference.
+        namespace: String,
+    },
 
     /// A consumer namespace is not permitted by the target `ClusterRepository`'s
     /// `allowedNamespaces` tenancy gate (ADR §3.2/§4.3).
     #[error(
         "namespace {namespace:?} is not in the allowedNamespaces of ClusterRepository {repo:?}"
     )]
-    ConsumerNamespaceNotAllowed { namespace: String, repo: String },
+    ConsumerNamespaceNotAllowed {
+        /// The consumer namespace that was denied.
+        namespace: String,
+        /// The `ClusterRepository` whose tenancy gate denied it.
+        repo: String,
+    },
 
     /// A `Backup` with `origin: discovered` tried to set a `deletionPolicy` other
     /// than `Retain`. Discovered snapshots are forced `Retain` so the operator
@@ -46,7 +68,10 @@ pub enum ValidationError {
         "origin: discovered backups must use deletionPolicy: Retain (got {got:?}); \
          the operator never deletes snapshots it did not create"
     )]
-    DiscoveredMustRetain { got: String },
+    DiscoveredMustRetain {
+        /// The rejected `deletionPolicy` that was set (anything but `Retain`).
+        got: String,
+    },
 
     /// A `Restore` with `source.identity` did not set `spec.repository`. Identity
     /// sources cannot derive a repository, so it is required (ADR §3.6/§4.6).
@@ -61,31 +86,48 @@ pub enum ValidationError {
     #[error(
         "inline kopia-side retention policy on a Repository spec is unsupported (field {field:?}); retention is driven exclusively by BackupConfig.spec.retention (ADR §4.4)"
     )]
-    InlineRetentionForbidden { field: String },
+    InlineRetentionForbidden {
+        /// The offending repo-level retention field that was set.
+        field: String,
+    },
 
     /// A cron expression failed to parse with the same parser the controller uses
     /// at runtime, so it is rejected at apply time rather than at first reconcile
     /// (ADR §4.1).
     #[error("invalid cron expression {expr:?}: {reason}")]
-    InvalidCron { expr: String, reason: String },
+    InvalidCron {
+        /// The cron expression that failed to parse.
+        expr: String,
+        /// The parser's reason for rejecting it.
+        reason: String,
+    },
 
     /// Two fields that may not both be set were both set (e.g. a `Source` with
     /// both `pvc` and `pvcSelector`).
     #[error("fields {a:?} and {b:?} are mutually exclusive but both were set ({context})")]
     MutuallyExclusive {
+        /// The first of the two conflicting fields.
         a: String,
+        /// The second of the two conflicting fields.
         b: String,
+        /// Where the conflict occurred (e.g. `"backup source"`), for the message.
         context: String,
     },
 
     /// A required field (or "at least one of" surface) was empty.
     #[error("missing required field: {field}")]
-    MissingRequiredField { field: String },
+    MissingRequiredField {
+        /// The required field (or "at least one of" surface) that was empty.
+        field: String,
+    },
 
     /// Rendering a `ClusterRepository.identityDefaults` template with `tera` failed
     /// (ADR §4.2). Surfaced at admission so a bad template never reaches status.
     #[error("failed to render identity template: {reason}")]
-    IdentityTemplateRender { reason: String },
+    IdentityTemplateRender {
+        /// The underlying `tera` render error, surfaced for the user.
+        reason: String,
+    },
 
     /// A label selector was supplied as the tenancy gate but the caller could not
     /// provide the consumer namespace's labels to match against. We fail closed
@@ -95,7 +137,12 @@ pub enum ValidationError {
         "ClusterRepository {repo:?} gates by label selector but namespace {namespace:?} labels \
          were not available to evaluate; denying (fail-closed)"
     )]
-    SelectorLabelsUnavailable { namespace: String, repo: String },
+    SelectorLabelsUnavailable {
+        /// The consumer namespace whose labels could not be evaluated.
+        namespace: String,
+        /// The `ClusterRepository` gating by label selector.
+        repo: String,
+    },
 
     /// A namespaced `Repository` set `spec.maintenance.namespace`, which only
     /// applies to a cluster-scoped `ClusterRepository` (a namespaced
@@ -105,7 +152,10 @@ pub enum ValidationError {
         "spec.maintenance.namespace ({namespace:?}) is only valid on a ClusterRepository; \
          a namespaced Repository's managed Maintenance always lives in the repository's namespace"
     )]
-    MaintenanceNamespaceOnNamespacedRepo { namespace: String },
+    MaintenanceNamespaceOnNamespacedRepo {
+        /// The `spec.maintenance.namespace` value set on the namespaced `Repository`.
+        namespace: String,
+    },
 }
 
 /// Result alias for validators. Defaults to `()` for the common "pass/fail with no

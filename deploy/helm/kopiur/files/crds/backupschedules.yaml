@@ -40,12 +40,14 @@ spec:
             properties:
               configRef:
                 description: |-
-                  Reference to a `BackupConfig` CR (used by `Backup.spec.configRef` and
-                  `BackupSchedule.spec.configRef`). May cross namespaces, subject to RBAC. ADR §3.4/§3.5.
+                  The `BackupConfig` (the recipe) this schedule invokes; resolved in the
+                  schedule's own namespace. ADR §3.5 separates recipe from schedule.
                 properties:
                   name:
+                    description: Name of the referenced `BackupConfig`.
                     type: string
                   namespace:
+                    description: Namespace of the `BackupConfig`; absent = same namespace as the referrer.
                     nullable: true
                     type: string
                 required:
@@ -61,15 +63,15 @@ spec:
                 nullable: true
                 type: integer
               schedule:
-                description: Cron schedule with deterministic jitter, timezone, and concurrency controls. ADR §3.5/§4.1.
+                description: Cron, jitter, timezone, and concurrency for the firing cadence. ADR §3.5.
                 properties:
                   concurrencyPolicy:
                     default: Forbid
-                    description: What to do when a previous run is still in flight. Closed enum, default `Forbid`. ADR §4.1 (G5/G18).
+                    description: How to handle a firing while a prior run is still in flight. ADR §4.1.
                     enum:
+                    - Forbid
                     - Allow
                     - Replace
-                    - Forbid
                     type: string
                   cron:
                     description: Cron expression with Jenkins-style `H` substitution. ADR §4.1 (G4).
@@ -82,6 +84,9 @@ spec:
                     description: 'GitOps-friendly default: do NOT fire immediately on create. ADR §4.1 (G3).'
                     type: boolean
                   startingDeadlineSeconds:
+                    description: |-
+                      If a slot is missed by more than this many seconds (e.g. operator was
+                      down), skip it instead of firing late. ADR §4.1.
                     format: int64
                     nullable: true
                     type: integer
@@ -89,6 +94,9 @@ spec:
                     description: Skip future firings while true. ADR §5.9.
                     type: boolean
                   timezone:
+                    description: |-
+                      IANA timezone the cron is evaluated in (e.g. `America/Los_Angeles`).
+                      Absent means the controller's configured default. ADR §4.1.
                     nullable: true
                     type: string
                 required:
@@ -99,9 +107,11 @@ spec:
             - schedule
             type: object
           status:
+            description: 'Observed state of a `BackupSchedule`: pinned firing slots and failure run. ADR §3.5.'
             nullable: true
             properties:
               conditions:
+                description: Standard Kubernetes conditions surfacing schedule health. ADR §5 status conventions.
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
                   properties:
@@ -134,6 +144,7 @@ spec:
                   type: object
                 type: array
               consecutiveFailures:
+                description: Count of back-to-back failed runs; resets on success. Drives alerting.
                 format: int64
                 nullable: true
                 type: integer
@@ -142,60 +153,69 @@ spec:
                 nullable: true
                 properties:
                   at:
+                    description: |-
+                      The RFC3339 instant this slot fired (or is scheduled to). Accepts the
+                      `scheduledAt` alias on the wire (see the struct docs) but always
+                      serializes back as `at`.
                     nullable: true
                     type: string
                   backupRef:
+                    description: The `Backup` CR this slot produced, when one was created.
                     nullable: true
                     properties:
                       name:
+                        description: The `Backup`'s `metadata.name` (same namespace as the schedule).
                         type: string
                     required:
                     - name
                     type: object
                 type: object
               lastSuccessfulSchedule:
-                description: |-
-                  A pinned schedule slot and (optionally) the `Backup` it created. ADR §3.5.
-
-                  `at`/`scheduledAt` are both accepted on the wire: ADR uses `scheduledAt` for
-                  `lastSchedule` and `at` for `next`/`lastSuccessful`. We model both as the single
-                  `at` field with a serde alias so either spelling round-trips.
+                description: The most recent firing whose `Backup` succeeded. ADR §3.5.
                 nullable: true
                 properties:
                   at:
+                    description: |-
+                      The RFC3339 instant this slot fired (or is scheduled to). Accepts the
+                      `scheduledAt` alias on the wire (see the struct docs) but always
+                      serializes back as `at`.
                     nullable: true
                     type: string
                   backupRef:
+                    description: The `Backup` CR this slot produced, when one was created.
                     nullable: true
                     properties:
                       name:
+                        description: The `Backup`'s `metadata.name` (same namespace as the schedule).
                         type: string
                     required:
                     - name
                     type: object
                 type: object
               nextSchedule:
-                description: |-
-                  A pinned schedule slot and (optionally) the `Backup` it created. ADR §3.5.
-
-                  `at`/`scheduledAt` are both accepted on the wire: ADR uses `scheduledAt` for
-                  `lastSchedule` and `at` for `next`/`lastSuccessful`. We model both as the single
-                  `at` field with a serde alias so either spelling round-trips.
+                description: The next firing slot the controller has computed (cron + jitter, pinned).
                 nullable: true
                 properties:
                   at:
+                    description: |-
+                      The RFC3339 instant this slot fired (or is scheduled to). Accepts the
+                      `scheduledAt` alias on the wire (see the struct docs) but always
+                      serializes back as `at`.
                     nullable: true
                     type: string
                   backupRef:
+                    description: The `Backup` CR this slot produced, when one was created.
                     nullable: true
                     properties:
                       name:
+                        description: The `Backup`'s `metadata.name` (same namespace as the schedule).
                         type: string
                     required:
                     - name
                     type: object
                 type: object
               observedGeneration:
+                description: The `metadata.generation` this status reflects, for staleness detection.
                 format: int64
                 nullable: true
                 type: integer

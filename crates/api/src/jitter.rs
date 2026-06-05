@@ -58,6 +58,22 @@ fn fnv1a(seed: &str, slot_start_unix: i64) -> u64 {
 /// Resolution is whole seconds: jitter windows are minutes-to-hours, sub-second
 /// precision is meaningless for cron slots, and integer seconds keep the value
 /// trivially reproducible across languages if the mover ever re-derives it.
+///
+/// ```
+/// use std::time::Duration;
+/// // Re-exported from the crate root as `jitter_offset`.
+/// use kopiur_api::jitter_offset;
+///
+/// let max = Duration::from_secs(1800); // 30m window
+/// // Deterministic: the same (seed, slot, max) always yields the same offset —
+/// // HA replicas and restarts agree without coordination (ADR §4.1).
+/// let a = jitter_offset("schedule-uid", 1_700_000_000, max);
+/// let b = jitter_offset("schedule-uid", 1_700_000_000, max);
+/// assert_eq!(a, b);
+/// assert!(a < max);
+/// // A zero window means no jitter.
+/// assert_eq!(jitter_offset("uid", 123, Duration::ZERO), Duration::ZERO);
+/// ```
 pub fn offset(seed: &str, slot_start_unix: i64, max: Duration) -> Duration {
     let max_secs = max.as_secs();
     if max_secs == 0 {
@@ -78,6 +94,22 @@ pub fn offset(seed: &str, slot_start_unix: i64, max: Duration) -> Duration {
 /// Returns the rewritten expression. Non-`H` fields pass through unchanged. If the
 /// expression isn't 5 whitespace-separated fields it is returned unchanged (shape
 /// validation is [`crate::validate::validate_cron`]'s job).
+///
+/// ```
+/// use kopiur_api::substitute_h;
+///
+/// // Each `H` resolves to a concrete, deterministic value in the field's range;
+/// // non-`H` fields are untouched.
+/// let out = substitute_h("H 2 * * *", "schedule-uid");
+/// let fields: Vec<&str> = out.split_whitespace().collect();
+/// let minute: u64 = fields[0].parse().expect("H -> a minute");
+/// assert!(minute < 60);
+/// assert_eq!(&fields[1..], &["2", "*", "*", "*"]);
+///
+/// // Deterministic per seed; different schedules land in different minutes.
+/// assert_eq!(substitute_h("H 2 * * *", "uid"), substitute_h("H 2 * * *", "uid"));
+/// assert_ne!(substitute_h("H 2 * * *", "uid-a"), substitute_h("H 2 * * *", "uid-b"));
+/// ```
 pub fn substitute_h(expr: &str, seed: &str) -> String {
     let fields: Vec<&str> = expr.split_whitespace().collect();
     if fields.len() != 5 {

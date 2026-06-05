@@ -1,21 +1,5 @@
-//! # kopiur-e2e
-//!
-//! End-to-end test harness. Unlike the per-crate `integration` tests (which
-//! drive reconcile helpers or POST admission reviews directly), these tests
-//! exercise the **fully deployed operator**: the controller + mover images are
-//! built, loaded into an ephemeral `kind` cluster, and installed via the Helm
-//! chart by `scripts/with-e2e.sh`. The tests then create real `kopiur.home-operations.com` CRs
-//! and assert on the cluster state the operator produces — real mover Jobs, real
-//! kopia snapshots, real restored bytes.
-//!
-//! Everything is gated behind the `e2e` feature **and** `#[ignore]`, and skips
-//! gracefully when no cluster is reachable, so the hermetic
-//! `cargo test --workspace` never compiles a cluster body or touches a cluster.
-//! Per the SKILL these must only ever target the throwaway kind cluster created
-//! by `scripts/with-e2e.sh`, never a real one.
-//!
-//! The harness is intentionally small: a graceful-skip client, a generic poll
-//! helper, and a namespace fixture. The scenarios live in `tests/lifecycle.rs`.
+#![warn(missing_docs)]
+#![doc = include_str!("../README.md")]
 
 use std::time::{Duration, Instant};
 

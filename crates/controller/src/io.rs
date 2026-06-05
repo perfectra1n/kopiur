@@ -168,7 +168,9 @@ pub struct RepoCredentials {
 /// it is handled here.
 #[derive(Debug, Clone)]
 pub struct ResolvedRepository {
+    /// The repository's storage backend (normalized from either CRD).
     pub backend: Backend,
+    /// The repository's encryption/password configuration.
     pub encryption: Encryption,
 }
 
@@ -182,14 +184,42 @@ pub struct ResolvedRepository {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoLookup {
     /// Namespaced `Repository` get in `namespace`.
-    Namespaced { namespace: String, name: String },
+    Namespaced {
+        /// Namespace to perform the `Repository` get in.
+        namespace: String,
+        /// Name of the `Repository` to get.
+        name: String,
+    },
     /// Cluster-scoped `ClusterRepository` get (`Api::all`).
-    Cluster { name: String },
+    Cluster {
+        /// Name of the `ClusterRepository` to get.
+        name: String,
+    },
 }
 
 /// Pure mapping from a consumer's [`RepositoryRef`] (+ the default namespace to
 /// use when the ref omits one) to the API lookup it implies. Exhaustive over
 /// [`RepositoryKind`] (ADR §5.5): a new variant cannot compile until handled.
+///
+/// ```
+/// use kopiur_controller::io::{repo_lookup, RepoLookup};
+/// use kopiur_api::common::{RepositoryKind, RepositoryRef};
+///
+/// // A namespaced ref with no explicit namespace falls back to `default_ns`.
+/// let r = RepositoryRef { kind: RepositoryKind::Repository, name: "nas".into(), namespace: None };
+/// assert_eq!(
+///     repo_lookup(&r, "billing"),
+///     RepoLookup::Namespaced { namespace: "billing".into(), name: "nas".into() },
+/// );
+///
+/// // A ClusterRepository ref ignores any namespace and resolves cluster-wide.
+/// let c = RepositoryRef {
+///     kind: RepositoryKind::ClusterRepository,
+///     name: "shared".into(),
+///     namespace: Some("ignored".into()),
+/// };
+/// assert_eq!(repo_lookup(&c, "billing"), RepoLookup::Cluster { name: "shared".into() });
+/// ```
 pub fn repo_lookup(repo_ref: &RepositoryRef, default_ns: &str) -> RepoLookup {
     match repo_ref.kind {
         RepositoryKind::Repository => RepoLookup::Namespaced {

@@ -35,7 +35,10 @@ use std::sync::Arc;
 /// checks that need it fail closed (deny with reason).
 #[derive(Clone)]
 pub struct AppState {
+    /// Kubernetes client for tenancy resolution. `None` in tests (or with no
+    /// kubeconfig) — tenancy checks then fail closed; pure validation still runs.
     pub client: Option<Client>,
+    /// Admission metrics recorder feeding the webhook's `/metrics` endpoint.
     pub metrics: Arc<WebhookMetrics>,
 }
 

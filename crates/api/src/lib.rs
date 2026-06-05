@@ -1,22 +1,5 @@
-//! # kopiur-api
-//!
-//! Strongly-typed CRD definitions and shared logic for **Kopiur**, the
-//! Kopia-native Kubernetes backup operator (ADR-0003).
-//!
-//! This crate deliberately has *no* controller-runtime dependencies (no
-//! `kube::Client`, no `tokio`) so downstream tools — a custom backup-triggering
-//! controller, a CI linter for `BackupConfig` manifests — can depend on the API
-//! types alone (ADR §5.1).
-//!
-//! ## Type-safety thesis (ADR §5.5)
-//!
-//! Every discriminated union in the CRD surface is a Rust `enum`:
-//! [`backend::Backend`], [`cluster_repository::AllowedNamespaces`],
-//! [`common::DeletionPolicy`], [`restore::RestoreSource`], [`backup_config::Hook`],
-//! etc. A deserialized value is always exactly one variant, and reconcilers `match`
-//! exhaustively — so a new variant added later *cannot* compile until every handler
-//! accounts for it. For backup software this eliminates the highest-severity class of
-//! "controller silently dropped data" bugs (gap G21).
+#![warn(missing_docs)]
+#![doc = include_str!("../README.md")]
 
 pub mod backend;
 pub mod backup;

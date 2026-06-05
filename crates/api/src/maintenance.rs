@@ -12,6 +12,17 @@ use serde::{Deserialize, Serialize};
 /// jitter), full daily at 03:00 (1h jitter). Shared by the webhook (defaulting),
 /// the controller (projection), and tests, so the default lives in exactly one
 /// place. ADR §3.7.
+///
+/// ```
+/// use kopiur_api::default_maintenance_schedule;
+///
+/// let s = default_maintenance_schedule();
+/// assert_eq!(s.quick.cron, "0 */6 * * *");
+/// assert_eq!(s.quick.jitter.as_deref(), Some("30m"));
+/// assert_eq!(s.full.cron, "0 3 * * *");
+/// assert_eq!(s.full.jitter.as_deref(), Some("1h"));
+/// assert!(s.timezone.is_none());
+/// ```
 pub fn default_maintenance_schedule() -> MaintenanceSchedule {
     MaintenanceSchedule {
         quick: CronSpec {
@@ -46,10 +57,17 @@ pub fn default_maintenance_schedule() -> MaintenanceSchedule {
 pub struct MaintenanceSpec {
     /// Discriminated reference to a `Repository` or `ClusterRepository`. ADR §3.2.
     pub repository: RepositoryRef,
+    /// Quick + full cron schedules (with a shared timezone) for `kopia
+    /// maintenance run`. ADR §3.7.
     pub schedule: MaintenanceSchedule,
+    /// Ownership-lease configuration; at most one `Maintenance` may own a
+    /// repository at a time. ADR §3.7.
     pub ownership: Ownership,
+    /// Mover (Job pod) overrides for the maintenance run — resources, scheduling,
+    /// etc. Object-store repositories typically tune this. ADR §3.7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mover: Option<MoverSpec>,
+    /// How a failed maintenance run is retried/bounded (backoff, deadline). ADR §3.7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_policy: Option<FailurePolicy>,
 }
@@ -58,8 +76,11 @@ pub struct MaintenanceSpec {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintenanceSchedule {
+    /// Cron + jitter for `kopia maintenance run` (quick = cheap index/log work).
     pub quick: CronSpec,
+    /// Cron + jitter for `kopia maintenance run --full` (content reclamation).
     pub full: CronSpec,
+    /// IANA timezone both crons are evaluated in; absent means controller default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
 }
@@ -68,12 +89,26 @@ pub struct MaintenanceSchedule {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Ownership {
+    /// Stable lease holder identity (e.g. `kopia-operator/nas-primary`). Two
+    /// `Maintenance` CRs claiming the same repository compare this. ADR §3.7.
     pub owner: String,
+    /// What to do if the lease is already held by a different `owner`. ADR §3.7.
     #[serde(default)]
     pub takeover_policy: TakeoverPolicy,
 }
 
 /// What to do when another owner already holds the lease. Closed enum. ADR §3.7.
+///
+/// ```
+/// use kopiur_api::TakeoverPolicy;
+///
+/// // The safest default: never seize a lease another owner holds.
+/// assert_eq!(TakeoverPolicy::default(), TakeoverPolicy::Never);
+/// assert_eq!(
+///     serde_json::to_value(TakeoverPolicy::PromptCondition).unwrap(),
+///     serde_json::json!("PromptCondition"),
+/// );
+/// ```
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 pub enum TakeoverPolicy {
     /// Never take over an existing lease (default — safest).
@@ -113,6 +148,7 @@ pub struct RepositoryMaintenanceSpec {
     /// Mover overrides for the managed `Maintenance` (object-store repositories).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mover: Option<MoverSpec>,
+    /// Failure handling (backoff/deadline) for the managed `Maintenance` run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_policy: Option<FailurePolicy>,
     /// Lease takeover policy for the managed `Maintenance`. Defaults to
@@ -142,26 +178,35 @@ impl Default for RepositoryMaintenanceSpec {
     }
 }
 
+/// Observed maintenance state: lease holder plus per-kind run results. ADR §3.7.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintenanceStatus {
+    /// The `metadata.generation` this status reflects, for staleness detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
+    /// Current lease holder, if the lease has been claimed. ADR §3.7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ownership: Option<OwnershipStatus>,
+    /// Last/next-run state for the quick maintenance schedule. ADR §3.7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quick: Option<RunStatus>,
+    /// Last/next-run state for the full maintenance schedule. ADR §3.7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full: Option<RunStatus>,
+    /// Standard Kubernetes conditions surfacing maintenance health. ADR §5.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
 }
 
+/// Observed ownership-lease state: who holds it and since when. ADR §3.7.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct OwnershipStatus {
+    /// The current lease holder's identity (matches `Ownership.owner`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// RFC3339 instant the lease was claimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_at: Option<String>,
 }
@@ -170,10 +215,13 @@ pub struct OwnershipStatus {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RunStatus {
+    /// RFC3339 instant of the most recent run of this kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<String>,
+    /// RFC3339 instant of the next scheduled run of this kind (cron + jitter, pinned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_scheduled_at: Option<String>,
+    /// Count of back-to-back failed runs of this kind; resets on success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consecutive_failures: Option<i64>,
     /// The ONLY place storage reclamation is surfaced (ADR §3.7/§4.5).

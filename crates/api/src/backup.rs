@@ -50,24 +50,55 @@ pub struct BackupSpec {
 
 /// How a `Backup` came to exist. Canonical value mirrored from the `kopiur.home-operations.com/origin`
 /// label. Closed enum. ADR §3.4.
+///
+/// Origin drives the deletion-policy default (ADR §4.5): `discovered` backups are
+/// forced to `Retain` because the operator did not create those snapshots.
+///
+/// ```
+/// use kopiur_api::Origin;
+///
+/// assert_eq!(Origin::default(), Origin::Scheduled);
+/// // Serializes camelCase, matching the `origin` label/status value.
+/// assert_eq!(serde_json::to_value(Origin::Discovered).unwrap(), "discovered");
+/// ```
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum Origin {
+    /// Created by a `BackupSchedule`; spec carries `configRef`. ADR §3.4.
     #[default]
     Scheduled,
+    /// Created by `kubectl create` / external automation; spec carries `configRef`. ADR §3.4.
     Manual,
+    /// Materialized by the catalog scan for a snapshot kopiur didn't produce;
+    /// spec is empty and `deletionPolicy` is forced to `Retain`. ADR §3.4/§4.5.
     Discovered,
 }
 
 /// Lifecycle phase of a `Backup`. Closed enum. ADR §3.4 status.
+///
+/// ```
+/// use kopiur_api::{BackupPhase, PhaseLabel};
+///
+/// assert_eq!(BackupPhase::default(), BackupPhase::Pending);
+/// // `PhaseLabel::label` gives the stable string used in status/metrics.
+/// assert_eq!(BackupPhase::Succeeded.label(), "Succeeded");
+/// // Every variant is enumerated for metric reset.
+/// assert_eq!(BackupPhase::ALL.len(), 6);
+/// ```
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 pub enum BackupPhase {
+    /// Admitted, not yet started (also the default). ADR §3.4 status.
     #[default]
     Pending,
+    /// Mover Job is in flight. ADR §3.4 status.
     Running,
+    /// Snapshot created successfully. ADR §3.4 status.
     Succeeded,
+    /// Mover Job exhausted its retries. ADR §3.4 status.
     Failed,
+    /// CR is being deleted; finalizer is reclaiming the snapshot. ADR §3.4 status/§4.5.
     Deleting,
+    /// Catalog-materialized backup kopiur didn't produce. ADR §3.4 status.
     Discovered,
 }
 
@@ -92,20 +123,26 @@ impl crate::common::PhaseLabel for BackupPhase {
     }
 }
 
+/// Observed state of a [`Backup`]. ADR §3.4 status.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupStatus {
+    /// Current lifecycle phase. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<BackupPhase>,
+    /// Canonical origin (also mirrored to the `origin` label). ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<Origin>,
+    /// `metadata.generation` last reconciled, for staleness detection. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
     /// The kopia artifact this CR represents. ADR §3.4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<SnapshotInfo>,
+    /// Start/end/duration of the snapshot run. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing: Option<BackupTiming>,
+    /// Byte/file counts parsed from kopia's JSON output. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<BackupStats>,
     /// Present for scheduled/manual; absent for discovered. ADR §3.4.
@@ -114,6 +151,8 @@ pub struct BackupStatus {
     /// Frozen recipe values at run time (scheduled/manual). ADR §3.4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved: Option<ResolvedBackup>,
+    /// Standard Kubernetes conditions (e.g. `SourcesQuiesced`, `SnapshotCreated`).
+    /// ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
     /// Capped at ~4KB; full logs live in the Job pod. ADR §3.4/§4.10.
@@ -121,23 +160,31 @@ pub struct BackupStatus {
     pub log_tail: Option<String>,
 }
 
+/// Identifies the kopia snapshot a [`Backup`] CR owns. ADR §3.4.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotInfo {
+    /// kopia's snapshot ID — the handle the finalizer uses to delete content.
+    ///
     /// Renamed to match the ADR wire shape exactly (`kopiaSnapshotID`, capital `ID`);
     /// serde's `camelCase` would otherwise produce `kopiaSnapshotId`.
     #[serde(rename = "kopiaSnapshotID")]
     pub kopia_snapshot_id: String,
+    /// The `username@hostname:path` identity recorded for this snapshot. ADR §3.4/§4.2.
     pub identity: ResolvedIdentity,
 }
 
+/// Timing of a snapshot run. ADR §3.4 status.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupTiming {
+    /// RFC3339 start time of the run. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_time: Option<String>,
+    /// RFC3339 end time of the run. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_time: Option<String>,
+    /// Wall-clock duration in seconds. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<i64>,
 }
@@ -146,23 +193,31 @@ pub struct BackupTiming {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupStats {
+    /// Total logical size of the snapshot in bytes. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<i64>,
+    /// Bytes newly uploaded this run (after dedup/compression). ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_new: Option<i64>,
+    /// Count of files new since the previous snapshot. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files_new: Option<i64>,
+    /// Count of files changed since the previous snapshot. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files_modified: Option<i64>,
+    /// Count of files unchanged since the previous snapshot. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files_unchanged: Option<i64>,
 }
 
+/// The mover Job backing a scheduled/manual `Backup`; absent for discovered. ADR §3.4 status.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JobStatus {
+    /// Name of the mover `Job`. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Number of attempts so far (bounded by `failurePolicy.backoffLimit`). ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempts: Option<i32>,
 }
@@ -171,18 +226,22 @@ pub struct JobStatus {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedBackup {
+    /// The repository this run targeted, frozen at run time. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<RepositoryRef>,
+    /// The concrete PVCs + source paths backed up this run. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<ResolvedSource>,
 }
 
+/// One resolved source backed up by a run — a concrete PVC and its kopia path. ADR §3.4 status.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedSource {
     /// `namespace/name` of the PVC, as kopia sees it. ADR §3.4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pvc: Option<String>,
+    /// The source path kopia recorded for this PVC. ADR §3.4/§4.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
 }

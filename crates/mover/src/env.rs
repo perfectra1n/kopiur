@@ -3,6 +3,14 @@
 //! Exposed from the library (not just `main.rs`) because the controller stamps
 //! these onto the mover `Job` it creates — both sides reference the same
 //! constant so the controller↔mover env contract can't drift.
+//!
+//! ```
+//! use kopiur_mover::env;
+//!
+//! assert_eq!(env::WORK_SPEC_PATH, "KOPIUR_WORK_SPEC_PATH");
+//! assert_eq!(env::KOPIA_BINARY, "KOPIUR_KOPIA_BINARY");
+//! assert_eq!(env::RESULT_CONFIGMAP, "KOPIUR_RESULT_CONFIGMAP");
+//! ```
 
 /// Path to the mounted work-spec JSON (the controller↔mover contract). The
 /// controller sets this on the Job; the mover reads it (falling back to argv[1]).

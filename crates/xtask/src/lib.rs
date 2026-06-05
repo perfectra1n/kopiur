@@ -1,8 +1,5 @@
-//! Codegen library for kopiur's `xtask` binary.
-//!
-//! The actual generation logic lives here (not in `main.rs`) so it can be
-//! exercised directly from integration tests under `tests/` — a binary crate's
-//! modules are not importable, a library's are.
+#![warn(missing_docs)]
+#![doc = include_str!("../README.md")]
 
 pub mod artifact;
 pub mod crds;

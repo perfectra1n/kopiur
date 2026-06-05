@@ -1,27 +1,5 @@
-//! # kopiur-controller
-//!
-//! The kube-rs operator for Kopiur (ADR §5.2): one
-//! [`kube::runtime::Controller`] per top-level CRD, each with its owned-resource
-//! watches and a kind-aware `error_policy`. Long kopia operations run in mover
-//! `Job`s; the controller only makes short, idempotent kopia calls (ADR §5.4).
-//!
-//! ## Module map
-//! - [`context`] — shared [`context::Context`] (client, kopia factory, metrics,
-//!   recorder).
-//! - [`error`] — [`error::Error`] + the transient/structural `error_policy`.
-//! - [`metrics`] — OTel instruments (Prometheus pull + optional OTLP push, via
-//!   `kopiur-telemetry`) for the ADR §4.13 metrics.
-//! - [`config`] — the controller's env var names + fixed config values.
-//! - [`jobs`] — pure mover `Job`/`ConfigMap` builder (§4.10/§4.11).
-//! - one module per reconciler: [`repository`], [`cluster_repository`],
-//!   [`backup_config`], [`backup_schedule`], [`backup`], [`restore`],
-//!   [`maintenance`].
-//!
-//! The reconcilers keep their **decision logic pure** (e.g.
-//! [`backup::plan_deletion`], [`backup_schedule::next_fire`],
-//! [`backup_config::backups_to_delete`]) so the type-safety thesis is unit-tested
-//! without a cluster; the kube IO is thin and exercised by the feature-gated
-//! integration tests.
+#![warn(missing_docs)]
+#![doc = include_str!("../README.md")]
 
 pub mod backup;
 pub mod backup_config;

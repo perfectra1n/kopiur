@@ -37,42 +37,50 @@ spec:
               Not `Eq`: `mover` transitively embeds k8s-openapi types.
             properties:
               failurePolicy:
-                description: Per-run failure controls passed through to the mover `Job`. ADR §3.4/§4.10 (G6).
+                description: How a failed maintenance run is retried/bounded (backoff, deadline). ADR §3.7.
                 nullable: true
                 properties:
                   activeDeadlineSeconds:
+                    description: |-
+                      Passed through to the mover `Job.spec.activeDeadlineSeconds` — wall-clock cap
+                      after which a still-running run is killed.
                     format: int64
                     nullable: true
                     type: integer
                   backoffLimit:
+                    description: |-
+                      Passed through to the mover `Job.spec.backoffLimit` — how many times a failed
+                      run is retried before the Job is marked failed.
                     format: int32
                     nullable: true
                     type: integer
                 type: object
               mover:
                 description: |-
-                  Per-recipe mover overrides (resources, cache, security context). ADR §3.3.
-
-                  Not `Eq`: embeds `k8s-openapi` types (`ResourceRequirements`, `SecurityContext`)
-                  which only implement `PartialEq`.
+                  Mover (Job pod) overrides for the maintenance run — resources, scheduling,
+                  etc. Object-store repositories typically tune this. ADR §3.7.
                 nullable: true
                 properties:
                   cache:
-                    description: Cache defaults inherited by `Backup`/`Restore` movers unless overridden. ADR §3.1.
+                    description: Override the repository's [`CacheDefaults`] for this recipe's movers.
                     nullable: true
                     properties:
                       capacity:
+                        description: Size of the PVC backing the mover's kopia cache (e.g. `10Gi`).
                         nullable: true
                         type: string
                       contentCacheSizeMb:
+                        description: kopia content cache budget in MiB (`--content-cache-size-mb`).
                         format: int64
                         nullable: true
                         type: integer
                       metadataCacheSizeMb:
+                        description: kopia metadata cache budget in MiB (`--metadata-cache-size-mb`).
                         format: int64
                         nullable: true
                         type: integer
                       storageClassName:
+                        description: StorageClass for the cache PVC; absent uses the cluster default.
                         nullable: true
                         type: string
                     type: object
@@ -81,10 +89,11 @@ spec:
                     nullable: true
                     properties:
                       container:
+                        description: Which container within the matched pod; absent uses the first/only container.
                         nullable: true
                         type: string
                       podSelector:
-                        description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                        description: Label selector matching the workload pod(s) to read context/hooks from.
                         properties:
                           matchExpressions:
                             description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
@@ -121,7 +130,7 @@ spec:
                     nullable: true
                     type: boolean
                   resources:
-                    description: ResourceRequirements describes the compute resource requirements.
+                    description: Resource requests/limits for the mover container.
                     nullable: true
                     properties:
                       claims:
@@ -158,7 +167,7 @@ spec:
                         type: object
                     type: object
                   securityContext:
-                    description: SecurityContext holds security configuration that will be applied to a container. Some fields are present in both SecurityContext and PodSecurityContext.  When both are set, the values in SecurityContext take precedence.
+                    description: Security context applied to the mover container.
                     nullable: true
                     properties:
                       allowPrivilegeEscalation:
@@ -264,13 +273,18 @@ spec:
                     type: object
                 type: object
               ownership:
-                description: Ownership-lease configuration. At most one `Maintenance` may own a repository. ADR §3.7.
+                description: |-
+                  Ownership-lease configuration; at most one `Maintenance` may own a
+                  repository at a time. ADR §3.7.
                 properties:
                   owner:
+                    description: |-
+                      Stable lease holder identity (e.g. `kopia-operator/nas-primary`). Two
+                      `Maintenance` CRs claiming the same repository compare this. ADR §3.7.
                     type: string
                   takeoverPolicy:
                     default: Never
-                    description: What to do when another owner already holds the lease. Closed enum. ADR §3.7.
+                    description: What to do if the lease is already held by a different `owner`. ADR §3.7.
                     enum:
                     - Never
                     - PromptCondition
@@ -284,16 +298,13 @@ spec:
                 properties:
                   kind:
                     default: Repository
-                    description: |-
-                      Which kind of repository a consumer CR references. ADR §3.2/§3.3.
-
-                      This is a closed enum: a consumer's `repository.kind` is always exactly one
-                      of these two values, so reconcilers `match` it exhaustively.
+                    description: Which repository CRD this points at; defaults to [`RepositoryKind::Repository`].
                     enum:
                     - Repository
                     - ClusterRepository
                     type: string
                   name:
+                    description: Name of the referenced `Repository`/`ClusterRepository`.
                     type: string
                   namespace:
                     description: Cross-namespace `Repository` reference; ignored/forbidden for `ClusterRepository`.
@@ -303,35 +314,46 @@ spec:
                 - name
                 type: object
               schedule:
-                description: Quick + full cron schedules plus a shared timezone. ADR §3.7.
+                description: |-
+                  Quick + full cron schedules (with a shared timezone) for `kopia
+                  maintenance run`. ADR §3.7.
                 properties:
                   full:
-                    description: |-
-                      A single cron entry with optional deterministic jitter. Shared by `Maintenance`'s
-                      quick/full schedules. ADR §3.7. `jitter` is a Go-style duration string (e.g. `30m`).
+                    description: Cron + jitter for `kopia maintenance run --full` (content reclamation).
                     properties:
                       cron:
+                        description: |-
+                          The cron expression, parsed by `croner`. May contain an `H` placeholder for
+                          deterministic per-schedule jitter (ADR §3.7).
                         type: string
                       jitter:
+                        description: |-
+                          Optional deterministic jitter window as a Go-style duration string (e.g.
+                          `30m`), derived from `(scheduleUID, slot)` so it is stable across restarts.
                         nullable: true
                         type: string
                     required:
                     - cron
                     type: object
                   quick:
-                    description: |-
-                      A single cron entry with optional deterministic jitter. Shared by `Maintenance`'s
-                      quick/full schedules. ADR §3.7. `jitter` is a Go-style duration string (e.g. `30m`).
+                    description: Cron + jitter for `kopia maintenance run` (quick = cheap index/log work).
                     properties:
                       cron:
+                        description: |-
+                          The cron expression, parsed by `croner`. May contain an `H` placeholder for
+                          deterministic per-schedule jitter (ADR §3.7).
                         type: string
                       jitter:
+                        description: |-
+                          Optional deterministic jitter window as a Go-style duration string (e.g.
+                          `30m`), derived from `(scheduleUID, slot)` so it is stable across restarts.
                         nullable: true
                         type: string
                     required:
                     - cron
                     type: object
                   timezone:
+                    description: IANA timezone both crons are evaluated in; absent means controller default.
                     nullable: true
                     type: string
                 required:
@@ -344,9 +366,11 @@ spec:
             - schedule
             type: object
           status:
+            description: 'Observed maintenance state: lease holder plus per-kind run results. ADR §3.7.'
             nullable: true
             properties:
               conditions:
+                description: Standard Kubernetes conditions surfacing maintenance health. ADR §5.
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
                   properties:
@@ -379,10 +403,11 @@ spec:
                   type: object
                 type: array
               full:
-                description: Per-kind (quick/full) run status. ADR §3.7.
+                description: Last/next-run state for the full maintenance schedule. ADR §3.7.
                 nullable: true
                 properties:
                   consecutiveFailures:
+                    description: Count of back-to-back failed runs of this kind; resets on success.
                     format: int64
                     nullable: true
                     type: integer
@@ -392,31 +417,38 @@ spec:
                     nullable: true
                     type: integer
                   lastRunAt:
+                    description: RFC3339 instant of the most recent run of this kind.
                     nullable: true
                     type: string
                   nextScheduledAt:
+                    description: RFC3339 instant of the next scheduled run of this kind (cron + jitter, pinned).
                     nullable: true
                     type: string
                 type: object
               observedGeneration:
+                description: The `metadata.generation` this status reflects, for staleness detection.
                 format: int64
                 nullable: true
                 type: integer
               ownership:
+                description: Current lease holder, if the lease has been claimed. ADR §3.7.
                 nullable: true
                 properties:
                   claimedAt:
+                    description: RFC3339 instant the lease was claimed.
                     nullable: true
                     type: string
                   owner:
+                    description: The current lease holder's identity (matches `Ownership.owner`).
                     nullable: true
                     type: string
                 type: object
               quick:
-                description: Per-kind (quick/full) run status. ADR §3.7.
+                description: Last/next-run state for the quick maintenance schedule. ADR §3.7.
                 nullable: true
                 properties:
                   consecutiveFailures:
+                    description: Count of back-to-back failed runs of this kind; resets on success.
                     format: int64
                     nullable: true
                     type: integer
@@ -426,9 +458,11 @@ spec:
                     nullable: true
                     type: integer
                   lastRunAt:
+                    description: RFC3339 instant of the most recent run of this kind.
                     nullable: true
                     type: string
                   nextScheduledAt:
+                    description: RFC3339 instant of the next scheduled run of this kind (cron + jitter, pinned).
                     nullable: true
                     type: string
                 type: object

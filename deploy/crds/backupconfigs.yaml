@@ -34,11 +34,22 @@ spec:
               Not `Eq`: transitively embeds k8s-openapi types via `mover` and `hooks` (`JobSpec`).
             properties:
               copyMethod:
-                description: Volume snapshot copy method. Closed enum. ADR §3.3.
+                description: |-
+                  Volume snapshot copy method. Closed enum. ADR §3.3.
+
+                  ```
+                  use kopiur_api::CopyMethod;
+
+                  // Defaults to a point-in-time CSI snapshot.
+                  assert_eq!(CopyMethod::default(), CopyMethod::Snapshot);
+                  // Serializes as a bare PascalCase string (no external tagging — it has no payload).
+                  assert_eq!(serde_json::to_value(CopyMethod::Snapshot).unwrap(), "Snapshot");
+                  assert_eq!(serde_json::to_value(CopyMethod::Direct).unwrap(), "Direct");
+                  ```
                 enum:
+                - Snapshot
                 - Clone
                 - Direct
-                - Snapshot
                 nullable: true
                 type: string
               defaultDeletionPolicy:
@@ -51,6 +62,16 @@ spec:
                   enforces that any new variant added later must be handled in every match site,
                   preventing the class of bug where a new policy slips into production without a
                   corresponding reconcile branch.
+
+                  ```
+                  use kopiur_api::common::DeletionPolicy;
+
+                  // Produced backups default to deleting the snapshot with the CR.
+                  assert_eq!(DeletionPolicy::default(), DeletionPolicy::Delete);
+                  // Variants serialize to their bare PascalCase names (plain string enum).
+                  assert_eq!(serde_json::to_value(DeletionPolicy::Retain).unwrap(), "Retain");
+                  assert_eq!(serde_json::to_value(DeletionPolicy::Orphan).unwrap(), "Orphan");
+                  ```
                 enum:
                 - Delete
                 - Retain
@@ -58,7 +79,19 @@ spec:
                 nullable: true
                 type: string
               groupBy:
-                description: Multi-PVC grouping strategy. Closed enum. ADR §4.9.
+                description: |-
+                  Multi-PVC grouping strategy. Closed enum. ADR §4.9.
+
+                  Defaults to a consistent group snapshot; `None` must be set *explicitly* to
+                  accept independent per-PVC snapshots, because a silent per-PVC fallback would
+                  produce inconsistent backups (the data-integrity hazard ADR §4.9 guards against).
+
+                  ```
+                  use kopiur_api::GroupBy;
+
+                  assert_eq!(GroupBy::default(), GroupBy::VolumeGroupSnapshot);
+                  assert_eq!(serde_json::to_value(GroupBy::None).unwrap(), "None");
+                  ```
                 enum:
                 - VolumeGroupSnapshot
                 - None
@@ -69,6 +102,9 @@ spec:
                 nullable: true
                 properties:
                   afterSnapshot:
+                    description: |-
+                      Hooks run (in order) after the snapshot completes — e.g. resuming the
+                      workload. ADR §4.8.
                     items:
                       description: |-
                         One of three hook forms. ADR §4.8.
@@ -77,6 +113,24 @@ spec:
                         or `{ httpRequest: {...} }`. Exactly one variant by construction.
 
                         Not `Eq`: `RunJob` embeds `JobSpec` (k8s-openapi, `PartialEq` only).
+
+                        ```
+                        use kopiur_api::backup_config::{Hook, HttpRequestHook};
+
+                        // Construct directly — the type system guarantees exactly one variant.
+                        let hook = Hook::HttpRequest(HttpRequestHook {
+                            url: "https://example/notify".into(),
+                            method: Some("POST".into()),
+                            body: None,
+                            timeout: None,
+                            continue_on_failure: false,
+                        });
+                        assert_eq!(hook.kind_str(), "HttpRequest");
+
+                        // Externally tagged on the wire: `{ httpRequest: { url: ... } }`.
+                        let json = serde_json::to_value(&hook).unwrap();
+                        assert_eq!(json["httpRequest"]["url"], "https://example/notify");
+                        ```
                       oneOf:
                       - required:
                         - workloadExec
@@ -89,17 +143,22 @@ spec:
                           description: Typed POST to a URL for cross-system orchestration.
                           properties:
                             body:
+                              description: Optional request body. ADR §4.8.
                               nullable: true
                               type: string
                             continueOnFailure:
+                              description: 'If `true`, a failed request does not abort the backup (default: abort). ADR §4.8.'
                               type: boolean
                             method:
+                              description: HTTP method (default `POST`). ADR §4.8.
                               nullable: true
                               type: string
                             timeout:
+                              description: Max time to wait for the response (Go duration string). ADR §4.8.
                               nullable: true
                               type: string
                             url:
+                              description: Target URL to call. ADR §4.8.
                               type: string
                           required:
                           - url
@@ -113,9 +172,10 @@ spec:
                             serde, so the externally-tagged `{ runJob: {...} }` wire shape is unchanged.
                           properties:
                             continueOnFailure:
+                              description: 'If `true`, a failed Job does not abort the backup (default: abort). ADR §4.8.'
                               type: boolean
                             jobSpec:
-                              description: JobSpec describes how the job execution will look like.
+                              description: The full Kubernetes `JobSpec` to run. ADR §4.8.
                               properties:
                                 activeDeadlineSeconds:
                                   description: Specifies the duration in seconds relative to the startTime that the job may be continuously active before the system tries to terminate it; value must be positive integer. If a Job is suspended (at creation or through an update), this timer will effectively be stopped and reset when the Job is resumed again.
@@ -5126,6 +5186,7 @@ spec:
                               - template
                               type: object
                             timeout:
+                              description: Max time to wait for the Job to complete (Go duration string). ADR §4.8.
                               nullable: true
                               type: string
                           required:
@@ -5137,16 +5198,19 @@ spec:
                             fork #22).
                           properties:
                             command:
+                              description: Command + args to run inside the selected container. ADR §4.8.
                               items:
                                 type: string
                               type: array
                             container:
+                              description: Which container within the matched pod; absent uses the first/only container.
                               nullable: true
                               type: string
                             continueOnFailure:
+                              description: 'If `true`, a failed hook does not abort the backup (default: abort). ADR §4.8.'
                               type: boolean
                             podSelector:
-                              description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                              description: Label selector matching the workload pod(s) to read context/hooks from.
                               properties:
                                 matchExpressions:
                                   description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
@@ -5176,6 +5240,7 @@ spec:
                                   type: object
                               type: object
                             timeout:
+                              description: Max time to wait for the command (Go duration string, e.g. `2m`). ADR §4.8.
                               nullable: true
                               type: string
                           required:
@@ -5184,6 +5249,9 @@ spec:
                       type: object
                     type: array
                   beforeSnapshot:
+                    description: |-
+                      Hooks run (in order) before the snapshot is taken — e.g. quiescing a
+                      database. ADR §4.8.
                     items:
                       description: |-
                         One of three hook forms. ADR §4.8.
@@ -5192,6 +5260,24 @@ spec:
                         or `{ httpRequest: {...} }`. Exactly one variant by construction.
 
                         Not `Eq`: `RunJob` embeds `JobSpec` (k8s-openapi, `PartialEq` only).
+
+                        ```
+                        use kopiur_api::backup_config::{Hook, HttpRequestHook};
+
+                        // Construct directly — the type system guarantees exactly one variant.
+                        let hook = Hook::HttpRequest(HttpRequestHook {
+                            url: "https://example/notify".into(),
+                            method: Some("POST".into()),
+                            body: None,
+                            timeout: None,
+                            continue_on_failure: false,
+                        });
+                        assert_eq!(hook.kind_str(), "HttpRequest");
+
+                        // Externally tagged on the wire: `{ httpRequest: { url: ... } }`.
+                        let json = serde_json::to_value(&hook).unwrap();
+                        assert_eq!(json["httpRequest"]["url"], "https://example/notify");
+                        ```
                       oneOf:
                       - required:
                         - workloadExec
@@ -5204,17 +5290,22 @@ spec:
                           description: Typed POST to a URL for cross-system orchestration.
                           properties:
                             body:
+                              description: Optional request body. ADR §4.8.
                               nullable: true
                               type: string
                             continueOnFailure:
+                              description: 'If `true`, a failed request does not abort the backup (default: abort). ADR §4.8.'
                               type: boolean
                             method:
+                              description: HTTP method (default `POST`). ADR §4.8.
                               nullable: true
                               type: string
                             timeout:
+                              description: Max time to wait for the response (Go duration string). ADR §4.8.
                               nullable: true
                               type: string
                             url:
+                              description: Target URL to call. ADR §4.8.
                               type: string
                           required:
                           - url
@@ -5228,9 +5319,10 @@ spec:
                             serde, so the externally-tagged `{ runJob: {...} }` wire shape is unchanged.
                           properties:
                             continueOnFailure:
+                              description: 'If `true`, a failed Job does not abort the backup (default: abort). ADR §4.8.'
                               type: boolean
                             jobSpec:
-                              description: JobSpec describes how the job execution will look like.
+                              description: The full Kubernetes `JobSpec` to run. ADR §4.8.
                               properties:
                                 activeDeadlineSeconds:
                                   description: Specifies the duration in seconds relative to the startTime that the job may be continuously active before the system tries to terminate it; value must be positive integer. If a Job is suspended (at creation or through an update), this timer will effectively be stopped and reset when the Job is resumed again.
@@ -10241,6 +10333,7 @@ spec:
                               - template
                               type: object
                             timeout:
+                              description: Max time to wait for the Job to complete (Go duration string). ADR §4.8.
                               nullable: true
                               type: string
                           required:
@@ -10252,16 +10345,19 @@ spec:
                             fork #22).
                           properties:
                             command:
+                              description: Command + args to run inside the selected container. ADR §4.8.
                               items:
                                 type: string
                               type: array
                             container:
+                              description: Which container within the matched pod; absent uses the first/only container.
                               nullable: true
                               type: string
                             continueOnFailure:
+                              description: 'If `true`, a failed hook does not abort the backup (default: abort). ADR §4.8.'
                               type: boolean
                             podSelector:
-                              description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                              description: Label selector matching the workload pod(s) to read context/hooks from.
                               properties:
                                 matchExpressions:
                                   description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
@@ -10291,6 +10387,7 @@ spec:
                                   type: object
                               type: object
                             timeout:
+                              description: Max time to wait for the command (Go duration string, e.g. `2m`). ADR §4.8.
                               nullable: true
                               type: string
                           required:
@@ -10304,9 +10401,15 @@ spec:
                 nullable: true
                 properties:
                   hostname:
+                    description: |-
+                      Override the `hostname` portion of `username@hostname:path`; absent uses the
+                      resolved default. Templated with `tera` and pinned at admission (ADR §4.2).
                     nullable: true
                     type: string
                   username:
+                    description: |-
+                      Override the `username` portion of `username@hostname:path`; absent uses the
+                      resolved default. Templated with `tera` and pinned at admission (ADR §4.2).
                     nullable: true
                     type: string
                 type: object
@@ -10315,21 +10418,25 @@ spec:
                 nullable: true
                 properties:
                   cache:
-                    description: Cache defaults inherited by `Backup`/`Restore` movers unless overridden. ADR §3.1.
+                    description: Override the repository's [`CacheDefaults`] for this recipe's movers.
                     nullable: true
                     properties:
                       capacity:
+                        description: Size of the PVC backing the mover's kopia cache (e.g. `10Gi`).
                         nullable: true
                         type: string
                       contentCacheSizeMb:
+                        description: kopia content cache budget in MiB (`--content-cache-size-mb`).
                         format: int64
                         nullable: true
                         type: integer
                       metadataCacheSizeMb:
+                        description: kopia metadata cache budget in MiB (`--metadata-cache-size-mb`).
                         format: int64
                         nullable: true
                         type: integer
                       storageClassName:
+                        description: StorageClass for the cache PVC; absent uses the cluster default.
                         nullable: true
                         type: string
                     type: object
@@ -10338,10 +10445,11 @@ spec:
                     nullable: true
                     properties:
                       container:
+                        description: Which container within the matched pod; absent uses the first/only container.
                         nullable: true
                         type: string
                       podSelector:
-                        description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                        description: Label selector matching the workload pod(s) to read context/hooks from.
                         properties:
                           matchExpressions:
                             description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
@@ -10378,7 +10486,7 @@ spec:
                     nullable: true
                     type: boolean
                   resources:
-                    description: ResourceRequirements describes the compute resource requirements.
+                    description: Resource requests/limits for the mover container.
                     nullable: true
                     properties:
                       claims:
@@ -10415,7 +10523,7 @@ spec:
                         type: object
                     type: object
                   securityContext:
-                    description: SecurityContext holds security configuration that will be applied to a container. Some fields are present in both SecurityContext and PodSecurityContext.  When both are set, the values in SecurityContext take precedence.
+                    description: Security context applied to the mover container.
                     nullable: true
                     properties:
                       allowPrivilegeEscalation:
@@ -10525,12 +10633,15 @@ spec:
                 nullable: true
                 properties:
                   compression:
+                    description: Compression algorithm + per-extension opt-outs. ADR §3.3.
                     nullable: true
                     properties:
                       compressor:
+                        description: kopia compressor name (e.g. `zstd`); absent leaves kopia's default. ADR §3.3.
                         nullable: true
                         type: string
                       neverCompress:
+                        description: Filename globs to leave uncompressed (e.g. already-compressed media). ADR §3.3.
                         items:
                           type: string
                         type: array
@@ -10541,6 +10652,7 @@ spec:
                       type: string
                     type: array
                   ignore:
+                    description: Paths/patterns kopia should skip while snapshotting. ADR §3.3.
                     nullable: true
                     properties:
                       cacheDirs:
@@ -10550,11 +10662,15 @@ spec:
                         description: 'fork issue #13.'
                         type: boolean
                       paths:
+                        description: |-
+                          Filename/path globs to exclude from the snapshot (e.g. `*.tmp`,
+                          `*/cache/*`, `lost+found`). ADR §3.3.
                         items:
                           type: string
                         type: array
                     type: object
                   splitter:
+                    description: kopia object splitter (e.g. `DYNAMIC-4M-BUZHASH`). ADR §3.3.
                     nullable: true
                     type: string
                 type: object
@@ -10563,16 +10679,13 @@ spec:
                 properties:
                   kind:
                     default: Repository
-                    description: |-
-                      Which kind of repository a consumer CR references. ADR §3.2/§3.3.
-
-                      This is a closed enum: a consumer's `repository.kind` is always exactly one
-                      of these two values, so reconcilers `match` it exhaustively.
+                    description: Which repository CRD this points at; defaults to [`RepositoryKind::Repository`].
                     enum:
                     - Repository
                     - ClusterRepository
                     type: string
                   name:
+                    description: Name of the referenced `Repository`/`ClusterRepository`.
                     type: string
                   namespace:
                     description: Cross-namespace `Repository` reference; ignored/forbidden for `ClusterRepository`.
@@ -10586,31 +10699,37 @@ spec:
                 nullable: true
                 properties:
                   keepAnnual:
+                    description: Keep one snapshot per year for the most-recent N years.
                     format: uint32
                     minimum: 0.0
                     nullable: true
                     type: integer
                   keepDaily:
+                    description: Keep one snapshot per day for the most-recent N days.
                     format: uint32
                     minimum: 0.0
                     nullable: true
                     type: integer
                   keepHourly:
+                    description: Keep one snapshot per hour for the most-recent N hours.
                     format: uint32
                     minimum: 0.0
                     nullable: true
                     type: integer
                   keepLatest:
+                    description: Keep the N most-recent snapshots regardless of age.
                     format: uint32
                     minimum: 0.0
                     nullable: true
                     type: integer
                   keepMonthly:
+                    description: Keep one snapshot per month for the most-recent N months.
                     format: uint32
                     minimum: 0.0
                     nullable: true
                     type: integer
                   keepWeekly:
+                    description: Keep one snapshot per week for the most-recent N weeks.
                     format: uint32
                     minimum: 0.0
                     nullable: true
@@ -10625,22 +10744,25 @@ spec:
                     `sourcePath*` keys and YAML lists them as optional siblings). ADR §3.3.
                   properties:
                     pvc:
+                      description: Single PVC by name. Mutually exclusive with `pvcSelector`. ADR §3.3.
                       nullable: true
                       properties:
                         name:
+                          description: |-
+                            Name of the `PersistentVolumeClaim` to back up (in the `BackupConfig`'s
+                            namespace). ADR §3.3.
                           type: string
                       required:
                       - name
                       type: object
                     pvcSelector:
                       description: |-
-                        Selects PVCs across namespaces by label. ADR §3.3/§5.4.
-
-                        Not `Eq`: embeds `LabelSelector` (k8s-openapi, `PartialEq` only).
+                        Label/namespace selector matching many PVCs (multi-PVC sources).
+                        Mutually exclusive with `pvc`. ADR §3.3/§5.4.
                       nullable: true
                       properties:
                         labelSelector:
-                          description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                          description: Standard Kubernetes label selector matching the PVCs to include. ADR §3.3/§5.4.
                           nullable: true
                           properties:
                             matchExpressions:
@@ -10671,9 +10793,15 @@ spec:
                               type: object
                           type: object
                         namespaceSelector:
+                          description: |-
+                            Restricts the search to specific namespaces; absent means the
+                            `BackupConfig`'s own namespace. ADR §3.3/§5.4.
                           nullable: true
                           properties:
                             matchNames:
+                              description: |-
+                                Exact namespace names to search; empty means the `BackupConfig`'s own
+                                namespace. ADR §3.3/§5.4.
                               items:
                                 type: string
                               type: array
@@ -10684,25 +10812,45 @@ spec:
                       nullable: true
                       type: string
                     sourcePathStrategy:
-                      description: How a selector-matched PVC's source path is derived. Closed enum. ADR §3.3/§4.2.
+                      description: |-
+                        How a selector-matched PVC's source path is derived. Closed enum. ADR §3.3/§4.2.
+
+                        Only relevant for `pvcSelector` sources, where one recipe expands to many PVCs
+                        and each needs a distinct kopia source path.
+
+                        ```
+                        use kopiur_api::SourcePathStrategy;
+
+                        assert_eq!(SourcePathStrategy::default(), SourcePathStrategy::PvcName);
+                        assert_eq!(
+                            serde_json::to_value(SourcePathStrategy::PvcNamespacedName).unwrap(),
+                            "PvcNamespacedName"
+                        );
+                        ```
                       enum:
                       - PvcName
                       - PvcNamespacedName
-                      - null
                       nullable: true
                       type: string
                   type: object
                 type: array
               volumeSnapshotClassName:
+                description: |-
+                  `VolumeSnapshotClass` used when `copyMethod` snapshots/clones the source.
+                  ADR §3.3.
                 nullable: true
                 type: string
             required:
             - repository
             type: object
           status:
+            description: Observed state of a [`BackupConfig`]. ADR §3.3 status.
             nullable: true
             properties:
               conditions:
+                description: |-
+                  Standard Kubernetes conditions (e.g. `RepositoryReachable`,
+                  `GroupSnapshotSupported`). ADR §3.3 status.
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
                   properties:
@@ -10735,6 +10883,7 @@ spec:
                   type: object
                 type: array
               observedGeneration:
+                description: '`metadata.generation` last reconciled, for staleness detection. ADR §3.3 status.'
                 format: int64
                 nullable: true
                 type: integer
@@ -10743,34 +10892,43 @@ spec:
                 nullable: true
                 properties:
                   identity:
-                    description: Fully-resolved identity pinned into status; never re-rendered after admission. ADR §4.2.
+                    description: The resolved `username@hostname` identity. ADR §3.3/§4.2.
                     nullable: true
                     properties:
                       hostname:
+                        description: The final `hostname` kopia records, fixed at admission.
                         type: string
                       sourcePath:
+                        description: The resolved snapshot source path, when applicable (`username@hostname:path`).
                         nullable: true
                         type: string
                       username:
+                        description: The final `username` kopia records, fixed at admission.
                         type: string
                     required:
                     - hostname
                     - username
                     type: object
                   sources:
+                    description: The concrete PVCs + source paths after selector expansion. ADR §3.3 status.
                     items:
+                      description: One resolved source — a concrete PVC and the path kopia records for it. ADR §3.3 status.
                       properties:
                         pvc:
                           description: '`namespace/name` of the PVC, as kopia sees it. ADR §3.3 status.'
                           nullable: true
                           type: string
                         sourcePath:
+                          description: The source path kopia records for this PVC. ADR §3.3/§4.2.
                           nullable: true
                           type: string
                       type: object
                     type: array
                 type: object
               retention:
+                description: |-
+                  Summary of GFS retention pruning against this config's `Backup` CRs.
+                  ADR §3.3 status/§4.4.
                 nullable: true
                 properties:
                   activeBackupCount:
@@ -10779,9 +10937,11 @@ spec:
                     nullable: true
                     type: integer
                   lastPruneAt:
+                    description: RFC3339 timestamp of the last prune pass. ADR §3.3 status.
                     nullable: true
                     type: string
                   lastPruneDeleted:
+                    description: Number of `Backup` CRs deleted by the last prune pass. ADR §3.3 status/§4.4.
                     format: int64
                     nullable: true
                     type: integer

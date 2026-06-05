@@ -16,6 +16,18 @@ use serde::{Deserialize, Serialize};
 
 /// Kopia's snapshot identity triple: `userName@host:path`. Present on both
 /// snapshot-create results and snapshot-list entries.
+///
+/// kopia's JSON spells the user component `userName`; the typed field is
+/// `user_name`:
+///
+/// ```
+/// use kopiur_kopia::SnapshotSource;
+///
+/// let src: SnapshotSource =
+///     serde_json::from_str(r#"{"host":"prod","userName":"mydb","path":"/data"}"#).unwrap();
+/// assert_eq!(src.user_name, "mydb");
+/// assert_eq!(src.identity(), "mydb@prod:/data");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotSource {
@@ -84,6 +96,47 @@ pub struct RootEntry {
 /// `rootEntry.summ`; the create result itself does not carry a top-level
 /// `stats` block (that appears on snapshot-list entries). We surface
 /// convenience accessors for the common stats the mover reports.
+///
+/// Parse a representative kopia create result and read the convenience
+/// accessors that pull from `rootEntry.summ`:
+///
+/// ```
+/// use kopiur_kopia::SnapshotCreateResult;
+///
+/// let json = r#"{
+///     "id": "k9c0ffee",
+///     "source": {"host": "prod", "userName": "mydb", "path": "/data"},
+///     "startTime": "2026-06-02T03:13:59Z",
+///     "endTime": "2026-06-02T03:14:00Z",
+///     "rootEntry": {
+///         "name": "data", "type": "d", "obj": "k1",
+///         "summ": {"size": 4096, "files": 12, "dirs": 3, "numFailed": 1}
+///     }
+/// }"#;
+/// let r: SnapshotCreateResult = serde_json::from_str(json).unwrap();
+/// assert_eq!(r.id, "k9c0ffee");
+/// assert_eq!(r.source.identity(), "mydb@prod:/data");
+/// assert_eq!(r.total_bytes(), 4096);
+/// assert_eq!(r.file_count(), 12);
+/// assert_eq!(r.error_count(), 1);
+/// ```
+///
+/// The accessors return `0` when the root summary is absent rather than
+/// panicking:
+///
+/// ```
+/// use kopiur_kopia::SnapshotCreateResult;
+///
+/// let json = r#"{
+///     "id": "k1",
+///     "source": {"host": "h", "userName": "u", "path": "/p"},
+///     "startTime": "2026-06-02T03:13:59Z",
+///     "endTime": "2026-06-02T03:14:00Z"
+/// }"#;
+/// let r: SnapshotCreateResult = serde_json::from_str(json).unwrap();
+/// assert_eq!(r.total_bytes(), 0);
+/// assert_eq!(r.file_count(), 0);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotCreateResult {
@@ -170,6 +223,27 @@ pub struct SnapshotStats {
 }
 
 /// One entry from `kopia snapshot list --json`.
+///
+/// Unlike the create result, list entries carry a top-level `stats` block and a
+/// `retentionReason` array (the kopia GFS classes keeping the snapshot alive):
+///
+/// ```
+/// use kopiur_kopia::SnapshotListEntry;
+///
+/// let json = r#"{
+///     "id": "k1",
+///     "source": {"host": "prod", "userName": "mydb", "path": "/data"},
+///     "startTime": "2026-06-02T03:13:59Z",
+///     "endTime": "2026-06-02T03:14:00Z",
+///     "stats": {"totalSize": 4096, "fileCount": 12, "errorCount": 0},
+///     "retentionReason": ["latest-1", "daily-1"]
+/// }"#;
+/// let entry: SnapshotListEntry = serde_json::from_str(json).unwrap();
+/// assert_eq!(entry.id, "k1");
+/// assert_eq!(entry.stats.total_size, 4096);
+/// assert_eq!(entry.stats.file_count, 12);
+/// assert_eq!(entry.retention_reason, vec!["latest-1", "daily-1"]);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotListEntry {
@@ -249,6 +323,27 @@ pub struct ContentFormat {
 /// the explicit rename). We keep the high-value fields typed and leave the rest
 /// (volume capacity, object format, epoch params) for future expansion without
 /// breaking on unknown fields.
+///
+/// Parse a trimmed status object — note the `uniqueIDHex` key maps to
+/// `unique_id_hex`, and unknown fields (here `extraFutureField`) are tolerated:
+///
+/// ```
+/// use kopiur_kopia::RepositoryStatus;
+///
+/// let json = r#"{
+///     "configFile": "/config/repository.config",
+///     "uniqueIDHex": "deadbeef",
+///     "clientOptions": {"hostname": "prod", "username": "mydb"},
+///     "storage": {"type": "s3", "config": {"bucket": "backups"}},
+///     "contentFormat": {"hash": "BLAKE2B-256-128", "encryption": "AES256-GCM-HMAC-SHA256", "version": 3},
+///     "extraFutureField": 42
+/// }"#;
+/// let status: RepositoryStatus = serde_json::from_str(json).unwrap();
+/// assert_eq!(status.unique_id_hex, "deadbeef");
+/// assert_eq!(status.storage.storage_type, "s3");
+/// assert_eq!(status.content_format.version, 3);
+/// assert_eq!(status.client_options.username, "mydb");
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryStatus {
@@ -292,6 +387,25 @@ pub struct MaintenanceSchedule {
 }
 
 /// Result of `kopia maintenance info --json`.
+///
+/// `interval` is kopia's Go `time.Duration` in nanoseconds; the `schedule` block
+/// is optional:
+///
+/// ```
+/// use kopiur_kopia::MaintenanceInfo;
+///
+/// let json = r#"{
+///     "owner": "mydb@prod",
+///     "quick": {"enabled": true, "interval": 3600000000000},
+///     "full": {"enabled": false, "interval": 0}
+/// }"#;
+/// let info: MaintenanceInfo = serde_json::from_str(json).unwrap();
+/// assert_eq!(info.owner, "mydb@prod");
+/// assert!(info.quick.enabled);
+/// assert_eq!(info.quick.interval, 3_600_000_000_000); // 1h in nanos
+/// assert!(!info.full.enabled);
+/// assert!(info.schedule.is_none());
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintenanceInfo {

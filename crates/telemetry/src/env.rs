@@ -23,6 +23,13 @@ pub const KOPIUR_LOG_FORMAT: &str = "KOPIUR_LOG_FORMAT";
 
 /// The OTLP env vars a parent process should pass through to children so their
 /// telemetry reaches the same collector. Ordered with the endpoint first.
+///
+/// ```
+/// use kopiur_telemetry::env;
+/// // The endpoint is forwarded first, and the protocol var is included.
+/// assert_eq!(env::OTLP_PASSTHROUGH[0], env::OTEL_EXPORTER_OTLP_ENDPOINT);
+/// assert!(env::OTLP_PASSTHROUGH.contains(&env::OTEL_EXPORTER_OTLP_PROTOCOL));
+/// ```
 pub const OTLP_PASSTHROUGH: &[&str] = &[
     OTEL_EXPORTER_OTLP_ENDPOINT,
     OTEL_EXPORTER_OTLP_PROTOCOL,

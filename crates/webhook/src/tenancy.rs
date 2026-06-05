@@ -38,11 +38,21 @@ use std::collections::BTreeMap;
 /// surfaced verbatim in the `kubectl apply` rejection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TenancyDecision {
+    /// The consumer namespace is permitted to reference the `ClusterRepository`.
     Allow,
+    /// The reference is rejected; the string is the user-facing reason surfaced
+    /// verbatim in the `kubectl apply` rejection.
     Deny(String),
 }
 
 impl TenancyDecision {
+    /// `true` iff this is [`TenancyDecision::Allow`].
+    ///
+    /// ```
+    /// use kopiur_webhook::tenancy::TenancyDecision;
+    /// assert!(TenancyDecision::Allow.is_allow());
+    /// assert!(!TenancyDecision::Deny("not allowed".into()).is_allow());
+    /// ```
     pub fn is_allow(&self) -> bool {
         matches!(self, TenancyDecision::Allow)
     }

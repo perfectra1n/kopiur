@@ -80,6 +80,20 @@ pub struct RestoreOp {
 
 impl RestoreOp {
     /// Translate the carried restore flags into the kopia client's options.
+    ///
+    /// ```
+    /// use kopiur_mover::workspec::RestoreOp;
+    ///
+    /// let op = RestoreOp {
+    ///     snapshot_id: "k1".into(),
+    ///     target_path: "/data".into(),
+    ///     ignore_permission_errors: Some(false),
+    ///     write_files_atomically: Some(true),
+    /// };
+    /// let opts = op.restore_options();
+    /// assert_eq!(opts.ignore_permission_errors, Some(false));
+    /// assert_eq!(opts.write_files_atomically, Some(true));
+    /// ```
     pub fn restore_options(&self) -> kopiur_kopia::RestoreOptions {
         kopiur_kopia::RestoreOptions {
             ignore_permission_errors: self.ignore_permission_errors,
@@ -241,6 +255,18 @@ impl RepositoryConnect {
 
     /// Convert to the kopia client's connect spec. Exhaustive: a new backend
     /// variant fails to compile until handled.
+    ///
+    /// ```
+    /// use kopiur_mover::workspec::RepositoryConnect;
+    /// use kopiur_kopia::ConnectSpec;
+    ///
+    /// let wire = RepositoryConnect::Filesystem { path: "/repo".into() };
+    /// assert_eq!(wire.kind_str(), "Filesystem");
+    /// assert_eq!(
+    ///     wire.to_connect_spec(),
+    ///     ConnectSpec::Filesystem { path: "/repo".into() },
+    /// );
+    /// ```
     pub fn to_connect_spec(&self) -> kopiur_kopia::ConnectSpec {
         use kopiur_kopia::ConnectSpec;
         match self {
@@ -354,6 +380,49 @@ impl Default for MoverOptions {
 }
 
 /// The full work spec the controller writes for one mover run.
+///
+/// This is the controller↔mover JSON contract (ADR §4.10): the controller
+/// serializes it into a `ConfigMap`, the mover deserializes it from a mounted
+/// file. It round-trips losslessly, and externally-tagged enums keep the wire
+/// shape `{ "backup": {...} }` / `{ "filesystem": {...} }`:
+///
+/// ```
+/// use std::collections::BTreeMap;
+/// use kopiur_mover::workspec::*;
+///
+/// let spec = MoverWorkSpec {
+///     version: 1,
+///     operation: Operation::Backup(BackupOp {
+///         source_path: "/data".into(),
+///         tags: BTreeMap::new(),
+///     }),
+///     identity: ResolvedIdentity {
+///         username: "mydb".into(),
+///         hostname: "prod".into(),
+///         source_path: "/data".into(),
+///     },
+///     repository: RepositoryConnect::Filesystem { path: "/repo".into() },
+///     target_ref: TargetRef {
+///         api_version: "kopiur.home-operations.com/v1alpha1".into(),
+///         kind: "Backup".into(),
+///         name: "mydb-20260601".into(),
+///         namespace: "prod".into(),
+///     },
+///     hook_plan: HookPlanSummary::default(),
+///     options: MoverOptions::default(),
+/// };
+///
+/// // Round-trips through serde_json unchanged.
+/// let json = serde_json::to_string(&spec).unwrap();
+/// let back: MoverWorkSpec = serde_json::from_str(&json).unwrap();
+/// assert_eq!(back, spec);
+///
+/// // Externally tagged on the wire (camelCase keys).
+/// let v: serde_json::Value = serde_json::to_value(&spec).unwrap();
+/// assert_eq!(v["operation"]["backup"]["sourcePath"], "/data");
+/// assert_eq!(v["repository"]["filesystem"]["path"], "/repo");
+/// assert_eq!(spec.operation.kind_str(), "Backup");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MoverWorkSpec {
