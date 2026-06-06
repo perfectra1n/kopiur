@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.8](https://github.com/home-operations/kopiur/compare/0.1.7...0.1.8) (2026-06-06)
+
+
+### Features
+
+* **docs:** add some useful docs ([6abd4f5](https://github.com/home-operations/kopiur/commit/6abd4f5421742d6f02228f7f269119d4ac5905f4))
+* **docs:** implement docs for the movers ([b69f445](https://github.com/home-operations/kopiur/commit/b69f445173a88edc2017dc7cf6dfc65f433f0535))
+* **docs:** take that mise ([ed2d9e2](https://github.com/home-operations/kopiur/commit/ed2d9e273ddb7f0f81c97285aa03a09140900a77))
+* **maintenance:** make maintenance...actually do something ([e58232d](https://github.com/home-operations/kopiur/commit/e58232dacc1bcf056af82363fb767ab5aee6c4bc))
+* **mover:** actually use secrets in movers and get rbac for it ([c8ab1de](https://github.com/home-operations/kopiur/commit/c8ab1deb9aa0a0b56ef1771d2a28571b99f9505d))
+* **movers:** implement privileged movers ([334a9a5](https://github.com/home-operations/kopiur/commit/334a9a5919952e241883059f4ca375b813bac45a))
+* **tests:** make sure to implement tests for updated rbac ([bb2a118](https://github.com/home-operations/kopiur/commit/bb2a118850eabc7b9d0ee9c3429ab897433a613c))
+
 ## [0.1.7](https://github.com/home-operations/kopiur/compare/0.1.6...0.1.7) (2026-06-06)
 
 
