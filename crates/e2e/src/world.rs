@@ -33,6 +33,16 @@ pub enum Need {
     /// The workload namespace with its own source PV/PVC and S3 credentials
     /// (implies [`Need::Minio`], since those creds target MinIO).
     WorkloadNs,
+    /// A running SFTP server (atmoz/sftp) with a fixed host key + the client's
+    /// authorized key, and the SFTP credentials Secret (private key + known_hosts)
+    /// the mover reads. Implies [`Need::Filesystem`] for a backup source PVC.
+    Sftp,
+    /// A running WebDAV server (basic auth) and the WebDAV credentials Secret.
+    /// Implies [`Need::Filesystem`] for a backup source PVC.
+    WebDav,
+    /// The rclone credentials Secret (an `rclone.conf` whose `s3` remote points at
+    /// the in-cluster MinIO). Implies [`Need::Minio`].
+    Rclone,
 }
 
 /// Handle to a reachable cluster plus per-`Need` idempotency latches.
@@ -41,6 +51,9 @@ pub struct World {
     fs: OnceCell<()>,
     minio: OnceCell<()>,
     workload_ns: OnceCell<()>,
+    sftp: OnceCell<()>,
+    webdav: OnceCell<()>,
+    rclone: OnceCell<()>,
 }
 
 impl World {
@@ -53,6 +66,9 @@ impl World {
             fs: OnceCell::new(),
             minio: OnceCell::new(),
             workload_ns: OnceCell::new(),
+            sftp: OnceCell::new(),
+            webdav: OnceCell::new(),
+            rclone: OnceCell::new(),
         })
     }
 
@@ -75,6 +91,15 @@ impl World {
                     self.workload_ns
                         .get_or_try_init(|| self.ensure_workload_ns())
                         .await?;
+                }
+                Need::Sftp => {
+                    self.sftp.get_or_try_init(|| self.ensure_sftp()).await?;
+                }
+                Need::WebDav => {
+                    self.webdav.get_or_try_init(|| self.ensure_webdav()).await?;
+                }
+                Need::Rclone => {
+                    self.rclone.get_or_try_init(|| self.ensure_rclone()).await?;
                 }
             }
         }
@@ -169,6 +194,101 @@ impl World {
         ];
         apply_all(&self.client, &fixtures).await
     }
+
+    /// Stand up the in-cluster SFTP server (fixed host key + the client's
+    /// authorized public key) and seed the SFTP credentials Secret the mover
+    /// reads (private key + known_hosts + repo password). Needs a backup source,
+    /// so it depends on the filesystem fixtures.
+    async fn ensure_sftp(&self) -> Result<()> {
+        self.fs.get_or_try_init(|| self.ensure_filesystem()).await?;
+        let fixtures: Vec<Fixture> = vec![
+            // Server-side material mounted into the sftp Deployment.
+            builders::opaque_secret(
+                consts::OPERATOR_NS,
+                consts::SECRET_SFTP_SERVER,
+                &[
+                    (consts::KEY_SFTP_AUTHORIZED, consts::SFTP_CLIENT_PUBLIC_KEY),
+                    (consts::KEY_SFTP_HOST_KEY, consts::SFTP_HOST_PRIVATE_KEY),
+                ],
+            )
+            .into(),
+            // Client-side credentials the mover materializes into files.
+            builders::opaque_secret(
+                consts::OPERATOR_NS,
+                consts::SECRET_SFTP_CREDS,
+                &[
+                    (consts::KEY_KOPIA_PASSWORD, consts::KOPIA_PASSWORD),
+                    (consts::KEY_SFTP_KEY_DATA, consts::SFTP_CLIENT_PRIVATE_KEY),
+                    (consts::KEY_SFTP_KNOWN_HOSTS, consts::SFTP_KNOWN_HOSTS),
+                ],
+            )
+            .into(),
+            builders::sftp_deployment(consts::OPERATOR_NS).into(),
+            builders::sftp_service(consts::OPERATOR_NS).into(),
+        ];
+        apply_all(&self.client, &fixtures).await?;
+        wait::deployment_ready(&self.client, consts::OPERATOR_NS, "sftp").await
+    }
+
+    /// Stand up the in-cluster WebDAV server (basic auth) and seed the WebDAV
+    /// credentials Secret the mover reads. Needs a backup source.
+    async fn ensure_webdav(&self) -> Result<()> {
+        self.fs.get_or_try_init(|| self.ensure_filesystem()).await?;
+        let fixtures: Vec<Fixture> = vec![
+            builders::opaque_secret(
+                consts::OPERATOR_NS,
+                consts::SECRET_WEBDAV_CREDS,
+                &[
+                    (consts::KEY_KOPIA_PASSWORD, consts::KOPIA_PASSWORD),
+                    (consts::KEY_WEBDAV_USERNAME, consts::WEBDAV_USER),
+                    (consts::KEY_WEBDAV_PASSWORD, consts::WEBDAV_PASSWORD),
+                ],
+            )
+            .into(),
+            builders::webdav_deployment(consts::OPERATOR_NS).into(),
+            builders::webdav_service(consts::OPERATOR_NS).into(),
+        ];
+        apply_all(&self.client, &fixtures).await?;
+        wait::deployment_ready(&self.client, consts::OPERATOR_NS, "webdav").await
+    }
+
+    /// Seed the rclone credentials Secret (an `rclone.conf` whose `s3` remote
+    /// targets the in-cluster MinIO). Implies MinIO + its `kopiur-rclone` bucket.
+    async fn ensure_rclone(&self) -> Result<()> {
+        self.minio.get_or_try_init(|| self.ensure_minio()).await?;
+        let conf = rclone_config();
+        let fixtures: Vec<Fixture> = vec![
+            builders::opaque_secret(
+                consts::OPERATOR_NS,
+                consts::SECRET_RCLONE_CREDS,
+                &[
+                    (consts::KEY_KOPIA_PASSWORD, consts::KOPIA_PASSWORD),
+                    (consts::KEY_RCLONE_CONFIG, &conf),
+                ],
+            )
+            .into(),
+        ];
+        apply_all(&self.client, &fixtures).await
+    }
+}
+
+/// An `rclone.conf` defining the `miniors3` remote (an rclone `s3` provider
+/// pointing at the in-cluster MinIO over plain HTTP). The mover materializes
+/// this from the credentials Secret and forwards it to rclone via `--config`.
+fn rclone_config() -> String {
+    format!(
+        "[miniors3]\n\
+         type = s3\n\
+         provider = Minio\n\
+         access_key_id = {user}\n\
+         secret_access_key = {pass}\n\
+         endpoint = http://{endpoint}\n\
+         region = us-east-1\n\
+         force_path_style = true\n",
+        user = consts::MINIO_USER,
+        pass = consts::MINIO_PASS,
+        endpoint = consts::MINIO_ENDPOINT,
+    )
 }
 
 /// Repo password + valid S3 keys (the single-secret homelab layout).

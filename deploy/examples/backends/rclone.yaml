@@ -17,8 +17,11 @@ metadata:
 type: Opaque
 stringData:
   # A standard rclone.conf defining the remote referenced by remotePath below
-  # (here the remote is named `mydrive`). Generate it with `rclone config`.
-  rclone.conf: |
+  # (here the remote is named `mydrive`). Generate it with `rclone config`. The
+  # operator's mover writes this to a file and runs rclone with `--config`. The
+  # key is KOPIA_RCLONE_CONFIG (a valid env identifier), not `rclone.conf`
+  # (a dotted key is dropped by Kubernetes envFrom).
+  KOPIA_RCLONE_CONFIG: |
     [mydrive]
     type = drive
     scope = drive

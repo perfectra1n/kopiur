@@ -28,18 +28,31 @@ A backend is chosen by **which key you set** (`backend.s3`, `backend.azure`, …
 
 ## Credential keys at a glance
 
-The mover reads these **exact** key names from the Secret you reference and exports them as the environment variables kopia expects. `KOPIA_PASSWORD` is required for **every** backend.
+The mover reads these **exact** key names from the Secret you reference and feeds them to kopia. `KOPIA_PASSWORD` is required for **every** backend.
 
 | Backend | Secret keys (besides `KOPIA_PASSWORD`) | Spec key |
 |---|---|---|
 | [S3 / S3-compatible](#s3--s3-compatible) | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, *(opt)* `AWS_SESSION_TOKEN` | `backend.s3` |
 | [Azure](#azure-blob-storage) | `AZURE_STORAGE_KEY` **or** `AZURE_STORAGE_SAS_TOKEN` | `backend.azure` |
-| [Google Cloud Storage](#google-cloud-storage) | `GOOGLE_APPLICATION_CREDENTIALS` (the SA-key JSON) | `backend.gcs` |
+| [Google Cloud Storage](#google-cloud-storage) | `KOPIA_GCS_CREDENTIALS` (the SA-key JSON) | `backend.gcs` |
 | [Backblaze B2](#backblaze-b2) | `B2_KEY_ID`, `B2_KEY` | `backend.b2` |
 | [Filesystem](#filesystem-pvc-backed) | *(none — only `KOPIA_PASSWORD`)* | `backend.filesystem` |
-| [SFTP](#sftp) | `ssh-privatekey`, `known_hosts` | `backend.sftp` |
-| [WebDAV](#webdav) | `WEBDAV_USERNAME`, `WEBDAV_PASSWORD` | `backend.webDav` |
-| [rclone](#rclone-everything-else) | `rclone.conf` *(via `configSecretRef`)* | `backend.rclone` |
+| [SFTP](#sftp) | `KOPIA_SFTP_KEY_DATA`, `KOPIA_SFTP_KNOWN_HOSTS` | `backend.sftp` |
+| [WebDAV](#webdav) | `KOPIA_WEBDAV_USERNAME`, `KOPIA_WEBDAV_PASSWORD` | `backend.webDav` |
+| [rclone](#rclone-everything-else) | `KOPIA_RCLONE_CONFIG` *(via `configSecretRef`)* | `backend.rclone` |
+
+```admonish info title="Env-delivered vs. file-delivered credentials"
+Most backends authenticate via environment variables kopia reads directly — the mover loads the Secret with `envFrom`, so the keys above become env vars. Three backends need their credentials as **files** instead (kopia's SFTP/GCS/rclone flags have no env form, and a Secret key like `ssh-privatekey` isn't a valid env-var name so `envFrom` would silently drop it). For those, the mover reads a well-known env key and writes it to a private (`0600`) file, then points kopia at the path:
+
+| Secret key | Becomes | kopia flag |
+|---|---|---|
+| `KOPIA_SFTP_KEY_DATA` | the SSH private key file | `--keyfile` |
+| `KOPIA_SFTP_KNOWN_HOSTS` | the `known_hosts` file | `--known-hosts` |
+| `KOPIA_GCS_CREDENTIALS` | the service-account JSON file | `--credentials-file` |
+| `KOPIA_RCLONE_CONFIG` | the `rclone.conf` file | rclone `--config` |
+
+You don't manage the files — just put the value under the right key; the secret never lands on kopia's argv.
+```
 
 ```admonish note title="ClusterRepository: Secret refs need a namespace"
 Everything below uses a namespaced `Repository`. For a cluster-scoped `ClusterRepository` the same backend stanzas apply, but **every** Secret reference must carry an explicit `namespace:` (webhook-enforced), and the credential Secret must also be replicated into each workload namespace — see [Movers → the ClusterRepository gotcha](movers.md#the-credentials-secret-yours-to-place).

@@ -138,6 +138,145 @@ pub fn minio_service(ns: &str) -> Service {
     }))
 }
 
+/// An in-cluster SFTP server (atmoz/sftp) for the SFTP-backend e2e. The user +
+/// repo subdirectory come from the container args (atmoz `user:pass:::dir`
+/// format); the client's authorized public key and the server's fixed host key
+/// are mounted from [`consts::SECRET_SFTP_SERVER`] so host-key verification is
+/// deterministic. Readiness is a TCP probe (SFTP has no HTTP health endpoint).
+pub fn sftp_deployment(ns: &str) -> Deployment {
+    let repo_dir = consts::SFTP_PATH.trim_start_matches('/');
+    let user_spec = format!(
+        "{}:{}:::{}",
+        consts::SFTP_USER,
+        consts::SFTP_PASSWORD,
+        repo_dir
+    );
+    from_json(json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": { "name": "sftp", "namespace": ns },
+        "spec": {
+            "replicas": 1,
+            "selector": { "matchLabels": { "app": "sftp" } },
+            "template": {
+                "metadata": { "labels": { "app": "sftp" } },
+                "spec": {
+                    "containers": [{
+                        "name": "sftp",
+                        "image": consts::SFTP_IMAGE,
+                        "imagePullPolicy": "IfNotPresent",
+                        "args": [user_spec],
+                        "ports": [{ "containerPort": 22 }],
+                        "readinessProbe": {
+                            "tcpSocket": { "port": 22 },
+                            "periodSeconds": 3,
+                        },
+                        "volumeMounts": [
+                            // atmoz installs every *.pub under .ssh/keys into the
+                            // user's authorized_keys at startup.
+                            {
+                                "name": "client-key",
+                                "mountPath": format!("/home/{}/.ssh/keys", consts::SFTP_USER),
+                                "readOnly": true,
+                            },
+                            // A fixed host key so `known_hosts` can be pinned.
+                            {
+                                "name": "host-key",
+                                "mountPath": "/etc/ssh/ssh_host_ed25519_key",
+                                "subPath": "ssh_host_ed25519_key",
+                                "readOnly": true,
+                            },
+                        ],
+                    }],
+                    "volumes": [
+                        {
+                            "name": "client-key",
+                            "secret": {
+                                "secretName": consts::SECRET_SFTP_SERVER,
+                                "items": [{ "key": consts::KEY_SFTP_AUTHORIZED, "path": "client.pub" }],
+                            },
+                        },
+                        {
+                            "name": "host-key",
+                            "secret": {
+                                "secretName": consts::SECRET_SFTP_SERVER,
+                                // 0600 — sshd refuses a group/world-readable host key.
+                                "defaultMode": 384,
+                                "items": [{
+                                    "key": consts::KEY_SFTP_HOST_KEY,
+                                    "path": "ssh_host_ed25519_key",
+                                    "mode": 384,
+                                }],
+                            },
+                        },
+                    ],
+                },
+            },
+        },
+    }))
+}
+
+/// The `Service` fronting the SFTP server on port 22.
+pub fn sftp_service(ns: &str) -> Service {
+    from_json(json!({
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": { "name": "sftp", "namespace": ns },
+        "spec": {
+            "selector": { "app": "sftp" },
+            "ports": [{ "name": "sftp", "port": 22, "targetPort": 22 }],
+        },
+    }))
+}
+
+/// An in-cluster WebDAV server (Apache + mod_dav) with HTTP basic auth from env.
+/// Readiness is a TCP probe — an unauthenticated HTTP GET returns 401, which a
+/// `httpGet` probe would treat as unready.
+pub fn webdav_deployment(ns: &str) -> Deployment {
+    from_json(json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": { "name": "webdav", "namespace": ns },
+        "spec": {
+            "replicas": 1,
+            "selector": { "matchLabels": { "app": "webdav" } },
+            "template": {
+                "metadata": { "labels": { "app": "webdav" } },
+                "spec": {
+                    "containers": [{
+                        "name": "webdav",
+                        "image": consts::WEBDAV_IMAGE,
+                        "imagePullPolicy": "IfNotPresent",
+                        "env": [
+                            { "name": "AUTH_TYPE", "value": "Basic" },
+                            { "name": "USERNAME", "value": consts::WEBDAV_USER },
+                            { "name": "PASSWORD", "value": consts::WEBDAV_PASSWORD },
+                        ],
+                        "ports": [{ "containerPort": 80 }],
+                        "readinessProbe": {
+                            "tcpSocket": { "port": 80 },
+                            "periodSeconds": 3,
+                        },
+                    }],
+                },
+            },
+        },
+    }))
+}
+
+/// The `Service` fronting the WebDAV server on port 80.
+pub fn webdav_service(ns: &str) -> Service {
+    from_json(json!({
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": { "name": "webdav", "namespace": ns },
+        "spec": {
+            "selector": { "app": "webdav" },
+            "ports": [{ "name": "http", "port": 80, "targetPort": 80 }],
+        },
+    }))
+}
+
 /// A one-shot `Pod` that creates all [`consts::BUCKETS`] via `mc` (idempotent
 /// `mb --ignore-existing`), retrying `mc alias set` until MinIO answers. The
 /// harness runs it to completion, then deletes it.
@@ -271,6 +410,53 @@ mod tests {
         let v = val(&s);
         assert_eq!(v.pointer("/spec/ports/0/port").unwrap(), 9000);
         assert_eq!(v.pointer("/spec/selector/app").unwrap(), "minio");
+    }
+
+    #[test]
+    fn sftp_deployment_pins_host_key_0600_and_passes_user_spec() {
+        let d = sftp_deployment(consts::OPERATOR_NS);
+        let v = val(&d);
+        let c = v
+            .pointer("/spec/template/spec/containers/0")
+            .expect("container");
+        assert_eq!(c.pointer("/image").unwrap(), consts::SFTP_IMAGE);
+        // atmoz user spec: user:pass:::dir (dir = repo path without leading slash).
+        assert_eq!(
+            c.pointer("/args/0").unwrap(),
+            &serde_json::json!(format!(
+                "{}:{}:::kopia",
+                consts::SFTP_USER,
+                consts::SFTP_PASSWORD
+            ))
+        );
+        assert_eq!(c.pointer("/readinessProbe/tcpSocket/port").unwrap(), 22);
+        // The host key must be mounted 0600 (decimal 384) or sshd ignores it.
+        let host_vol = v
+            .pointer("/spec/template/spec/volumes/1")
+            .expect("host-key volume");
+        assert_eq!(host_vol.pointer("/secret/items/0/mode").unwrap(), 384);
+        assert_eq!(
+            host_vol.pointer("/secret/secretName").unwrap(),
+            consts::SECRET_SFTP_SERVER
+        );
+    }
+
+    #[test]
+    fn webdav_deployment_sets_basic_auth_and_tcp_probe() {
+        let d = webdav_deployment(consts::OPERATOR_NS);
+        let v = val(&d);
+        let c = v
+            .pointer("/spec/template/spec/containers/0")
+            .expect("container");
+        assert_eq!(c.pointer("/image").unwrap(), consts::WEBDAV_IMAGE);
+        assert_eq!(c.pointer("/readinessProbe/tcpSocket/port").unwrap(), 80);
+        let env = c.pointer("/env").unwrap().as_array().unwrap();
+        // USERNAME/PASSWORD/AUTH_TYPE are present for basic auth.
+        let names: Vec<&str> = env
+            .iter()
+            .filter_map(|e| e.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"USERNAME") && names.contains(&"PASSWORD"));
     }
 
     #[test]

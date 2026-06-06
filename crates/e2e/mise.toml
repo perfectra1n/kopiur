@@ -50,7 +50,7 @@ kind load docker-image kopiur/controller:e2e kopiur/webhook:e2e kopiur/mover:e2e
 """
 
 [tasks.minio-preload]
-description = "Preload MinIO + mc images into the kind node (avoids slow in-cluster pulls)"
+description = "Preload backend-server images (MinIO/mc, SFTP, WebDAV) into the kind node (avoids slow in-cluster pulls)"
 dir = "{{config_root}}/../.."
 run = """
 set -eu
@@ -66,6 +66,9 @@ preload() {
 }
 preload minio/minio:latest
 preload minio/mc:latest
+# Backend servers for the SFTP/WebDAV e2e (mirror crates/e2e/src/consts.rs).
+preload atmoz/sftp:alpine
+preload bytemark/webdav:2.4
 """
 
 [tasks.node-seed]

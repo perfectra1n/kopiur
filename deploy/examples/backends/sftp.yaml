@@ -13,15 +13,18 @@ metadata:
   namespace: backups
 type: Opaque
 stringData:
-  # SSH key-based auth (recommended). The mover writes the key to a file and
-  # passes it to kopia as --keyfile.
-  ssh-privatekey: |
+  # SSH key-based auth. kopia's SFTP backend has no env-var credential form, so
+  # the operator's mover reads these two keys from the env (envFrom) and writes
+  # them to files, then passes `--keyfile`/`--known-hosts` to kopia. The key
+  # NAMES must be valid env identifiers (this is why it's KOPIA_SFTP_KEY_DATA,
+  # not `ssh-privatekey` — a dashed key is dropped by Kubernetes envFrom).
+  KOPIA_SFTP_KEY_DATA: |
     -----BEGIN OPENSSH PRIVATE KEY-----
     REPLACE_ME
     -----END OPENSSH PRIVATE KEY-----
   # Pin the server host key (avoid trust-on-first-use). Get it with:
   #   ssh-keyscan -p 22 nas.lan
-  known_hosts: "nas.lan ssh-ed25519 AAAAC3Nz...REPLACE_ME"
+  KOPIA_SFTP_KNOWN_HOSTS: "nas.lan ssh-ed25519 AAAAC3Nz...REPLACE_ME"
   KOPIA_PASSWORD: "choose-something-long-and-random"
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1

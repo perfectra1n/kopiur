@@ -13,9 +13,11 @@ metadata:
   namespace: backups
 type: Opaque
 stringData:
-  # The full service-account key JSON, verbatim. The mover writes it to a file
-  # and points GOOGLE_APPLICATION_CREDENTIALS at it.
-  GOOGLE_APPLICATION_CREDENTIALS: |
+  # The full service-account key JSON, verbatim. The operator's mover writes it
+  # to a file and passes `--credentials-file` to kopia. (The key is
+  # KOPIA_GCS_CREDENTIALS, not GOOGLE_APPLICATION_CREDENTIALS, because the latter
+  # is a *path* to the SDK — putting JSON under that name would be misread.)
+  KOPIA_GCS_CREDENTIALS: |
     {
       "type": "service_account",
       "project_id": "REPLACE_ME",

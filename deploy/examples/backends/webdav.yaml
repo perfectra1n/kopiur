@@ -13,9 +13,9 @@ metadata:
   namespace: backups
 type: Opaque
 stringData:
-  # HTTP basic-auth for the WebDAV endpoint.
-  WEBDAV_USERNAME: "REPLACE_ME"
-  WEBDAV_PASSWORD: "REPLACE_ME"
+  # HTTP basic-auth for the WebDAV endpoint. kopia reads these exact env names.
+  KOPIA_WEBDAV_USERNAME: "REPLACE_ME"
+  KOPIA_WEBDAV_PASSWORD: "REPLACE_ME"
   KOPIA_PASSWORD: "choose-something-long-and-random"
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
