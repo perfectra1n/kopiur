@@ -103,6 +103,13 @@ docker exec "${NODE}" sh -c '
   printf "hello kopiur e2e\n" > /kopiur-e2e/src/a.txt
   printf "nested data\n"      > /kopiur-e2e/src/sub/b.txt
   chmod -R 0777 /kopiur-e2e
+  # A deliberately NON-writable repo dir (root-owned, no write bit) used by the
+  # terminal-failure regression test: the controller (uid 65532) cannot create a
+  # kopia repo here, so connect/create fails with EACCES -> PermissionDenied. Set
+  # AFTER the recursive 0777 above so it actually sticks.
+  mkdir -p /kopiur-e2e/ro-repo
+  chown 0:0 /kopiur-e2e/ro-repo
+  chmod 0555 /kopiur-e2e/ro-repo
 '
 
 # --- 4. Namespace, secret, PVs/PVCs --------------------------------------------
@@ -279,9 +286,15 @@ controller:
   extraVolumes:
     - name: repo
       hostPath: { path: /kopiur-e2e/repo, type: Directory }
+    # A non-writable repo path (root-owned 0555 on the node) for the
+    # terminal-failure regression test (filesystem PermissionDenied hard-stop).
+    - name: ro-repo
+      hostPath: { path: /kopiur-e2e/ro-repo, type: Directory }
   extraVolumeMounts:
     - name: repo
       mountPath: /repo
+    - name: ro-repo
+      mountPath: /ro-repo
 YAML
 
 echo "==> waiting for controller rollout"
