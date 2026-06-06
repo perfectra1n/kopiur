@@ -807,8 +807,26 @@ impl KopiaClient {
         self.run_json(&args, "maintenance info").await
     }
 
+    /// Claim the repository's maintenance ownership for the *currently connected*
+    /// identity (`kopia maintenance set --owner me`). kopia ties "who may run
+    /// maintenance" to the connected user@hostname and rejects a `maintenance run`
+    /// from anyone but the designated owner ("maintenance must be run by designated
+    /// user: …"). A repo bootstrapped by the controller in-process is owned by the
+    /// controller's identity, so a mover Job (a different pod) MUST claim ownership
+    /// before it can run maintenance. Idempotent; no JSON, success is exit 0.
+    pub async fn maintenance_set_owner_me(&self) -> Result<(), KopiaError> {
+        let args = vec![
+            "maintenance".into(),
+            "set".into(),
+            "--owner".into(),
+            "me".into(),
+        ];
+        self.run_ok(&args).await.map(|_| ())
+    }
+
     /// Run a maintenance pass. kopia's `maintenance run` does not emit JSON;
-    /// success is exit code 0.
+    /// success is exit code 0. The caller must already be the designated
+    /// maintenance owner (see [`maintenance_set_owner_me`](Self::maintenance_set_owner_me)).
     pub async fn maintenance_run(&self, mode: MaintenanceMode) -> Result<(), KopiaError> {
         let mut args = vec!["maintenance".into(), "run".into()];
         match mode {

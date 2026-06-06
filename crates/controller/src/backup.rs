@@ -304,9 +304,13 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
             &msg,
         )
         .await;
-        // Structural: won't resolve without an admin annotating the namespace or a
-        // spec change. Re-checked on the structural-backoff requeue.
-        return Err(Error::Validation(msg));
+        // The missing dependency is the namespace opt-in annotation an admin adds
+        // out-of-band (like a missing creds Secret) — Transient, NOT Structural, so
+        // it is re-checked on the short transient cadence and the opt-in takes
+        // effect within ~30s instead of a 5-minute structural backoff. (A namespace
+        // annotation does not enqueue this Backup, so the requeue is what picks it
+        // up.) Mirrors the `CredentialsAvailable=False` gate above.
+        return Err(Error::MissingDependency(msg));
     }
     // Permitted: clear any stale `MoverPermitted=False` from a prior reconcile.
     if let Some(conds) = backup.status.as_ref().map(|s| s.conditions.as_slice())

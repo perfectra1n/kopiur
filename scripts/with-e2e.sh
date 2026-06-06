@@ -52,10 +52,13 @@ dump_diagnostics() {
   kubectl logs -n "${NS}" -l app.kubernetes.io/component=controller \
     --tail=400 --all-containers >&2 2>&1 || true
 
-  # Logs from every mover Job pod in every namespace (bootstrap/backup/restore/
-  # maintenance) — these carry the kopia error that drives the Warning Event.
-  echo "---- mover Job pod logs (all namespaces) ----" >&2
-  kubectl get pods -A -l app.kubernetes.io/component=mover \
+  # Logs from every Job pod in every namespace (bootstrap/backup/restore/
+  # maintenance movers) — these carry the kopia error that drives the failure.
+  # Select by the batch Job-name label (present on ALL Job pods); the per-reconciler
+  # component label differs (maintenance pods are `component=maintenance`, not
+  # `mover`), so a `component=mover` selector would match nothing.
+  echo "---- Job pod logs (all namespaces) ----" >&2
+  kubectl get pods -A -l batch.kubernetes.io/job-name \
     -o 'jsonpath={range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null \
     | while read -r mns mpod; do
         [[ -n "${mpod}" ]] || continue
@@ -383,5 +386,5 @@ kubectl -n "${NS}" rollout status deploy/kopiur-controller --timeout=120s
 
 # --- 6. Run the e2e tests ------------------------------------------------------
 echo "==> running e2e tests"
-cargo test -p kopiur-e2e --features e2e -- --include-ignored --test-threads=1 --nocapture
+cargo test -p kopiur-e2e --features e2e -- --include-ignored --test-threads=1 --nocapture ${KOPIUR_E2E_TESTFILTER:-}
 echo "==> e2e tests passed"

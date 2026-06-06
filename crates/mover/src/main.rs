@@ -406,6 +406,18 @@ async fn run_maintenance_flow(
             Ok(())
         }
         action @ (LeaseAction::Claim | LeaseAction::Takeover) => {
+            // Claim kopia's maintenance ownership for THIS pod's identity first.
+            // kopia rejects `maintenance run` from anyone but the designated owner,
+            // and a repo the controller bootstrapped in-process is owned by the
+            // controller's identity — so without this the run fails with
+            // "maintenance must be run by designated user: …". The operator's own
+            // lease (decided above via op.owner/takeover_policy) is the real
+            // coordination; this just satisfies kopia's per-connection guard.
+            if let Err(e) = client.maintenance_set_owner_me().await {
+                patch_maintenance_status(&spec.target_ref, &maintenance_failed_body(&e)).await;
+                error!(class = %e.class(), "maintenance ownership claim failed");
+                return Err(maintenance_err("set-owner", &e));
+            }
             if let Err(e) = client.maintenance_run(op.mode).await {
                 patch_maintenance_status(&spec.target_ref, &maintenance_failed_body(&e)).await;
                 error!(class = %e.class(), "maintenance run failed");
