@@ -34,7 +34,7 @@ env:
 jobs:
   e2e:
     name: E2E
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Don't let a hung wait burn the whole budget.
     timeout-minutes: 40
     permissions:
