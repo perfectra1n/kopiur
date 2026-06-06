@@ -5,6 +5,8 @@
 # User guide
 
 - [Installation](install.md)
+- [Examples](examples.md)
+- [Maintenance](maintenance.md)
 
 # Reference
 
