@@ -363,7 +363,7 @@ controller:
   logLevel: debug
   # The repo hostPath must be visible to the controller's in-process kopia
   # (filesystem connect/create). kopia's cache/logs/config come from the chart's
-  # built-in writable `kopia-cache` emptyDir + the KOPIA_* env the binary sets —
+  # built-in writable kopia-cache emptyDir + the KOPIA_* env the binary sets —
   # deliberately NOT a manual workaround here. That is exactly the regression the
   # cache_and_events e2e guards: production had no such workaround, so the chart
   # itself must give kopia a writable home on the read-only rootfs.

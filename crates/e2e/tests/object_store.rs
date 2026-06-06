@@ -358,24 +358,26 @@ async fn s3_maintenance_runs_in_a_mover_job() {
     let jobs: Api<Job> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
     // Maintenance gates on repository readiness (G7), so bootstrap an isolated
-    // S3 repo (own bucket) to Ready first.
+    // S3 repo (own bucket) to Ready first. Opt OUT of default-managed maintenance
+    // (`maintenance.enabled: false`) so the operator does not auto-create a managed
+    // `Maintenance` named after the repo — this test drives its OWN explicit
+    // `Maintenance` (same name) and would otherwise collide with a 409.
+    let repo_json = {
+        let mut v = s3_repository_json("e2e-s3-maint", "kopiur-maint", "kopia-s3-creds", true);
+        v["spec"]["maintenance"] = serde_json::json!({ "enabled": false });
+        v
+    };
     repos
-        .create(
-            &PostParams::default(),
-            &cr(s3_repository_json(
-                "e2e-s3-maint",
-                "kopiur-maint",
-                "kopia-s3-creds",
-                true,
-            )),
-        )
+        .create(&PostParams::default(), &cr(repo_json))
         .await
         .expect("create S3 Repository");
     wait_phase(&repos, "e2e-s3-maint", "Ready")
         .await
         .expect("S3 Repository should reach Ready via the bootstrap Job");
 
-    // Create the Maintenance; the controller spawns a per-slot mover Job.
+    // Create the explicit Maintenance; the controller spawns a per-slot mover Job.
+    // (The operator honors an externally-authored Maintenance even when the repo
+    // opted out of managed maintenance — ADR §3.7.)
     maints
         .create(
             &PostParams::default(),
