@@ -229,6 +229,10 @@ fn metadata(name: &str, namespace: Option<&str>) -> ObjectMeta {
 fn cluster_artifact() -> Result<Artifact> {
     let mut rules = kopia_crd_rules(true);
     rules.extend(workload_rules());
+    // Read Namespaces to check the privileged-movers opt-in annotation (ADR
+    // §4.11/§G16). Cluster-scoped resource → cluster install only; a namespaced
+    // install can't grant it and the controller fails the check open there.
+    rules.push(rule(&[""], &["namespaces".into()], READ_VERBS));
 
     let clusterrole = ClusterRole {
         metadata: metadata(CLUSTERROLE_NAME, None),

@@ -92,6 +92,25 @@ pub async fn ensure_namespace(client: &Client, ns: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Add (or update) a single annotation on a `Namespace` via a strategic-merge
+/// patch. Used to flip the privileged-movers opt-in in the privileged-mover
+/// scenario.
+pub async fn annotate_namespace(
+    client: &Client,
+    ns: &str,
+    key: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    use k8s_openapi::api::core::v1::Namespace;
+    use kube::api::{Patch, PatchParams};
+
+    let api: kube::Api<Namespace> = kube::Api::all(client.clone());
+    let patch = serde_json::json!({ "metadata": { "annotations": { key: value } } });
+    api.patch(ns, &PatchParams::default(), &Patch::Merge(&patch))
+        .await?;
+    Ok(())
+}
+
 /// Server-side apply an Opaque `Secret` with the given string data into `ns`
 /// (idempotent). Used to place a repository-credentials Secret into a workload
 /// namespace so the mover Job's `envFrom` resolves there.

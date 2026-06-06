@@ -76,6 +76,20 @@ pub const CHECK_CREDENTIALS_ACTION: &str = "CheckCredentials";
 pub const CREDENTIALS_AVAILABLE_CONDITION: &str = "CredentialsAvailable";
 /// `reason`/Event reason for [`CREDENTIALS_AVAILABLE_CONDITION`] = `False`.
 pub const MISSING_CREDENTIALS_REASON: &str = "MissingCredentialsSecret";
+
+/// Namespace annotation a cluster admin sets to allow elevated (root/privileged)
+/// movers in that namespace (ADR §4.11/§G16). Without it, a `BackupConfig` whose
+/// `spec.mover` requests privilege is refused — a tenant could otherwise reuse the
+/// minted mover ServiceAccount at that privilege. Mirrors VolSync's
+/// `volsync.backube/privileged-movers`.
+pub const PRIVILEGED_MOVERS_ANNOTATION: &str = "kopiur.home-operations.com/privileged-movers";
+/// `Backup` condition surfaced when a privileged mover is requested in a namespace
+/// that has not opted in — `False` carries the actionable message.
+pub const MOVER_PERMITTED_CONDITION: &str = "MoverPermitted";
+/// `reason`/Event reason for [`MOVER_PERMITTED_CONDITION`] = `False`.
+pub const PRIVILEGED_MOVER_NOT_PERMITTED_REASON: &str = "PrivilegedMoverNotPermitted";
+/// Event `action` (remediation hint) for a refused privileged mover.
+pub const ALLOW_PRIVILEGED_MOVER_ACTION: &str = "AnnotateNamespaceForPrivilegedMovers";
 /// `action` for a `PermissionDenied` failure: make the repository path/PVC
 /// writable by the operator's UID.
 pub const CHECK_PERMISSIONS_ACTION: &str = "CheckPermissions";

@@ -31,9 +31,12 @@ use kopiur_mover::workspec::{
     ResolvedIdentity as MoverIdentity, SnapshotDeleteOp, TargetRef,
 };
 
+use crate::config;
 use crate::consts::{
-    API_VERSION, CONFIG_LABEL, CREDENTIALS_AVAILABLE_CONDITION, MISSING_CREDENTIALS_REASON,
-    ORIGIN_LABEL, SKIP_SNAPSHOT_CLEANUP_ANNOTATION, SNAPSHOT_CLEANUP_FINALIZER,
+    ALLOW_PRIVILEGED_MOVER_ACTION, API_VERSION, CONFIG_LABEL, CREDENTIALS_AVAILABLE_CONDITION,
+    MISSING_CREDENTIALS_REASON, MOVER_PERMITTED_CONDITION, ORIGIN_LABEL,
+    PRIVILEGED_MOVER_NOT_PERMITTED_REASON, SKIP_SNAPSHOT_CLEANUP_ANNOTATION,
+    SNAPSHOT_CLEANUP_FINALIZER,
 };
 use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
@@ -256,6 +259,72 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         )
         .await?;
     }
+
+    // Privileged-mover gate (ADR §4.11/§G16, VolSync-parity): an elevated mover
+    // (root/privileged/added caps/`privilegedMode`) requires the workload namespace
+    // to opt in via the `kopiur.home-operations.com/privileged-movers` annotation —
+    // a tenant there could otherwise reuse the minted mover SA at that privilege.
+    // Refuse with a clear `MoverPermitted=False` condition + Event otherwise.
+    if config
+        .spec
+        .mover
+        .as_ref()
+        .is_some_and(|m| m.requires_privilege())
+        && !io::namespace_allows_privileged_movers(&ctx.client, &namespace).await?
+    {
+        let sa = ctx
+            .mover_service_account
+            .as_deref()
+            .unwrap_or(config::DEFAULT_MOVER_NAME);
+        let msg = io::privileged_mover_message(&config.name_any(), &namespace, sa);
+        let existing = backup
+            .status
+            .as_ref()
+            .map(|s| s.conditions.clone())
+            .unwrap_or_default();
+        let conditions = io::upsert_condition(
+            &existing,
+            MOVER_PERMITTED_CONDITION,
+            false,
+            PRIVILEGED_MOVER_NOT_PERMITTED_REASON,
+            &msg,
+            backup.meta().generation,
+        );
+        io::patch_status(
+            &api,
+            &name,
+            serde_json::json!({ "phase": "Pending", "conditions": conditions }),
+        )
+        .await?;
+        io::publish_warning_event(
+            ctx,
+            backup,
+            PRIVILEGED_MOVER_NOT_PERMITTED_REASON,
+            ALLOW_PRIVILEGED_MOVER_ACTION,
+            &msg,
+        )
+        .await;
+        // Structural: won't resolve without an admin annotating the namespace or a
+        // spec change. Re-checked on the structural-backoff requeue.
+        return Err(Error::Validation(msg));
+    }
+    // Permitted: clear any stale `MoverPermitted=False` from a prior reconcile.
+    if let Some(conds) = backup.status.as_ref().map(|s| s.conditions.as_slice())
+        && conds
+            .iter()
+            .any(|c| c.type_ == MOVER_PERMITTED_CONDITION && c.status != "True")
+    {
+        let conditions = io::upsert_condition(
+            conds,
+            MOVER_PERMITTED_CONDITION,
+            true,
+            "Permitted",
+            "the mover is permitted in this namespace",
+            backup.meta().generation,
+        );
+        io::patch_status(&api, &name, serde_json::json!({ "conditions": conditions })).await?;
+    }
+
     let creds_ctx = io::CredsContext {
         secret_names: &creds_secrets,
         repo_kind: io::repo_kind_str(config.spec.repository.kind),

@@ -31,8 +31,8 @@ use kopiur_api::{
     Backup, BackupConfig, BackupSchedule, ClusterRepository, Maintenance, Repository, Restore,
 };
 use kopiur_e2e::{
-    E2E_NAMESPACE, apply_secret, default_timeout, ensure_namespace, poll_interval, try_client,
-    wait_until,
+    E2E_NAMESPACE, annotate_namespace, apply_secret, default_timeout, ensure_namespace,
+    poll_interval, try_client, wait_until,
 };
 
 /// Deserialize a CR from a JSON literal into its typed kube object.
@@ -518,6 +518,120 @@ async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
     // Cleanup: the cluster-scoped repo + the workload namespace (GCs its CRs).
     let _ = crepos
         .delete("e2e-xns-crepo", &DeleteParams::default())
+        .await;
+    let nss: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
+    let _ = nss.delete(APP_NS, &DeleteParams::default()).await;
+}
+
+/// Privileged-mover namespace opt-in (ADR §4.11/§G16). A `BackupConfig` whose
+/// `spec.mover.securityContext` runs as root must be REFUSED with a clear
+/// `MoverPermitted=False` / `PrivilegedMoverNotPermitted` condition until the
+/// workload namespace carries the `kopiur.home-operations.com/privileged-movers`
+/// annotation — then it clears. Mirrors VolSync's privileged-movers gate: a tenant
+/// could otherwise reuse the minted mover ServiceAccount to run root pods.
+#[tokio::test]
+#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+async fn privileged_mover_requires_namespace_optin() {
+    let Some(client) = try_client().await else {
+        return;
+    };
+    const APP_NS: &str = "kopiur-e2e-priv";
+
+    ensure_namespace(&client, APP_NS)
+        .await
+        .expect("create workload namespace");
+    // Creds present in the workload ns so the run reaches the privileged-mover gate
+    // (not the credentials gate).
+    apply_secret(
+        &client,
+        APP_NS,
+        CREDS_SECRET,
+        &[("KOPIA_PASSWORD", "e2e-test-password-123")],
+    )
+    .await
+    .expect("apply creds Secret");
+
+    let crepos: Api<ClusterRepository> = Api::all(client.clone());
+    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), APP_NS);
+    let backups: Api<Backup> = Api::namespaced(client.clone(), APP_NS);
+
+    crepos
+        .create(
+            &PostParams::default(),
+            &cr(cluster_repository_json("e2e-priv-crepo")),
+        )
+        .await
+        .expect("create ClusterRepository");
+    wait_phase(&crepos, "e2e-priv-crepo", "Ready")
+        .await
+        .expect("ClusterRepository should reach Ready");
+
+    // A BackupConfig whose mover runs as root (the trilium-rain shape).
+    let cfg = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "BackupConfig",
+        "metadata": { "name": "e2e-priv-cfg", "namespace": APP_NS },
+        "spec": {
+            "repository": { "kind": "ClusterRepository", "name": "e2e-priv-crepo" },
+            "sources": [ { "pvc": { "name": "e2e-src" } } ],
+            "retention": { "keepLatest": 5 },
+            "mover": { "securityContext": { "runAsUser": 0, "runAsGroup": 0 } }
+        }
+    });
+    configs
+        .create(&PostParams::default(), &cr(cfg))
+        .await
+        .expect("create privileged BackupConfig");
+    backups
+        .create(
+            &PostParams::default(),
+            &cr(backup_json_ns("e2e-priv-backup", "e2e-priv-cfg", APP_NS)),
+        )
+        .await
+        .expect("create Backup");
+
+    // Refused: MoverPermitted=False with the privileged-mover reason + opt-in hint.
+    wait_condition(&backups, "e2e-priv-backup", "MoverPermitted", "False")
+        .await
+        .expect("privileged mover must be refused until the namespace opts in");
+    let s = status_json(&backups, "e2e-priv-backup").await;
+    let cond = s
+        .get("conditions")
+        .and_then(|c| c.as_array())
+        .and_then(|a| {
+            a.iter()
+                .find(|c| c.get("type").and_then(|t| t.as_str()) == Some("MoverPermitted"))
+        })
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    assert_eq!(
+        cond.get("reason").and_then(|r| r.as_str()),
+        Some("PrivilegedMoverNotPermitted")
+    );
+    assert!(
+        cond.get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .contains("kopiur.home-operations.com/privileged-movers"),
+        "message must tell the admin which annotation to set"
+    );
+
+    // Opt in → the gate clears.
+    annotate_namespace(
+        &client,
+        APP_NS,
+        "kopiur.home-operations.com/privileged-movers",
+        "true",
+    )
+    .await
+    .expect("annotate namespace for privileged movers");
+    wait_condition(&backups, "e2e-priv-backup", "MoverPermitted", "True")
+        .await
+        .expect("MoverPermitted should clear once the namespace opts in");
+
+    // Cleanup.
+    let _ = crepos
+        .delete("e2e-priv-crepo", &DeleteParams::default())
         .await;
     let nss: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
     let _ = nss.delete(APP_NS, &DeleteParams::default()).await;

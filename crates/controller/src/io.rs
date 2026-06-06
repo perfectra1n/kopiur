@@ -34,7 +34,7 @@ use crate::consts::{
     API_VERSION, CHECK_BACKEND_ACTION, CHECK_CREDENTIALS_ACTION, CHECK_MAINTENANCE_ACTION,
     CHECK_PERMISSIONS_ACTION, MAINTENANCE_CONFIGURED_CONDITION, MAINTENANCE_CONFIGURED_REASON,
     MAINTENANCE_DISABLED_REASON, MAINTENANCE_NAMESPACE_UNRESOLVED_REASON,
-    MISSING_CREDENTIALS_REASON,
+    MISSING_CREDENTIALS_REASON, PRIVILEGED_MOVERS_ANNOTATION,
 };
 use crate::context::Context;
 use crate::error::{Error, Result};
@@ -670,11 +670,16 @@ pub async fn ensure_creds_present(
     }
 }
 
-/// Emit a `Warning` Event for a missing credentials Secret, so the actionable
-/// message is visible on the object (`kubectl describe`/`get events`), not only in
-/// the controller log. Best-effort: a publish failure is logged, never fatal.
-pub async fn publish_missing_creds_event<K>(ctx: &Context, obj: &K, message: &str)
-where
+/// Emit a `Warning` Event on `obj` so an actionable message is visible via
+/// `kubectl describe`/`get events`, not only in the controller log. Best-effort: a
+/// publish failure is logged, never fatal.
+pub async fn publish_warning_event<K>(
+    ctx: &Context,
+    obj: &K,
+    reason: &str,
+    action: &str,
+    message: &str,
+) where
     K: Resource<DynamicType = ()>,
 {
     let regarding = obj.object_ref(&());
@@ -683,17 +688,75 @@ where
         .publish(
             &Event {
                 type_: EventType::Warning,
-                reason: MISSING_CREDENTIALS_REASON.into(),
+                reason: reason.into(),
                 note: Some(message.to_string()),
-                action: CHECK_CREDENTIALS_ACTION.into(),
+                action: action.into(),
                 secondary: None,
             },
             &regarding,
         )
         .await
     {
-        tracing::warn!(error = %e, "failed to publish MissingCredentialsSecret event");
+        tracing::warn!(error = %e, reason, "failed to publish Warning event");
     }
+}
+
+/// Emit a `Warning` Event for a missing credentials Secret (see
+/// [`publish_warning_event`]).
+pub async fn publish_missing_creds_event<K>(ctx: &Context, obj: &K, message: &str)
+where
+    K: Resource<DynamicType = ()>,
+{
+    publish_warning_event(
+        ctx,
+        obj,
+        MISSING_CREDENTIALS_REASON,
+        CHECK_CREDENTIALS_ACTION,
+        message,
+    )
+    .await;
+}
+
+/// Whether namespace `ns` has opted in to elevated (root/privileged) movers via the
+/// [`PRIVILEGED_MOVERS_ANNOTATION`]. If the namespace cannot be read because the
+/// operator lacks `namespaces get` (a namespaced-scope install, where the operator
+/// is already confined to admin-chosen namespaces), the check fails **open** with a
+/// warning rather than blocking every privileged mover.
+pub async fn namespace_allows_privileged_movers(client: &kube::Client, ns: &str) -> Result<bool> {
+    use k8s_openapi::api::core::v1::Namespace;
+    let api: Api<Namespace> = Api::all(client.clone());
+    match api.get(ns).await {
+        Ok(namespace) => Ok(namespace
+            .annotations()
+            .get(PRIVILEGED_MOVERS_ANNOTATION)
+            .is_some_and(|v| v == "true")),
+        // Forbidden (no cluster-scoped namespaces:get, e.g. a namespaced install):
+        // can't determine the opt-in, so don't block — the operator is already
+        // scoped to admin-selected namespaces in that mode.
+        Err(kube::Error::Api(e)) if e.code == 403 => {
+            tracing::warn!(
+                namespace = ns,
+                "cannot read namespace to check the privileged-movers opt-in (operator lacks \
+                 namespaces:get); allowing the privileged mover"
+            );
+            Ok(true)
+        }
+        Err(e) => Err(Error::Kube(e)),
+    }
+}
+
+/// The actionable message for a privileged mover refused in a namespace that has
+/// not opted in (what / why / how-to-fix). Pure so the exact text is unit-asserted.
+pub fn privileged_mover_message(config_name: &str, ns: &str, mover_sa: &str) -> String {
+    format!(
+        "BackupConfig `{config_name}` requests a privileged mover (e.g. `runAsUser: 0`, \
+         `privileged: true`, added capabilities, or `privilegedMode`), but namespace `{ns}` has \
+         not opted in. A tenant with access to `{ns}` could reuse the minted `{mover_sa}` \
+         ServiceAccount to run pods at that privilege, so an elevated mover requires an explicit \
+         per-namespace opt-in. Fix: a cluster admin annotates the namespace — `kubectl annotate \
+         namespace {ns} {PRIVILEGED_MOVERS_ANNOTATION}=true` — or remove the elevated \
+         securityContext/privilegedMode from the BackupConfig `spec.mover`."
+    )
 }
 
 /// Standard kopiur labels for a child object (origin/config/snapshot).
@@ -2059,5 +2122,22 @@ mod tests {
             repo_kind_str(RepositoryKind::ClusterRepository),
             "ClusterRepository"
         );
+    }
+
+    #[test]
+    fn privileged_mover_message_is_actionable() {
+        let msg = privileged_mover_message("trilium-rain", "trilium", "kopiur-mover");
+        // What: the BackupConfig + namespace.
+        assert!(msg.contains("trilium-rain"));
+        assert!(msg.contains("`trilium`"));
+        // Why: tenant could reuse the minted SA at that privilege.
+        assert!(msg.contains("kopiur-mover"));
+        assert!(msg.contains("reuse"));
+        // How: the exact annotate command with the real annotation key.
+        assert!(msg.contains("kubectl annotate namespace trilium"));
+        assert!(msg.contains(PRIVILEGED_MOVERS_ANNOTATION));
+        assert!(msg.contains("=true"));
+        // Alternative fix: drop the elevated context.
+        assert!(msg.contains("securityContext"));
     }
 }

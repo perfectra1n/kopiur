@@ -305,6 +305,42 @@ pub struct MoverSpec {
     pub inherit_security_context_from: Option<PodSelector>,
 }
 
+impl MoverSpec {
+    /// Whether this mover requests **elevated privileges** that the workload
+    /// namespace must explicitly opt into (ADR §4.11/§G16). True when
+    /// `privilegedMode` is set, or the `securityContext` runs as root / privileged
+    /// / with escalation / with added Linux capabilities.
+    ///
+    /// The rationale is the same as VolSync's `privileged-movers` model: the
+    /// controller mints a mover `ServiceAccount` in the workload namespace, and a
+    /// tenant with access there could reuse it to run pods at the mover's privilege.
+    /// Granting an elevated mover is therefore a per-namespace admin decision, gated
+    /// by a namespace annotation rather than allowed implicitly. Pure + exhaustive
+    /// so the definition of "privileged" lives in one tested place.
+    pub fn requires_privilege(&self) -> bool {
+        self.privileged_mode == Some(true)
+            || self
+                .security_context
+                .as_ref()
+                .is_some_and(security_context_is_elevated)
+    }
+}
+
+/// Whether a container `SecurityContext` requests privileges beyond a normal
+/// unprivileged user (root UID, `privileged`, escalation, added capabilities, or an
+/// explicit `runAsNonRoot: false`). Pure helper for [`MoverSpec::requires_privilege`].
+pub fn security_context_is_elevated(sc: &k8s_openapi::api::core::v1::SecurityContext) -> bool {
+    sc.privileged == Some(true)
+        || sc.run_as_user == Some(0)
+        || sc.run_as_non_root == Some(false)
+        || sc.allow_privilege_escalation == Some(true)
+        || sc
+            .capabilities
+            .as_ref()
+            .and_then(|c| c.add.as_ref())
+            .is_some_and(|add| !add.is_empty())
+}
+
 /// Selects workload pods by label. Reuses k8s-openapi `LabelSelector`. ADR §3.3 hooks.
 ///
 /// Not `Eq`: `LabelSelector` only implements `PartialEq`.
@@ -496,5 +532,88 @@ mod tests {
         // resolves cluster-scoped.
         let stray = ref_of(RepositoryKind::ClusterRepository, "hetzner", Some("oops"));
         assert!(stray.resolves_to("apps", RepositoryKind::ClusterRepository, "hetzner", None));
+    }
+
+    // --- privileged-mover detection (ADR §4.11/§G16, namespace-gated). ---
+
+    use k8s_openapi::api::core::v1::{Capabilities, SecurityContext};
+
+    fn mover_with(sc: Option<SecurityContext>, privileged_mode: Option<bool>) -> MoverSpec {
+        MoverSpec {
+            security_context: sc,
+            privileged_mode,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn default_mover_is_unprivileged() {
+        assert!(!MoverSpec::default().requires_privilege());
+        // A benign securityContext (non-root, no escalation) is not privileged.
+        let benign = SecurityContext {
+            run_as_user: Some(1000),
+            run_as_non_root: Some(true),
+            allow_privilege_escalation: Some(false),
+            ..Default::default()
+        };
+        assert!(!mover_with(Some(benign), None).requires_privilege());
+    }
+
+    #[test]
+    fn run_as_root_requires_privilege() {
+        // The trilium-rain case: mover.securityContext.runAsUser: 0.
+        let root = SecurityContext {
+            run_as_user: Some(0),
+            ..Default::default()
+        };
+        assert!(mover_with(Some(root), None).requires_privilege());
+    }
+
+    #[test]
+    fn privileged_flag_and_escalation_and_caps_and_nonroot_false_all_count() {
+        let priv_ctx = SecurityContext {
+            privileged: Some(true),
+            ..Default::default()
+        };
+        assert!(mover_with(Some(priv_ctx), None).requires_privilege());
+
+        let escalate = SecurityContext {
+            allow_privilege_escalation: Some(true),
+            ..Default::default()
+        };
+        assert!(mover_with(Some(escalate), None).requires_privilege());
+
+        let caps = SecurityContext {
+            capabilities: Some(Capabilities {
+                add: Some(vec!["SYS_ADMIN".into()]),
+                drop: None,
+            }),
+            ..Default::default()
+        };
+        assert!(mover_with(Some(caps), None).requires_privilege());
+
+        let nonroot_false = SecurityContext {
+            run_as_non_root: Some(false),
+            ..Default::default()
+        };
+        assert!(mover_with(Some(nonroot_false), None).requires_privilege());
+    }
+
+    #[test]
+    fn privileged_mode_flag_alone_requires_privilege() {
+        assert!(mover_with(None, Some(true)).requires_privilege());
+        assert!(!mover_with(None, Some(false)).requires_privilege());
+    }
+
+    #[test]
+    fn empty_added_capabilities_is_not_privileged() {
+        let caps = SecurityContext {
+            capabilities: Some(Capabilities {
+                add: Some(vec![]),
+                drop: Some(vec!["ALL".into()]),
+            }),
+            ..Default::default()
+        };
+        assert!(!mover_with(Some(caps), None).requires_privilege());
     }
 }

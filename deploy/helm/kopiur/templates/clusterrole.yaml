@@ -60,6 +60,11 @@ rules:
     resources:
       - secrets
     verbs: [get, list, watch]
+  # Read Namespaces to check the privileged-movers opt-in annotation (§4.11/§G16).
+  - apiGroups: [""]
+    resources:
+      - namespaces
+    verbs: [get, list, watch]
   - apiGroups: [batch]
     resources:
       - jobs
