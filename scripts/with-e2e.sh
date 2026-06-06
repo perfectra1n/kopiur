@@ -33,8 +33,48 @@ done
 KOPIA_VERSION="${KOPIA_VERSION:-$(mise config get tools.kopia)}"
 RUST_VERSION="${RUST_VERSION:-$(mise config get tools.rust.version)}"
 
+# Dump cluster state so a CI failure is debuggable WITHOUT re-running: the harness
+# tears the cluster down on exit, so without this the controller/Job/pod logs that
+# explain a failure are lost forever. Best-effort — every command tolerates a
+# missing cluster/resource so the dump never masks the original exit code.
+dump_diagnostics() {
+  echo "================ E2E FAILURE DIAGNOSTICS ================" >&2
+  # Operator + workload CRs, Jobs, pods, and Events across ALL namespaces (mover
+  # Jobs run in workload namespaces, not just ${NS}).
+  kubectl get repositories,clusterrepositories,backupconfigs,backups,backupschedules,restores,maintenances \
+    -A -o wide >&2 2>&1 || true
+  kubectl get jobs,pods,serviceaccounts,rolebindings -A -o wide >&2 2>&1 || true
+  echo "---- Warning Events (all namespaces) ----" >&2
+  kubectl get events -A --field-selector type=Warning \
+    --sort-by=.lastTimestamp >&2 2>&1 || true
+
+  echo "---- controller logs ----" >&2
+  kubectl logs -n "${NS}" -l app.kubernetes.io/component=controller \
+    --tail=400 --all-containers >&2 2>&1 || true
+
+  # Logs from every mover Job pod in every namespace (bootstrap/backup/restore/
+  # maintenance) — these carry the kopia error that drives the Warning Event.
+  echo "---- mover Job pod logs (all namespaces) ----" >&2
+  kubectl get pods -A -l app.kubernetes.io/component=mover \
+    -o 'jsonpath={range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | while read -r mns mpod; do
+        [[ -n "${mpod}" ]] || continue
+        echo "-- ${mns}/${mpod} --" >&2
+        kubectl logs -n "${mns}" "${mpod}" --tail=200 --all-containers >&2 2>&1 || true
+      done || true
+  # describe the bootstrap/mover Jobs so FailedCreate events (e.g. a missing
+  # ServiceAccount) are visible even when no pod was ever created.
+  echo "---- Job descriptions (all namespaces) ----" >&2
+  kubectl describe jobs -A >&2 2>&1 || true
+  echo "================ END DIAGNOSTICS ================" >&2
+}
+
 cleanup() {
   local rc=$?
+  # On any failure, dump cluster state before tearing it down (needs a kubeconfig).
+  if [[ "${rc}" -ne 0 && -n "${KUBECONFIG:-}" ]]; then
+    dump_diagnostics || true
+  fi
   if [[ "${KOPIUR_KEEP_KIND:-0}" != "1" ]]; then
     echo "==> deleting kind cluster '${CLUSTER}'"
     kind delete cluster --name "${CLUSTER}" >/dev/null 2>&1 || true
@@ -170,6 +210,36 @@ metadata:
 spec:
   accessModes: ["ReadWriteOnce"]
   resources: { requests: { storage: 1Gi } }
+---
+# Workload namespace for the cross-namespace scenarios (bootstrap -> repo -> Backup
+# in a namespace SEPARATE from the operator's). A second hostPath PV over the same
+# source dir gives this namespace its own source PVC (a hostPath PV binds to one
+# PVC, so the operator-ns claim cannot be reused here).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kopiur-e2e-xns
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: kopiur-e2e-src-xns
+spec:
+  capacity: { storage: 1Gi }
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ""
+  hostPath: { path: /kopiur-e2e/src, type: Directory }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: e2e-src
+  namespace: kopiur-e2e-xns
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ""
+  volumeName: kopiur-e2e-src-xns
+  resources: { requests: { storage: 1Gi } }
 YAML
 
 # --- 4b. MinIO (S3) for the object-store bootstrap scenarios -------------------
@@ -228,6 +298,8 @@ kubectl -n "${NS}" run mc-mkbucket --rm -i --restart=Never \
     mc mb --ignore-existing local/kopiur
     mc mb --ignore-existing local/kopiur-guard
     mc mb --ignore-existing local/kopiur-maint
+    mc mb --ignore-existing local/kopiur-xns-crepo
+    mc mb --ignore-existing local/kopiur-xns-repo
   "
 
 echo "==> creating S3 credential Secrets"
@@ -242,6 +314,14 @@ kubectl -n "${NS}" create secret generic kopia-s3-creds \
 # repo whose password fails to open must end Failed, never be recreated).
 kubectl -n "${NS}" create secret generic kopia-s3-badpw \
   --from-literal=KOPIA_PASSWORD="this-is-the-wrong-password" \
+  --from-literal=AWS_ACCESS_KEY_ID="${MINIO_USER}" \
+  --from-literal=AWS_SECRET_ACCESS_KEY="${MINIO_PASS}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+# Same good creds in the workload namespace, where the cross-namespace mover Jobs
+# run and load them via namespace-local envFrom (a namespaced Repository's
+# bootstrap Job AND a ClusterRepository-backed Backup's mover both run here).
+kubectl -n "kopiur-e2e-xns" create secret generic kopia-s3-creds \
+  --from-literal=KOPIA_PASSWORD="e2e-test-password-123" \
   --from-literal=AWS_ACCESS_KEY_ID="${MINIO_USER}" \
   --from-literal=AWS_SECRET_ACCESS_KEY="${MINIO_PASS}" \
   --dry-run=client -o yaml | kubectl apply -f -

@@ -29,7 +29,7 @@ use kopiur_mover::workspec::{
 };
 
 use crate::backup::{backend_to_repository_connect, mover_pull_policy_pub};
-use crate::consts::{API_VERSION, REPOSITORY_BOOTSTRAPPED_CONDITION};
+use crate::consts::{API_VERSION, BOOTSTRAP_JOB_DEADLINE_SECS, REPOSITORY_BOOTSTRAPPED_CONDITION};
 use crate::context::Context;
 use crate::error::{Error, Result, TERMINAL_HEARTBEAT, error_policy_for};
 use crate::io;
@@ -334,7 +334,13 @@ async fn bootstrap_cluster_object_store(
         work_spec: &work_spec,
         image: &ctx.mover_image,
         image_pull_policy: mover_pull_policy_pub(),
-        limits: JobLimits::default(),
+        // Bound the bootstrap Job so a pod that never schedules (missing mover SA,
+        // image-pull failure) becomes terminal-`Failed` instead of hanging — then
+        // `finalize_cluster_bootstrap` runs and surfaces a Warning Event.
+        limits: JobLimits {
+            active_deadline_seconds: Some(BOOTSTRAP_JOB_DEADLINE_SECS),
+            ..JobLimits::default()
+        },
         resources: None,
         security_context: None,
         labels,
@@ -416,58 +422,62 @@ async fn finalize_cluster_bootstrap(
     job_succeeded: bool,
 ) -> Result<Action> {
     let result = read_cluster_bootstrap_result(ctx, job_ns, job_name).await?;
-    let Some(result) = result else {
-        if job_succeeded {
+
+    // Classify any terminal failure as a typed value (ADR §5.5): a result-less
+    // failed Job and a kopia-rejected connect are distinct, exhaustively-handled
+    // modes — never a silent `Failed/Unknown` with no Event.
+    let failure = match &result {
+        None if job_succeeded => {
             tracing::warn!(repo = %name, "bootstrap Job complete but result not readable yet; requeueing");
             return Ok(Action::requeue(Duration::from_secs(5)));
         }
-        let conditions = cluster_bootstrap_condition(
-            repo,
-            false,
-            "Unknown",
-            "bootstrap Job failed without a result",
-        );
-        io::patch_status(
-            api,
-            name,
-            serde_json::json!({
-                "phase": "Failed",
-                "backend": backend.kind_str(),
-                "conditions": conditions,
-            }),
-        )
-        .await?;
-        return Ok(Action::requeue(Duration::from_secs(120)));
+        None => Some(io::BootstrapFailure::JobFailedWithoutResult {
+            job_name: job_name.to_string(),
+        }),
+        Some(r) if !r.success => Some(io::BootstrapFailure::Backend {
+            class: r
+                .failure
+                .as_ref()
+                .map(|f| KopiaErrorClass::from_label(&f.kopia_error_class))
+                .unwrap_or(KopiaErrorClass::Unknown),
+            message: r
+                .failure
+                .as_ref()
+                .map(|f| f.message.clone())
+                .unwrap_or_else(|| "repository bootstrap failed".to_string()),
+        }),
+        Some(_) => None,
     };
 
-    if !result.success {
-        let (class, message) = result
-            .failure
-            .as_ref()
-            .map(|f| (f.kopia_error_class.as_str(), f.message.as_str()))
-            .unwrap_or(("Unknown", "repository bootstrap failed"));
-        let conditions = cluster_bootstrap_condition(repo, false, class, message);
-        io::patch_status(
+    if let Some(failure) = failure {
+        let reason = failure.reason();
+        let conditions =
+            cluster_bootstrap_condition(repo, false, reason, &failure.condition_message());
+        // Guard the write so the Event + warn log fire only on the real transition,
+        // not on every 120 s re-read (the message is stable → a true no-op once
+        // written, so no reconcile hot-loop and no Event spam).
+        let current = serde_json::to_value(&repo.status).ok();
+        let wrote = io::patch_status_if_changed(
             api,
             name,
+            current.as_ref(),
             serde_json::json!({
                 "phase": "Failed",
                 "backend": backend.kind_str(),
+                "observedGeneration": repo.metadata.generation,
                 "conditions": conditions,
             }),
         )
         .await?;
-        io::publish_backend_failure(
-            ctx,
-            &repo.object_ref(&()),
-            name,
-            KopiaErrorClass::from_label(class),
-            message,
-        )
-        .await;
-        tracing::warn!(repo = %name, class, "ClusterRepository bootstrap failed");
+        if wrote {
+            failure.publish(ctx, &repo.object_ref(&()), name).await;
+            tracing::warn!(repo = %name, reason, "ClusterRepository bootstrap failed");
+        }
         return Ok(Action::requeue(Duration::from_secs(120)));
     }
+
+    // Success: the result is present and `success == true`.
+    let result = result.expect("a non-failure bootstrap implies a readable, successful result");
 
     let allowed_count = allowed_namespace_count(&repo.spec.allowed_namespaces);
     let conditions = cluster_bootstrap_condition(

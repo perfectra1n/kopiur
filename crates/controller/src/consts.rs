@@ -60,6 +60,14 @@ pub const MAINTENANCE_NAMESPACE_UNRESOLVED_REASON: &str = "MaintenanceNamespaceU
 /// `False` carries the kopia error class + message so a failure is actionable.
 pub const REPOSITORY_BOOTSTRAPPED_CONDITION: &str = "Bootstrapped";
 
+/// `activeDeadlineSeconds` on the object-store bootstrap Job. A bootstrap whose
+/// pods never schedule (e.g. a missing mover ServiceAccount, an image-pull
+/// failure) otherwise never gets a `Failed` condition, so the controller never
+/// finalizes and the repository hangs `Initializing` with no Event. The deadline
+/// forces the Job terminal-`Failed` so `finalize_*` runs and surfaces a Warning.
+/// Sized comfortably under the e2e Event-publish budget (180s).
+pub const BOOTSTRAP_JOB_DEADLINE_SECS: i64 = 120;
+
 // A repository connect/create (bootstrap) failure is surfaced as a Warning Event
 // whose `reason` is the kopia error class itself (`KopiaErrorClass::as_str`, e.g.
 // `AccessDenied`/`PermissionDenied`) so it matches the `Bootstrapped=False`
@@ -69,6 +77,14 @@ pub const REPOSITORY_BOOTSTRAPPED_CONDITION: &str = "Bootstrapped";
 /// `action` for credential-class failures (`AccessDenied`/`AuthFailure`): check
 /// the repository credentials Secret and bucket/path grants.
 pub const CHECK_CREDENTIALS_ACTION: &str = "CheckCredentials";
+
+/// Machine-readable `reason` (condition + Warning Event) when a bootstrap Job
+/// reaches a terminal/failed state but wrote **no** structured result — the mover
+/// pod crashed, was evicted, hit its [`BOOTSTRAP_JOB_DEADLINE_SECS`] deadline, or
+/// never scheduled (e.g. a missing mover ServiceAccount). Distinct from a kopia
+/// error class so the failure mode is not silently conflated with a backend
+/// rejection ([`crate::io::BootstrapFailure`]).
+pub const BOOTSTRAP_JOB_FAILED_REASON: &str = "BootstrapJobFailed";
 
 /// `Backup`/`Restore` condition surfaced when the mover Job's credential Secret is
 /// absent from the workload namespace — `False` carries the actionable message

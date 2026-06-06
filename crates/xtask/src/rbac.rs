@@ -162,8 +162,15 @@ fn workload_rules() -> Vec<PolicyRule> {
         ),
         // Per-namespace mover RBAC minted by the controller (§4.12): a
         // `kopiur-mover` ServiceAccount plus a RoleBinding to the `kopiur-mover`
-        // role, created in each mover Job's namespace.
-        rule(&[""], &["serviceaccounts".into()], &["create", "get"]),
+        // role, created in each mover Job's namespace. `io::ensure_mover_rbac`
+        // mints via server-side apply (a PATCH), so `patch` (and `update`) are
+        // REQUIRED alongside `create`/`get` — without `patch` the apply is 403'd
+        // and the SA is never minted, so the mover Job FailedCreates.
+        rule(
+            &[""],
+            &["serviceaccounts".into()],
+            &["get", "create", "update", "patch"],
+        ),
         rule(
             &["rbac.authorization.k8s.io"],
             &["rolebindings".into()],

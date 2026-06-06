@@ -27,6 +27,22 @@ fn rule_grants(rules: &[PolicyRule], group: &str, resource: &str) -> bool {
     })
 }
 
+/// Whether some rule grants `verb` on `(group, resource)`. Stricter than
+/// [`rule_grants`]: a rule that lists the resource but lacks the verb does NOT
+/// satisfy this (the bug that shipped `serviceaccounts: [create, get]` while the
+/// controller mints via server-side apply, which needs `patch`).
+fn rule_grants_verb(rules: &[PolicyRule], group: &str, resource: &str, verb: &str) -> bool {
+    rules.iter().any(|r| {
+        r.api_groups
+            .as_ref()
+            .is_some_and(|g| g.iter().any(|x| x == group))
+            && r.resources
+                .as_ref()
+                .is_some_and(|res| res.iter().any(|x| x == resource))
+            && r.verbs.iter().any(|v| v == verb)
+    })
+}
+
 #[test]
 fn clusterrole_parses_and_grants_expected_rules() {
     let artifacts = xtask::rbac::artifacts().expect("generate RBAC artifacts");
@@ -120,6 +136,52 @@ fn namespaced_role_omits_cluster_crds_but_keeps_mover_minting() {
         rule_grants(&rules, "rbac.authorization.k8s.io", "rolebindings"),
         "namespaced role must mint the mover RoleBinding in its own namespace"
     );
+}
+
+/// Regression: the controller mints the per-namespace mover SA + RoleBinding via
+/// server-side apply (`io::ensure_mover_rbac` → `PatchParams::apply`), which the
+/// apiserver authorizes as a `patch` (plus `create` when the object is new). The
+/// operator role shipped `serviceaccounts: [create, get]` — missing `patch` — so
+/// every mint 403'd, the reconcile errored before launching the mover Job, and a
+/// failing Repository never published its Warning Event (and real-cluster mover
+/// Jobs FailedCreate'd). Both install modes must grant `patch` on the minted kinds.
+#[test]
+fn operator_role_can_server_side_apply_the_minted_mover_rbac() {
+    let artifacts = xtask::rbac::artifacts().expect("generate RBAC artifacts");
+    for (rel, kind) in [
+        ("rbac/operator-clusterrole.yaml", "ClusterRole"),
+        ("rbac/operator-role.yaml", "Role"),
+    ] {
+        let a = artifact(&artifacts, rel);
+        let rules = docs(&a.content)
+            .into_iter()
+            .find_map(|d| {
+                let v: serde_yaml::Value = serde_yaml::from_str(&d).ok()?;
+                (v.get("kind").and_then(|k| k.as_str()) == Some(kind)).then_some(())?;
+                if kind == "ClusterRole" {
+                    serde_yaml::from_str::<ClusterRole>(&d).ok()?.rules
+                } else {
+                    serde_yaml::from_str::<Role>(&d).ok()?.rules
+                }
+            })
+            .unwrap_or_else(|| panic!("{rel}: {kind} rules must parse"));
+
+        // Server-side apply needs `patch` (and `create` for first-write) on BOTH
+        // minted kinds — assert the verb, not just the resource's presence.
+        for (group, resource) in [
+            ("", "serviceaccounts"),
+            ("rbac.authorization.k8s.io", "rolebindings"),
+        ] {
+            assert!(
+                rule_grants_verb(&rules, group, resource, "patch"),
+                "{rel}: must grant `patch` on {resource} (controller mints via server-side apply)"
+            );
+            assert!(
+                rule_grants_verb(&rules, group, resource, "create"),
+                "{rel}: must grant `create` on {resource} (first-time mint)"
+            );
+        }
+    }
 }
 
 /// The dedicated, least-privilege mover role is generated for both install modes

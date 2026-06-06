@@ -133,8 +133,10 @@ rules:
   resources:
   - serviceaccounts
   verbs:
-  - create
   - get
+  - create
+  - update
+  - patch
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:

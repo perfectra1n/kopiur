@@ -81,10 +81,13 @@ rules:
   # `kopiur-mover` ServiceAccount + a RoleBinding (to the mover ClusterRole) created
   # in each mover Job's namespace. Without these the mover Job's SA does not exist in
   # the workload namespace and the Job never schedules a pod.
+  # `io::ensure_mover_rbac` mints these via server-side apply (a PATCH), so `patch`
+  # (and `update`) are required alongside `create`/`get` — without `patch` the apply
+  # is 403'd and the mover SA is never minted, so the mover Job FailedCreates.
   - apiGroups: [""]
     resources:
       - serviceaccounts
-    verbs: [create, get]
+    verbs: [get, create, update, patch]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources:
       - rolebindings

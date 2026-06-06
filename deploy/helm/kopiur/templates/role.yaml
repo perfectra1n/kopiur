@@ -76,11 +76,12 @@ rules:
     resources:
       - volumegroupsnapshots
     verbs: [get, list, watch, create, delete]
-  # Per-namespace mover RBAC minted by the controller (§4.12).
+  # Per-namespace mover RBAC minted by the controller (§4.12). Minted via
+  # server-side apply (PATCH), so `patch`/`update` are required, not just create/get.
   - apiGroups: [""]
     resources:
       - serviceaccounts
-    verbs: [create, get]
+    verbs: [get, create, update, patch]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources:
       - rolebindings

@@ -31,10 +31,11 @@ use kopiur_api::{ClusterRepository, Maintenance, Repository};
 use kopiur_kopia::KopiaErrorClass;
 
 use crate::consts::{
-    API_VERSION, CHECK_BACKEND_ACTION, CHECK_CREDENTIALS_ACTION, CHECK_MAINTENANCE_ACTION,
-    CHECK_PERMISSIONS_ACTION, MAINTENANCE_CONFIGURED_CONDITION, MAINTENANCE_CONFIGURED_REASON,
-    MAINTENANCE_DISABLED_REASON, MAINTENANCE_NAMESPACE_UNRESOLVED_REASON,
-    MISSING_CREDENTIALS_REASON, PRIVILEGED_MOVERS_ANNOTATION,
+    API_VERSION, BOOTSTRAP_JOB_FAILED_REASON, CHECK_BACKEND_ACTION, CHECK_CREDENTIALS_ACTION,
+    CHECK_MAINTENANCE_ACTION, CHECK_PERMISSIONS_ACTION, MAINTENANCE_CONFIGURED_CONDITION,
+    MAINTENANCE_CONFIGURED_REASON, MAINTENANCE_DISABLED_REASON,
+    MAINTENANCE_NAMESPACE_UNRESOLVED_REASON, MISSING_CREDENTIALS_REASON,
+    PRIVILEGED_MOVERS_ANNOTATION,
 };
 use crate::context::Context;
 use crate::error::{Error, Result};
@@ -1244,6 +1245,36 @@ fn operator_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Publish a Warning Event on `regarding` with a pre-composed `(reason, action,
+/// note)`. The single low-level publish primitive every backend/bootstrap warning
+/// funnels through. Best-effort: a failed publish is logged, never fatal (a
+/// dropped Event must not fail a reconcile).
+async fn publish_warning(
+    ctx: &Context,
+    regarding: &ObjectReference,
+    name: &str,
+    reason: &str,
+    action: &str,
+    note: String,
+) {
+    if let Err(e) = ctx
+        .recorder
+        .publish(
+            &Event {
+                type_: EventType::Warning,
+                reason: reason.to_string(),
+                note: Some(note),
+                action: action.to_string(),
+                secondary: None,
+            },
+            regarding,
+        )
+        .await
+    {
+        tracing::warn!(error = %e, repo = %name, reason, "failed to publish Warning event");
+    }
+}
+
 /// Surface a repository connect/create failure as a Warning Event on the CR, so
 /// *what* the backend rejected (e.g. S3 "Access Denied") is visible from
 /// `kubectl get events` / `describe` and not buried in a status condition. The
@@ -1256,24 +1287,98 @@ pub async fn publish_backend_failure(
     class: KopiaErrorClass,
     message: &str,
 ) {
-    let reason = class.as_str();
     let (action, note) = backend_failure_event(class, message, operator_uid());
-    if let Err(e) = ctx
-        .recorder
-        .publish(
-            &Event {
-                type_: EventType::Warning,
-                reason: reason.into(),
-                note: Some(note),
-                action: action.into(),
-                secondary: None,
-            },
-            regarding,
-        )
-        .await
-    {
-        tracing::warn!(error = %e, repo = %name, "failed to publish {reason} event");
+    publish_warning(ctx, regarding, name, class.as_str(), action, note).await;
+}
+
+/// Why an object-store repository bootstrap Job did not yield a healthy
+/// repository. Each variant maps **exhaustively** (ADR §5.5) to a
+/// `Bootstrapped=False` condition reason/message and a Warning Event, so a new
+/// terminal failure mode forces an explicit decision instead of silently
+/// degrading. Shared by the `Repository` and `ClusterRepository` finalizers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootstrapFailure {
+    /// The mover ran and wrote a structured failure result: kopia could not
+    /// connect to / create the repository. Carries the kopia error class and the
+    /// human message (its stderr tail), exactly as the mover classified them.
+    Backend {
+        /// The kopia error class the mover recorded (drives the Event `reason`).
+        class: KopiaErrorClass,
+        /// The mover's persisted failure message (stable across re-reads).
+        message: String,
+    },
+    /// The bootstrap Job reached a terminal/failed state but wrote **no** result:
+    /// the mover pod crashed, was OOM-killed/evicted, exceeded its
+    /// `activeDeadlineSeconds`, or never scheduled (e.g. a missing mover
+    /// ServiceAccount). The cause lives in the Job's pod logs.
+    JobFailedWithoutResult {
+        /// The bootstrap Job's name, so the message can point an operator at it.
+        job_name: String,
+    },
+}
+
+impl BootstrapFailure {
+    /// The machine-readable `reason` shared by the `Bootstrapped=False` condition
+    /// and the Warning Event — they must match (ADR §5.5). A backend rejection
+    /// reuses the kopia class label; a result-less Job failure is its own reason
+    /// so the two are never conflated.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            BootstrapFailure::Backend { class, .. } => class.as_str(),
+            BootstrapFailure::JobFailedWithoutResult { .. } => BOOTSTRAP_JOB_FAILED_REASON,
+        }
     }
+
+    /// The stable, actionable condition message (what failed / why / how to find
+    /// the cause). Volatile-free so the guarded status write stays a no-op across
+    /// repeated identical failures (no hot-loop — see [`patch_status_if_changed`]).
+    pub fn condition_message(&self) -> String {
+        match self {
+            BootstrapFailure::Backend { message, .. } => message.clone(),
+            BootstrapFailure::JobFailedWithoutResult { job_name } => {
+                bootstrap_job_failed_message(job_name)
+            }
+        }
+    }
+
+    /// Publish this failure as a Warning Event on `regarding`. The `Backend`
+    /// variant reuses the kopia-class remediation machinery
+    /// ([`backend_failure_event`]); the result-less variant carries its own
+    /// actionable note. Both are clamped to [`EVENT_NOTE_MAX_BYTES`].
+    pub async fn publish(&self, ctx: &Context, regarding: &ObjectReference, name: &str) {
+        match self {
+            BootstrapFailure::Backend { class, message } => {
+                publish_backend_failure(ctx, regarding, name, *class, message).await;
+            }
+            BootstrapFailure::JobFailedWithoutResult { job_name } => {
+                let note = truncate_for_note(
+                    &bootstrap_job_failed_message(job_name),
+                    EVENT_NOTE_MAX_BYTES,
+                );
+                publish_warning(
+                    ctx,
+                    regarding,
+                    name,
+                    BOOTSTRAP_JOB_FAILED_REASON,
+                    CHECK_BACKEND_ACTION,
+                    note,
+                )
+                .await;
+            }
+        }
+    }
+}
+
+/// The actionable message for a bootstrap Job that failed without writing a
+/// result. Pure so the exact text is unit-asserted. Names the Job, explains the
+/// likely causes, and gives the concrete commands to find the real error.
+pub fn bootstrap_job_failed_message(job_name: &str) -> String {
+    format!(
+        "the repository bootstrap Job `{job_name}` failed without writing a result — the mover \
+         pod crashed, was evicted, exceeded its deadline, or never scheduled (e.g. a missing mover \
+         ServiceAccount in this namespace). Inspect it with `kubectl describe job/{job_name}` and \
+         `kubectl logs job/{job_name}` to find the underlying error."
+    )
 }
 
 #[cfg(test)]
@@ -1393,6 +1498,67 @@ mod tests {
         assert!(
             note.contains("65532"),
             "remediation hint lost to truncation: {note}"
+        );
+    }
+
+    // --- BootstrapFailure: the typed bootstrap outcome drives both the
+    // `Bootstrapped=False` condition reason/message and the Warning Event. The two
+    // terminal modes must stay distinct (a kopia rejection vs. a result-less Job
+    // failure) and both must produce a non-empty, bounded, actionable note. ---
+
+    #[test]
+    fn bootstrap_failure_backend_reason_is_the_kopia_class_label() {
+        let f = BootstrapFailure::Backend {
+            class: KopiaErrorClass::AccessDenied,
+            message: "Access Denied".to_string(),
+        };
+        // The Event/condition reason matches the kopia class (so it lines up with
+        // the in-process connect path), never the result-less reason.
+        assert_eq!(f.reason(), KopiaErrorClass::AccessDenied.as_str());
+        assert_ne!(f.reason(), BOOTSTRAP_JOB_FAILED_REASON);
+        assert_eq!(f.condition_message(), "Access Denied");
+    }
+
+    #[test]
+    fn bootstrap_failure_job_without_result_has_its_own_reason_and_actionable_message() {
+        let f = BootstrapFailure::JobFailedWithoutResult {
+            job_name: "e2e-evt-fail-bootstrap".to_string(),
+        };
+        // Distinct, machine-readable reason — never conflated with a kopia class.
+        assert_eq!(f.reason(), BOOTSTRAP_JOB_FAILED_REASON);
+        assert_eq!(
+            KopiaErrorClass::from_label(f.reason()),
+            KopiaErrorClass::Unknown
+        );
+        let msg = f.condition_message();
+        assert!(
+            msg.contains("e2e-evt-fail-bootstrap"),
+            "names the Job: {msg}"
+        );
+        assert!(
+            msg.contains("ServiceAccount"),
+            "explains a likely cause: {msg}"
+        );
+        assert!(
+            msg.contains("kubectl logs"),
+            "gives a concrete next step: {msg}"
+        );
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_job_failed_message_is_bounded_for_the_event_note() {
+        // Even a pathological Job name must yield a note within the apiserver's
+        // 1024-byte limit once clamped (regression: the 422 Event bug).
+        let long_name = "a".repeat(5000);
+        let note = truncate_for_note(
+            &bootstrap_job_failed_message(&long_name),
+            EVENT_NOTE_MAX_BYTES,
+        );
+        assert!(
+            note.len() <= EVENT_NOTE_MAX_BYTES,
+            "note is {} bytes, exceeds the {EVENT_NOTE_MAX_BYTES}-byte Event limit",
+            note.len()
         );
     }
 
