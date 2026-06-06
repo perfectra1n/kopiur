@@ -1,0 +1,48 @@
+# Backend: Google Cloud Storage (ADR-0003 §3.1)
+#
+# Identifiers (bucket/prefix) live in the Repository spec; the service-account
+# key JSON lives in a Secret. kopia reads it as GOOGLE_APPLICATION_CREDENTIALS.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.gcs`).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gcs-repo-creds
+  namespace: backups
+type: Opaque
+stringData:
+  # The full service-account key JSON, verbatim. The mover writes it to a file
+  # and points GOOGLE_APPLICATION_CREDENTIALS at it.
+  GOOGLE_APPLICATION_CREDENTIALS: |
+    {
+      "type": "service_account",
+      "project_id": "REPLACE_ME",
+      "private_key_id": "REPLACE_ME",
+      "private_key": "-----BEGIN PRIVATE KEY-----\nREPLACE_ME\n-----END PRIVATE KEY-----\n",
+      "client_email": "kopia@REPLACE_ME.iam.gserviceaccount.com",
+      "client_id": "REPLACE_ME",
+      "token_uri": "https://oauth2.googleapis.com/token"
+    }
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: gcs-primary
+  namespace: backups
+spec:
+  backend:
+    gcs:
+      bucket: my-kopia-backups # the GCS bucket holding the repository
+      prefix: prod/ # optional object-name prefix within the bucket
+      auth:
+        secretRef:
+          name: gcs-repo-creds
+  encryption:
+    passwordSecretRef:
+      name: gcs-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true

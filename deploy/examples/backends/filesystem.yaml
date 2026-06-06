@@ -1,0 +1,51 @@
+# Backend: Filesystem (PVC-backed) (ADR-0003 §3.1)
+#
+# A NAS/PVC repository: the operator mounts a PVC into the mover at `path` and
+# kopia writes the repository there. No object-store keys — only KOPIA_PASSWORD.
+#
+# PERMISSIONS: the repository path must be WRITABLE by the UID the mover runs as
+# (default 65532). If create/connect fails with "permission denied", the operator
+# tells you the exact UID and `chown -R <uid> <path>` to run. See the Permissions
+# guide.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.filesystem`).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fs-repo-creds
+  namespace: backups
+type: Opaque
+stringData:
+  # Filesystem backends need ONLY the repository encryption password.
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nas-repo
+  namespace: backups
+spec:
+  accessModes: ["ReadWriteMany"] # the mover Job mounts this read-write
+  resources:
+    requests:
+      storage: 500Gi
+  # storageClassName: your-nfs-or-nas-class
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: nas-primary
+  namespace: backups
+spec:
+  backend:
+    filesystem:
+      path: /repo # mount path INSIDE the mover pod
+      pvcName: nas-repo # the PVC mounted at `path` (omit if path is on the node/image)
+  encryption:
+    passwordSecretRef:
+      name: fs-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true

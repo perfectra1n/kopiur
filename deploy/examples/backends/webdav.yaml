@@ -1,0 +1,38 @@
+# Backend: WebDAV (ADR-0003 §3.1)
+#
+# The collection URL lives in the Repository spec; HTTP basic-auth credentials
+# live in a Secret.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.webDav` — note the camelCase capital D).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: webdav-repo-creds
+  namespace: backups
+type: Opaque
+stringData:
+  # HTTP basic-auth for the WebDAV endpoint.
+  WEBDAV_USERNAME: "REPLACE_ME"
+  WEBDAV_PASSWORD: "REPLACE_ME"
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: webdav-primary
+  namespace: backups
+spec:
+  backend:
+    webDav:
+      url: https://dav.example.com/kopia # the WebDAV collection URL
+      auth:
+        secretRef:
+          name: webdav-repo-creds
+  encryption:
+    passwordSecretRef:
+      name: webdav-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true

@@ -1,0 +1,47 @@
+# Backend: SFTP (ADR-0003 §3.1)
+#
+# Connection identifiers (host/port/path/username) live in the Repository spec;
+# the SSH private key and known-hosts entry live in a Secret.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.sftp`).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sftp-repo-creds
+  namespace: backups
+type: Opaque
+stringData:
+  # SSH key-based auth (recommended). The mover writes the key to a file and
+  # passes it to kopia as --keyfile.
+  ssh-privatekey: |
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    REPLACE_ME
+    -----END OPENSSH PRIVATE KEY-----
+  # Pin the server host key (avoid trust-on-first-use). Get it with:
+  #   ssh-keyscan -p 22 nas.lan
+  known_hosts: "nas.lan ssh-ed25519 AAAAC3Nz...REPLACE_ME"
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: sftp-primary
+  namespace: backups
+spec:
+  backend:
+    sftp:
+      host: nas.lan # SFTP server hostname or IP
+      port: 22 # optional; defaults to 22
+      path: /volume1/kopia # remote path holding the repository
+      username: backup # SSH user to connect as
+      auth:
+        secretRef:
+          name: sftp-repo-creds
+  encryption:
+    passwordSecretRef:
+      name: sftp-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true

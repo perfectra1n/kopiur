@@ -1,0 +1,44 @@
+# Backend: rclone (everything else) (ADR-0003 §3.1)
+#
+# kopia shells out to `rclone`, so any rclone-supported provider works. The
+# `remotePath` is rclone's `remote:path` form; the remote must be defined in the
+# rclone.conf you supply via a Secret.
+#
+# NOTE: rclone references its config via `configSecretRef`, NOT `auth`.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.rclone`).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rclone-config
+  namespace: backups
+type: Opaque
+stringData:
+  # A standard rclone.conf defining the remote referenced by remotePath below
+  # (here the remote is named `mydrive`). Generate it with `rclone config`.
+  rclone.conf: |
+    [mydrive]
+    type = drive
+    scope = drive
+    token = {"access_token":"REPLACE_ME","token_type":"Bearer","refresh_token":"REPLACE_ME"}
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: rclone-primary
+  namespace: backups
+spec:
+  backend:
+    rclone:
+      remotePath: mydrive:backups/kopia # rclone remote:path; `mydrive` is defined in rclone.conf
+      configSecretRef:
+        name: rclone-config # Secret holding the rclone.conf above (NOT `auth`)
+  encryption:
+    passwordSecretRef:
+      name: rclone-config # may be the same Secret; it also carries KOPIA_PASSWORD
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true

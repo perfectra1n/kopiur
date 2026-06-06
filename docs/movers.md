@@ -99,7 +99,7 @@ $ kubectl annotate namespace media kopiur.home-operations.com/privileged-movers=
 On the next reconcile `MoverPermitted` clears to `True` and the privileged mover runs. To revoke, remove the annotation (or drop the elevated `securityContext` from the `BackupConfig`).
 
 ```admonish tip title="Prefer unprivileged when you can"
-Reach for a privileged mover only when a workload genuinely needs it (e.g. an app that writes files as root). Many sources back up fine unprivileged, and an unprivileged mover keeps the minted ServiceAccount's blast radius minimal.
+Reach for a privileged mover only when a workload genuinely needs it (e.g. an app that writes files as root). Many sources back up fine unprivileged, and an unprivileged mover keeps the minted ServiceAccount's blast radius minimal. Before going root, try matching the mover's UID/GID to the data owner — see [Permissions, UID & GID](permissions.md).
 ```
 
 ## Putting it together: a ClusterRepository backup in a workload namespace

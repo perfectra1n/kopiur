@@ -56,8 +56,8 @@ The mover reads these **well-known keys** from the Secret you reference and expo
 | **Azure** | `AZURE_STORAGE_KEY` **or** `AZURE_STORAGE_SAS_TOKEN` | Account name can come from `spec.backend.azure.storageAccount`. |
 | **GCS** | `GOOGLE_APPLICATION_CREDENTIALS` (service-account JSON) | The Secret holds the SA key JSON; kopia reads it as the credentials file. |
 | **B2** | `B2_KEY_ID`, `B2_KEY` | Backblaze application key ID + key. |
-| **SFTP** | SSH private key / password | Supplied via `auth.secretRef`; see [SFTP](#sftp). |
-| **WebDAV** | basic-auth username / password | Supplied via `auth.secretRef`. |
+| **SFTP** | `ssh-privatekey`, `known_hosts` | Supplied via `auth.secretRef`; see [SFTP](backends.md#sftp). |
+| **WebDAV** | `WEBDAV_USERNAME`, `WEBDAV_PASSWORD` | Supplied via `auth.secretRef`. |
 | **rclone** | `rclone.conf` | Referenced by `backend.rclone.configSecretRef`, not `auth`. |
 | **filesystem** | *(none — local path)* | Only `KOPIA_PASSWORD` is needed. |
 
@@ -67,106 +67,21 @@ Because a `ClusterRepository` is cluster-scoped it has no namespace of its own, 
 
 ## The eight backends
 
-Each block below is the `spec.backend` stanza. Drop it into a `Repository` (or `ClusterRepository`) with an `encryption` block and you're done. A complete, apply-ready S3 example is [`deploy/examples/01-single-pvc-scheduled.yaml`](examples.md#example-01--single-pvc-scheduled); filesystem appears in the [Maintenance guide](maintenance.md).
+Kopiur supports eight backends; each is selected by the `spec.backend.<key>` you set.
 
-### S3 / S3-compatible
+| Backend | `spec.backend` key | Where it goes |
+|---|---|---|
+| Amazon S3 + any S3-compatible store (MinIO, RustFS, Ceph RGW, Wasabi) | `s3` | a bucket |
+| Azure Blob Storage | `azure` | a container |
+| Google Cloud Storage | `gcs` | a bucket |
+| Backblaze B2 | `b2` | a bucket |
+| Filesystem (NAS/PVC) | `filesystem` | a mounted PVC path |
+| SFTP | `sftp` | a path on an SSH server |
+| WebDAV | `webDav` | a collection URL |
+| rclone (everything else) | `rclone` | any rclone remote |
 
-```yaml
-backend:
-  s3:
-    bucket: my-backups
-    prefix: clusters/prod/ # optional; lets several repos share one bucket
-    endpoint: s3.us-east-1.amazonaws.com # OMIT for AWS default; SET for MinIO/RustFS/Ceph
-    region: us-east-1 # required by AWS and some compatible providers
-    auth:
-      secretRef: { name: repo-creds }
-    tls: # optional — for self-signed or HTTP-only endpoints
-      disableTls: false # true ⇒ plain HTTP (in-cluster MinIO/RustFS)
-      insecureSkipVerify: false
-```
-
-```admonish tip title="In-cluster MinIO / RustFS over HTTP"
-kopia's S3 path assumes HTTPS. For a plain-HTTP in-cluster endpoint set `tls.disableTls: true`. For a self-signed HTTPS endpoint, prefer pointing `tls.caBundleRef` at a `ConfigMap` with the CA over `insecureSkipVerify: true`.
-```
-
-### Azure Blob Storage
-
-```yaml
-backend:
-  azure:
-    container: kopia-backups
-    prefix: prod/ # optional
-    storageAccount: mystorageacct # when not inferred from credentials
-    auth:
-      secretRef: { name: repo-creds } # AZURE_STORAGE_KEY or AZURE_STORAGE_SAS_TOKEN
-```
-
-### Google Cloud Storage
-
-```yaml
-backend:
-  gcs:
-    bucket: my-kopia-backups
-    prefix: prod/ # optional
-    auth:
-      secretRef: { name: repo-creds } # GOOGLE_APPLICATION_CREDENTIALS (SA JSON)
-```
-
-### Backblaze B2
-
-```yaml
-backend:
-  b2:
-    bucket: my-kopia-backups
-    prefix: prod/ # optional
-    auth:
-      secretRef: { name: repo-creds } # B2_KEY_ID + B2_KEY
-```
-
-### Filesystem (PVC-backed)
-
-For a NAS/PVC repository: the operator mounts a PVC into the mover at `path` and kopia writes the repository there. No object-store keys — only `KOPIA_PASSWORD`.
-
-```yaml
-backend:
-  filesystem:
-    path: /repo # mount path inside the mover pod
-    pvcName: nas-repo # the PVC mounted at `path` (omit if the path is on the image/node)
-```
-
-### SFTP
-
-```yaml
-backend:
-  sftp:
-    host: nas.lan
-    port: 22 # optional; defaults to 22
-    path: /volume1/kopia
-    username: backup
-    auth:
-      secretRef: { name: repo-creds } # SSH private key / known-hosts / password
-```
-
-### WebDAV
-
-```yaml
-backend:
-  webDav:
-    url: https://dav.example.com/kopia
-    auth:
-      secretRef: { name: repo-creds } # HTTP basic-auth username/password
-```
-
-### rclone (everything else)
-
-kopia shells out to `rclone`, so any rclone-supported provider works. The `remotePath` is rclone's `remote:path` form, and the remote must be defined in the `rclone.conf` you supply via a Secret (note: `configSecretRef`, **not** `auth`).
-
-```yaml
-backend:
-  rclone:
-    remotePath: mydrive:backups/kopia
-    configSecretRef:
-      name: rclone-config # Secret holding the rclone.conf that defines `mydrive`
+```admonish tip title="Per-backend setup lives on its own page"
+For each backend — the **provider prerequisites**, the exact **Secret keys**, the knobs you'll actually change, and a **complete apply-ready manifest** (Secret + Repository in one file) — see [**Backend configuration**](backends.md). That page is the hands-on cookbook; this one is the concepts.
 ```
 
 ## Encryption and repository creation
@@ -256,6 +171,7 @@ A complete, apply-ready example is [`deploy/examples/02-cluster-repository.yaml`
 
 ## See also
 
+- [Backend configuration](backends.md) — per-backend setup cookbook (prereqs, Secret keys, apply-ready manifests).
 - [Movers, RBAC & credentials](movers.md) — where the credential Secret must live.
 - [Maintenance](maintenance.md) — the default-managed space reclamation per repo.
 - [`deploy/examples/01-single-pvc-scheduled.yaml`](examples.md#example-01--single-pvc-scheduled) — S3 `Repository`, end to end.

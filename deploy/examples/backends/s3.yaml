@@ -1,0 +1,50 @@
+# Backend: S3 / S3-compatible (ADR-0003 §3.1)
+#
+# Amazon S3 and any S3-compatible store (MinIO, RustFS, Ceph RGW, Wasabi, ...).
+# Identifiers (bucket/prefix/endpoint/region) live in the Repository spec;
+# credentials live in a Secret read by well-known keys.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.s3`, NOT `backend: { kind: S3 }`).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-repo-creds
+  namespace: backups
+type: Opaque
+stringData:
+  # Read by well-known names. AWS_SESSION_TOKEN is optional (STS only).
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+  # The kopia repository encryption password. Lose it and the backups are
+  # unrecoverable — store it outside the cluster too.
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: s3-primary
+  namespace: backups
+spec:
+  backend:
+    s3:
+      bucket: my-backups # the bucket holding the kopia repository
+      prefix: clusters/prod/ # optional; lets several repos share one bucket
+      region: us-east-1 # required by AWS; some compatible stores want it too
+      # endpoint: OMIT for AWS. For MinIO/RustFS/Ceph set the host, e.g.
+      #   endpoint: minio.storage.svc.cluster.local:9000
+      #   tls:
+      #     disableTls: true        # in-cluster plain HTTP (kopia assumes HTTPS otherwise)
+      #     # or, for self-signed HTTPS, prefer a CA bundle over skipping verify:
+      #     # caBundleRef: { configMapName: minio-ca, key: ca.crt }
+      #     # insecureSkipVerify: true   # last resort
+      auth:
+        secretRef:
+          name: s3-repo-creds
+  encryption:
+    passwordSecretRef:
+      name: s3-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true # initialize the repo if it does not exist yet (default: false)

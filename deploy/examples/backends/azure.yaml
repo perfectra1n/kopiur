@@ -1,0 +1,40 @@
+# Backend: Azure Blob Storage (ADR-0003 §3.1)
+#
+# Identifiers (container/prefix/storageAccount) live in the Repository spec;
+# credentials live in a Secret read by well-known keys.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.azure`).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: azure-repo-creds
+  namespace: backups
+type: Opaque
+stringData:
+  # Provide EXACTLY ONE of these two (kopia picks up whichever is set):
+  AZURE_STORAGE_KEY: "REPLACE_ME" # the storage-account access key, OR ...
+  # AZURE_STORAGE_SAS_TOKEN: "REPLACE_ME"  # ... a SAS token scoped to the container
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: azure-primary
+  namespace: backups
+spec:
+  backend:
+    azure:
+      container: kopia-backups # the blob container holding the repository
+      prefix: prod/ # optional blob-name prefix within the container
+      storageAccount: mystorageacct # account name (when not inferred from creds)
+      auth:
+        secretRef:
+          name: azure-repo-creds
+  encryption:
+    passwordSecretRef:
+      name: azure-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true

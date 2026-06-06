@@ -20,6 +20,11 @@ Kopiur separates the backup **recipe** (`BackupConfig`) from its **invocation** 
 | 06 | [Manual one-shot backup](#example-06--manual-one-shot-backup) | A `Backup` CR as the universal trigger. |
 | 07 | [Restore a discovered backup](#example-07--restore-a-discovered-backup) | Restore foreign / pre-install snapshots. |
 | 08 | [Maintenance](#example-08--maintenance) | A standalone `Maintenance` for fine-grained control. |
+| 09 | [Mover UID/GID & permissions](#example-09--mover-uidgid--permissions) | Match the mover's UID/GID to the data owner so it can read it. |
+
+```admonish tip title="Looking for a specific storage backend?"
+Complete apply-ready `Repository` manifests for **every** backend (S3, Azure, GCS, B2, filesystem, SFTP, WebDAV, rclone) live under [`deploy/examples/backends/`](https://github.com/home-operations/kopiur/tree/main/deploy/examples/backends) and are walked through, with provider prerequisites, on the [Backend configuration](backends.md) page. The numbered ladder below is the task/workflow tutorial.
+```
 
 ```admonish warning title="Alpha"
 These use API group `kopiur.home-operations.com`, version `v1alpha1`. Backends are **externally tagged** (the bucket lives under `backend.s3`, not `backend: { kind: S3 }`).
@@ -123,4 +128,14 @@ Maintenance is default-managed (see the [Maintenance guide](maintenance.md)), bu
 
 ```yaml
 {{#include ../deploy/examples/08-maintenance.yaml}}
+```
+
+---
+
+## Example 09 — Mover UID/GID & permissions
+
+The mover Job is a separate pod that mounts and reads your PVC, so it must run as a UID/GID that can read the data (and, on restore, write the target). This `BackupConfig` sets `spec.mover.securityContext.runAsUser/runAsGroup` to match the owning user, and comments the root-mover variant for data you can't match. See the [Permissions guide](permissions.md) for how to find the right numbers.
+
+```yaml
+{{#include ../deploy/examples/09-mover-permissions.yaml}}
 ```

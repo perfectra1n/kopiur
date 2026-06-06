@@ -1,0 +1,40 @@
+# Backend: Backblaze B2 (ADR-0003 §3.1)
+#
+# Identifiers (bucket/prefix) live in the Repository spec; the application key
+# ID + key live in a Secret read by well-known keys.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.b2`).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: b2-repo-creds
+  namespace: backups
+type: Opaque
+stringData:
+  # A Backblaze application key (keyID + key). Prefer a key scoped to the one
+  # bucket, not the master key.
+  B2_KEY_ID: "REPLACE_ME"
+  B2_KEY: "REPLACE_ME"
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: b2-primary
+  namespace: backups
+spec:
+  backend:
+    b2:
+      bucket: my-kopia-backups # the B2 bucket holding the repository
+      prefix: prod/ # optional object-name prefix within the bucket
+      auth:
+        secretRef:
+          name: b2-repo-creds
+  encryption:
+    passwordSecretRef:
+      name: b2-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true
