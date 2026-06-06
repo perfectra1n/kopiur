@@ -23,6 +23,20 @@ pub const CONFIG_LABEL: &str = "kopiur.home-operations.com/config";
 /// The API version string for kopiur CRDs (used in mover `TargetRef`s).
 pub const API_VERSION: &str = "kopiur.home-operations.com/v1alpha1";
 
+/// Standard component label. `maintenance` marks the mover Jobs the `Maintenance`
+/// reconciler spawns, so it can enforce single-flight (at most one maintenance
+/// Job per repository at a time, G3) via a label selector.
+pub const COMPONENT_LABEL: &str = "app.kubernetes.io/component";
+/// `COMPONENT_LABEL` value for maintenance mover Jobs.
+pub const MAINTENANCE_COMPONENT: &str = "maintenance";
+/// Label tying a maintenance Job back to its owning `Maintenance` CR (the
+/// single-flight selector is `COMPONENT_LABEL`=maintenance + this = CR name).
+pub const MAINTENANCE_INSTANCE_LABEL: &str = "kopiur.home-operations.com/maintenance";
+/// Annotation on a maintenance Job recording the scheduled slot it runs (RFC3339;
+/// not a valid *label* value because of the colons). Mirrors the upstream
+/// `batch.kubernetes.io/cronjob-scheduled-timestamp` (G9).
+pub const MAINTENANCE_SLOT_ANNOTATION: &str = "kopiur.home-operations.com/maintenance-slot";
+
 /// Status condition `type` set on a `Repository`/`ClusterRepository` recording
 /// whether a `Maintenance` covers it (ADR §3.7). Maintenance is default-managed:
 /// `True` once the operator manages one (or an external one exists); `False` only

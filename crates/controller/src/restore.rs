@@ -368,6 +368,7 @@ async fn drive_direct_restore(
         result_configmap: None,
         service_account: ctx.mover_service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
+        annotations: Default::default(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);

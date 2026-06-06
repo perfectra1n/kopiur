@@ -34,6 +34,11 @@ pub enum Operation {
     /// reach in-process (ADR §5.4). Result is written to the work-spec ConfigMap,
     /// not the CR status (the controller owns the Repository status).
     BootstrapRepository(BootstrapRepositoryOp),
+    /// Run `kopia maintenance run` (quick or full) for a repository the
+    /// controller cannot reach in-process. The mover reads the ownership lease,
+    /// applies the takeover policy, runs maintenance when it holds the lease, and
+    /// PATCHes the `Maintenance` `.status` directly (ADR §3.7/§5.4).
+    Maintenance(MaintenanceOp),
 }
 
 impl Operation {
@@ -44,6 +49,7 @@ impl Operation {
             Operation::Restore(_) => "Restore",
             Operation::SnapshotDelete(_) => "SnapshotDelete",
             Operation::BootstrapRepository(_) => "BootstrapRepository",
+            Operation::Maintenance(_) => "Maintenance",
         }
     }
 }
@@ -129,6 +135,26 @@ pub struct BootstrapRepositoryOp {
     /// whose cross-namespace placement is a separate concern).
     #[serde(default)]
     pub scan_catalog: bool,
+}
+
+/// Payload for a maintenance run.
+///
+/// The controller decides *which* pass is due (full subsumes quick) and passes
+/// the lease parameters down; the mover makes the lease decision because reading
+/// the current holder requires repo access (`kopia maintenance info`), which the
+/// controller does not have for object stores. ADR §3.7.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceOp {
+    /// Which pass to run when the lease is held: quick (index/log) or full
+    /// (content reclamation).
+    pub mode: kopiur_kopia::MaintenanceMode,
+    /// This `Maintenance`'s configured lease holder identity
+    /// (`spec.ownership.owner`); compared against the repo's current holder.
+    pub owner: String,
+    /// What to do if the lease is held by a *different* owner. ADR §3.7.
+    #[serde(default)]
+    pub takeover_policy: kopiur_api::TakeoverPolicy,
 }
 
 /// The resolved kopia identity (`username@hostname:path`). Pinned by the
@@ -589,6 +615,47 @@ mod tests {
                 .get("disableTlsVerification")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn maintenance_roundtrip_and_wire_shape() {
+        let spec = MoverWorkSpec {
+            version: 1,
+            operation: Operation::Maintenance(MaintenanceOp {
+                mode: kopiur_kopia::MaintenanceMode::Full,
+                owner: "kopiur/prod/nas-primary".into(),
+                takeover_policy: kopiur_api::TakeoverPolicy::Force,
+            }),
+            identity: ResolvedIdentity {
+                username: "kopiur-maintenance".into(),
+                hostname: "prod".into(),
+                source_path: String::new(),
+            },
+            repository: RepositoryConnect::S3 {
+                bucket: "b".into(),
+                endpoint: Some("minio:9000".into()),
+                prefix: None,
+                region: None,
+                disable_tls: true,
+                disable_tls_verification: false,
+            },
+            target_ref: TargetRef {
+                kind: "Maintenance".into(),
+                ..sample_target()
+            },
+            hook_plan: HookPlanSummary::default(),
+            options: MoverOptions::default(),
+        };
+        assert_eq!(roundtrip(&spec), spec);
+        assert_eq!(spec.operation.kind_str(), "Maintenance");
+        let v: serde_json::Value = serde_json::to_value(&spec).unwrap();
+        // Externally tagged: { "maintenance": { "mode": "full", "owner": ... } }.
+        assert_eq!(v["operation"]["maintenance"]["mode"], "full");
+        assert_eq!(
+            v["operation"]["maintenance"]["owner"],
+            "kopiur/prod/nas-primary"
+        );
+        assert_eq!(v["operation"]["maintenance"]["takeoverPolicy"], "Force");
     }
 
     #[test]

@@ -348,6 +348,36 @@ pub async fn resolve_repository_ref(
     }
 }
 
+/// Whether the referenced repository is connected and healthy
+/// (`status.phase == Ready`). Maintenance gates Job spawning on this: an
+/// object-store repository must be bootstrapped (connected/created) before
+/// `kopia maintenance` can reach it, so spawning a maintenance Job earlier just
+/// produces a doomed pod (ADR §3.7, G7). Honors `kind` via [`repo_lookup`].
+pub async fn repository_ready(
+    client: &kube::Client,
+    repo_ref: &RepositoryRef,
+    default_ns: &str,
+) -> Result<bool> {
+    let ready = Some(kopiur_api::RepositoryPhase::Ready);
+    match repo_lookup(repo_ref, default_ns) {
+        RepoLookup::Namespaced { namespace, name } => {
+            let api: Api<Repository> = Api::namespaced(client.clone(), &namespace);
+            let repo = api.get_opt(&name).await?.ok_or_else(|| {
+                Error::MissingDependency(format!("Repository {namespace}/{name}"))
+            })?;
+            Ok(repo.status.and_then(|s| s.phase) == ready)
+        }
+        RepoLookup::Cluster { name } => {
+            let api: Api<ClusterRepository> = Api::all(client.clone());
+            let repo = api
+                .get_opt(&name)
+                .await?
+                .ok_or_else(|| Error::MissingDependency(format!("ClusterRepository {name}")))?;
+            Ok(repo.status.and_then(|s| s.phase) == ready)
+        }
+    }
+}
+
 /// Resolve the credentials Secret reference from a repository's encryption block.
 pub fn repo_credentials(enc: &Encryption) -> RepoCredentials {
     let r = &enc.password_secret_ref;

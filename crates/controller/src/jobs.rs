@@ -43,6 +43,12 @@ pub struct JobLimits {
     pub backoff_limit: i32,
     /// `Job.spec.activeDeadlineSeconds`. None = no deadline.
     pub active_deadline_seconds: Option<i64>,
+    /// `Job.spec.ttlSecondsAfterFinished`. `None` (the default) leaves cleanup to
+    /// owner-reference GC — correct for one-Job-per-CR runs (backup/restore),
+    /// which are reaped when the CR is deleted. Recurring per-slot Jobs
+    /// (maintenance) set this so finished Jobs don't accumulate while the owning
+    /// CR lives on.
+    pub ttl_seconds_after_finished: Option<i64>,
 }
 
 impl Default for JobLimits {
@@ -50,6 +56,7 @@ impl Default for JobLimits {
         JobLimits {
             backoff_limit: 2,
             active_deadline_seconds: None,
+            ttl_seconds_after_finished: None,
         }
     }
 }
@@ -116,6 +123,10 @@ pub struct MoverJobInputs<'a> {
     /// vars (`RUST_LOG`, `KOPIUR_LOG_FORMAT`) so the mover inherits the
     /// controller's level/format. `(name, value)` pairs; may be empty.
     pub passthrough_env: Vec<(String, String)>,
+    /// Extra annotations on the `Job` metadata (e.g. the maintenance scheduled
+    /// slot — an RFC3339 timestamp, which is not a valid *label* value). Usually
+    /// empty for backup/restore/bootstrap.
+    pub annotations: BTreeMap<String, String>,
 }
 
 /// The restricted-PSA-compatible default security context (§4.11/G16):
@@ -324,12 +335,14 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
             name: Some(inputs.name.to_string()),
             namespace: Some(inputs.namespace.to_string()),
             labels: Some(inputs.labels.clone()),
+            annotations: (!inputs.annotations.is_empty()).then(|| inputs.annotations.clone()),
             owner_references: Some(vec![inputs.owner.clone()]),
             ..Default::default()
         },
         spec: Some(JobSpec {
             backoff_limit: Some(inputs.limits.backoff_limit),
             active_deadline_seconds: inputs.limits.active_deadline_seconds,
+            ttl_seconds_after_finished: inputs.limits.ttl_seconds_after_finished.map(|t| t as i32),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(inputs.labels.clone()),
@@ -412,6 +425,7 @@ mod tests {
             result_configmap: None,
             service_account: Some("kopiur-operator"),
             passthrough_env: Vec::new(),
+            annotations: Default::default(),
         }
     }
 
@@ -454,14 +468,49 @@ mod tests {
         let limits = JobLimits {
             backoff_limit: 5,
             active_deadline_seconds: Some(7200),
+            ttl_seconds_after_finished: Some(3600),
         };
         let job = build_job(&inputs(&ws, limits));
         let spec = job.spec.as_ref().unwrap();
         assert_eq!(spec.backoff_limit, Some(5));
         assert_eq!(spec.active_deadline_seconds, Some(7200));
+        // TTL flows through so recurring (per-slot) Jobs self-clean.
+        assert_eq!(spec.ttl_seconds_after_finished, Some(3600));
         let pod = spec.template.spec.as_ref().unwrap();
         assert_eq!(pod.restart_policy.as_deref(), Some("Never"));
         assert_eq!(pod.containers[0].name, "mover");
+    }
+
+    #[test]
+    fn ttl_is_none_by_default_so_backup_restore_jobs_persist_for_gc() {
+        assert_eq!(JobLimits::default().ttl_seconds_after_finished, None);
+        // A default-limits Job must not set ttlSecondsAfterFinished (owner-ref GC
+        // reaps one-Job-per-CR runs; no regression for backup/restore).
+        let ws = sample_work_spec();
+        let job = build_job(&inputs(&ws, JobLimits::default()));
+        assert_eq!(
+            job.spec.unwrap().ttl_seconds_after_finished,
+            None,
+            "default Jobs must not auto-expire"
+        );
+    }
+
+    #[test]
+    fn annotations_flow_onto_job_metadata() {
+        let ws = sample_work_spec();
+        let mut i = inputs(&ws, JobLimits::default());
+        i.annotations = std::collections::BTreeMap::from([(
+            "kopiur.home-operations.com/maintenance-slot".to_string(),
+            "2026-06-06T03:00:00+00:00".to_string(),
+        )]);
+        let job = build_job(&i);
+        assert_eq!(
+            job.metadata.annotations.unwrap()["kopiur.home-operations.com/maintenance-slot"],
+            "2026-06-06T03:00:00+00:00"
+        );
+        // Empty annotations must leave the field unset (no churn for other runs).
+        let bare = build_job(&inputs(&ws, JobLimits::default()));
+        assert!(bare.metadata.annotations.is_none());
     }
 
     #[test]

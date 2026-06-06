@@ -20,11 +20,12 @@
 
 #![cfg(all(unix, feature = "e2e"))]
 
+use k8s_openapi::api::batch::v1::Job;
 use kube::Api;
-use kube::api::PostParams;
+use kube::api::{ListParams, PostParams};
 use serde::de::DeserializeOwned;
 
-use kopiur_api::{Backup, BackupConfig, Repository, Restore};
+use kopiur_api::{Backup, BackupConfig, Maintenance, Repository, Restore};
 use kopiur_e2e::{E2E_NAMESPACE, default_timeout, poll_interval, try_client, wait_until};
 
 /// Deserialize a CR from a JSON literal into its typed kube object.
@@ -316,5 +317,120 @@ async fn s3_bootstrap_backup_restore_adopt_and_guard() {
         still.get("phase").and_then(|v| v.as_str()),
         Some("Ready"),
         "existing repository must remain Ready after the wrong-password attempt, got {still}"
+    );
+}
+
+/// A `Maintenance` against an object-store repository, with a fast cron so the
+/// first slot is immediately due.
+fn s3_maintenance_json(name: &str, repo: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "Maintenance",
+        "metadata": { "name": name, "namespace": E2E_NAMESPACE },
+        "spec": {
+            "repository": { "kind": "Repository", "name": repo },
+            // Both fast; the first reconcile runs FULL (preferred, no prior run),
+            // which also stamps the quick clock.
+            "schedule": {
+                "quick": { "cron": "*/5 * * * *" },
+                "full": { "cron": "*/5 * * * *" }
+            },
+            "ownership": { "owner": "kopiur-e2e", "takeoverPolicy": "Force" }
+        }
+    })
+}
+
+/// Regression guard for the headline bug: object-store maintenance was a silent
+/// no-op (the reconciler ran `kopia maintenance` in-process for *filesystem*
+/// only and just logged "object-store maintenance not run in-process" for S3).
+/// Now every backend runs maintenance in a mover Job. This asserts the real
+/// path end-to-end: an S3 repo reaches `Ready`, a `Maintenance` spawns a mover
+/// Job that connects to MinIO, claims the lease, runs `kopia maintenance`, and
+/// PATCHes the status — none of which can happen if maintenance is a no-op.
+#[tokio::test]
+#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
+async fn s3_maintenance_runs_in_a_mover_job() {
+    let Some(client) = try_client().await else {
+        return;
+    };
+    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let jobs: Api<Job> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    // Maintenance gates on repository readiness (G7), so bootstrap an isolated
+    // S3 repo (own bucket) to Ready first.
+    repos
+        .create(
+            &PostParams::default(),
+            &cr(s3_repository_json(
+                "e2e-s3-maint",
+                "kopiur-maint",
+                "kopia-s3-creds",
+                true,
+            )),
+        )
+        .await
+        .expect("create S3 Repository");
+    wait_phase(&repos, "e2e-s3-maint", "Ready")
+        .await
+        .expect("S3 Repository should reach Ready via the bootstrap Job");
+
+    // Create the Maintenance; the controller spawns a per-slot mover Job.
+    maints
+        .create(
+            &PostParams::default(),
+            &cr(s3_maintenance_json("e2e-s3-maint", "e2e-s3-maint")),
+        )
+        .await
+        .expect("create Maintenance");
+
+    // A maintenance mover Job (component=maintenance, instance=the CR) runs to
+    // completion — the previously-missing object-store execution.
+    wait_until(
+        "a maintenance mover Job completes",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let selector = "app.kubernetes.io/component=maintenance,\
+                            kopiur.home-operations.com/maintenance=e2e-s3-maint";
+            let list = jobs.list(&ListParams::default().labels(selector)).await?;
+            let done = list
+                .items
+                .iter()
+                .any(|j| j.status.as_ref().and_then(|s| s.succeeded).unwrap_or(0) >= 1);
+            Ok(done.then_some(()))
+        },
+    )
+    .await
+    .expect("a maintenance mover Job should run to completion");
+
+    // The mover ran `kopia maintenance` against S3 and PATCHed the status: the
+    // first run is full (which also stamps quick), and the lease is owned. This
+    // can only be true if maintenance actually executed.
+    wait_until(
+        "Maintenance records a full run and owns the lease",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let s = status_json(&maints, "e2e-s3-maint").await;
+            let ran = s
+                .get("full")
+                .and_then(|f| f.get("lastRunAt"))
+                .and_then(|v| v.as_str())
+                .is_some();
+            let owned = condition_status(&s, "LeaseOwned").as_deref() == Some("True");
+            Ok((ran && owned).then_some(()))
+        },
+    )
+    .await
+    .expect("Maintenance should record a full run and own the lease (proves kopia maintenance ran in the mover Job)");
+
+    let s = status_json(&maints, "e2e-s3-maint").await;
+    assert_eq!(
+        s.get("ownership")
+            .and_then(|o| o.get("owner"))
+            .and_then(|v| v.as_str()),
+        Some("kopiur-e2e"),
+        "ownership.owner must be the claimed lease holder, got {s}"
     );
 }

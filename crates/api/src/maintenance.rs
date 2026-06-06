@@ -120,6 +120,51 @@ pub enum TakeoverPolicy {
     Force,
 }
 
+/// What to do about the ownership lease, decided from the takeover policy and
+/// whether another owner currently holds it (ADR §3.7). Exhaustive over
+/// [`TakeoverPolicy`].
+///
+/// Lives in `kopiur-api` (not the controller) because the lease decision is made
+/// in the mover for object-store repositories — only something with repo access
+/// can read `kopia maintenance info` to learn the current holder. Keeping the
+/// pure decision here gives the controller (filesystem) and the mover
+/// (object-store) one shared, exhaustively-matched source of truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseAction {
+    /// Claim the lease (we hold it or it is free).
+    Claim,
+    /// Forcibly take the lease from the current holder.
+    Takeover,
+    /// Surface a condition prompting a human to decide; do not claim.
+    Prompt,
+    /// Another owner holds it and policy is `Never`: do nothing, requeue.
+    Yield,
+}
+
+/// Decide the lease action. `held_by_other` is true when a *different* owner
+/// currently holds the maintenance lease for this repository.
+///
+/// ```
+/// use kopiur_api::{lease_action, LeaseAction, TakeoverPolicy};
+///
+/// // Free (or already ours) → always claim, regardless of policy.
+/// assert_eq!(lease_action(TakeoverPolicy::Never, false), LeaseAction::Claim);
+/// // Held by another → dispatch on policy.
+/// assert_eq!(lease_action(TakeoverPolicy::Never, true), LeaseAction::Yield);
+/// assert_eq!(lease_action(TakeoverPolicy::Force, true), LeaseAction::Takeover);
+/// ```
+pub fn lease_action(policy: TakeoverPolicy, held_by_other: bool) -> LeaseAction {
+    if !held_by_other {
+        // Free or already ours → just (re)claim.
+        return LeaseAction::Claim;
+    }
+    match policy {
+        TakeoverPolicy::Never => LeaseAction::Yield,
+        TakeoverPolicy::PromptCondition => LeaseAction::Prompt,
+        TakeoverPolicy::Force => LeaseAction::Takeover,
+    }
+}
+
 /// Inline maintenance control on a `Repository`/`ClusterRepository`
 /// (`spec.maintenance`). ADR §3.1/§3.7.
 ///
@@ -377,6 +422,33 @@ failurePolicy:
         assert_eq!(s.full.cron, "0 3 * * *");
         assert_eq!(s.full.jitter.as_deref(), Some("1h"));
         assert!(s.timezone.is_none());
+    }
+
+    #[test]
+    fn free_lease_is_claimed_regardless_of_policy() {
+        for p in [
+            TakeoverPolicy::Never,
+            TakeoverPolicy::PromptCondition,
+            TakeoverPolicy::Force,
+        ] {
+            assert_eq!(lease_action(p, false), LeaseAction::Claim);
+        }
+    }
+
+    #[test]
+    fn held_lease_dispatches_by_policy() {
+        assert_eq!(
+            lease_action(TakeoverPolicy::Never, true),
+            LeaseAction::Yield
+        );
+        assert_eq!(
+            lease_action(TakeoverPolicy::PromptCondition, true),
+            LeaseAction::Prompt
+        );
+        assert_eq!(
+            lease_action(TakeoverPolicy::Force, true),
+            LeaseAction::Takeover
+        );
     }
 
     #[test]

@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use kopiur_kopia::{KopiaClient, KopiaError};
+use kopiur_api::{LeaseAction, lease_action};
+use kopiur_kopia::{KopiaClient, KopiaError, MaintenanceMode};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
@@ -28,7 +29,9 @@ use kopiur_mover::bootstrap::{
 };
 use kopiur_mover::env::{KOPIA_BINARY, RESULT_CONFIGMAP, WORK_SPEC_PATH};
 use kopiur_mover::status::StatusUpdate;
-use kopiur_mover::workspec::{self, BootstrapRepositoryOp, MoverWorkSpec, Operation};
+use kopiur_mover::workspec::{
+    self, BootstrapRepositoryOp, MaintenanceOp, MoverWorkSpec, Operation,
+};
 
 fn main() -> std::process::ExitCode {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -71,6 +74,10 @@ async fn run() -> Result<()> {
     // runs with periodic progress PATCHes.
     let result = match &spec.operation {
         Operation::BootstrapRepository(op) => run_bootstrap_flow(&client, &spec, op).await,
+        // Maintenance, like bootstrap, owns its own connect lifecycle: the lease
+        // decision needs `kopia maintenance info`, which requires repo access the
+        // controller does not have for object stores (ADR §3.7/§5.4).
+        Operation::Maintenance(op) => run_maintenance_flow(&client, &spec, op).await,
         _ => {
             // A best-effort status reporter. If we cannot build a kube client
             // (e.g. running outside a cluster), we log instead of failing.
@@ -162,12 +169,15 @@ async fn run_operation(
             client.snapshot_delete(&op.snapshot_id).await?;
             Ok(StatusUpdate::succeeded(chrono::Utc::now()))
         }
-        // Bootstrap is dispatched in `run()` before the connect+execute path; it
-        // owns its own connect/create lifecycle and never reaches here. Named
-        // explicitly (not `_`) so a future Operation variant still fails to
-        // compile until handled (ADR §5.5).
+        // Bootstrap and Maintenance are dispatched in `run()` before the
+        // connect+execute path; they own their own connect lifecycle and never
+        // reach here. Named explicitly (not `_`) so a future Operation variant
+        // still fails to compile until handled (ADR §5.5).
         Operation::BootstrapRepository(_) => {
             unreachable!("BootstrapRepository is handled by run_bootstrap_flow, not execute()")
+        }
+        Operation::Maintenance(_) => {
+            unreachable!("Maintenance is handled by run_maintenance_flow, not execute()")
         }
     }
 }
@@ -323,6 +333,189 @@ async fn write_result_configmap(
     )
     .await?;
     Ok(())
+}
+
+/// Drive a `Maintenance` run: connect, read the ownership lease, apply the
+/// takeover policy, run `kopia maintenance run` when we hold the lease, and PATCH
+/// the `Maintenance` `.status` directly (ADR §3.7). Returns an error (non-zero
+/// exit → Job `Failed`) only when a kopia call fails; a *yield* (lease held by
+/// another owner under a non-`Force` policy) is a successful no-op run.
+async fn run_maintenance_flow(
+    client: &KopiaClient,
+    spec: &MoverWorkSpec,
+    op: &MaintenanceOp,
+) -> Result<()> {
+    info!(
+        backend = spec.repository.kind_str(),
+        mode = ?op.mode,
+        maintenance = %spec.target_ref.name,
+        "running maintenance"
+    );
+    // Connect first: for object stores this pod is the only place with repo
+    // access, which is exactly why the lease decision is made here.
+    if let Err(e) = client
+        .repository_connect(&spec.repository.to_connect_spec())
+        .await
+    {
+        patch_maintenance_status(&spec.target_ref, &maintenance_failed_body(&e)).await;
+        error!(class = %e.class(), "maintenance connect failed");
+        return Err(maintenance_err("connect", &e));
+    }
+
+    // Read the current lease holder and apply the takeover policy.
+    let info = match client.maintenance_info().await {
+        Ok(i) => i,
+        Err(e) => {
+            patch_maintenance_status(&spec.target_ref, &maintenance_failed_body(&e)).await;
+            error!(class = %e.class(), "maintenance info failed");
+            return Err(maintenance_err("info", &e));
+        }
+    };
+    let held_by_other = !info.owner.is_empty() && info.owner != op.owner;
+    match lease_action(op.takeover_policy, held_by_other) {
+        LeaseAction::Yield => {
+            patch_maintenance_status(
+                &spec.target_ref,
+                &lease_blocked_body(
+                    &info.owner,
+                    "LeaseHeldByOther",
+                    &format!(
+                        "maintenance lease held by {}; takeoverPolicy=Never",
+                        info.owner
+                    ),
+                ),
+            )
+            .await;
+            info!(owner = %info.owner, "maintenance lease held by another owner; yielding");
+            Ok(())
+        }
+        LeaseAction::Prompt => {
+            patch_maintenance_status(
+                &spec.target_ref,
+                &lease_blocked_body(
+                    &info.owner,
+                    "LeaseTakeoverPrompt",
+                    &format!(
+                        "lease held by {}; set takeoverPolicy=Force to claim",
+                        info.owner
+                    ),
+                ),
+            )
+            .await;
+            info!(owner = %info.owner, "maintenance lease held; prompting for takeover");
+            Ok(())
+        }
+        action @ (LeaseAction::Claim | LeaseAction::Takeover) => {
+            if let Err(e) = client.maintenance_run(op.mode).await {
+                patch_maintenance_status(&spec.target_ref, &maintenance_failed_body(&e)).await;
+                error!(class = %e.class(), "maintenance run failed");
+                return Err(maintenance_err("run", &e));
+            }
+            patch_maintenance_status(
+                &spec.target_ref,
+                &maintenance_ran_body(op, &chrono::Utc::now()),
+            )
+            .await;
+            info!(?action, mode = ?op.mode, "maintenance run succeeded");
+            Ok(())
+        }
+    }
+}
+
+/// Build a uniform maintenance error for the process exit (Job → `Failed`).
+fn maintenance_err(stage: &str, e: &KopiaError) -> anyhow::Error {
+    anyhow::anyhow!("maintenance {stage} failed (class {}): {e}", e.class())
+}
+
+/// `{ "status": ... }` body for a successful maintenance run. A full run also
+/// advances the quick clock (full subsumes quick). `lastContentReclaimedBytes`
+/// is `0`: `kopia maintenance run` emits no JSON, so the precise figure needs a
+/// `maintenance info` delta (tracked separately; the field round-trips).
+fn maintenance_ran_body(
+    op: &MaintenanceOp,
+    now: &chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    let ts = now.to_rfc3339();
+    let run = serde_json::json!({ "lastRunAt": ts, "lastContentReclaimedBytes": 0 });
+    let mut status = serde_json::json!({
+        "ownership": { "owner": op.owner, "claimedAt": ts },
+        "conditions": [lease_condition_body("True", "LeaseClaimed", "maintenance lease claimed", now)],
+    });
+    match op.mode {
+        MaintenanceMode::Quick => {
+            status["quick"] = run;
+        }
+        MaintenanceMode::Full => {
+            status["quick"] = run.clone();
+            status["full"] = run;
+        }
+    }
+    serde_json::json!({ "status": status })
+}
+
+/// `{ "status": ... }` body when the lease is held by another owner (yield /
+/// prompt): record the observed holder and a `LeaseOwned=False` condition.
+fn lease_blocked_body(owner: &str, reason: &str, message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": {
+            "ownership": { "owner": owner },
+            "conditions": [lease_condition_body("False", reason, message, &chrono::Utc::now())],
+        }
+    })
+}
+
+/// `{ "status": ... }` body for a failed kopia maintenance call.
+fn maintenance_failed_body(e: &KopiaError) -> serde_json::Value {
+    serde_json::json!({
+        "status": {
+            "conditions": [lease_condition_body(
+                "False",
+                "MaintenanceFailed",
+                &format!("maintenance failed (class {}): {e}", e.class()),
+                &chrono::Utc::now(),
+            )],
+        }
+    })
+}
+
+/// A single `LeaseOwned` condition. The codebase uses a single-element
+/// `conditions` array (last-writer-wins for the salient state) for `Maintenance`.
+fn lease_condition_body(
+    status: &str,
+    reason: &str,
+    message: &str,
+    now: &chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "LeaseOwned",
+        "status": status,
+        "reason": reason,
+        "message": message,
+        "lastTransitionTime": now.to_rfc3339(),
+        "observedGeneration": 0,
+    })
+}
+
+/// PATCH a raw `{ "status": ... }` merge body onto the `Maintenance` `.status`
+/// (best-effort; logged on failure, like [`StatusReporter`]). Uses a dynamic API
+/// so the mover need not depend on the typed CRD struct.
+async fn patch_maintenance_status(target: &workspec::TargetRef, body: &serde_json::Value) {
+    use kube::api::{Patch, PatchParams};
+    use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
+
+    let attempt = async {
+        let client = kube::Client::try_default().await?;
+        let (group, version) = split_api_version(&target.api_version);
+        let gvk = GroupVersionKind::gvk(&group, &version, &target.kind);
+        let ar = ApiResource::from_gvk(&gvk);
+        let api = kube::Api::<DynamicObject>::namespaced_with(client, &target.namespace, &ar);
+        api.patch_status(&target.name, &PatchParams::default(), &Patch::Merge(body))
+            .await?;
+        Ok::<(), anyhow::Error>(())
+    };
+    if let Err(e) = attempt.await {
+        warn!(error = %e, target = %target.name, "maintenance status PATCH failed");
+    }
 }
 
 /// Report a terminal failure (PATCH the failure block) and return an error so
@@ -531,5 +724,46 @@ mod tests {
     #[test]
     fn split_api_version_core() {
         assert_eq!(split_api_version("v1"), (String::new(), "v1".to_string()));
+    }
+
+    fn maint_op(mode: MaintenanceMode) -> MaintenanceOp {
+        MaintenanceOp {
+            mode,
+            owner: "kopiur/prod/nas".into(),
+            takeover_policy: kopiur_api::TakeoverPolicy::Never,
+        }
+    }
+
+    #[test]
+    fn quick_run_advances_only_quick_clock() {
+        let now = chrono::Utc::now();
+        let body = maintenance_ran_body(&maint_op(MaintenanceMode::Quick), &now);
+        assert!(body["status"]["quick"]["lastRunAt"].is_string());
+        assert!(
+            body["status"]["full"].is_null(),
+            "a quick run must not stamp the full clock"
+        );
+        assert_eq!(body["status"]["ownership"]["owner"], "kopiur/prod/nas");
+    }
+
+    #[test]
+    fn full_run_subsumes_quick_clock() {
+        let now = chrono::Utc::now();
+        let body = maintenance_ran_body(&maint_op(MaintenanceMode::Full), &now);
+        // Full subsumes quick: both clocks advance so quick isn't immediately due.
+        assert!(body["status"]["full"]["lastRunAt"].is_string());
+        assert!(body["status"]["quick"]["lastRunAt"].is_string());
+        assert_eq!(
+            body["status"]["full"]["lastRunAt"],
+            body["status"]["quick"]["lastRunAt"]
+        );
+    }
+
+    #[test]
+    fn lease_blocked_records_observed_owner_and_false_condition() {
+        let body = lease_blocked_body("other/owner", "LeaseHeldByOther", "held");
+        assert_eq!(body["status"]["ownership"]["owner"], "other/owner");
+        assert_eq!(body["status"]["conditions"][0]["status"], "False");
+        assert_eq!(body["status"]["conditions"][0]["type"], "LeaseOwned");
     }
 }

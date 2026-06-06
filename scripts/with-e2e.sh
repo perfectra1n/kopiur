@@ -227,6 +227,7 @@ kubectl -n "${NS}" run mc-mkbucket --rm -i --restart=Never \
     until mc alias set local http://minio:9000 ${MINIO_USER} ${MINIO_PASS} >/dev/null 2>&1; do sleep 2; done
     mc mb --ignore-existing local/kopiur
     mc mb --ignore-existing local/kopiur-guard
+    mc mb --ignore-existing local/kopiur-maint
   "
 
 echo "==> creating S3 credential Secrets"

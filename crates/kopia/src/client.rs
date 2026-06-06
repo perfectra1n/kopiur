@@ -28,7 +28,12 @@ use crate::model::{
 };
 
 /// Which maintenance pass to run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` so the mover work-spec can carry the mode as one
+/// shared type (no parallel enum in `kopiur-mover`). Wire form is the camelCase
+/// variant name (`"quick"` / `"full"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum MaintenanceMode {
     /// `kopia maintenance run --no-full` — index compaction, epoch advance.
     Quick,

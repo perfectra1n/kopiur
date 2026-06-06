@@ -344,6 +344,7 @@ async fn bootstrap_cluster_object_store(
         result_configmap: Some(&job_name),
         service_account: ctx.mover_service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
+        annotations: Default::default(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);

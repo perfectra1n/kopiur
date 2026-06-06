@@ -37,8 +37,8 @@ pub use cluster_repository::{
 };
 pub use common::{ConfigRef, CronSpec, DeletionPolicy, ObjectRef, PhaseLabel};
 pub use maintenance::{
-    Maintenance, MaintenanceSchedule, MaintenanceSpec, MaintenanceStatus, Ownership,
-    RepositoryMaintenanceSpec, TakeoverPolicy, default_maintenance_schedule,
+    LeaseAction, Maintenance, MaintenanceSchedule, MaintenanceSpec, MaintenanceStatus, Ownership,
+    RepositoryMaintenanceSpec, TakeoverPolicy, default_maintenance_schedule, lease_action,
 };
 pub use repository::{Repository, RepositoryPhase, RepositorySpec, RepositoryStatus};
 pub use restore::{
