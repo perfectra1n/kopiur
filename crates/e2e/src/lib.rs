@@ -9,6 +9,9 @@ pub mod apply;
 pub mod builders;
 pub mod consts;
 pub mod wait;
+pub mod world;
+
+pub use world::{Need, World};
 
 /// The namespace the e2e harness installs the operator and runs scenarios in.
 /// Back-compat alias for [`consts::OPERATOR_NS`].
