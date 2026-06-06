@@ -1,7 +1,7 @@
 //! End-to-end guards for two production bugs that the prior harness masked.
 //!
 //! Gated by `#[cfg(feature = "e2e")]` + `#[ignore]`, skipping gracefully without
-//! a cluster (`scripts/with-e2e.sh`). Run with `mise run test-e2e`.
+//! a cluster (`mise run //crates/e2e:test`). Run with `mise run //crates/e2e:test`.
 //!
 //! 1. **Writable kopia cache (the `/nonexistent` bug).** The controller runs
 //!    short kopia ops in-process. kopia defaults its cache/logs/config under
@@ -29,7 +29,7 @@ use kube::api::{ListParams, LogParams, PostParams};
 use serde::de::DeserializeOwned;
 
 use kopiur_api::Repository;
-use kopiur_e2e::{E2E_NAMESPACE, default_timeout, poll_interval, try_client, wait_until};
+use kopiur_e2e::{E2E_NAMESPACE, Need, World, default_timeout, poll_interval, wait_until};
 
 /// The Kubernetes Event `note` byte limit the apiserver enforces.
 const EVENT_NOTE_MAX_BYTES: usize = 1024;
@@ -139,11 +139,16 @@ async fn pod_logs_for(
 /// signature. Before the fix the connect failed and the log was full of
 /// `mkdir /nonexistent: read-only file system`.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
 async fn controller_kopia_has_writable_cache_and_no_nonexistent_errors() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
     // The in-process filesystem connect+create only succeeds if kopia has a
@@ -180,11 +185,16 @@ async fn controller_kopia_has_writable_cache_and_no_nonexistent_errors() {
 /// been rejected, exactly the original bug), and we additionally assert the
 /// note's length and that it carries a machine-readable reason.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
 async fn backend_failure_publishes_a_bounded_warning_event() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Minio])
+        .await
+        .expect("provision MinIO + buckets");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let events: Api<Event> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 

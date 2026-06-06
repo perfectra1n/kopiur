@@ -5,9 +5,17 @@ use std::time::{Duration, Instant};
 
 use kube::{Client, Error};
 
+pub mod apply;
+pub mod builders;
+pub mod consts;
+pub mod wait;
+pub mod world;
+
+pub use world::{Need, World};
+
 /// The namespace the e2e harness installs the operator and runs scenarios in.
-/// Matches `scripts/with-e2e.sh`.
-pub const E2E_NAMESPACE: &str = "kopiur-e2e";
+/// Back-compat alias for [`consts::OPERATOR_NS`].
+pub const E2E_NAMESPACE: &str = consts::OPERATOR_NS;
 
 /// Try to connect to a cluster, probing the API so a stale kubeconfig skips
 /// rather than hangs. Returns `None` (printing a skip notice) when no cluster is

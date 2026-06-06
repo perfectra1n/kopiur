@@ -2,7 +2,7 @@
 //! operator in kind.
 //!
 //! Gated by `#[cfg(feature = "e2e")]` + `#[ignore]`, skipping gracefully without
-//! a cluster (`scripts/with-e2e.sh`). Run with `mise run test-e2e`.
+//! a cluster (`mise run //crates/e2e:test`). Run with `mise run //crates/e2e:test`.
 //!
 //! The headline assertion is the regression guard for the silent-logs bug: the
 //! controller and the mover Jobs used to emit **zero** bytes to stdout because
@@ -19,7 +19,7 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::Api;
 use kube::api::{ListParams, LogParams};
 
-use kopiur_e2e::{E2E_NAMESPACE, default_timeout, poll_interval, try_client, wait_until};
+use kopiur_e2e::{E2E_NAMESPACE, World, default_timeout, poll_interval, wait_until};
 
 /// Read the logs of the first non-terminating pod matching a label `selector`.
 /// Returns `Ok(None)` when no such pod exists yet (so callers can poll). The
@@ -50,11 +50,12 @@ async fn pod_logs_for(
 /// pod (a backup mover) — the mover/bootstrap silence was the worst case, since
 /// its only other output was a result ConfigMap.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
 async fn operator_binaries_emit_logs() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    let client = world.client().clone();
 
     // Controller: present from install, logs continuously.
     let controller = wait_until(

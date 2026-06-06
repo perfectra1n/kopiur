@@ -2,13 +2,13 @@
 //! Backup** path exercised in a workload namespace SEPARATE from the operator's.
 //!
 //! Gated by `#[cfg(feature = "e2e")]` + `#[ignore]`, skipping gracefully without a
-//! cluster. Driven by `scripts/with-e2e.sh`, which stands up MinIO, the
+//! cluster. Driven by `mise run //crates/e2e:test`, which stands up MinIO, the
 //! `kopiur-xns-crepo` / `kopiur-xns-repo` buckets, and a workload namespace
 //! (`kopiur-e2e-xns`) pre-seeded with a source PVC of known data and the S3
 //! credentials Secret. Run:
 //!
 //! ```text
-//! mise run test-e2e      # or: scripts/with-e2e.sh
+//! mise run //crates/e2e:test
 //! ```
 //!
 //! These assert real operator output for the two cross-namespace shapes:
@@ -41,7 +41,7 @@ use k8s_openapi::api::rbac::v1::RoleBinding;
 
 use kopiur_api::{Backup, BackupConfig, ClusterRepository, Maintenance, Repository};
 use kopiur_e2e::{
-    E2E_NAMESPACE, default_timeout, ensure_namespace, poll_interval, try_client, wait_until,
+    E2E_NAMESPACE, Need, World, default_timeout, ensure_namespace, poll_interval, wait_until,
 };
 
 /// The workload namespace the harness pre-seeds (source PVC + S3 creds Secret),
@@ -226,11 +226,16 @@ fn assert_real_snapshot(status: &serde_json::Value, what: &str) {
 /// workload namespace then drives a mover Job there, the controller mints the mover
 /// RBAC in that namespace, and the Backup reaches `Succeeded` with a real snapshot.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
 async fn clusterrepository_bootstrap_then_cross_namespace_backup_succeeds() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Minio, Need::WorkloadNs])
+        .await
+        .expect("provision MinIO + workload namespace");
+    let client = world.client().clone();
     let crepos: Api<ClusterRepository> = Api::all(client.clone());
     let configs: Api<BackupConfig> = Api::namespaced(client.clone(), XNS);
     let backups: Api<Backup> = Api::namespaced(client.clone(), XNS);
@@ -287,11 +292,16 @@ async fn clusterrepository_bootstrap_then_cross_namespace_backup_succeeds() {
 /// namespace reaches `Succeeded` — proving the operator reconciles namespaced
 /// Repositories in arbitrary namespaces and mints the mover RBAC there.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
 async fn repository_bootstrap_then_backup_in_workload_namespace_succeeds() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Minio, Need::WorkloadNs])
+        .await
+        .expect("provision MinIO + workload namespace");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), XNS);
     let configs: Api<BackupConfig> = Api::namespaced(client.clone(), XNS);
     let backups: Api<Backup> = Api::namespaced(client.clone(), XNS);
@@ -347,11 +357,16 @@ async fn repository_bootstrap_then_backup_in_workload_namespace_succeeds() {
 /// the controller mints it before launching the Job, and a first-ever reconcile is
 /// due immediately, so the SA appears without waiting for a cron slot.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
 async fn maintenance_in_fresh_namespace_mints_mover_rbac() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Minio])
+        .await
+        .expect("provision MinIO + buckets");
+    let client = world.client().clone();
     // A namespace dedicated to this scenario where NO Backup ever runs, so only the
     // maintenance path can mint the mover SA here.
     const MAINT_NS: &str = "kopiur-e2e-maint-xns";

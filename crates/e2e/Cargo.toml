@@ -16,7 +16,7 @@ rustls = { workspace = true }
 k8s-openapi = { workspace = true, features = ["v1_33"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 anyhow = { workspace = true }
 http = "1"
 

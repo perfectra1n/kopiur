@@ -1,6 +1,19 @@
 # mise tasks + tooling for kopiur. `mise tasks` lists them; `mise run <task>`.
 # Mise is the source of truth for Rust and project tools in developer shells and CI.
 
+# Monorepo task mode: the e2e harness tasks are co-located with the crate they
+# drive, in `crates/e2e/mise.toml`, and invoked as `mise run //crates/e2e:test`
+# (or any sub-task, e.g. `//crates/e2e:cluster-create`). `settings.experimental`
+# enables this persistently — no MISE_EXPERIMENTAL env var needed in CI or dev
+# shells. Existing root tasks below stay invokable unprefixed (`mise run test`).
+experimental_monorepo_root = true
+
+[settings]
+experimental = true
+
+[monorepo]
+config_roots = ["crates/e2e"]
+
 [tools]
 rust = { version = "1.95.0", components = "rustfmt,clippy,llvm-tools-preview" }
 lefthook = "2.1.9"
@@ -51,10 +64,6 @@ run = "cargo test --workspace --locked"
 [tasks.test-int]
 description = "Cluster + kopia integration tests on an ephemeral kind cluster"
 run = "scripts/with-kind.sh cargo test --workspace --features integration --locked -- --include-ignored"
-
-[tasks.test-e2e]
-description = "Full end-to-end: build images, load into kind, helm install, drive lifecycles, tear down"
-run = "scripts/with-e2e.sh"
 
 [tasks.clippy]
 description = "Clippy across the workspace, warnings are errors"

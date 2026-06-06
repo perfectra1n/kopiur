@@ -27,11 +27,11 @@
 use std::time::Duration;
 
 use kube::api::{Patch, PatchParams, PostParams};
-use kube::{Api, Client, Resource};
+use kube::{Api, Resource};
 use serde::de::DeserializeOwned;
 
 use kopiur_api::Repository;
-use kopiur_e2e::{E2E_NAMESPACE, default_timeout, poll_interval, try_client, wait_until};
+use kopiur_e2e::{E2E_NAMESPACE, Need, World, default_timeout, poll_interval, wait_until};
 
 const CREDS_SECRET: &str = "kopia-creds";
 
@@ -102,11 +102,16 @@ fn resource_version(repo: &Repository) -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
 async fn filesystem_permission_denied_hard_stops_without_spam() {
-    let Some(client): Option<Client> = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let name = "e2e-ro-repo";
 

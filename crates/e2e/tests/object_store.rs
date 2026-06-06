@@ -2,12 +2,12 @@
 //! operator in kind.
 //!
 //! Gated by `#[cfg(feature = "e2e")]` + `#[ignore]`, skipping gracefully without
-//! a cluster. `scripts/with-e2e.sh` stands up a single-pod MinIO over plain HTTP,
+//! a cluster. `mise run //crates/e2e:test` stands up a single-pod MinIO over plain HTTP,
 //! creates the `kopiur` / `kopiur-guard` buckets, and seeds the credential
 //! Secrets these tests reference. Run:
 //!
 //! ```text
-//! mise run test-e2e      # or: scripts/with-e2e.sh
+//! mise run //crates/e2e:test
 //! ```
 //!
 //! These assert the object-store bootstrap path end-to-end: the controller
@@ -26,7 +26,7 @@ use kube::api::{ListParams, PostParams};
 use serde::de::DeserializeOwned;
 
 use kopiur_api::{Backup, BackupConfig, Maintenance, Repository, Restore};
-use kopiur_e2e::{E2E_NAMESPACE, default_timeout, poll_interval, try_client, wait_until};
+use kopiur_e2e::{E2E_NAMESPACE, Need, World, default_timeout, poll_interval, wait_until};
 
 /// Deserialize a CR from a JSON literal into its typed kube object.
 fn cr<T: DeserializeOwned>(v: serde_json::Value) -> T {
@@ -154,11 +154,16 @@ fn condition_field(status: &serde_json::Value, type_: &str, field: &str) -> Opti
 ///    with `Bootstrapped=False` — the safe-create guard never recreates over the
 ///    existing repository.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
 async fn s3_bootstrap_backup_restore_adopt_and_guard() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Minio])
+        .await
+        .expect("provision MinIO + buckets");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
@@ -348,11 +353,16 @@ fn s3_maintenance_json(name: &str, repo: &str) -> serde_json::Value {
 /// Job that connects to MinIO, claims the lease, runs `kopia maintenance`, and
 /// PATCHes the status — none of which can happen if maintenance is a no-op.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
 async fn s3_maintenance_runs_in_a_mover_job() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Minio])
+        .await
+        .expect("provision MinIO + buckets");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let jobs: Api<Job> = Api::namespaced(client.clone(), E2E_NAMESPACE);
