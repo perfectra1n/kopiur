@@ -1,0 +1,60 @@
+# Helm values for the e2e harness (mise `e2e-helm` task).
+#
+# Installs the operator the way the Rust e2e suite expects: cluster-scoped (so the
+# controller's watchers can LIST cluster-wide and ClusterRepository reconciles),
+# running as the distroless-nonroot uid the mover image uses (65532) so a shared
+# hostPath kopia repo — written 0700 by kopia — is readable by both the controller's
+# in-process ops and the mover Jobs, with the locally-built `:e2e` images loaded
+# into kind (pullPolicy: Never). The webhook is disabled: its admission logic is
+# covered by the unit + integration tiers and needs TLS/cert-manager we don't want
+# in the harness.
+#
+# The hostPath dirs below are seeded on the node by the mise `e2e-node-seed` task;
+# the in-cluster objects (PVCs, Secrets, MinIO) are provisioned from Rust
+# (crates/e2e `World`). Keep the paths in lockstep with crates/e2e/src/consts.rs
+# (HOSTPATH_REPO / HOSTPATH_RO_REPO) and the uid with consts::MOVER_UID.
+installScope: cluster
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+webhook:
+  enabled: false
+
+image:
+  registry: docker.io
+  pullPolicy: Never
+  controller:
+    repository: kopiur/controller
+    tag: e2e
+  webhook:
+    repository: kopiur/webhook
+    tag: e2e
+  mover:
+    repository: kopiur/mover
+    tag: e2e
+    pullPolicy: Never
+
+controller:
+  logLevel: debug
+  # The repo hostPath must be visible to the controller's in-process kopia
+  # (filesystem connect/create). kopia's cache/logs/config come from the chart's
+  # built-in writable kopia-cache emptyDir — deliberately NOT a manual workaround
+  # here; that is exactly what the cache_and_events e2e guards.
+  extraVolumes:
+    - name: repo
+      hostPath: { path: /kopiur-e2e/repo, type: Directory }
+    # A non-writable repo path (root-owned 0555 on the node) for the
+    # terminal-failure regression test (filesystem PermissionDenied hard-stop).
+    - name: ro-repo
+      hostPath: { path: /kopiur-e2e/ro-repo, type: Directory }
+  extraVolumeMounts:
+    - name: repo
+      mountPath: /repo
+    - name: ro-repo
+      mountPath: /ro-repo
