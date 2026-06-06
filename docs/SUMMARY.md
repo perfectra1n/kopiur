@@ -6,6 +6,7 @@
 
 - [Installation](install.md)
 - [Examples](examples.md)
+- [Movers, RBAC & credentials](movers.md)
 - [Maintenance](maintenance.md)
 
 # Reference
