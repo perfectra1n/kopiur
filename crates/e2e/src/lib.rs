@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use kube::{Client, Error};
 
+pub mod apply;
 pub mod builders;
 pub mod consts;
 
