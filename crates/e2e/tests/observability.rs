@@ -19,7 +19,7 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::Api;
 use kube::api::{ListParams, LogParams};
 
-use kopiur_e2e::{E2E_NAMESPACE, default_timeout, poll_interval, try_client, wait_until};
+use kopiur_e2e::{E2E_NAMESPACE, World, default_timeout, poll_interval, wait_until};
 
 /// Read the logs of the first non-terminating pod matching a label `selector`.
 /// Returns `Ok(None)` when no such pod exists yet (so callers can poll). The
@@ -52,9 +52,10 @@ async fn pod_logs_for(
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
 async fn operator_binaries_emit_logs() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    let client = world.client().clone();
 
     // Controller: present from install, logs continuously.
     let controller = wait_until(

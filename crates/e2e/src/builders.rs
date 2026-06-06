@@ -196,9 +196,17 @@ mod tests {
 
     #[test]
     fn static_pvc_binds_named_volume() {
-        let pvc = static_pvc(consts::OPERATOR_NS, consts::PVC_REPO, consts::PV_REPO, "1Gi");
+        let pvc = static_pvc(
+            consts::OPERATOR_NS,
+            consts::PVC_REPO,
+            consts::PV_REPO,
+            "1Gi",
+        );
         let v = val(&pvc);
-        assert_eq!(v.pointer("/metadata/namespace").unwrap(), consts::OPERATOR_NS);
+        assert_eq!(
+            v.pointer("/metadata/namespace").unwrap(),
+            consts::OPERATOR_NS
+        );
         assert_eq!(v.pointer("/spec/volumeName").unwrap(), consts::PV_REPO);
         assert_eq!(v.pointer("/spec/storageClassName").unwrap(), "");
         assert_eq!(

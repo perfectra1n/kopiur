@@ -41,7 +41,7 @@ use k8s_openapi::api::rbac::v1::RoleBinding;
 
 use kopiur_api::{Backup, BackupConfig, ClusterRepository, Maintenance, Repository};
 use kopiur_e2e::{
-    E2E_NAMESPACE, default_timeout, ensure_namespace, poll_interval, try_client, wait_until,
+    E2E_NAMESPACE, Need, World, default_timeout, ensure_namespace, poll_interval, wait_until,
 };
 
 /// The workload namespace the harness pre-seeds (source PVC + S3 creds Secret),
@@ -228,9 +228,14 @@ fn assert_real_snapshot(status: &serde_json::Value, what: &str) {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
 async fn clusterrepository_bootstrap_then_cross_namespace_backup_succeeds() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Minio, Need::WorkloadNs])
+        .await
+        .expect("provision MinIO + workload namespace");
+    let client = world.client().clone();
     let crepos: Api<ClusterRepository> = Api::all(client.clone());
     let configs: Api<BackupConfig> = Api::namespaced(client.clone(), XNS);
     let backups: Api<Backup> = Api::namespaced(client.clone(), XNS);
@@ -289,9 +294,14 @@ async fn clusterrepository_bootstrap_then_cross_namespace_backup_succeeds() {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
 async fn repository_bootstrap_then_backup_in_workload_namespace_succeeds() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Minio, Need::WorkloadNs])
+        .await
+        .expect("provision MinIO + workload namespace");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), XNS);
     let configs: Api<BackupConfig> = Api::namespaced(client.clone(), XNS);
     let backups: Api<Backup> = Api::namespaced(client.clone(), XNS);
@@ -349,9 +359,14 @@ async fn repository_bootstrap_then_backup_in_workload_namespace_succeeds() {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
 async fn maintenance_in_fresh_namespace_mints_mover_rbac() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Minio])
+        .await
+        .expect("provision MinIO + buckets");
+    let client = world.client().clone();
     // A namespace dedicated to this scenario where NO Backup ever runs, so only the
     // maintenance path can mint the mover SA here.
     const MAINT_NS: &str = "kopiur-e2e-maint-xns";

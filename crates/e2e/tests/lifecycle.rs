@@ -31,8 +31,8 @@ use kopiur_api::{
     Backup, BackupConfig, BackupSchedule, ClusterRepository, Maintenance, Repository, Restore,
 };
 use kopiur_e2e::{
-    E2E_NAMESPACE, annotate_namespace, apply_secret, default_timeout, ensure_namespace,
-    poll_interval, try_client, wait_until,
+    E2E_NAMESPACE, Need, World, annotate_namespace, apply_secret, default_timeout,
+    ensure_namespace, poll_interval, wait_until,
 };
 
 /// Deserialize a CR from a JSON literal into its typed kube object.
@@ -223,9 +223,14 @@ where
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
 async fn backup_restore_delete_lifecycle() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
@@ -330,9 +335,14 @@ async fn backup_restore_delete_lifecycle() {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
 async fn cluster_repository_backup_lifecycle() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     let crepos: Api<ClusterRepository> = Api::all(client.clone());
     let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
@@ -402,9 +412,14 @@ async fn cluster_repository_backup_lifecycle() {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
 async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     // A workload namespace distinct from the operator's (E2E_NAMESPACE).
     const APP_NS: &str = "kopiur-e2e-app";
     // The chart-minted mover identity (release name `kopiur` → `kopiur-mover`).
@@ -532,9 +547,14 @@ async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
 async fn privileged_mover_requires_namespace_optin() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     const APP_NS: &str = "kopiur-e2e-priv";
 
     ensure_namespace(&client, APP_NS)
@@ -651,9 +671,14 @@ fn backup_json_ns(name: &str, config: &str, ns: &str) -> serde_json::Value {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
 async fn schedule_creates_backup() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let schedules: Api<BackupSchedule> = Api::namespaced(client.clone(), E2E_NAMESPACE);
@@ -708,9 +733,14 @@ async fn schedule_creates_backup() {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
 async fn maintenance_claims_lease() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let _ = repos
@@ -773,9 +803,14 @@ async fn scrape_controller_metrics(client: &Client) -> anyhow::Result<String> {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
 async fn metrics_reflect_backup_lifecycle() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
@@ -883,9 +918,14 @@ async fn metrics_reflect_backup_lifecycle() {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
 async fn repository_default_creates_managed_maintenance() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
@@ -923,9 +963,14 @@ async fn repository_default_creates_managed_maintenance() {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
 async fn disabling_maintenance_removes_managed() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
@@ -973,9 +1018,14 @@ async fn disabling_maintenance_removes_managed() {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
 async fn external_maintenance_is_not_duplicated() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
@@ -1031,9 +1081,14 @@ async fn external_maintenance_is_not_duplicated() {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
 async fn cluster_repository_default_creates_managed_maintenance() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     let crepos: Api<ClusterRepository> = Api::all(client.clone());
     let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
@@ -1068,9 +1123,14 @@ async fn cluster_repository_default_creates_managed_maintenance() {
 #[tokio::test]
 #[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
 async fn maintenance_configured_reflected_in_metrics() {
-    let Some(client) = try_client().await else {
+    let Some(world) = World::connect().await else {
         return;
     };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
     let repo = "e2e-mxmaint-repo";

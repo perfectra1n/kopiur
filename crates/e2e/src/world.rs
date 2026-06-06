@@ -66,9 +66,7 @@ impl World {
         for need in needs {
             match need {
                 Need::Filesystem => {
-                    self.fs
-                        .get_or_try_init(|| self.ensure_filesystem())
-                        .await?;
+                    self.fs.get_or_try_init(|| self.ensure_filesystem()).await?;
                 }
                 Need::Minio => {
                     self.minio.get_or_try_init(|| self.ensure_minio()).await?;
@@ -87,9 +85,15 @@ impl World {
         let fixtures: Vec<Fixture> = vec![
             builders::hostpath_pv(consts::PV_REPO, consts::HOSTPATH_REPO, "1Gi").into(),
             builders::hostpath_pv(consts::PV_SRC, consts::HOSTPATH_SRC, "1Gi").into(),
-            builders::static_pvc(consts::OPERATOR_NS, consts::PVC_REPO, consts::PV_REPO, "1Gi")
+            builders::static_pvc(
+                consts::OPERATOR_NS,
+                consts::PVC_REPO,
+                consts::PV_REPO,
+                "1Gi",
+            )
+            .into(),
+            builders::static_pvc(consts::OPERATOR_NS, consts::PVC_SRC, consts::PV_SRC, "1Gi")
                 .into(),
-            builders::static_pvc(consts::OPERATOR_NS, consts::PVC_SRC, consts::PV_SRC, "1Gi").into(),
             builders::dynamic_pvc(consts::OPERATOR_NS, consts::PVC_DST, "1Gi").into(),
             builders::opaque_secret(
                 consts::OPERATOR_NS,
@@ -105,8 +109,10 @@ impl World {
         let fixtures: Vec<Fixture> = vec![
             builders::minio_deployment(consts::OPERATOR_NS).into(),
             builders::minio_service(consts::OPERATOR_NS).into(),
-            builders::opaque_secret(consts::OPERATOR_NS, consts::SECRET_S3_CREDS, &s3_creds()).into(),
-            builders::opaque_secret(consts::OPERATOR_NS, consts::SECRET_S3_BADPW, &s3_badpw()).into(),
+            builders::opaque_secret(consts::OPERATOR_NS, consts::SECRET_S3_CREDS, &s3_creds())
+                .into(),
+            builders::opaque_secret(consts::OPERATOR_NS, consts::SECRET_S3_BADPW, &s3_badpw())
+                .into(),
         ];
         apply_all(&self.client, &fixtures).await?;
         wait::deployment_ready(&self.client, consts::OPERATOR_NS, "minio").await?;
@@ -151,9 +157,15 @@ impl World {
         ensure_namespace(&self.client, consts::WORKLOAD_NS).await?;
         let fixtures: Vec<Fixture> = vec![
             builders::hostpath_pv(consts::PV_SRC_XNS, consts::HOSTPATH_SRC, "1Gi").into(),
-            builders::static_pvc(consts::WORKLOAD_NS, consts::PVC_SRC, consts::PV_SRC_XNS, "1Gi")
+            builders::static_pvc(
+                consts::WORKLOAD_NS,
+                consts::PVC_SRC,
+                consts::PV_SRC_XNS,
+                "1Gi",
+            )
+            .into(),
+            builders::opaque_secret(consts::WORKLOAD_NS, consts::SECRET_S3_CREDS, &s3_creds())
                 .into(),
-            builders::opaque_secret(consts::WORKLOAD_NS, consts::SECRET_S3_CREDS, &s3_creds()).into(),
         ];
         apply_all(&self.client, &fixtures).await
     }
