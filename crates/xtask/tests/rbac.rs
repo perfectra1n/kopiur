@@ -78,7 +78,7 @@ fn clusterrole_parses_and_grants_expected_rules() {
 }
 
 #[test]
-fn namespaced_role_parses_and_omits_cluster_scoped_bits() {
+fn namespaced_role_omits_cluster_crds_but_keeps_mover_minting() {
     let artifacts = xtask::rbac::artifacts().expect("generate RBAC artifacts");
     let a = artifact(&artifacts, "rbac/operator-role.yaml");
 
@@ -104,13 +104,65 @@ fn namespaced_role_parses_and_omits_cluster_scoped_bits() {
         rule_grants(&rules, "events.k8s.io", "events"),
         "namespaced role must grant events under events.k8s.io"
     );
-    // ...but cluster-scoped bits are dropped in namespaced mode.
+    // ...the cluster-scoped CRD is dropped in namespaced mode.
     assert!(
         !rule_grants(&rules, "kopiur.home-operations.com", "clusterrepositories"),
         "namespaced role must NOT include cluster-scoped clusterrepositories"
     );
+    // ...but the mover SA + RoleBinding minting rules ARE retained: even in
+    // namespaced mode the controller mints the least-privilege mover RBAC in the
+    // (in-scope) workload namespace before each mover Job (ADR §4.12).
     assert!(
-        !rule_grants(&rules, "", "serviceaccounts"),
-        "namespaced role must NOT mint serviceaccounts cluster-wide"
+        rule_grants(&rules, "", "serviceaccounts"),
+        "namespaced role must mint the mover ServiceAccount in its own namespace"
     );
+    assert!(
+        rule_grants(&rules, "rbac.authorization.k8s.io", "rolebindings"),
+        "namespaced role must mint the mover RoleBinding in its own namespace"
+    );
+}
+
+/// The dedicated, least-privilege mover role is generated for both install modes
+/// and grants ONLY what the mover uses (status patch on the owning CRDs + the
+/// bootstrap-result configmap patch) — never the operator's broad rule set.
+#[test]
+fn mover_role_is_least_privilege() {
+    let artifacts = xtask::rbac::artifacts().expect("generate RBAC artifacts");
+    for rel in ["rbac/mover-clusterrole.yaml", "rbac/mover-role.yaml"] {
+        let a = artifact(&artifacts, rel);
+        assert!(a.content.starts_with(RBAC_HEADER), "{rel} missing header");
+        let role_rules = docs(&a.content)
+            .into_iter()
+            .find_map(|d| {
+                let v: serde_yaml::Value = serde_yaml::from_str(&d).ok()?;
+                match v.get("kind").and_then(|k| k.as_str()) {
+                    Some("ClusterRole") => serde_yaml::from_str::<ClusterRole>(&d).ok()?.rules,
+                    Some("Role") => serde_yaml::from_str::<Role>(&d).ok()?.rules,
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| panic!("{rel} must contain a (Cluster)Role with rules"));
+
+        // Grants the mover's actual API surface.
+        assert!(
+            rule_grants(&role_rules, "kopiur.home-operations.com", "backups/status"),
+            "{rel} must grant backups/status"
+        );
+        assert!(
+            rule_grants(&role_rules, "", "configmaps"),
+            "{rel} must grant configmaps (bootstrap result write)"
+        );
+        // Least privilege: NONE of the operator's broad grants leak into the mover.
+        for (g, r) in [
+            ("batch", "jobs"),
+            ("", "secrets"),
+            ("", "pods"),
+            ("kopiur.home-operations.com", "backups"),
+        ] {
+            assert!(
+                !rule_grants(&role_rules, g, r),
+                "{rel} must NOT grant {g}/{r} (mover is least-privilege)"
+            );
+        }
+    }
 }

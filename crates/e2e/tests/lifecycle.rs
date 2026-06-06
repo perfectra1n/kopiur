@@ -461,7 +461,7 @@ async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
         &format!("ServiceAccount {APP_NS}/{MOVER_NAME} minted"),
         default_timeout(),
         poll_interval(),
-        || async { Ok(sas.get_opt(MOVER_NAME).await?.map(|_| ())) },
+        || async { sas.get_opt(MOVER_NAME).await.map(|o| o.map(|_| ())) },
     )
     .await
     .expect("mover ServiceAccount minted in workload namespace");
@@ -469,7 +469,7 @@ async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
         &format!("RoleBinding {APP_NS}/{MOVER_NAME} minted"),
         default_timeout(),
         poll_interval(),
-        || async { Ok(rbs.get_opt(MOVER_NAME).await?) },
+        || async { rbs.get_opt(MOVER_NAME).await },
     )
     .await
     .expect("mover RoleBinding minted in workload namespace");
