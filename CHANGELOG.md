@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/home-operations/kopiur/compare/0.1.5...0.1.6) (2026-06-06)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate chrono (0.4.44 → 0.4.45) ([#46](https://github.com/home-operations/kopiur/issues/46)) ([30effc4](https://github.com/home-operations/kopiur/commit/30effc4a8eadab58fe26b4c41f9adbae6f9630a9))
+
 ## [0.1.5](https://github.com/home-operations/kopiur/compare/0.1.4...0.1.5) (2026-06-05)
 
 
