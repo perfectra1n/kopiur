@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use kube::{Client, Error};
 
+pub mod builders;
 pub mod consts;
 
 /// The namespace the e2e harness installs the operator and runs scenarios in.
