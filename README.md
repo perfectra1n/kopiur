@@ -1,17 +1,8 @@
 # kopiur
 
-**Kopiur** (Kopia + Rust) is a Kopia-native Kubernetes backup operator written in
-Rust on [`kube-rs`](https://github.com/kube-rs/kube). It makes a kopia repository
-a first-class Kubernetes resource and separates the backup **recipe** from its
-**invocation** from its **schedule**, so backups can be triggered by cron,
-`kubectl create`, Argo Events, or a Helm hook — and a kopia snapshot's lifecycle
-is tied to its `Backup` CR by a finalizer + `deletionPolicy`. The whole CRD
-surface is modeled as Rust enums so invalid states are unrepresentable and
-reconcilers handle every variant at compile time. See
-[ADR-0003](docs/adr/0003-kopiur-rust-operator.md) for the full design.
+**Kopiur** (Kopia + Rust) is a Kopia-native Kubernetes backup operator written in Rust on [`kube-rs`](https://github.com/kube-rs/kube). It makes a kopia repository a first-class Kubernetes resource and separates the backup **recipe** from its **invocation** from its **schedule**, so backups can be triggered by cron, `kubectl create`, Argo Events, or a Helm hook — and a kopia snapshot's lifecycle is tied to its `Backup` CR by a finalizer + `deletionPolicy`. The whole CRD surface is modeled as Rust enums so invalid states are unrepresentable and reconcilers handle every variant at compile time. See [ADR-0003](docs/adr/0003-kopiur-rust-operator.md) for the full design.
 
-> Status: **alpha** — API group `kopiur.home-operations.com`, version `v1alpha1`. The CRD surface
-> may still change between releases.
+> Status: **alpha** — API group `kopiur.home-operations.com`, version `v1alpha1`. The CRD surface may still change between releases.
 
 ## The 7 CRDs (`kopiur.home-operations.com/v1alpha1`)
 
@@ -41,8 +32,7 @@ Then apply a worked example:
 kubectl apply -f deploy/examples/01-single-pvc-scheduled.yaml
 ```
 
-Full install guide, prerequisites (k8s >= 1.24, optional cert-manager), install
-modes, and the CRD-lifecycle caveat: **[docs/install.md](docs/install.md)**.
+Full install guide, prerequisites (k8s >= 1.24, optional cert-manager), install modes, and the CRD-lifecycle caveat: **[docs/install.md](docs/install.md)**.
 
 ## Layout
 
@@ -57,8 +47,7 @@ docs/adr/        Architecture Decision Records (0003 is canonical)
 
 ## Documentation
 
-📖 **Docs site: <https://kopiur.home-operations.com/>** — user guide, ADRs,
-and the generated [Rust API reference](https://kopiur.home-operations.com/rustdoc/).
+📖 **Docs site: <https://kopiur.home-operations.com/>** — user guide, ADRs, and the generated [Rust API reference](https://kopiur.home-operations.com/rustdoc/).
 
 - [Install guide](docs/install.md)
 - [Helm chart values & modes](deploy/helm/kopiur/README.md)

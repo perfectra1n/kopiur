@@ -4,10 +4,15 @@
 
 # User guide
 
+- [Getting started](getting-started.md)
 - [Installation](install.md)
-- [Examples](examples.md)
+- [Repositories & backends](repositories.md)
+- [Backups & schedules](backups.md)
+- [Restores](restores.md)
 - [Movers, RBAC & credentials](movers.md)
 - [Maintenance](maintenance.md)
+- [Examples](examples.md)
+- [Troubleshooting](troubleshooting.md)
 
 # Reference
 

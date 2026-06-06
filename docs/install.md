@@ -1,24 +1,16 @@
 # Installing Kopiur
 
-Kopiur is a Kopia-native Kubernetes backup operator (Rust / kube-rs). This guide
-covers installing the operator with the bundled Helm chart and verifying it.
+Kopiur is a Kopia-native Kubernetes backup operator (Rust / kube-rs). This guide covers installing the operator with the bundled Helm chart and verifying it.
 
-> Status: **alpha** — API group `kopiur.home-operations.com`, version `v1alpha1`. The CRD surface
-> may still change between releases.
+> Status: **alpha** — API group `kopiur.home-operations.com`, version `v1alpha1`. The CRD surface may still change between releases.
 
 ## Prerequisites
 
-- **Kubernetes >= 1.24.** The deploy-or-restore volume-populator path
-  (`Restore` + `PVC.spec.dataSourceRef`) relies on the `AnyVolumeDataSource`
-  feature, available from 1.24 (ADR §4.7).
+- **Kubernetes >= 1.24.** The deploy-or-restore volume-populator path (`Restore` + `PVC.spec.dataSourceRef`) relies on the `AnyVolumeDataSource` feature, available from 1.24 (ADR §4.7).
 - **Helm 3 or 4.**
-- A **kopia repository backend** you can reach: S3/MinIO, Azure Blob, GCS, B2,
-  filesystem (PVC), SFTP, WebDAV, or rclone.
-- *(Optional)* **cert-manager** — the simplest way to provision the admission
-  webhook's serving certificate. Without it you provide the cert yourself.
-- *(Optional)* **volume-data-source-validator** — recommended alongside CSI
-  populators so a malformed `dataSourceRef` is surfaced as an event rather than a
-  silently-stuck PVC (ADR §4.7).
+- A **kopia repository backend** you can reach: S3/MinIO, Azure Blob, GCS, B2, filesystem (PVC), SFTP, WebDAV, or rclone.
+- *(Optional)* **cert-manager** — the simplest way to provision the admission webhook's serving certificate. Without it you provide the cert yourself.
+- *(Optional)* **volume-data-source-validator** — recommended alongside CSI populators so a malformed `dataSourceRef` is surfaced as an event rather than a silently-stuck PVC (ADR §4.7).
 - *(Optional)* **Prometheus Operator** — if you want the chart's `ServiceMonitor`.
 
 ## Quickstart
@@ -42,8 +34,7 @@ kubectl get crd -l app.kubernetes.io/part-of=kopiur
 
 ### Without cert-manager
 
-The webhook serves TLS and the API server must trust it. If you are not using
-cert-manager, create the serving Secret and pass the CA bundle:
+The webhook serves TLS and the API server must trust it. If you are not using cert-manager, create the serving Secret and pass the CA bundle:
 
 ```bash
 # create a kubernetes.io/tls Secret named per webhook.tls.secretName, then:
@@ -54,8 +45,7 @@ helm install kopiur deploy/helm/kopiur \
   --set webhook.caBundle="$(base64 -w0 ca.crt)"
 ```
 
-Or disable the webhook entirely (validation then relies on the controller's
-defensive checks only — not recommended):
+Or disable the webhook entirely (validation then relies on the controller's defensive checks only — not recommended):
 
 ```bash
 helm install kopiur deploy/helm/kopiur -n kopiur-system --set webhook.enabled=false
@@ -68,13 +58,11 @@ helm install kopiur deploy/helm/kopiur -n kopiur-system --set webhook.enabled=fa
 | Namespaced (default) | `namespaced` | Role | release namespace only | not reconciled |
 | Cluster | `cluster` | ClusterRole | cluster-wide | reconciled |
 
-Use **cluster** scope for a shared platform repository (`ClusterRepository`)
-referenced by many tenant namespaces. See `deploy/examples/02-cluster-repository.yaml`.
+Use **cluster** scope for a shared platform repository (`ClusterRepository`) referenced by many tenant namespaces. See `deploy/examples/02-cluster-repository.yaml`.
 
 ## CRD lifecycle
 
-`installCRDs: true` (default) installs the 7 CRDs as Helm **templates**, so the
-flag is honored and `helm upgrade` re-applies schema changes.
+`installCRDs: true` (default) installs the 7 CRDs as Helm **templates**, so the flag is honored and `helm upgrade` re-applies schema changes.
 
 > Caution: with templated CRDs, `helm uninstall kopiur` deletes the CRDs **and
 > every `kopiur.home-operations.com` object in the cluster** (Repositories, Backups, ...). For an
@@ -88,14 +76,11 @@ flag is honored and `helm upgrade` re-applies schema changes.
 > kubectl apply --server-side -f deploy/crds/all-crds.yaml
 > ```
 
-The CRDs and RBAC shipped by the chart are **generated** by
-`cargo xtask gen-crds` / `cargo xtask gen-rbac` and checked in under
-`deploy/crds/` and `deploy/rbac/`. Those xtasks are the source of truth.
+The CRDs and RBAC shipped by the chart are **generated** by `cargo xtask gen-crds` / `cargo xtask gen-rbac` and checked in under `deploy/crds/` and `deploy/rbac/`. Those xtasks are the source of truth.
 
 ## First backup
 
-After install, create a repository and start backing up a PVC. The smallest
-end-to-end example is `deploy/examples/01-single-pvc-scheduled.yaml`:
+After install, create a repository and start backing up a PVC. The smallest end-to-end example is `deploy/examples/01-single-pvc-scheduled.yaml`:
 
 ```bash
 kubectl apply -f deploy/examples/01-single-pvc-scheduled.yaml
@@ -117,18 +102,11 @@ Eight runnable walkthroughs live in `deploy/examples/`:
 
 ## Observability
 
-- The controller serves `/metrics`, `/healthz`, and `/readyz` on its probe port
-  (`:8080`); the webhook serves `/metrics` on its TLS port. All metrics are under
-  the `kopiur_` namespace.
+- The controller serves `/metrics`, `/healthz`, and `/readyz` on its probe port (`:8080`); the webhook serves `/metrics` on its TLS port. All metrics are under the `kopiur_` namespace.
 - `metrics.enabled=true` (default) creates a metrics `Service`.
-- `metrics.serviceMonitor.enabled=true` creates a Prometheus-Operator
-  `ServiceMonitor` (requires the Prometheus-Operator CRDs);
-  `metrics.prometheusRule.enabled=true` ships the kopiur alert rules.
-- `grafanaDashboard.enabled=true` ships the Grafana dashboard as a
-  sidecar-discoverable `ConfigMap` (source: `deploy/dashboards/kopiur.json`).
-- `observability.otlp.enabled=true` (with `observability.otlp.endpoint`)
-  additionally exports OTLP **traces, logs, and a metrics push** from the
-  controller, webhook, and mover Jobs. Off by default.
+- `metrics.serviceMonitor.enabled=true` creates a Prometheus-Operator `ServiceMonitor` (requires the Prometheus-Operator CRDs); `metrics.prometheusRule.enabled=true` ships the kopiur alert rules.
+- `grafanaDashboard.enabled=true` ships the Grafana dashboard as a sidecar-discoverable `ConfigMap` (source: `deploy/dashboards/kopiur.json`).
+- `observability.otlp.enabled=true` (with `observability.otlp.endpoint`) additionally exports OTLP **traces, logs, and a metrics push** from the controller, webhook, and mover Jobs. Off by default.
 
 Turn it all on with the ready-made overlay:
 
@@ -137,8 +115,7 @@ helm upgrade kopiur deploy/helm/kopiur -n kopiur-system \
   -f deploy/observability-values.yaml
 ```
 
-See [`docs/dev/observability.md`](dev/observability.md) for the full metric list,
-OTLP details, and a sample collector config.
+See [`docs/dev/observability.md`](dev/observability.md) for the full metric list, OTLP details, and a sample collector config.
 
 ## Upgrade / uninstall
 

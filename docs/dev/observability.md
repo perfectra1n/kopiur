@@ -1,53 +1,27 @@
 # Observability
 
-Kopiur exposes Prometheus metrics, and can additionally export OpenTelemetry
-(OTLP) traces, logs, and metrics. The implementation lives in the
-**`kopiur-telemetry`** crate, shared by the controller, webhook, and mover.
+Kopiur exposes Prometheus metrics, and can additionally export OpenTelemetry (OTLP) traces, logs, and metrics. The implementation lives in the **`kopiur-telemetry`** crate, shared by the controller, webhook, and mover.
 
 ## The one idea: instrument once, two readers
 
-Metrics are instrumented **once** against the OpenTelemetry metrics API. A single
-`SdkMeterProvider` fans out to two readers:
+Metrics are instrumented **once** against the OpenTelemetry metrics API. A single `SdkMeterProvider` fans out to two readers:
 
-1. an **`opentelemetry-prometheus` exporter** that populates a `prometheus::Registry`
-   behind the always-on `/metrics` pull endpoint (so a `ServiceMonitor` scrapes the
-   pods directly — no collector required), and
-2. an **OTLP `PeriodicReader`** that *pushes* the same measurements to a collector
-   — added only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+1. an **`opentelemetry-prometheus` exporter** that populates a `prometheus::Registry` behind the always-on `/metrics` pull endpoint (so a `ServiceMonitor` scrapes the pods directly — no collector required), and
+2. an **OTLP `PeriodicReader`** that *pushes* the same measurements to a collector — added only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
 
-Recording a value updates both; there is no double instrumentation. Traces (the
-controller's `#[instrument]` reconcile spans) and logs (bridged from `tracing`
-events) export over OTLP via `tracing-opentelemetry` and
-`opentelemetry-appender-tracing`.
+Recording a value updates both; there is no double instrumentation. Traces (the controller's `#[instrument]` reconcile spans) and logs (bridged from `tracing` events) export over OTLP via `tracing-opentelemetry` and `opentelemetry-appender-tracing`.
 
-**OTLP is env-gated and off by default.** With no endpoint configured the
-behavior is identical to fmt-only logging + the Prometheus pull, so the hermetic
-test suite stays offline. A misconfiguration is logged with an actionable error
-and **degrades** to fmt-logging + the Prometheus pull rather than crashing a
-backup operator — unless `KOPIUR_OTEL_STRICT=true`, which makes it fail fast.
+**OTLP is env-gated and off by default.** With no endpoint configured the behavior is identical to fmt-only logging + the Prometheus pull, so the hermetic test suite stays offline. A misconfiguration is logged with an actionable error and **degrades** to fmt-logging + the Prometheus pull rather than crashing a backup operator — unless `KOPIUR_OTEL_STRICT=true`, which makes it fail fast.
 
 ## Logging (stdout / `kubectl logs`)
 
-Every component writes structured `tracing` events to **stdout** via an fmt layer
-installed by `kopiur_telemetry::init_tracing`. No collector is needed — this is the
-always-on path that `kubectl logs` shows. Reconcilers carry a `#[instrument]` span
-with `kind`, `namespace`, and `name`, so each line is attributable to the resource
-being reconciled.
+Every component writes structured `tracing` events to **stdout** via an fmt layer installed by `kopiur_telemetry::init_tracing`. No collector is needed — this is the always-on path that `kubectl logs` shows. Reconcilers carry a `#[instrument]` span with `kind`, `namespace`, and `name`, so each line is attributable to the resource being reconciled.
 
-**Level** — the standard `RUST_LOG` filter (default `info`). Per-target directives
-work: `RUST_LOG=info,kopia=debug` keeps the operator at `info` while surfacing
-**kopia's own progress and log output** (emitted line-by-line under the `kopia`
-target) in mover and controller logs. Without it, kopia's output is captured for the
-failure tail but not printed.
+**Level** — the standard `RUST_LOG` filter (default `info`). Per-target directives work: `RUST_LOG=info,kopia=debug` keeps the operator at `info` while surfacing **kopia's own progress and log output** (emitted line-by-line under the `kopia` target) in mover and controller logs. Without it, kopia's output is captured for the failure tail but not printed.
 
-**Format** — `KOPIUR_LOG_FORMAT` selects `text` (human-readable, default) or `json`
-(one structured object per line for Loki/ELK/Datadog). An unrecognized value
-degrades to `text` with a warning. In `text` mode ANSI color is suppressed when
-stdout is not a TTY (i.e. in a container), so `kubectl logs` stays clean.
+**Format** — `KOPIUR_LOG_FORMAT` selects `text` (human-readable, default) or `json` (one structured object per line for Loki/ELK/Datadog). An unrecognized value degrades to `text` with a warning. In `text` mode ANSI color is suppressed when stdout is not a TTY (i.e. in a container), so `kubectl logs` stays clean.
 
-**Movers inherit the controller's config.** The controller forwards both `RUST_LOG`
-and `KOPIUR_LOG_FORMAT` (alongside the OTLP vars) onto every mover `Job`, so a
-backup/restore Job logs at the same level and format — set it once on the controller.
+**Movers inherit the controller's config.** The controller forwards both `RUST_LOG` and `KOPIUR_LOG_FORMAT` (alongside the OTLP vars) onto every mover `Job`, so a backup/restore Job logs at the same level and format — set it once on the controller.
 
 Helm knobs (`logging.*`, applied to controller + webhook, and through to movers):
 
@@ -73,9 +47,7 @@ helm upgrade --install kopiur deploy/helm/kopiur -n kopiur-system \
 
 ## Metrics
 
-All metrics are under the `kopiur_` namespace. The Prometheus exporter applies
-the OTel→Prometheus conventions, so a counter instrument named
-`kopiur_x` is exported as `kopiur_x_total`.
+All metrics are under the `kopiur_` namespace. The Prometheus exporter applies the OTel→Prometheus conventions, so a counter instrument named `kopiur_x` is exported as `kopiur_x_total`.
 
 | Metric | Type | Labels | Source |
 |---|---|---|---|
@@ -102,12 +74,8 @@ the OTel→Prometheus conventions, so a counter instrument named
 | `kopiur_mover_operation_duration_seconds` | histogram | `operation`, `result` | mover Job (OTLP push) |
 
 Notes:
-- `kopiur_resource_phase` is **zeroed when a CR is deleted** so `… == 1` alerts
-  clear before the object is garbage-collected (OTel sync gauges can't drop a
-  series; zeroing is the available remedy). Series for long-deleted resources
-  persist at `0`.
-- Per-resource gauges are re-read from the freshest status on each successful
-  reconcile, so they don't lag a cycle behind a phase transition.
+- `kopiur_resource_phase` is **zeroed when a CR is deleted** so `… == 1` alerts clear before the object is garbage-collected (OTel sync gauges can't drop a series; zeroing is the available remedy). Series for long-deleted resources persist at `0`.
+- Per-resource gauges are re-read from the freshest status on each successful reconcile, so they don't lag a cycle behind a phase transition.
 
 ## Enabling everything (Helm)
 
@@ -121,8 +89,7 @@ helm upgrade --install kopiur deploy/helm/kopiur -n kopiur-system \
   --set observability.otlp.endpoint=http://otel-collector.observability.svc:4317
 ```
 
-A ready-to-use values overlay is at
-[`deploy/observability-values.yaml`](https://github.com/home-operations/kopiur/blob/main/deploy/observability-values.yaml):
+A ready-to-use values overlay is at [`deploy/observability-values.yaml`](https://github.com/home-operations/kopiur/blob/main/deploy/observability-values.yaml):
 
 ```bash
 helm upgrade --install kopiur deploy/helm/kopiur -n kopiur-system \
@@ -143,36 +110,21 @@ Keys (see `deploy/helm/kopiur/values.yaml` for the full set):
 | `observability.otlp.headers` | `""` | e.g. `authorization=Bearer …` |
 | `observability.otlp.strict` | `false` | fail-fast on telemetry misconfig |
 
-When OTLP is enabled the controller passes the same `OTEL_EXPORTER_OTLP_*` env to
-every mover `Job` it creates, so mover traces/logs/metrics reach the same collector.
+When OTLP is enabled the controller passes the same `OTEL_EXPORTER_OTLP_*` env to every mover `Job` it creates, so mover traces/logs/metrics reach the same collector.
 
 ## Environment variables
 
-The env var **names** are centralized in `crates/telemetry/src/env.rs`
-(`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`,
-`OTEL_EXPORTER_OTLP_HEADERS`, `KOPIUR_OTEL_STRICT`, plus the logging vars
-`RUST_LOG` and `KOPIUR_LOG_FORMAT`); the Helm `observability.otlp` and `logging`
-blocks set them. Only gRPC is compiled in — point the endpoint at the collector's
-gRPC port (4317). Setting `OTEL_EXPORTER_OTLP_PROTOCOL` to anything other than
-`grpc` is rejected with an actionable error.
+The env var **names** are centralized in `crates/telemetry/src/env.rs` (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_HEADERS`, `KOPIUR_OTEL_STRICT`, plus the logging vars `RUST_LOG` and `KOPIUR_LOG_FORMAT`); the Helm `observability.otlp` and `logging` blocks set them. Only gRPC is compiled in — point the endpoint at the collector's gRPC port (4317). Setting `OTEL_EXPORTER_OTLP_PROTOCOL` to anything other than `grpc` is rejected with an actionable error.
 
-`OTLP_PASSTHROUGH` and `LOG_PASSTHROUGH` (same module) list the vars the controller
-forwards onto mover `Job`s: OTLP only when a collector is configured, logging
-whenever set.
+`OTLP_PASSTHROUGH` and `LOG_PASSTHROUGH` (same module) list the vars the controller forwards onto mover `Job`s: OTLP only when a collector is configured, logging whenever set.
 
 ## Dashboard
 
-`deploy/dashboards/kopiur.json` is the source of truth (import it into Grafana
-directly). The chart copy under `deploy/helm/kopiur/files/dashboards/kopiur.json`
-is **generated** from it by `cargo xtask gen-all` and guarded by
-`cargo xtask gen-all --check`, so the two can never drift. Edit the source, then
-regenerate.
+`deploy/dashboards/kopiur.json` is the source of truth (import it into Grafana directly). The chart copy under `deploy/helm/kopiur/files/dashboards/kopiur.json` is **generated** from it by `cargo xtask gen-all` and guarded by `cargo xtask gen-all --check`, so the two can never drift. Edit the source, then regenerate.
 
 ## Grafana via the OTLP path
 
-If you run OTLP-only and don't scrape the pods, point Prometheus at the
-collector instead. A minimal OpenTelemetry Collector that ingests OTLP and
-re-exposes a Prometheus scrape target:
+If you run OTLP-only and don't scrape the pods, point Prometheus at the collector instead. A minimal OpenTelemetry Collector that ingests OTLP and re-exposes a Prometheus scrape target:
 
 ```yaml
 # otel-collector config (configmap data)
@@ -192,6 +144,5 @@ service:
     logs:    { receivers: [otlp], exporters: [debug] }
 ```
 
-For most users the direct-scrape `ServiceMonitor` path is simpler; OTLP is for
-shops that already run a collector and want traces + logs alongside metrics.
+For most users the direct-scrape `ServiceMonitor` path is simpler; OTLP is for shops that already run a collector and want traces + logs alongside metrics.
 ```
