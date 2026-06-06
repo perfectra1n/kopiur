@@ -30,7 +30,15 @@ echo "==> cargo doc (workspace, no deps)"
 cargo doc --no-deps --workspace --locked
 
 echo "==> mdbook build (html + linkcheck)"
-mdbook build
+# mdBook spawns its preprocessors (mdbook-mermaid, mdbook-admonish) by bare name
+# via PATH. A globally cargo-installed mdBook toolchain in ~/.cargo/bin can shadow
+# the mise-pinned, version-matched ones and break the build, because the 0.4 and
+# 0.5 preprocessor protocols are mutually incompatible (mdbook-admonish is 0.4-only,
+# mdbook-mermaid 0.17+ is 0.5-only — see the VERSION LOCK note in .mise/config.toml).
+# Drop any `.cargo/bin` entry from PATH for the mdBook step only (cargo doc above
+# already ran) so the mise-pinned matrix always wins, regardless of stray globals.
+DOCS_PATH="$(printf '%s' "$PATH" | awk -v RS=: -v ORS=: '$0 !~ /\.cargo\/bin$/' | sed 's/:$//')"
+PATH="$DOCS_PATH" mdbook build
 
 echo "==> nesting rustdoc under ${OUT}/rustdoc"
 rm -rf "${OUT}/rustdoc"
