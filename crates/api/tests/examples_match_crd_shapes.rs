@@ -26,6 +26,17 @@ fn examples_dir() -> PathBuf {
         .expect("deploy/examples must exist")
 }
 
+/// `*.yaml` files directly in `dir` (non-recursive), sorted.
+fn yaml_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .expect("read examples dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().map(|x| x == "yaml").unwrap_or(false))
+        .collect();
+    files.sort();
+    files
+}
+
 /// Deserialize the `.spec` of a kopiur.home-operations.com document into a typed spec, asserting it
 /// matches the real CRD field surface.
 fn check_spec<T: DeserializeOwned>(kind: &str, doc: &serde_json::Value, file: &str) {
@@ -39,13 +50,21 @@ fn check_spec<T: DeserializeOwned>(kind: &str, doc: &serde_json::Value, file: &s
 #[test]
 fn all_examples_match_crd_field_shapes() {
     let dir = examples_dir();
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .expect("read examples dir")
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().map(|x| x == "yaml").unwrap_or(false))
-        .collect();
-    files.sort();
-    assert_eq!(files.len(), 8, "expected 8 example files, found {files:?}");
+    // The numbered tutorial ladder (flat) plus the per-backend reference set
+    // under `backends/` — both must deserialize into the real CRD types.
+    let ladder = yaml_files(&dir);
+    let backends = yaml_files(&dir.join("backends"));
+    assert_eq!(
+        ladder.len(),
+        9,
+        "expected 9 numbered example files, found {ladder:?}"
+    );
+    assert_eq!(
+        backends.len(),
+        8,
+        "expected 8 per-backend example files, found {backends:?}"
+    );
+    let files: Vec<PathBuf> = ladder.into_iter().chain(backends).collect();
 
     let mut kopia_docs = 0usize;
     for path in &files {
@@ -82,9 +101,10 @@ fn all_examples_match_crd_field_shapes() {
             }
         }
     }
-    // Sanity: across the 8 files we should have validated a healthy number of CRs.
+    // Sanity: across the ladder + per-backend files we should have validated a
+    // healthy number of CRs (8 backend Repositories alone clear this).
     assert!(
-        kopia_docs >= 12,
-        "expected to validate >=12 kopiur.home-operations.com docs, got {kopia_docs}"
+        kopia_docs >= 20,
+        "expected to validate >=20 kopiur.home-operations.com docs, got {kopia_docs}"
     );
 }

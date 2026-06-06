@@ -209,6 +209,10 @@ impl World {
                 &[
                     (consts::KEY_SFTP_AUTHORIZED, consts::SFTP_CLIENT_PUBLIC_KEY),
                     (consts::KEY_SFTP_HOST_KEY, consts::SFTP_HOST_PRIVATE_KEY),
+                    (
+                        consts::KEY_SFTP_ONLY_ED25519,
+                        consts::SFTP_ONLY_ED25519_SCRIPT,
+                    ),
                 ],
             )
             .into(),

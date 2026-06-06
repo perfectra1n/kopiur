@@ -48,17 +48,17 @@ A backend is selected by **which key you set** (`backend.s3`, `backend.azure`, â
 
 ### Credential Secret keys by backend
 
-The mover reads these **well-known keys** from the Secret you reference and exports them as the environment variables kopia expects. Put your credentials under these exact key names. `KOPIA_PASSWORD` (the repository encryption password) is required for **every** backend.
+The mover reads these **well-known keys** from the Secret you reference and feeds them to kopia. Put your credentials under these exact key names. `KOPIA_PASSWORD` (the repository encryption password) is required for **every** backend. See [Backend configuration](backends.md#credential-keys-at-a-glance) for the full per-backend setup and the env-vs-file credential detail.
 
 | Backend | Secret keys the mover reads | Notes |
 |---|---|---|
 | **S3** | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, *(opt)* `AWS_SESSION_TOKEN` | Works for AWS and any S3-compatible store (MinIO, RustFS, Ceph RGW). |
 | **Azure** | `AZURE_STORAGE_KEY` **or** `AZURE_STORAGE_SAS_TOKEN` | Account name can come from `spec.backend.azure.storageAccount`. |
-| **GCS** | `GOOGLE_APPLICATION_CREDENTIALS` (service-account JSON) | The Secret holds the SA key JSON; kopia reads it as the credentials file. |
+| **GCS** | `KOPIA_GCS_CREDENTIALS` (service-account JSON) | The mover writes the JSON to a file and passes `--credentials-file`. |
 | **B2** | `B2_KEY_ID`, `B2_KEY` | Backblaze application key ID + key. |
-| **SFTP** | `ssh-privatekey`, `known_hosts` | Supplied via `auth.secretRef`; see [SFTP](backends.md#sftp). |
-| **WebDAV** | `WEBDAV_USERNAME`, `WEBDAV_PASSWORD` | Supplied via `auth.secretRef`. |
-| **rclone** | `rclone.conf` | Referenced by `backend.rclone.configSecretRef`, not `auth`. |
+| **SFTP** | `KOPIA_SFTP_KEY_DATA`, `KOPIA_SFTP_KNOWN_HOSTS` | Key-based auth; the mover writes both to files (`--keyfile`/`--known-hosts`). See [SFTP](backends.md#sftp). |
+| **WebDAV** | `KOPIA_WEBDAV_USERNAME`, `KOPIA_WEBDAV_PASSWORD` | HTTP basic auth, via `auth.secretRef`. |
+| **rclone** | `KOPIA_RCLONE_CONFIG` (the `rclone.conf`) | Referenced by `backend.rclone.configSecretRef`, not `auth`. |
 | **filesystem** | *(none â€” local path)* | Only `KOPIA_PASSWORD` is needed. |
 
 ```admonish note title="ClusterRepository Secret references need a namespace"

@@ -186,6 +186,13 @@ pub fn sftp_deployment(ns: &str) -> Deployment {
                                 "subPath": "ssh_host_ed25519_key",
                                 "readOnly": true,
                             },
+                            // Startup script that drops the random RSA/ECDSA host
+                            // keys so only the pinned ed25519 key is offered.
+                            {
+                                "name": "sftpd",
+                                "mountPath": "/etc/sftp.d",
+                                "readOnly": true,
+                            },
                         ],
                     }],
                     "volumes": [
@@ -206,6 +213,18 @@ pub fn sftp_deployment(ns: &str) -> Deployment {
                                     "key": consts::KEY_SFTP_HOST_KEY,
                                     "path": "ssh_host_ed25519_key",
                                     "mode": 384,
+                                }],
+                            },
+                        },
+                        {
+                            "name": "sftpd",
+                            "secret": {
+                                "secretName": consts::SECRET_SFTP_SERVER,
+                                // 0755 — atmoz only runs /etc/sftp.d/* files that are executable.
+                                "items": [{
+                                    "key": consts::KEY_SFTP_ONLY_ED25519,
+                                    "path": "00-only-ed25519.sh",
+                                    "mode": 493,
                                 }],
                             },
                         },

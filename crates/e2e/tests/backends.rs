@@ -98,7 +98,7 @@ fn backup_json(name: &str, config: &str) -> serde_json::Value {
     })
 }
 
-fn restore_json(name: &str, repo: &str, backup: &str, dst_pvc: &str) -> serde_json::Value {
+fn restore_json(name: &str, repo: &str, backup: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
         "kind": "Restore",
@@ -106,13 +106,8 @@ fn restore_json(name: &str, repo: &str, backup: &str, dst_pvc: &str) -> serde_js
         "spec": {
             "repository": { "kind": "Repository", "name": repo },
             "source": { "backupRef": { "name": backup } },
-            // target.pvc → the operator creates this PVC; give it explicit
-            // capacity/access so a fresh per-backend name provisions cleanly.
-            "target": { "pvc": {
-                "name": dst_pvc,
-                "capacity": "1Gi",
-                "accessModes": ["ReadWriteOnce"]
-            } }
+            // Restore into the pre-provisioned destination PVC (from Need::Filesystem).
+            "target": { "pvc": { "name": consts::PVC_DST } }
         }
     })
 }
@@ -120,15 +115,9 @@ fn restore_json(name: &str, repo: &str, backup: &str, dst_pvc: &str) -> serde_js
 /// Drive the full pipeline for one backend: create the `Repository` (`create:
 /// true`) → `Ready` with a real `uniqueId`; back up the source PVC → `Succeeded`
 /// with a real kopia snapshot id; restore it → `Completed`. `prefix` namespaces
-/// the CRs so the three backend tests can coexist on one reused cluster;
-/// `dst_pvc` is a per-backend restore destination so they don't collide on
-/// `e2e-dst`.
-async fn run_backend_lifecycle(
-    world: &World,
-    prefix: &str,
-    repository_json: serde_json::Value,
-    dst_pvc: &str,
-) {
+/// the CRs so the three backend tests can coexist on one reused cluster; the
+/// restore reuses the shared `e2e-dst` PVC (tests run serially).
+async fn run_backend_lifecycle(world: &World, prefix: &str, repository_json: serde_json::Value) {
     let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
@@ -183,11 +172,11 @@ async fn run_backend_lifecycle(
         "{prefix} Backup must carry a real kopia snapshot id, got {bstatus}"
     );
 
-    // 3. Restore it into a fresh PVC → Completed.
+    // 3. Restore it into the shared destination PVC → Completed.
     restores
         .create(
             &PostParams::default(),
-            &cr(restore_json(&restore, &repo, &backup, dst_pvc)),
+            &cr(restore_json(&restore, &repo, &backup)),
         )
         .await
         .unwrap_or_else(|e| panic!("create {prefix} Restore: {e}"));
@@ -227,7 +216,7 @@ async fn sftp_bootstrap_backup_restore() {
             "create": { "enabled": true }
         }
     });
-    run_backend_lifecycle(&world, "e2e-sftp", repo_json, "e2e-dst-sftp").await;
+    run_backend_lifecycle(&world, "e2e-sftp", repo_json).await;
 }
 
 /// WebDAV backend, end to end (basic auth via `KOPIA_WEBDAV_*` env).
@@ -255,7 +244,7 @@ async fn webdav_bootstrap_backup_restore() {
             "create": { "enabled": true }
         }
     });
-    run_backend_lifecycle(&world, "e2e-webdav", repo_json, "e2e-dst-webdav").await;
+    run_backend_lifecycle(&world, "e2e-webdav", repo_json).await;
 }
 
 /// rclone backend, end to end. kopia shells out to the `rclone` binary (shipped
@@ -285,5 +274,5 @@ async fn rclone_bootstrap_backup_restore() {
             "create": { "enabled": true }
         }
     });
-    run_backend_lifecycle(&world, "e2e-rclone", repo_json, "e2e-dst-rclone").await;
+    run_backend_lifecycle(&world, "e2e-rclone", repo_json).await;
 }

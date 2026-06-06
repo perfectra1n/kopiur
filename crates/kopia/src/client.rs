@@ -49,18 +49,21 @@ pub enum MaintenanceMode {
 ///
 /// ## Credentials are NOT here
 ///
-/// Secrets (access keys, storage keys, SFTP passwords, GCS credentials JSON) are
-/// supplied via the process environment — set them with
-/// [`KopiaClientBuilder::env`]. Only the *non-secret* connection identifiers
-/// (bucket, container, host, path, …) live in `ConnectSpec` so they never leak
-/// into a ConfigMap, a process listing, or an error message. The relevant kopia
-/// env vars by backend:
-///   * S3:    `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`
-///   * Azure: `AZURE_STORAGE_KEY` / `AZURE_STORAGE_SAS_TOKEN` (or SP env)
-///   * B2:    `B2_KEY_ID`, `B2_KEY`
-///   * GCS:   `GOOGLE_APPLICATION_CREDENTIALS` (path to the credentials file)
-///   * SFTP:  `--keyfile`/`--sftp-password` via the key-data env or a mounted key
-///   * all:   `KOPIA_PASSWORD` (the repository encryption password)
+/// Secrets are supplied two ways, never on argv. Env-delivered secrets (set with
+/// [`KopiaClientBuilder::env`]) cover the backends kopia reads from the
+/// environment; file-delivered secrets are written to a file by the caller (the
+/// mover) and the *path* is passed in the relevant `ConnectSpec` field. Either
+/// way only non-secret identifiers (bucket, host, path, …) and file *paths* live
+/// in `ConnectSpec`, so a secret never leaks into a ConfigMap, a process listing,
+/// or an error message. The relevant kopia inputs by backend:
+///   * S3:    `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` (env)
+///   * Azure: `AZURE_STORAGE_KEY` / `AZURE_STORAGE_SAS_TOKEN` (env; or SP env)
+///   * B2:    `B2_KEY_ID`, `B2_KEY` (env)
+///   * WebDAV:`KOPIA_WEBDAV_USERNAME`, `KOPIA_WEBDAV_PASSWORD` (env)
+///   * GCS:   `Gcs::credentials_file` → `--credentials-file` (a JSON file path)
+///   * SFTP:  `Sftp::keyfile`/`known_hosts` → `--keyfile`/`--known-hosts` (file paths)
+///   * rclone:`Rclone::config_file` → rclone `--config` (a file path)
+///   * all:   `KOPIA_PASSWORD` (the repository encryption password; env)
 ///
 /// This is the full set of kopia 0.23 `repository connect/create` backends. The
 /// operator's CRD `Backend` enum maps onto the first eight; `Gdrive`,
@@ -305,13 +308,13 @@ impl ConnectSpec {
                 remote_path,
                 config_file,
             } => {
-                let mut a =
-                    vec!["rclone".into(), "--remote-path".into(), remote_path.clone()];
-                // Forward the rclone config path to the embedded rclone via
-                // `--rclone-args=--config=<path>`.
+                let mut a = vec!["rclone".into(), "--remote-path".into(), remote_path.clone()];
+                // Forward the rclone config path to the embedded rclone. Must be a
+                // SINGLE `--rclone-args=<value>` token: kopia's CLI parser treats a
+                // separate value starting with `--` as the next flag, so
+                // `--rclone-args --config=…` fails with "expected argument".
                 if let Some(cfg) = config_file {
-                    a.push("--rclone-args".into());
-                    a.push(format!("--config={cfg}"));
+                    a.push(format!("--rclone-args=--config={cfg}"));
                 }
                 a
             }
@@ -1178,8 +1181,8 @@ mod tests {
                 "rclone",
                 "--remote-path",
                 "r:bucket",
-                "--rclone-args",
-                "--config=/var/cache/kopia/creds/rclone.conf"
+                // One token: a separate `--config=…` value would be misparsed as a flag.
+                "--rclone-args=--config=/var/cache/kopia/creds/rclone.conf"
             ]
         );
         assert_eq!(

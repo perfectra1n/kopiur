@@ -117,6 +117,19 @@ pub const KEY_SFTP_KNOWN_HOSTS: &str = "KOPIA_SFTP_KNOWN_HOSTS";
 pub const KEY_SFTP_AUTHORIZED: &str = "authorized_key";
 /// Secret key (in [`SECRET_SFTP_SERVER`]) for the server's fixed host private key.
 pub const KEY_SFTP_HOST_KEY: &str = "ssh_host_ed25519_key";
+/// Secret key (in [`SECRET_SFTP_SERVER`]) for the `/etc/sftp.d` startup script.
+pub const KEY_SFTP_ONLY_ED25519: &str = "only_ed25519.sh";
+/// An atmoz `/etc/sftp.d` script (run before sshd starts) that restricts the
+/// server to offer ONLY the pinned ed25519 host key — which is what the client's
+/// `known_hosts` contains. Without this, go-ssh negotiates the server's random
+/// RSA host key and fails with `knownhosts: key mismatch`.
+///
+/// We append `HostKeyAlgorithms` to sshd_config rather than deleting the RSA key
+/// file: sshd_config still lists `HostKey …ssh_host_rsa_key`, so removing the
+/// file makes sshd fail to start ("Unable to load host key"). Leaving the keys in
+/// place but advertising only ed25519 keeps sshd happy and the client pinned.
+pub const SFTP_ONLY_ED25519_SCRIPT: &str = "#!/bin/sh\n\
+    echo 'HostKeyAlgorithms ssh-ed25519' >> /etc/ssh/sshd_config\n";
 
 /// Client ed25519 PRIVATE key the mover authenticates with (throwaway, e2e-only).
 pub const SFTP_CLIENT_PRIVATE_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
