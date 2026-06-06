@@ -70,3 +70,57 @@ pub fn default_timeout() -> Duration {
 pub fn poll_interval() -> Duration {
     Duration::from_secs(3)
 }
+
+/// Ensure a `Namespace` named `ns` exists (idempotent: a 409 Conflict is treated
+/// as success). Used by the cross-namespace scenarios that run a workload + Backup
+/// in a namespace separate from the operator's.
+pub async fn ensure_namespace(client: &Client, ns: &str) -> anyhow::Result<()> {
+    use k8s_openapi::api::core::v1::Namespace;
+    use kube::api::PostParams;
+
+    let api: kube::Api<Namespace> = kube::Api::all(client.clone());
+    let obj: Namespace = serde_json::from_value(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": { "name": ns },
+    }))?;
+    match api.create(&PostParams::default(), &obj).await {
+        Ok(_) => Ok(()),
+        // Already exists from a prior run on a reused cluster.
+        Err(kube::Error::Api(e)) if e.code == 409 => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Server-side apply an Opaque `Secret` with the given string data into `ns`
+/// (idempotent). Used to place a repository-credentials Secret into a workload
+/// namespace so the mover Job's `envFrom` resolves there.
+pub async fn apply_secret(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    string_data: &[(&str, &str)],
+) -> anyhow::Result<()> {
+    use k8s_openapi::api::core::v1::Secret;
+    use kube::api::{Patch, PatchParams};
+
+    let data: serde_json::Map<String, serde_json::Value> = string_data
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+        .collect();
+    let secret: Secret = serde_json::from_value(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": { "name": name, "namespace": ns },
+        "type": "Opaque",
+        "stringData": data,
+    }))?;
+    let api: kube::Api<Secret> = kube::Api::namespaced(client.clone(), ns);
+    api.patch(
+        name,
+        &PatchParams::apply("kopiur-e2e").force(),
+        &Patch::Apply(&secret),
+    )
+    .await?;
+    Ok(())
+}

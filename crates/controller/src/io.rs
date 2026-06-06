@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::{ConfigMap, ObjectReference};
+use k8s_openapi::api::core::v1::{ConfigMap, ObjectReference, Secret, ServiceAccount};
+use k8s_openapi::api::rbac::v1::{RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference, Time};
 use kube::api::{DeleteParams, Patch, PatchParams};
 use kube::core::ObjectMeta;
@@ -33,6 +34,7 @@ use crate::consts::{
     API_VERSION, CHECK_BACKEND_ACTION, CHECK_CREDENTIALS_ACTION, CHECK_MAINTENANCE_ACTION,
     CHECK_PERMISSIONS_ACTION, MAINTENANCE_CONFIGURED_CONDITION, MAINTENANCE_CONFIGURED_REASON,
     MAINTENANCE_DISABLED_REASON, MAINTENANCE_NAMESPACE_UNRESOLVED_REASON,
+    MISSING_CREDENTIALS_REASON,
 };
 use crate::context::Context;
 use crate::error::{Error, Result};
@@ -485,6 +487,213 @@ pub async fn apply_mover_objects(
     let job_api: Api<Job> = Api::namespaced(client.clone(), namespace);
     apply(&job_api, name, job).await?;
     Ok(())
+}
+
+/// Labels marking the per-namespace mover RBAC objects as kopiur-managed.
+fn mover_managed_labels() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "app.kubernetes.io/managed-by".to_string(),
+            "kopiur".to_string(),
+        ),
+        (
+            "app.kubernetes.io/component".to_string(),
+            "mover".to_string(),
+        ),
+    ])
+}
+
+/// Build the least-privilege mover `ServiceAccount` for namespace `ns`. Pure (no
+/// IO) so the shape is unit-testable. The mover Job runs as this SA; it is minted
+/// per workload namespace because a mover Job runs there, not in the operator's
+/// namespace where the operator SA lives.
+pub fn build_mover_service_account(ns: &str, name: &str) -> ServiceAccount {
+    ServiceAccount {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(ns.to_string()),
+            labels: Some(mover_managed_labels()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Build the `RoleBinding` that grants the mover SA the mover role within `ns`.
+/// `role_kind` is `ClusterRole` (cluster install: one shared role bound per
+/// namespace) or `Role` (namespaced install: a role in the operator namespace).
+/// Pure (no IO) so the subject/roleRef wiring is unit-testable.
+pub fn build_mover_rolebinding(
+    ns: &str,
+    sa_name: &str,
+    role_kind: &str,
+    role_name: &str,
+) -> RoleBinding {
+    RoleBinding {
+        metadata: ObjectMeta {
+            name: Some(sa_name.to_string()),
+            namespace: Some(ns.to_string()),
+            labels: Some(mover_managed_labels()),
+            ..Default::default()
+        },
+        role_ref: RoleRef {
+            api_group: "rbac.authorization.k8s.io".to_string(),
+            kind: role_kind.to_string(),
+            name: role_name.to_string(),
+        },
+        subjects: Some(vec![Subject {
+            kind: "ServiceAccount".to_string(),
+            name: sa_name.to_string(),
+            namespace: Some(ns.to_string()),
+            api_group: None,
+        }]),
+    }
+}
+
+/// Ensure the mover `ServiceAccount` + its `RoleBinding` exist in `ns` (the mover
+/// Job's namespace). Idempotent server-side apply — reconcilers call this before
+/// every mover Job so the SA is present in the workload namespace (else the Job
+/// `FailedCreate`s with `serviceaccount ... not found` and never schedules a pod).
+/// The objects are kopiur-managed and shared across all mover Jobs in the
+/// namespace (no owner reference, so deleting one Backup does not revoke them).
+pub async fn ensure_mover_rbac(
+    client: &kube::Client,
+    ns: &str,
+    sa_name: &str,
+    role_kind: &str,
+    role_name: &str,
+) -> Result<()> {
+    let sa = build_mover_service_account(ns, sa_name);
+    let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), ns);
+    apply(&sa_api, sa_name, &sa).await?;
+
+    let rb = build_mover_rolebinding(ns, sa_name, role_kind, role_name);
+    let rb_api: Api<RoleBinding> = Api::namespaced(client.clone(), ns);
+    apply(&rb_api, sa_name, &rb).await?;
+    Ok(())
+}
+
+/// Context for the missing-credentials message: which Secrets the mover Job needs
+/// in its namespace, and where the referencing repository keeps them (so the
+/// message can name the cross-namespace mismatch).
+pub struct CredsContext<'a> {
+    /// Secret names the mover Job loads via `envFrom`, required in the Job's ns.
+    pub secret_names: &'a [String],
+    /// `Repository` or `ClusterRepository` — the kind of the referencing repo.
+    pub repo_kind: &'a str,
+    /// Name of the referencing repository.
+    pub repo_name: &'a str,
+    /// Namespace the repository's credential Secret lives in, when explicit (a
+    /// `ClusterRepository` pins it, e.g. `kopiur-system`). `None` ⇒ same-namespace
+    /// reference (a namespaced `Repository`).
+    pub repo_secret_namespace: Option<&'a str>,
+}
+
+/// The actionable message for a credentials Secret missing from the mover Job's
+/// namespace (ADR §4.12; the project's what/why/how-to-fix rule). Pure so the
+/// exact text is unit-asserted. Names the missing Secret and namespace, explains
+/// why (the mover loads it via namespace-local `envFrom`), states where the repo
+/// currently keeps it, and gives concrete fixes.
+pub fn missing_creds_message(secret: &str, job_ns: &str, ctx: &CredsContext) -> String {
+    let mut msg = format!(
+        "credentials Secret `{secret}` does not exist in namespace `{job_ns}`, where the mover \
+         Job runs and loads it via envFrom — Kubernetes envFrom is namespace-local and cannot \
+         read a Secret from another namespace."
+    );
+    match ctx.repo_secret_namespace {
+        // Cross-namespace mismatch (typically a ClusterRepository whose Secret is
+        // pinned to the operator namespace): name both ends and offer both fixes.
+        Some(src) if src != job_ns => {
+            msg.push_str(&format!(
+                " The referenced {kind} `{name}` keeps that Secret in namespace `{src}`. \
+                 Fix: create a Secret named `{secret}` in namespace `{job_ns}` carrying the same \
+                 keys (e.g. `KOPIA_PASSWORD`, plus backend keys like `AWS_ACCESS_KEY_ID`/\
+                 `AWS_SECRET_ACCESS_KEY`), or back up with a namespaced Repository whose secret \
+                 lives in `{job_ns}`.",
+                kind = ctx.repo_kind,
+                name = ctx.repo_name,
+            ));
+        }
+        // Same-namespace reference: the Secret simply isn't there yet.
+        _ => {
+            msg.push_str(&format!(
+                " The {kind} `{name}` references it from namespace `{job_ns}`. \
+                 Fix: create a Secret named `{secret}` in namespace `{job_ns}` carrying the \
+                 repository credentials (e.g. `KOPIA_PASSWORD`, plus any backend keys).",
+                kind = ctx.repo_kind,
+                name = ctx.repo_name,
+            ));
+        }
+    }
+    msg
+}
+
+/// The `repo_kind` string for a [`RepositoryKind`] (for [`CredsContext`] messages).
+pub fn repo_kind_str(kind: RepositoryKind) -> &'static str {
+    match kind {
+        RepositoryKind::Repository => "Repository",
+        RepositoryKind::ClusterRepository => "ClusterRepository",
+    }
+}
+
+/// The actionable message for the first credential Secret missing from the mover
+/// Job's namespace, or `None` if all are present. Lets a caller surface the
+/// blocking condition + Event before requeueing (see [`publish_missing_creds_event`]).
+pub async fn first_missing_cred(
+    client: &kube::Client,
+    job_ns: &str,
+    ctx: &CredsContext<'_>,
+) -> Result<Option<String>> {
+    let api: Api<Secret> = Api::namespaced(client.clone(), job_ns);
+    for name in ctx.secret_names {
+        if api.get_opt(name).await?.is_none() {
+            return Ok(Some(missing_creds_message(name, job_ns, ctx)));
+        }
+    }
+    Ok(None)
+}
+
+/// Verify every credential Secret the mover Job needs exists in its namespace,
+/// before launching a Job that would otherwise hang on a missing-Secret `envFrom`.
+/// Returns an actionable [`Error::MissingDependency`] (Transient — a GitOps apply
+/// may add the Secret shortly) naming the first missing Secret. Used by the
+/// bootstrap paths (repository/cluster-repository), whose Secret is same-namespace;
+/// the Backup/Restore paths use [`first_missing_cred`] to also surface a condition.
+pub async fn ensure_creds_present(
+    client: &kube::Client,
+    job_ns: &str,
+    ctx: &CredsContext<'_>,
+) -> Result<()> {
+    match first_missing_cred(client, job_ns, ctx).await? {
+        Some(msg) => Err(Error::MissingDependency(msg)),
+        None => Ok(()),
+    }
+}
+
+/// Emit a `Warning` Event for a missing credentials Secret, so the actionable
+/// message is visible on the object (`kubectl describe`/`get events`), not only in
+/// the controller log. Best-effort: a publish failure is logged, never fatal.
+pub async fn publish_missing_creds_event<K>(ctx: &Context, obj: &K, message: &str)
+where
+    K: Resource<DynamicType = ()>,
+{
+    let regarding = obj.object_ref(&());
+    if let Err(e) = ctx
+        .recorder
+        .publish(
+            &Event {
+                type_: EventType::Warning,
+                reason: MISSING_CREDENTIALS_REASON.into(),
+                note: Some(message.to_string()),
+                action: CHECK_CREDENTIALS_ACTION.into(),
+                secondary: None,
+            },
+            &regarding,
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "failed to publish MissingCredentialsSecret event");
+    }
 }
 
 /// Standard kopiur labels for a child object (origin/config/snapshot).
@@ -1729,5 +1938,126 @@ mod tests {
         );
         assert!(!f);
         assert!(m.is_some());
+    }
+
+    // --- mover RBAC minting (ADR §4.12): the controller mints a least-privilege
+    // mover SA + RoleBinding in each mover Job's namespace, because the Job runs in
+    // the workload namespace where the operator SA does not exist. The pure builders
+    // are asserted here; the live apply is covered by e2e. ---
+
+    #[test]
+    fn mover_service_account_is_named_and_namespaced_and_managed() {
+        let sa = build_mover_service_account("trilium", "kopiur-mover");
+        assert_eq!(sa.metadata.name.as_deref(), Some("kopiur-mover"));
+        assert_eq!(sa.metadata.namespace.as_deref(), Some("trilium"));
+        let labels = sa.metadata.labels.expect("managed labels");
+        assert_eq!(
+            labels
+                .get("app.kubernetes.io/managed-by")
+                .map(String::as_str),
+            Some("kopiur")
+        );
+        assert_eq!(
+            labels
+                .get("app.kubernetes.io/component")
+                .map(String::as_str),
+            Some("mover")
+        );
+    }
+
+    #[test]
+    fn mover_rolebinding_binds_the_namespaced_sa_to_the_named_role() {
+        let rb = build_mover_rolebinding("trilium", "kopiur-mover", "ClusterRole", "kopiur-mover");
+        // Binding lives in the workload namespace.
+        assert_eq!(rb.metadata.namespace.as_deref(), Some("trilium"));
+        // roleRef points at the chart-shipped ClusterRole by name.
+        assert_eq!(rb.role_ref.api_group, "rbac.authorization.k8s.io");
+        assert_eq!(rb.role_ref.kind, "ClusterRole");
+        assert_eq!(rb.role_ref.name, "kopiur-mover");
+        // The single subject is the minted SA in this namespace (not the operator's).
+        let subjects = rb.subjects.expect("one subject");
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].kind, "ServiceAccount");
+        assert_eq!(subjects[0].name, "kopiur-mover");
+        assert_eq!(subjects[0].namespace.as_deref(), Some("trilium"));
+    }
+
+    #[test]
+    fn mover_rolebinding_uses_role_kind_for_namespaced_install() {
+        // A namespaced install binds to a Role (in the operator namespace), not a
+        // cluster-scoped ClusterRole.
+        let rb = build_mover_rolebinding("apps", "kopiur-mover", "Role", "kopiur-mover");
+        assert_eq!(rb.role_ref.kind, "Role");
+    }
+
+    // --- missing-credentials message (load-bearing UX, ADR §4.12): names the
+    // Secret + namespace, says WHY (namespace-local envFrom), says WHERE the repo
+    // keeps it, and gives concrete fixes. ---
+
+    #[test]
+    fn missing_creds_message_cross_namespace_is_actionable() {
+        let names = vec!["kopia-rustfs-creds".to_string()];
+        let ctx = CredsContext {
+            secret_names: &names,
+            repo_kind: "ClusterRepository",
+            repo_name: "rustfs-kopiur-test",
+            repo_secret_namespace: Some("kopiur-system"),
+        };
+        let msg = missing_creds_message("kopia-rustfs-creds", "trilium", &ctx);
+        // What: the exact Secret and the namespace it is missing from.
+        assert!(msg.contains("kopia-rustfs-creds"));
+        assert!(msg.contains("`trilium`"));
+        // Why: namespace-local envFrom.
+        assert!(msg.contains("envFrom"));
+        // Where it currently lives: repo kind/name + its secret namespace.
+        assert!(msg.contains("ClusterRepository"));
+        assert!(msg.contains("rustfs-kopiur-test"));
+        assert!(msg.contains("`kopiur-system`"));
+        // How to fix: create it here, or use a namespaced Repository.
+        assert!(msg.contains("create a Secret"));
+        assert!(msg.contains("namespaced Repository"));
+    }
+
+    #[test]
+    fn missing_creds_message_same_namespace_drops_cross_ns_clause() {
+        let names = vec!["nas-creds".to_string()];
+        let ctx = CredsContext {
+            secret_names: &names,
+            repo_kind: "Repository",
+            repo_name: "nas-primary",
+            // Same-namespace reference (a namespaced Repository): no explicit ns.
+            repo_secret_namespace: None,
+        };
+        let msg = missing_creds_message("nas-creds", "billing", &ctx);
+        assert!(msg.contains("nas-creds"));
+        assert!(msg.contains("`billing`"));
+        assert!(msg.contains("envFrom"));
+        assert!(msg.contains("create a Secret"));
+        // No cross-namespace "keeps that Secret in namespace" clause when same-ns.
+        assert!(!msg.contains("keeps that Secret in namespace"));
+        assert!(!msg.contains("namespaced Repository"));
+    }
+
+    #[test]
+    fn missing_creds_message_treats_matching_secret_ns_as_same_namespace() {
+        // An explicit secret namespace equal to the job namespace is NOT a mismatch.
+        let names = vec!["creds".to_string()];
+        let ctx = CredsContext {
+            secret_names: &names,
+            repo_kind: "Repository",
+            repo_name: "local",
+            repo_secret_namespace: Some("billing"),
+        };
+        let msg = missing_creds_message("creds", "billing", &ctx);
+        assert!(!msg.contains("keeps that Secret in namespace"));
+    }
+
+    #[test]
+    fn repo_kind_str_maps_both_variants() {
+        assert_eq!(repo_kind_str(RepositoryKind::Repository), "Repository");
+        assert_eq!(
+            repo_kind_str(RepositoryKind::ClusterRepository),
+            "ClusterRepository"
+        );
     }
 }

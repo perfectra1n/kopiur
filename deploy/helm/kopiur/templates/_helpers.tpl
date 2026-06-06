@@ -85,6 +85,16 @@ Controller component name.
 {{- end }}
 
 {{/*
+Mover identity. The controller mints — in each mover Job's (workload) namespace — a
+least-privilege ServiceAccount of this name bound to the mover Role/ClusterRole of
+the same name (ADR §4.12). Both names are passed to the controller via env so the
+runtime-minted objects match the chart-shipped role.
+*/}}
+{{- define "kopiur.moverName" -}}
+{{- printf "%s-mover" (include "kopiur.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
 Webhook component name.
 */}}
 {{- define "kopiur.webhook.fullname" -}}

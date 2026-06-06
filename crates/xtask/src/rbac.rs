@@ -36,6 +36,23 @@ const CLUSTERROLE_NAME: &str = "kopiur-controller";
 const ROLE_NAME: &str = "kopiur-controller";
 const DEFAULT_NAMESPACE: &str = "kopiur-system";
 
+/// The dedicated, least-privilege mover role (§4.12). Bound to a per-namespace
+/// `kopiur-mover` ServiceAccount by a controller-minted RoleBinding; the SA and
+/// binding are created at runtime, so only the role itself is shipped here.
+const MOVER_CLUSTERROLE_NAME: &str = "kopiur-mover";
+const MOVER_ROLE_NAME: &str = "kopiur-mover";
+
+/// CRD plurals whose `.status` the mover PATCHes (the dynamic `targetRef` kinds).
+/// Deliberately excludes `backupconfigs`/`backupschedules`, which the mover never
+/// touches.
+const MOVER_STATUS_CRDS: &[&str] = &[
+    "backups",
+    "restores",
+    "repositories",
+    "clusterrepositories",
+    "maintenances",
+];
+
 const KOPIA_GROUP: &str = "kopiur.home-operations.com";
 
 /// All 7 CRD plurals in `kopiur.home-operations.com`. `clusterrepositories` is cluster-scoped.
@@ -94,11 +111,18 @@ fn kopia_crd_rules(include_cluster_crds: bool) -> Vec<PolicyRule> {
 }
 
 /// Core / batch / snapshot rules the controller needs to drive movers, hooks,
-/// jobs, and CSI snapshots (§4.12). `include_sa_minting` controls whether the
-/// `serviceaccounts` create/get block (per-namespace mover SA minting) is
-/// included — only meaningful cluster-wide.
-fn workload_rules(include_sa_minting: bool) -> Vec<PolicyRule> {
-    let mut rules = vec![
+/// jobs, and CSI snapshots (§4.12).
+///
+/// Includes the `serviceaccounts` + `rolebindings` minting rules: before every
+/// mover Job the controller ensures a least-privilege `kopiur-mover`
+/// ServiceAccount and a RoleBinding (to the `kopiur-mover` ClusterRole/Role)
+/// exist in the Job's namespace — the workload namespace, which differs from the
+/// operator's. Without this the mover Job's SA does not exist in that namespace
+/// and the Job never schedules a pod (`FailedCreate: serviceaccount ... not
+/// found`). The controller already holds a superset of the mover role's perms, so
+/// creating the binding is not a privilege escalation (no `bind` verb needed).
+fn workload_rules() -> Vec<PolicyRule> {
+    vec![
         // Mover pods + exec for pre/post hooks; PVCs for snapshot/restore I/O;
         // events for surfacing reconcile outcomes; configmaps carry the mover
         // work spec AND (for repository bootstrap) receive the mover's result
@@ -136,14 +160,34 @@ fn workload_rules(include_sa_minting: bool) -> Vec<PolicyRule> {
             &["volumegroupsnapshots".into()],
             &["get", "list", "watch", "create", "delete"],
         ),
-    ];
+        // Per-namespace mover RBAC minted by the controller (§4.12): a
+        // `kopiur-mover` ServiceAccount plus a RoleBinding to the `kopiur-mover`
+        // role, created in each mover Job's namespace.
+        rule(&[""], &["serviceaccounts".into()], &["create", "get"]),
+        rule(
+            &["rbac.authorization.k8s.io"],
+            &["rolebindings".into()],
+            &["get", "create", "update", "patch"],
+        ),
+    ]
+}
 
-    if include_sa_minting {
-        // Per-namespace mover ServiceAccount minted by the controller (§4.12).
-        rules.push(rule(&[""], &["serviceaccounts".into()], &["create", "get"]));
-    }
-
-    rules
+/// The minimal RBAC a mover Job actually uses, verified against `crates/mover/src/`:
+/// it PATCHes the owning CR's `.status` subresource (the target kind is dynamic —
+/// `backups`, `restores`, `repositories`, `clusterrepositories`, `maintenances`)
+/// and PATCHes the work-spec `ConfigMap` to write the repository-bootstrap result.
+/// Nothing else — credentials are env-mounted (no `secrets` access) and the work
+/// spec is a mounted volume (no `configmaps` get for it). This is deliberately a
+/// tiny subset of [`workload_rules`]; the mover runs as its own least-privilege SA.
+fn mover_rules() -> Vec<PolicyRule> {
+    let statuses: Vec<String> = MOVER_STATUS_CRDS
+        .iter()
+        .map(|c| format!("{c}/status"))
+        .collect();
+    vec![
+        rule(&[KOPIA_GROUP], &statuses, &["get", "patch"]),
+        rule(&[""], &["configmaps".into()], &["get", "patch"]),
+    ]
 }
 
 /// Splice `apiVersion`/`kind` into a serialized k8s-openapi object and render
@@ -184,7 +228,7 @@ fn metadata(name: &str, namespace: Option<&str>) -> ObjectMeta {
 /// Generate the cluster-scoped RBAC artifact.
 fn cluster_artifact() -> Result<Artifact> {
     let mut rules = kopia_crd_rules(true);
-    rules.extend(workload_rules(true));
+    rules.extend(workload_rules());
 
     let clusterrole = ClusterRole {
         metadata: metadata(CLUSTERROLE_NAME, None),
@@ -221,9 +265,11 @@ fn cluster_artifact() -> Result<Artifact> {
 
 /// Generate the namespaced RBAC artifact (§4.11/§4.12 namespaced-install mode).
 fn namespaced_artifact() -> Result<Artifact> {
-    // No cluster-scoped clusterrepositories; no cluster-wide SA minting.
+    // No cluster-scoped clusterrepositories. The controller still mints the mover
+    // SA + RoleBinding in the (single) workload namespace, so the SA/rolebinding
+    // minting rules are retained.
     let mut rules = kopia_crd_rules(false);
-    rules.extend(workload_rules(false));
+    rules.extend(workload_rules());
 
     let role = Role {
         metadata: metadata(ROLE_NAME, Some(DEFAULT_NAMESPACE)),
@@ -257,7 +303,40 @@ fn namespaced_artifact() -> Result<Artifact> {
     ))
 }
 
+/// Generate the cluster-scoped mover `ClusterRole`. The per-namespace
+/// `kopiur-mover` ServiceAccount and its RoleBinding are minted by the controller
+/// at runtime (in each mover Job's namespace), so only the role is shipped.
+fn mover_cluster_artifact() -> Result<Artifact> {
+    let clusterrole = ClusterRole {
+        metadata: metadata(MOVER_CLUSTERROLE_NAME, None),
+        rules: Some(mover_rules()),
+        ..Default::default()
+    };
+    let content = document(&[render(&clusterrole)?]);
+    Ok(Artifact::new(
+        "rbac/mover-clusterrole.yaml".to_string(),
+        content,
+    ))
+}
+
+/// Generate the namespaced mover `Role` (namespaced-install mode). Same minimal
+/// rules as the ClusterRole; the controller mints the SA + RoleBinding in the
+/// workload namespace at runtime.
+fn mover_namespaced_artifact() -> Result<Artifact> {
+    let role = Role {
+        metadata: metadata(MOVER_ROLE_NAME, Some(DEFAULT_NAMESPACE)),
+        rules: Some(mover_rules()),
+    };
+    let content = document(&[render(&role)?]);
+    Ok(Artifact::new("rbac/mover-role.yaml".to_string(), content))
+}
+
 /// All RBAC artifacts.
 pub fn artifacts() -> Result<Vec<Artifact>> {
-    Ok(vec![cluster_artifact()?, namespaced_artifact()?])
+    Ok(vec![
+        cluster_artifact()?,
+        namespaced_artifact()?,
+        mover_cluster_artifact()?,
+        mover_namespaced_artifact()?,
+    ])
 }

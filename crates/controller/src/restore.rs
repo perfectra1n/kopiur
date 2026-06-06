@@ -23,7 +23,7 @@ use kopiur_mover::workspec::{
     RestoreOp, TargetRef,
 };
 
-use crate::consts::API_VERSION;
+use crate::consts::{API_VERSION, CREDENTIALS_AVAILABLE_CONDITION, MISSING_CREDENTIALS_REASON};
 use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
 use crate::io::{self, ResolvedRepository};
@@ -308,6 +308,71 @@ async fn drive_direct_restore(
     };
     let target_path = "/restore".to_string();
     let creds_secrets = io::mover_creds_secrets(&repo.backend, &repo.encryption);
+
+    // The restore mover Job runs in this (workload) namespace: mint the mover SA +
+    // RoleBinding here, then verify the credential Secret(s) it loads via envFrom
+    // are present — else surface a clear condition + Event and requeue (ADR §4.12).
+    if let Some(sa) = ctx.mover_service_account.as_deref() {
+        io::ensure_mover_rbac(
+            &ctx.client,
+            namespace,
+            sa,
+            &ctx.mover_role_kind,
+            &ctx.mover_clusterrole,
+        )
+        .await?;
+    }
+    let repo_ref = restore.spec.repository.as_ref();
+    let creds_ctx = io::CredsContext {
+        secret_names: &creds_secrets,
+        repo_kind: repo_ref
+            .map(|r| io::repo_kind_str(r.kind))
+            .unwrap_or("Repository"),
+        repo_name: repo_ref
+            .map(|r| r.name.as_str())
+            .unwrap_or("(from source config)"),
+        repo_secret_namespace: repo.encryption.password_secret_ref.namespace.as_deref(),
+    };
+    if let Some(msg) = io::first_missing_cred(&ctx.client, namespace, &creds_ctx).await? {
+        let existing = restore
+            .status
+            .as_ref()
+            .map(|s| s.conditions.clone())
+            .unwrap_or_default();
+        let conditions = io::upsert_condition(
+            &existing,
+            CREDENTIALS_AVAILABLE_CONDITION,
+            false,
+            MISSING_CREDENTIALS_REASON,
+            &msg,
+            restore.metadata.generation,
+        );
+        io::patch_status(
+            api,
+            name,
+            serde_json::json!({ "phase": "Pending", "conditions": conditions }),
+        )
+        .await?;
+        io::publish_missing_creds_event(ctx, restore, &msg).await;
+        return Err(Error::MissingDependency(msg));
+    }
+    // Creds present: clear any stale `CredentialsAvailable=False` from a prior reconcile.
+    if let Some(conds) = restore.status.as_ref().map(|s| s.conditions.as_slice())
+        && conds
+            .iter()
+            .any(|c| c.type_ == CREDENTIALS_AVAILABLE_CONDITION && c.status != "True")
+    {
+        let conditions = io::upsert_condition(
+            conds,
+            CREDENTIALS_AVAILABLE_CONDITION,
+            true,
+            "Available",
+            "credentials Secret(s) present in the mover namespace",
+            restore.metadata.generation,
+        );
+        io::patch_status(api, name, serde_json::json!({ "conditions": conditions })).await?;
+    }
+
     let identity = MoverIdentity {
         username: "restore".into(),
         hostname: namespace.to_string(),

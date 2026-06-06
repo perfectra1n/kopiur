@@ -69,12 +69,27 @@ pub async fn run() -> anyhow::Result<()> {
         .unwrap_or_else(|_| jobs::DEFAULT_MOVER_IMAGE.to_string());
     tracing::info!(mover_image = %mover_image, "mover image configured");
     // The mover PATCHes the owning CR's status, so its Job pods must run as an SA
-    // bound to the operator's status-patch RBAC (not the namespace `default` SA).
-    // The chart sets this to the operator ServiceAccount.
+    // bound to the mover status-patch RBAC. This is a dedicated least-privilege SA
+    // (not the operator SA): the controller mints it + a RoleBinding to the mover
+    // role in each Job's (workload) namespace. The chart sets this name; `None`
+    // (off-chart) keeps the legacy behaviour of the `default` SA with no minting.
     let mover_service_account = std::env::var(config::MOVER_SERVICE_ACCOUNT_ENV)
         .ok()
         .filter(|s| !s.is_empty());
     tracing::info!(mover_service_account = ?mover_service_account, "mover SA configured");
+    // Name of the mover ClusterRole/Role the minted RoleBinding references. Falls
+    // back to the chart's default name when unset so minting still resolves.
+    let mover_clusterrole = std::env::var(config::MOVER_CLUSTERROLE_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| config::DEFAULT_MOVER_NAME.to_string());
+    // `roleRef.kind` for the minted mover RoleBinding (ClusterRole vs Role), set by
+    // the chart from installScope.
+    let mover_role_kind = std::env::var(config::MOVER_ROLE_KIND_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| config::DEFAULT_MOVER_ROLE_KIND.to_string());
+    tracing::info!(mover_clusterrole = %mover_clusterrole, mover_role_kind = %mover_role_kind, "mover role configured");
     // The operator's own namespace (downward API: KOPIUR_NAMESPACE). Default
     // placement for a ClusterRepository's managed (namespaced) Maintenance CR.
     let operator_namespace = std::env::var(config::OPERATOR_NAMESPACE_ENV)
@@ -148,6 +163,8 @@ pub async fn run() -> anyhow::Result<()> {
         recorder,
         mover_image,
         mover_service_account,
+        mover_clusterrole,
+        mover_role_kind,
         mover_env_passthrough,
         maintenance_store,
         maintenance_synced,

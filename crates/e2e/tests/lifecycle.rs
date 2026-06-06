@@ -24,10 +24,16 @@ use kube::api::{DeleteParams, Patch, PatchParams, PostParams};
 use kube::{Api, Client, ResourceExt};
 use serde::de::DeserializeOwned;
 
+use k8s_openapi::api::core::v1::ServiceAccount;
+use k8s_openapi::api::rbac::v1::RoleBinding;
+
 use kopiur_api::{
     Backup, BackupConfig, BackupSchedule, ClusterRepository, Maintenance, Repository, Restore,
 };
-use kopiur_e2e::{E2E_NAMESPACE, default_timeout, poll_interval, try_client, wait_until};
+use kopiur_e2e::{
+    E2E_NAMESPACE, apply_secret, default_timeout, ensure_namespace, poll_interval, try_client,
+    wait_until,
+};
 
 /// Deserialize a CR from a JSON literal into its typed kube object.
 fn cr<T: DeserializeOwned>(v: serde_json::Value) -> T {
@@ -380,6 +386,151 @@ async fn cluster_repository_backup_lifecycle() {
 
     // Cleanup the cluster-scoped resource (the namespaced ones GC with the ns).
     let _ = crepos.delete("e2e-crepo", &DeleteParams::default()).await;
+}
+
+/// Cross-namespace mover RBAC + credentials (ADR §4.12). A Backup in a workload
+/// namespace SEPARATE from the operator's must (a) get a least-privilege
+/// `kopiur-mover` ServiceAccount + RoleBinding MINTED in that namespace by the
+/// controller, and (b) when its credentials Secret is absent there, surface a clear
+/// `CredentialsAvailable=False` / `MissingCredentialsSecret` condition rather than
+/// launching a Job that hangs. Adding the Secret clears the condition.
+///
+/// Before the fix the mover Job referenced an SA (and `envFrom` Secret) that only
+/// existed in the operator namespace, so a cross-namespace Backup wedged in
+/// `Running` with the Job stuck in `FailedCreate: serviceaccount ... not found` —
+/// this test would time out waiting for the SA to appear.
+#[tokio::test]
+#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
+    let Some(client) = try_client().await else {
+        return;
+    };
+    // A workload namespace distinct from the operator's (E2E_NAMESPACE).
+    const APP_NS: &str = "kopiur-e2e-app";
+    // The chart-minted mover identity (release name `kopiur` → `kopiur-mover`).
+    const MOVER_NAME: &str = "kopiur-mover";
+
+    ensure_namespace(&client, APP_NS)
+        .await
+        .expect("create workload namespace");
+
+    let crepos: Api<ClusterRepository> = Api::all(client.clone());
+    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), APP_NS);
+    let backups: Api<Backup> = Api::namespaced(client.clone(), APP_NS);
+    let sas: Api<ServiceAccount> = Api::namespaced(client.clone(), APP_NS);
+    let rbs: Api<RoleBinding> = Api::namespaced(client.clone(), APP_NS);
+
+    // 1. A ClusterRepository (its Secret lives in E2E_NAMESPACE) reaches Ready.
+    crepos
+        .create(
+            &PostParams::default(),
+            &cr(cluster_repository_json("e2e-xns-crepo")),
+        )
+        .await
+        .expect("create ClusterRepository");
+    wait_phase(&crepos, "e2e-xns-crepo", "Ready")
+        .await
+        .expect("ClusterRepository should reach Ready");
+
+    // 2. BackupConfig + Backup in the WORKLOAD namespace. No creds Secret there yet.
+    let cfg = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "BackupConfig",
+        "metadata": { "name": "e2e-xns-cfg", "namespace": APP_NS },
+        "spec": {
+            "repository": { "kind": "ClusterRepository", "name": "e2e-xns-crepo" },
+            "sources": [ { "pvc": { "name": "e2e-src" } } ],
+            "retention": { "keepLatest": 5 }
+        }
+    });
+    configs
+        .create(&PostParams::default(), &cr(cfg))
+        .await
+        .expect("create BackupConfig in workload ns");
+    backups
+        .create(
+            &PostParams::default(),
+            &cr(backup_json_ns("e2e-xns-backup", "e2e-xns-cfg", APP_NS)),
+        )
+        .await
+        .expect("create Backup in workload ns");
+
+    // 3. The controller mints the mover SA + RoleBinding in the workload namespace
+    //    (this is the core of the fix — it happens before the creds check).
+    wait_until(
+        &format!("ServiceAccount {APP_NS}/{MOVER_NAME} minted"),
+        default_timeout(),
+        poll_interval(),
+        || async { Ok(sas.get_opt(MOVER_NAME).await?.map(|_| ())) },
+    )
+    .await
+    .expect("mover ServiceAccount minted in workload namespace");
+    let rb = wait_until(
+        &format!("RoleBinding {APP_NS}/{MOVER_NAME} minted"),
+        default_timeout(),
+        poll_interval(),
+        || async { Ok(rbs.get_opt(MOVER_NAME).await?) },
+    )
+    .await
+    .expect("mover RoleBinding minted in workload namespace");
+    assert_eq!(
+        rb.role_ref.name, MOVER_NAME,
+        "RoleBinding must target the mover role"
+    );
+
+    // 4. Missing creds → clear, actionable CredentialsAvailable=False condition.
+    wait_condition(&backups, "e2e-xns-backup", "CredentialsAvailable", "False")
+        .await
+        .expect("Backup should report CredentialsAvailable=False when the Secret is absent");
+    let s = status_json(&backups, "e2e-xns-backup").await;
+    let cond = s
+        .get("conditions")
+        .and_then(|c| c.as_array())
+        .and_then(|a| {
+            a.iter()
+                .find(|c| c.get("type").and_then(|t| t.as_str()) == Some("CredentialsAvailable"))
+        })
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    assert_eq!(
+        cond.get("reason").and_then(|r| r.as_str()),
+        Some("MissingCredentialsSecret")
+    );
+    let msg = cond.get("message").and_then(|m| m.as_str()).unwrap_or("");
+    assert!(
+        msg.contains(CREDS_SECRET) && msg.contains(APP_NS) && msg.contains("envFrom"),
+        "condition message must name the Secret, the namespace, and explain envFrom; got: {msg}"
+    );
+
+    // 5. Place the Secret in the workload namespace → the condition clears to True.
+    apply_secret(
+        &client,
+        APP_NS,
+        CREDS_SECRET,
+        &[("KOPIA_PASSWORD", "e2e-test-password-123")],
+    )
+    .await
+    .expect("apply creds Secret into workload namespace");
+    wait_condition(&backups, "e2e-xns-backup", "CredentialsAvailable", "True")
+        .await
+        .expect("Backup CredentialsAvailable should clear once the Secret is present");
+
+    // Cleanup: the cluster-scoped repo + the workload namespace (GCs its CRs).
+    let _ = crepos
+        .delete("e2e-xns-crepo", &DeleteParams::default())
+        .await;
+    let nss: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
+    let _ = nss.delete(APP_NS, &DeleteParams::default()).await;
+}
+
+/// A `Backup` JSON in an explicit namespace (cross-namespace scenarios).
+fn backup_json_ns(name: &str, config: &str, ns: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "Backup",
+        "metadata": { "name": name, "namespace": ns },
+        "spec": { "configRef": { "name": config }, "deletionPolicy": "Retain" }
+    })
 }
 
 /// A BackupSchedule with an every-minute cron creates a scheduled Backup CR.

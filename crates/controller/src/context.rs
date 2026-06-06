@@ -134,8 +134,18 @@ pub struct Context {
     /// ServiceAccount the mover `Job` pods run as (configurable via
     /// `KOPIUR_MOVER_SERVICE_ACCOUNT`). The mover PATCHes the owning CR's
     /// `.status`, so this SA must be bound to the operator's status-patch rules.
-    /// `None` falls back to the namespace `default` SA.
+    /// `None` falls back to the namespace `default` SA (and no minting).
     pub mover_service_account: Option<String>,
+    /// Name of the mover `ClusterRole`/`Role` (shipped by the chart) that the
+    /// controller-minted per-namespace mover `RoleBinding` references
+    /// (`KOPIUR_MOVER_CLUSTERROLE`, default [`crate::config::DEFAULT_MOVER_NAME`]).
+    /// Only used when [`mover_service_account`](Self::mover_service_account) is set,
+    /// since minting is gated on having a concrete mover SA name.
+    pub mover_clusterrole: String,
+    /// `roleRef.kind` for the minted mover `RoleBinding` (`ClusterRole` for a
+    /// cluster install, `Role` for a namespaced one — `KOPIUR_MOVER_ROLE_KIND`,
+    /// default [`crate::config::DEFAULT_MOVER_ROLE_KIND`]).
+    pub mover_role_kind: String,
     /// Env the controller passes through to every mover `Job`: OTLP
     /// (`OTEL_EXPORTER_OTLP_*`, only when a collector is configured) plus logging
     /// (`RUST_LOG`, `KOPIUR_LOG_FORMAT`, whenever set) so movers inherit the
@@ -169,6 +179,8 @@ impl Context {
         recorder: Recorder,
         mover_image: String,
         mover_service_account: Option<String>,
+        mover_clusterrole: String,
+        mover_role_kind: String,
         mover_env_passthrough: Vec<(String, String)>,
         maintenance_store: Store<Maintenance>,
         maintenance_synced: Arc<AtomicBool>,
@@ -181,6 +193,8 @@ impl Context {
             recorder,
             mover_image,
             mover_service_account,
+            mover_clusterrole,
+            mover_role_kind,
             mover_env_passthrough,
             maintenance_store,
             maintenance_synced,

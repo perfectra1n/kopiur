@@ -60,11 +60,21 @@ spec:
               value: {{ include "kopiur.image" (dict "root" $ "img" .Values.image.mover) | quote }}
             - name: KOPIUR_MOVER_PULL_POLICY
               value: {{ .Values.image.mover.pullPolicy | quote }}
-            # The mover PATCHes Backup/Restore .status, so its Job pods run as the
-            # operator ServiceAccount (bound to the status-patch RBAC), not the
-            # namespace default SA.
+            # The mover PATCHes Backup/Restore .status, so its Job pods run as a
+            # dedicated least-privilege ServiceAccount (NOT the operator SA and NOT
+            # the namespace default). The controller mints this SA + a RoleBinding to
+            # the mover role below in each Job's (workload) namespace, since a mover
+            # Job runs in the workload namespace where the operator SA does not exist.
             - name: KOPIUR_MOVER_SERVICE_ACCOUNT
-              value: {{ include "kopiur.serviceAccountName" . | quote }}
+              value: {{ include "kopiur.moverName" . | quote }}
+            # Name of the mover ClusterRole/Role (shipped by this chart) that the
+            # controller-minted per-namespace RoleBinding references, and its kind:
+            # a cluster install shares one ClusterRole bound per namespace; a
+            # namespaced install uses a Role in the operator namespace.
+            - name: KOPIUR_MOVER_CLUSTERROLE
+              value: {{ include "kopiur.moverName" . | quote }}
+            - name: KOPIUR_MOVER_ROLE_KIND
+              value: {{ eq .Values.installScope "cluster" | ternary "ClusterRole" "Role" | quote }}
             {{- include "kopiur.otlpEnv" . | nindent 12 }}
             {{- with .Values.controller.extraEnv }}
             {{- toYaml . | nindent 12 }}

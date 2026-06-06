@@ -357,6 +357,34 @@ async fn bootstrap_object_store(
         .unwrap_or(false);
     let work_spec = bootstrap_work_spec(backend, name, namespace, create_enabled, true);
     let creds_secrets = io::mover_creds_secrets(backend, &repo.spec.encryption);
+    // Mint the mover SA + RoleBinding in the Repository's namespace and confirm the
+    // credential Secret is present before launching the bootstrap Job (ADR §4.12).
+    if let Some(sa) = ctx.mover_service_account.as_deref() {
+        io::ensure_mover_rbac(
+            &ctx.client,
+            namespace,
+            sa,
+            &ctx.mover_role_kind,
+            &ctx.mover_clusterrole,
+        )
+        .await?;
+    }
+    io::ensure_creds_present(
+        &ctx.client,
+        namespace,
+        &io::CredsContext {
+            secret_names: &creds_secrets,
+            repo_kind: "Repository",
+            repo_name: name,
+            repo_secret_namespace: repo
+                .spec
+                .encryption
+                .password_secret_ref
+                .namespace
+                .as_deref(),
+        },
+    )
+    .await?;
     let owner = io::owner_ref_for(repo, "Repository")?;
     let mut labels = BTreeMap::new();
     labels.insert(

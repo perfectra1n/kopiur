@@ -69,6 +69,13 @@ pub const REPOSITORY_BOOTSTRAPPED_CONDITION: &str = "Bootstrapped";
 /// `action` for credential-class failures (`AccessDenied`/`AuthFailure`): check
 /// the repository credentials Secret and bucket/path grants.
 pub const CHECK_CREDENTIALS_ACTION: &str = "CheckCredentials";
+
+/// `Backup`/`Restore` condition surfaced when the mover Job's credential Secret is
+/// absent from the workload namespace — `False` carries the actionable message
+/// (which Secret, which namespace, why, and how to fix). ADR §4.12.
+pub const CREDENTIALS_AVAILABLE_CONDITION: &str = "CredentialsAvailable";
+/// `reason`/Event reason for [`CREDENTIALS_AVAILABLE_CONDITION`] = `False`.
+pub const MISSING_CREDENTIALS_REASON: &str = "MissingCredentialsSecret";
 /// `action` for a `PermissionDenied` failure: make the repository path/PVC
 /// writable by the operator's UID.
 pub const CHECK_PERMISSIONS_ACTION: &str = "CheckPermissions";

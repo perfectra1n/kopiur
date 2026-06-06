@@ -72,8 +72,16 @@ rules:
     resources:
       - volumegroupsnapshots
     verbs: [get, list, watch, create, delete]
+  # Per-namespace mover RBAC minted by the controller (§4.12): a least-privilege
+  # `kopiur-mover` ServiceAccount + a RoleBinding (to the mover ClusterRole) created
+  # in each mover Job's namespace. Without these the mover Job's SA does not exist in
+  # the workload namespace and the Job never schedules a pod.
   - apiGroups: [""]
     resources:
       - serviceaccounts
     verbs: [create, get]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - rolebindings
+    verbs: [get, create, update, patch]
 {{- end }}

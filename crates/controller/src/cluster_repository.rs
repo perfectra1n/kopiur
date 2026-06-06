@@ -346,6 +346,20 @@ async fn bootstrap_cluster_object_store(
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
     };
+    // The bootstrap Job runs in the credentials Secret's namespace (`job_ns`), where
+    // the Secret is present by construction — but the mover SA must still be minted
+    // there (it is NOT the operator SA). Ensure the mover SA + RoleBinding exist
+    // before launching (ADR §4.12).
+    if let Some(sa) = ctx.mover_service_account.as_deref() {
+        io::ensure_mover_rbac(
+            &ctx.client,
+            &job_ns,
+            sa,
+            &ctx.mover_role_kind,
+            &ctx.mover_clusterrole,
+        )
+        .await?;
+    }
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
     io::apply_mover_objects(&ctx.client, &job_ns, &job_name, &cm, &job).await?;

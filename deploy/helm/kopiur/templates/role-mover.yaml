@@ -1,0 +1,31 @@
+{{- if eq .Values.installScope "namespaced" -}}
+# Least-privilege mover Role (ADR §4.12, namespaced-install mode). RBAC rules SYNCED
+# from `cargo xtask gen-rbac` (deploy/rbac/mover-role.yaml) — that xtask is the
+# SOURCE OF TRUTH; edit it and re-run, then re-sync these rules.
+#
+# Same minimal rules as the cluster-scoped mover ClusterRole; the controller mints
+# the `kopiur-mover` ServiceAccount + a RoleBinding to this Role in the workload
+# namespace at runtime. `clusterrepositories/status` is retained for parity but inert
+# in a Role (ClusterRepository is only reconciled in installScope=cluster).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kopiur.moverName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kopiur.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - kopiur.home-operations.com
+    resources:
+      - backups/status
+      - restores/status
+      - repositories/status
+      - clusterrepositories/status
+      - maintenances/status
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources:
+      - configmaps
+    verbs: [get, patch]
+{{- end }}
