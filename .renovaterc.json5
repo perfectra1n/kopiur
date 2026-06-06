@@ -1,17 +1,4 @@
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
   extends: ["local>home-operations/renovate-config"],
-  packageRules: [
-    {
-      description: "Disable Auto Merge",
-      matchManagers: ["mise"],
-      matchPackageNames: [
-        "rust-lang/rust",
-        "kopia/kopia",
-        "EmbarkStudios/cargo-deny",
-        "taiki-e/cargo-llvm-cov",
-      ],
-      automerge: false,
-    },
-  ],
 }
