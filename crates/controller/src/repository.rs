@@ -38,7 +38,7 @@ use crate::consts::{
     SNAPSHOT_ID_LABEL,
 };
 use crate::context::Context;
-use crate::error::{Error, Result, error_policy_for};
+use crate::error::{Error, Result, TERMINAL_HEARTBEAT, error_policy_for};
 use crate::io;
 use crate::jobs::{self, JobLimits, MoverJobInputs};
 
@@ -153,6 +153,21 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
     // a short Job — documented as a follow-up below.
     match &repo.spec.backend {
         Backend::Filesystem(fs) => {
+            // Hard-stop: if we already terminally failed to connect for THIS spec
+            // generation, don't re-read the password Secret or re-hit the backend.
+            // A non-retryable failure (e.g. PermissionDenied on the NFS export)
+            // cannot succeed until the user edits the CR — which bumps
+            // `metadata.generation` and reopens this gate. The 30 min heartbeat
+            // keeps us resilient to a watch desync without spamming the backend or
+            // the logs (this wake does no IO and logs nothing).
+            if io::is_terminal_for_generation(
+                repo.status.as_ref().and_then(|s| s.phase),
+                repo.status.as_ref().and_then(|s| s.observed_generation),
+                repo.metadata.generation,
+            ) {
+                return Ok(Action::requeue(TERMINAL_HEARTBEAT));
+            }
+
             let creds = io::repo_credentials(&repo.spec.encryption);
             let password = io::read_repo_password(&ctx.client, &namespace, &creds).await?;
             let client = ctx.kopia.build([("KOPIA_PASSWORD".to_string(), password)]);
@@ -186,21 +201,51 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
                     };
                 if let Err(e) = outcome {
                     let class = e.class();
-                    let message = e.to_string();
-                    let conditions = bootstrap_condition(repo, false, class.as_str(), &message);
-                    io::patch_status(
+                    let retryable = class.is_retryable();
+                    // Reserve `Failed` (terminal, gated) for non-retryable classes;
+                    // a retryable backend blip is `Degraded` and keeps retrying on
+                    // the 30 s transient cadence.
+                    let phase = if retryable { "Degraded" } else { "Failed" };
+                    // Stable, volatile-free condition message — the full stderr (with
+                    // its per-attempt temp filename) goes to the Event only, so the
+                    // persisted status is byte-identical across repeated failures and
+                    // the guarded write below becomes a true no-op.
+                    let conditions =
+                        bootstrap_condition(repo, false, class.as_str(), class.summary());
+                    let current = serde_json::to_value(&repo.status).ok();
+                    let wrote = io::patch_status_if_changed(
                         &api,
                         &name,
+                        current.as_ref(),
                         serde_json::json!({
-                            "phase": "Failed",
+                            "phase": phase,
                             "backend": "Filesystem",
+                            "observedGeneration": repo.metadata.generation,
                             "conditions": conditions,
                         }),
                     )
                     .await?;
-                    io::publish_backend_failure(ctx, &repo.object_ref(&()), &name, class, &message)
+                    // Fire the Warning Event only on a real transition (not on every
+                    // requeue) — it carries the full stderr for `kubectl describe`.
+                    if wrote {
+                        io::publish_backend_failure(
+                            ctx,
+                            &repo.object_ref(&()),
+                            &name,
+                            class,
+                            &e.to_string(),
+                        )
                         .await;
-                    return Err(Error::Kopia(e));
+                    }
+                    return if retryable {
+                        // Transient: surface as an Err so error_policy requeues at
+                        // the 30 s cadence and we keep trying.
+                        Err(Error::Kopia(e))
+                    } else {
+                        // Terminal: status is written; stop. The gate above makes
+                        // subsequent wakes no-ops until the spec changes.
+                        Ok(Action::requeue(TERMINAL_HEARTBEAT))
+                    };
                 }
             }
 
@@ -213,6 +258,7 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
                     "phase": "Ready",
                     "backend": "Filesystem",
                     "uniqueId": status.unique_id_hex,
+                    "observedGeneration": repo.metadata.generation,
                 }),
             )
             .await?;
@@ -452,25 +498,33 @@ async fn finalize_bootstrap(
             .map(|f| (f.kopia_error_class.as_str(), f.message.as_str()))
             .unwrap_or(("Unknown", "repository bootstrap failed"));
         let conditions = bootstrap_condition(repo, false, class, message);
-        io::patch_status(
+        // The Job result (and its message) is persisted, so re-reads are stable —
+        // but guard the write anyway so a re-confirmed failure fires the Event and
+        // warn log only on the real transition, not on every 120 s re-read.
+        let current = serde_json::to_value(&repo.status).ok();
+        let wrote = io::patch_status_if_changed(
             api,
             name,
+            current.as_ref(),
             serde_json::json!({
                 "phase": "Failed",
                 "backend": backend.kind_str(),
+                "observedGeneration": repo.metadata.generation,
                 "conditions": conditions,
             }),
         )
         .await?;
-        io::publish_backend_failure(
-            ctx,
-            &repo.object_ref(&()),
-            name,
-            KopiaErrorClass::from_label(class),
-            message,
-        )
-        .await;
-        tracing::warn!(repo = %name, class, "repository bootstrap failed");
+        if wrote {
+            io::publish_backend_failure(
+                ctx,
+                &repo.object_ref(&()),
+                name,
+                KopiaErrorClass::from_label(class),
+                message,
+            )
+            .await;
+            tracing::warn!(repo = %name, class, "repository bootstrap failed");
+        }
         return Ok(Action::requeue(Duration::from_secs(120)));
     }
 

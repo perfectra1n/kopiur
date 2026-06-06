@@ -171,18 +171,17 @@ async fn reconcile_inner(config: &BackupConfig, ctx: &Context) -> Result<Action>
             }
         }
         let active = backups.len().saturating_sub(to_delete.len());
-        io::patch_status(
-            &api,
-            &name,
-            serde_json::json!({
-                "retention": {
-                    "activeBackupCount": active as i64,
-                    "lastPruneAt": Utc::now().to_rfc3339(),
-                    "lastPruneDeleted": to_delete.len() as i64,
-                }
-            }),
-        )
-        .await?;
+        // Only stamp `lastPruneAt`/`lastPruneDeleted` when a prune actually
+        // happened. Writing `now()` on every reconcile made the status differ each
+        // pass → resourceVersion bump → watch event → self-triggered reconcile (the
+        // same hot-loop class as the repo bug). The bare `activeBackupCount` write
+        // is deterministic, so an unchanged value is a no-op patch at the apiserver.
+        let mut retention = serde_json::json!({ "activeBackupCount": active as i64 });
+        if !to_delete.is_empty() {
+            retention["lastPruneAt"] = serde_json::json!(Utc::now().to_rfc3339());
+            retention["lastPruneDeleted"] = serde_json::json!(to_delete.len() as i64);
+        }
+        io::patch_status(&api, &name, serde_json::json!({ "retention": retention })).await?;
     }
 
     Ok(Action::requeue(std::time::Duration::from_secs(300)))

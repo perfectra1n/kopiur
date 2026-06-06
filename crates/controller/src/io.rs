@@ -66,6 +66,79 @@ where
     Ok(())
 }
 
+/// Whether merge-patching `desired` over `current` would be a no-op — i.e. every
+/// key in `desired` already holds the same value in `current`. `current` is the
+/// object's existing `.status` serialized to JSON (or `None` when there is no
+/// status yet, which is never a no-op).
+///
+/// This is the predicate behind [`patch_status_if_changed`]. It deliberately only
+/// inspects the keys present in `desired` (a strategic merge never removes the
+/// keys it omits), so a reconciler that patches a *subset* of status compares only
+/// that subset.
+pub fn status_patch_is_noop(
+    current: Option<&serde_json::Value>,
+    desired: &serde_json::Value,
+) -> bool {
+    let (Some(current), Some(desired_obj)) = (current, desired.as_object()) else {
+        return false;
+    };
+    let Some(current_obj) = current.as_object() else {
+        return false;
+    };
+    desired_obj
+        .iter()
+        .all(|(k, v)| current_obj.get(k) == Some(v))
+}
+
+/// Idempotent status patch: skip the PATCH entirely when `desired` matches the
+/// object's existing status (`current`), returning `false`; otherwise merge-patch
+/// and return `true`.
+///
+/// This is what breaks the reconcile hot-loop: a controller that re-writes an
+/// unchanged `Failed` status would bump `resourceVersion`, emit a watch event, and
+/// re-trigger itself in a tight loop. Skipping the no-op write means no event, no
+/// re-trigger. For this to hold, the `desired` status must be byte-stable across
+/// repeated identical failures — hence the condition message comes from
+/// [`kopiur_kopia::KopiaErrorClass::summary`] (volatile-free) and
+/// [`upsert_condition`] preserves `lastTransitionTime` while the status is
+/// unchanged. The returned bool lets the caller fire its Warning Event only on a
+/// real transition.
+pub async fn patch_status_if_changed<K>(
+    api: &Api<K>,
+    name: &str,
+    current: Option<&serde_json::Value>,
+    desired: serde_json::Value,
+) -> Result<bool>
+where
+    K: Resource + DeserializeOwned + Clone + std::fmt::Debug,
+{
+    if status_patch_is_noop(current, &desired) {
+        return Ok(false);
+    }
+    patch_status(api, name, desired).await?;
+    Ok(true)
+}
+
+/// Whether `status` already records a **terminal** `Failed` for the given spec
+/// `generation` — i.e. the reconciler hard-stopped on a non-retryable failure and
+/// nothing in the spec has changed since (`observedGeneration == generation`).
+///
+/// A repository reconciler checks this before re-reading secrets or re-connecting
+/// to the backend: once terminal for the current generation, it returns a quiet
+/// heartbeat instead of re-hitting a backend that cannot succeed until the user
+/// edits the CR (which bumps `metadata.generation` and reopens the gate). Only
+/// `Failed` is treated as terminal — `Degraded` (a *retryable* failure) keeps
+/// retrying on the transient cadence.
+pub fn is_terminal_for_generation(
+    phase: Option<kopiur_api::RepositoryPhase>,
+    observed_generation: Option<i64>,
+    generation: Option<i64>,
+) -> bool {
+    generation.is_some()
+        && phase == Some(kopiur_api::RepositoryPhase::Failed)
+        && observed_generation == generation
+}
+
 /// Build an [`OwnerReference`] to a kopiur CR `obj` of the given `kind`.
 /// `controller: true`, `blockOwnerDeletion: false` so children (Job/ConfigMap)
 /// are reaped by GC with the CR but never block its deletion (§4.10).
@@ -1331,6 +1404,105 @@ mod tests {
             m.last_transition_time, t0,
             "timestamp did not advance on flip"
         );
+    }
+
+    // --- idempotent status writes (the hot-loop fix) -------------------------
+
+    #[test]
+    fn status_patch_noop_when_subset_unchanged() {
+        let current = serde_json::json!({
+            "phase": "Failed",
+            "backend": "Filesystem",
+            "observedGeneration": 3,
+            "conditions": [{ "type": "Bootstrapped", "status": "False", "reason": "PermissionDenied" }],
+            "uniqueId": "abc",            // an extra key the desired doesn't touch
+        });
+        // Desired is a subset that matches → no-op (a merge patch never removes the
+        // keys it omits, so we only compare the keys we'd write).
+        let desired = serde_json::json!({
+            "phase": "Failed",
+            "backend": "Filesystem",
+            "observedGeneration": 3,
+            "conditions": [{ "type": "Bootstrapped", "status": "False", "reason": "PermissionDenied" }],
+        });
+        assert!(status_patch_is_noop(Some(&current), &desired));
+    }
+
+    #[test]
+    fn status_patch_not_noop_on_reason_or_generation_or_absent() {
+        let current = serde_json::json!({
+            "phase": "Failed",
+            "observedGeneration": 3,
+            "conditions": [{ "type": "Bootstrapped", "status": "False", "reason": "PermissionDenied" }],
+        });
+        // A new generation must write (the spec changed → re-attempt).
+        let newer_gen = serde_json::json!({ "phase": "Failed", "observedGeneration": 4 });
+        assert!(!status_patch_is_noop(Some(&current), &newer_gen));
+        // A different condition reason must write.
+        let new_reason = serde_json::json!({
+            "conditions": [{ "type": "Bootstrapped", "status": "False", "reason": "AuthFailure" }],
+        });
+        assert!(!status_patch_is_noop(Some(&current), &new_reason));
+        // No status at all (first reconcile) is never a no-op.
+        assert!(!status_patch_is_noop(None, &newer_gen));
+        assert!(!status_patch_is_noop(
+            Some(&serde_json::Value::Null),
+            &newer_gen
+        ));
+    }
+
+    #[test]
+    fn status_patch_noop_ignores_volatile_message_only_when_message_matches() {
+        // The condition message is now class-derived (stable). If two desired
+        // payloads carry the SAME stable message + same reason/generation, the
+        // second is a no-op. (A volatile message would differ here and force a
+        // write — which is exactly the loop we removed by switching to summary().)
+        let stable = "repository path is not writable by the operator's UID";
+        let current = serde_json::json!({
+            "phase": "Failed",
+            "observedGeneration": 2,
+            "conditions": [{ "type": "Bootstrapped", "status": "False", "reason": "PermissionDenied", "message": stable }],
+        });
+        let desired = serde_json::json!({
+            "phase": "Failed",
+            "observedGeneration": 2,
+            "conditions": [{ "type": "Bootstrapped", "status": "False", "reason": "PermissionDenied", "message": stable }],
+        });
+        assert!(status_patch_is_noop(Some(&current), &desired));
+    }
+
+    #[test]
+    fn terminal_gate_only_on_failed_at_current_generation() {
+        use kopiur_api::RepositoryPhase;
+        // Failed at the current generation → terminal (hard-stop).
+        assert!(is_terminal_for_generation(
+            Some(RepositoryPhase::Failed),
+            Some(5),
+            Some(5)
+        ));
+        // Failed but the spec moved on (gen bumped) → gate reopens, re-attempt.
+        assert!(!is_terminal_for_generation(
+            Some(RepositoryPhase::Failed),
+            Some(5),
+            Some(6)
+        ));
+        // Degraded (a retryable failure) is never terminal — keep retrying.
+        assert!(!is_terminal_for_generation(
+            Some(RepositoryPhase::Degraded),
+            Some(5),
+            Some(5)
+        ));
+        // No generation yet / no observed generation → not terminal.
+        assert!(!is_terminal_for_generation(
+            Some(RepositoryPhase::Failed),
+            None,
+            Some(5)
+        ));
+        assert!(!is_terminal_for_generation(
+            Some(RepositoryPhase::Failed),
+            Some(5),
+            None
+        ));
     }
 
     // --- managed Maintenance projection (ADR §3.7, default-on) ---------------

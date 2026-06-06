@@ -17,6 +17,14 @@ use crate::context::Context;
 pub const TRANSIENT_BACKOFF: Duration = Duration::from_secs(30);
 /// Maximum backoff for structural errors, clamped per ADR §5.2.
 pub const STRUCTURAL_BACKOFF: Duration = Duration::from_secs(300);
+/// Heartbeat interval for *terminal* errors — a permanent failure (e.g. filesystem
+/// `PermissionDenied`, wrong repository password) that will not succeed on retry
+/// without a spec change. We do NOT use a pure [`Action::await_change`] because the
+/// kube maintainers warn it can miss updates on a watch desync; instead we requeue
+/// on a long, deliberately quiet interval. The reconciler's terminal gate makes the
+/// wake a no-op (it re-checks `observedGeneration` and returns without backend IO or
+/// an error log) until the spec actually changes.
+pub const TERMINAL_HEARTBEAT: Duration = Duration::from_secs(1800);
 
 /// All errors a reconciler can surface. The exhaustive `class()` mapping is
 /// what drives requeue timing — a new variant must be classified to compile.
@@ -54,13 +62,20 @@ pub enum Error {
     Invariant(String),
 }
 
-/// Transient vs structural — the classification that picks the requeue delay.
+/// How a reconcile error should be re-driven — the classification that picks the
+/// requeue behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorClass {
-    /// Short retry (kopia/API/webhook outage, missing dependency).
+    /// Short retry (kopia/API/webhook outage, missing dependency, a *retryable*
+    /// kopia class).
     Transient,
     /// Long retry, clamped (a spec/logic bug needing human intervention).
     Structural,
+    /// A permanent failure that will not succeed on retry without a spec change
+    /// (a *non-retryable* kopia class: `PermissionDenied`, `AuthFailure`,
+    /// `AccessDenied`, `NotFound`, `Unknown`). Re-driven only on a long quiet
+    /// heartbeat so we stop hammering the backend and flooding the logs.
+    Terminal,
 }
 
 impl ErrorClass {
@@ -69,14 +84,17 @@ impl ErrorClass {
         match self {
             ErrorClass::Transient => "transient",
             ErrorClass::Structural => "structural",
+            ErrorClass::Terminal => "terminal",
         }
     }
 
-    /// The requeue backoff for this class (already clamped at 5 min). ADR §5.2.
-    pub fn backoff(self) -> Duration {
+    /// The requeue [`Action`] for this class. kube applies the returned delay
+    /// verbatim (no implicit backoff), so this is the single source of cadence.
+    pub fn action(self) -> Action {
         match self {
-            ErrorClass::Transient => TRANSIENT_BACKOFF,
-            ErrorClass::Structural => STRUCTURAL_BACKOFF,
+            ErrorClass::Transient => Action::requeue(TRANSIENT_BACKOFF),
+            ErrorClass::Structural => Action::requeue(STRUCTURAL_BACKOFF),
+            ErrorClass::Terminal => Action::requeue(TERMINAL_HEARTBEAT),
         }
     }
 }
@@ -84,9 +102,22 @@ impl ErrorClass {
 impl Error {
     /// Classify this error. Exhaustive `match` — a new variant cannot compile
     /// until it is given a class (the type-safety thesis, ADR §5.5).
+    ///
+    /// A kopia error is split on its own retry hint
+    /// ([`kopiur_kopia::KopiaErrorClass::is_retryable`]): a transient backend blip
+    /// (unreachable, locked) is [`Transient`](ErrorClass::Transient) and worth a
+    /// 30 s retry, but a permanent failure (permission denied, wrong password) is
+    /// [`Terminal`](ErrorClass::Terminal) — retrying it on a tight loop only spams.
     pub fn class(&self) -> ErrorClass {
         match self {
-            Error::Kube(_) | Error::Kopia(_) | Error::MissingDependency(_) => ErrorClass::Transient,
+            Error::Kube(_) | Error::MissingDependency(_) => ErrorClass::Transient,
+            Error::Kopia(e) => {
+                if e.class().is_retryable() {
+                    ErrorClass::Transient
+                } else {
+                    ErrorClass::Terminal
+                }
+            }
             Error::Validation(_)
             | Error::Serialization(_)
             | Error::InvalidSchedule(_)
@@ -112,24 +143,50 @@ pub fn error_policy_for(kind: &str, err: &Error, ctx: &Context) -> Action {
         error = %err,
         "reconcile error; requeueing"
     );
-    Action::requeue(class.backoff())
+    class.action()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use kopiur_kopia::{KopiaError, KopiaErrorClass};
+
     #[test]
-    fn kube_and_kopia_and_missing_are_transient() {
+    fn kube_and_missing_are_transient() {
         assert_eq!(
             Error::MissingDependency("repo".into()).class(),
             ErrorClass::Transient
         );
-        // KopiaError construction without a process: use the EmptyOutput variant.
-        let kerr = kopiur_kopia::KopiaError::EmptyOutput {
+    }
+
+    #[test]
+    fn kopia_class_follows_retryability() {
+        // A retryable kopia class (backend unreachable / locked) is Transient —
+        // worth a 30 s retry.
+        let retryable = KopiaError::NonZeroExit {
+            args: "repository connect".into(),
+            code: Some(1),
+            class: KopiaErrorClass::RepositoryUnavailable,
+            stderr_tail: "dial tcp: connection refused".into(),
+        };
+        assert_eq!(Error::Kopia(retryable).class(), ErrorClass::Transient);
+
+        // A non-retryable kopia class (filesystem permission denied — the reported
+        // bug) is Terminal: hard-stop, do NOT requeue on a tight loop.
+        let terminal = KopiaError::NonZeroExit {
+            args: "repository connect".into(),
+            code: Some(1),
+            class: KopiaErrorClass::PermissionDenied,
+            stderr_tail: "open /repo/.shards.tmp.deadbeef: permission denied".into(),
+        };
+        assert_eq!(Error::Kopia(terminal).class(), ErrorClass::Terminal);
+
+        // EmptyOutput maps to Unknown, which is non-retryable → Terminal.
+        let unknown = KopiaError::EmptyOutput {
             context: "x".into(),
         };
-        assert_eq!(Error::Kopia(kerr).class(), ErrorClass::Transient);
+        assert_eq!(Error::Kopia(unknown).class(), ErrorClass::Terminal);
     }
 
     #[test]
@@ -149,10 +206,19 @@ mod tests {
     }
 
     #[test]
-    fn backoff_is_30s_transient_and_5m_structural_clamp() {
-        assert_eq!(ErrorClass::Transient.backoff(), Duration::from_secs(30));
-        assert_eq!(ErrorClass::Structural.backoff(), Duration::from_secs(300));
-        // Structural backoff is the documented 5-minute clamp.
-        assert!(ErrorClass::Structural.backoff() <= Duration::from_secs(300));
+    fn action_cadence_per_class() {
+        assert_eq!(
+            ErrorClass::Transient.action(),
+            Action::requeue(Duration::from_secs(30))
+        );
+        assert_eq!(
+            ErrorClass::Structural.action(),
+            Action::requeue(Duration::from_secs(300))
+        );
+        // The whole point of the fix: a terminal error does NOT requeue at the
+        // transient 30 s cadence — it goes quiet on the 30 min heartbeat.
+        let terminal = ErrorClass::Terminal.action();
+        assert_eq!(terminal, Action::requeue(Duration::from_secs(1800)));
+        assert_ne!(terminal, Action::requeue(Duration::from_secs(30)));
     }
 }

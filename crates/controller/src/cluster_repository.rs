@@ -31,7 +31,7 @@ use kopiur_mover::workspec::{
 use crate::backup::{backend_to_repository_connect, mover_pull_policy_pub};
 use crate::consts::{API_VERSION, REPOSITORY_BOOTSTRAPPED_CONDITION};
 use crate::context::Context;
-use crate::error::{Error, Result, error_policy_for};
+use crate::error::{Error, Result, TERMINAL_HEARTBEAT, error_policy_for};
 use crate::io;
 use crate::jobs::{self, JobLimits, MoverJobInputs};
 
@@ -126,6 +126,17 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
     // refs MUST carry an explicit namespace (webhook-enforced).
     match &repo.spec.backend {
         Backend::Filesystem(fs) => {
+            // Hard-stop: see the namespaced Repository reconciler for the rationale.
+            // Once terminally Failed for this spec generation, don't re-read secrets
+            // or re-hit the backend until the spec changes (bumps generation).
+            if io::is_terminal_for_generation(
+                repo.status.as_ref().and_then(|s| s.phase),
+                repo.status.as_ref().and_then(|s| s.observed_generation),
+                repo.metadata.generation,
+            ) {
+                return Ok(Action::requeue(TERMINAL_HEARTBEAT));
+            }
+
             let creds = io::repo_credentials(&repo.spec.encryption);
             let secret_ns = creds.namespace.clone().ok_or_else(|| {
                 Error::Validation(
@@ -160,22 +171,39 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
                     };
                 if let Err(e) = outcome {
                     let class = e.class();
-                    let message = e.to_string();
+                    let retryable = class.is_retryable();
+                    let phase = if retryable { "Degraded" } else { "Failed" };
+                    // Stable, volatile-free condition message; full stderr → Event.
                     let conditions =
-                        cluster_bootstrap_condition(repo, false, class.as_str(), &message);
-                    io::patch_status(
+                        cluster_bootstrap_condition(repo, false, class.as_str(), class.summary());
+                    let current = serde_json::to_value(&repo.status).ok();
+                    let wrote = io::patch_status_if_changed(
                         &api,
                         &name,
+                        current.as_ref(),
                         serde_json::json!({
-                            "phase": "Failed",
+                            "phase": phase,
                             "backend": "Filesystem",
+                            "observedGeneration": repo.metadata.generation,
                             "conditions": conditions,
                         }),
                     )
                     .await?;
-                    io::publish_backend_failure(ctx, &repo.object_ref(&()), &name, class, &message)
+                    if wrote {
+                        io::publish_backend_failure(
+                            ctx,
+                            &repo.object_ref(&()),
+                            &name,
+                            class,
+                            &e.to_string(),
+                        )
                         .await;
-                    return Err(Error::Kopia(e));
+                    }
+                    return if retryable {
+                        Err(Error::Kopia(e))
+                    } else {
+                        Ok(Action::requeue(TERMINAL_HEARTBEAT))
+                    };
                 }
             }
             let status = client.repository_status().await?;
@@ -188,6 +216,7 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
                     "backend": "Filesystem",
                     "uniqueId": status.unique_id_hex,
                     "allowedNamespaceCount": allowed_count,
+                    "observedGeneration": repo.metadata.generation,
                 }),
             )
             .await?;

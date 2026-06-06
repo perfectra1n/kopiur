@@ -136,6 +136,18 @@ async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
     let name = restore.name_any();
     let api: Api<Restore> = Api::namespaced(ctx.client.clone(), &namespace);
 
+    // Already terminal: a Restore is one-shot. Once Completed/Failed there is
+    // nothing left to do until the spec changes, so don't re-resolve, re-pin a
+    // fresh timestamp, or re-write the phase — each of which would churn status and
+    // self-trigger another reconcile (the same hot-loop class as the repo bug).
+    // Mirrors the Backup reconciler's terminal discipline.
+    if matches!(
+        restore.status.as_ref().and_then(|s| s.phase),
+        Some(RestorePhase::Completed) | Some(RestorePhase::Failed)
+    ) {
+        return Ok(Action::requeue(std::time::Duration::from_secs(600)));
+    }
+
     let state = populator_state(restore.spec.target.is_some());
     let on_missing = effective_on_missing(
         restore
@@ -190,15 +202,25 @@ async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
         }
     };
 
-    io::patch_status(
-        &api,
-        &name,
-        serde_json::json!({
-            "phase": "Resolving",
-            "resolved": { "pinnedAt": chrono::Utc::now().to_rfc3339() },
-        }),
-    )
-    .await?;
+    // Pin the resolution timestamp exactly once. `resolved` is "pinned at
+    // admission; never re-resolved" (ADR §4.6) — re-writing `now()` on every
+    // reconcile churned status and self-triggered the loop.
+    if restore
+        .status
+        .as_ref()
+        .and_then(|s| s.resolved.as_ref())
+        .is_none()
+    {
+        io::patch_status(
+            &api,
+            &name,
+            serde_json::json!({
+                "phase": "Resolving",
+                "resolved": { "pinnedAt": chrono::Utc::now().to_rfc3339() },
+            }),
+        )
+        .await?;
+    }
 
     match state {
         PopulatorState::DirectTarget => {
@@ -242,20 +264,32 @@ async fn drive_direct_restore(
     use k8s_openapi::api::batch::v1::Job;
     let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), namespace);
     if let Some(job) = job_api.get_opt(name).await? {
+        // Guard each phase write with a phase-equality check so a tracked Job that
+        // sits terminal (or keeps running) doesn't re-patch an identical phase on
+        // every requeue and self-trigger. Mirrors the Backup reconciler.
+        let phase = restore.status.as_ref().and_then(|s| s.phase);
         return match crate::backup::job_terminal_state(&job) {
             Some(true) => {
                 if let Some(secs) = restore_job_duration_seconds(&job) {
                     ctx.metrics.set_restore_duration(namespace, name, secs);
                 }
-                io::patch_status(api, name, serde_json::json!({ "phase": "Completed" })).await?;
+                if phase != Some(RestorePhase::Completed) {
+                    io::patch_status(api, name, serde_json::json!({ "phase": "Completed" }))
+                        .await?;
+                }
                 Ok(Action::requeue(std::time::Duration::from_secs(600)))
             }
             Some(false) => {
-                io::patch_status(api, name, serde_json::json!({ "phase": "Failed" })).await?;
+                if phase != Some(RestorePhase::Failed) {
+                    io::patch_status(api, name, serde_json::json!({ "phase": "Failed" })).await?;
+                }
                 Ok(Action::requeue(std::time::Duration::from_secs(120)))
             }
             None => {
-                io::patch_status(api, name, serde_json::json!({ "phase": "Restoring" })).await?;
+                if phase != Some(RestorePhase::Restoring) {
+                    io::patch_status(api, name, serde_json::json!({ "phase": "Restoring" }))
+                        .await?;
+                }
                 Ok(Action::requeue(std::time::Duration::from_secs(30)))
             }
         };

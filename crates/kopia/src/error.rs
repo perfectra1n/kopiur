@@ -101,6 +101,43 @@ impl KopiaErrorClass {
         }
     }
 
+    /// A **stable**, volatile-free one-line summary of what this class means and
+    /// how to fix it, suitable for a status *condition message*.
+    ///
+    /// Unlike [`KopiaError::to_string`] (which embeds the kopia stderr tail — and
+    /// thus a per-attempt-random temp filename like `.shards.tmp.<hex>`), this is
+    /// byte-identical across repeated failures of the same class. The controller
+    /// uses it for the persisted condition so that re-writing an unchanged Failed
+    /// status is a true no-op (no resourceVersion bump → no self-triggered
+    /// reconcile). The full, volatile detail still goes to the Warning Event.
+    pub fn summary(&self) -> &'static str {
+        match self {
+            KopiaErrorClass::RepositoryUnavailable => {
+                "repository backend is unreachable; check the endpoint/network and retry"
+            }
+            KopiaErrorClass::AuthFailure => {
+                "repository password was rejected; check the encryption password Secret \
+                 (the KOPIA_PASSWORD key)"
+            }
+            KopiaErrorClass::AccessDenied => {
+                "the storage backend denied access; check the credentials Secret and that the \
+                 bucket/container/path exists and is reachable"
+            }
+            KopiaErrorClass::PermissionDenied => {
+                "repository path is not writable by the operator's UID; fix ownership/mode on the \
+                 backing PVC/NFS export"
+            }
+            KopiaErrorClass::NotFound => {
+                "the requested repository path, snapshot, or target was not found"
+            }
+            KopiaErrorClass::Locked => {
+                "a repository lock is held by another writer; it usually clears on retry"
+            }
+            KopiaErrorClass::SourceError => "a source filesystem error occurred during upload",
+            KopiaErrorClass::Unknown => "an unclassified repository backend error occurred",
+        }
+    }
+
     /// Whether re-running the same operation later might succeed without any
     /// configuration change. This is the operator's default retry hint; the
     /// caller may override it with policy.
@@ -369,6 +406,43 @@ mod tests {
         assert_eq!(
             KopiaErrorClass::from_label("not-a-real-class"),
             KopiaErrorClass::Unknown
+        );
+    }
+
+    #[test]
+    fn summary_is_stable_and_volatile_free() {
+        // Every class yields a non-empty, stable summary with no per-attempt
+        // volatile content (the temp-filename suffix kopia emits in stderr must
+        // never leak into the condition message — that volatility is what caused
+        // the reconcile hot-loop).
+        for c in [
+            KopiaErrorClass::RepositoryUnavailable,
+            KopiaErrorClass::AuthFailure,
+            KopiaErrorClass::AccessDenied,
+            KopiaErrorClass::PermissionDenied,
+            KopiaErrorClass::NotFound,
+            KopiaErrorClass::Locked,
+            KopiaErrorClass::SourceError,
+            KopiaErrorClass::Unknown,
+        ] {
+            let s = c.summary();
+            assert!(!s.is_empty());
+            assert!(
+                !s.contains(".shards"),
+                "summary leaks a volatile temp path: {s}"
+            );
+            assert!(
+                !s.contains(".tmp"),
+                "summary leaks a volatile temp path: {s}"
+            );
+            // Stable across calls (it returns a 'static str, but assert intent).
+            assert_eq!(s, c.summary());
+        }
+        // The PermissionDenied summary is the actionable one for the reported bug.
+        assert!(
+            KopiaErrorClass::PermissionDenied
+                .summary()
+                .contains("not writable")
         );
     }
 
