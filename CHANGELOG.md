@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.7](https://github.com/home-operations/kopiur/compare/0.1.6...0.1.7) (2026-06-06)
+
+
+### Features
+
+* **controller:** make sure not to spam the kube api every 0.33s ([9c4ca18](https://github.com/home-operations/kopiur/commit/9c4ca1817da9a34ade0530f77b67b0d768e3176f))
+* **test:** create test to make sure we don't spam kube api ([2556258](https://github.com/home-operations/kopiur/commit/25562581ae099daba8b74d09c691ca6bfa71eab0))
+
+
+### Miscellaneous Chores
+
+* update rlspls config ([f9f4c70](https://github.com/home-operations/kopiur/commit/f9f4c707f1c43cd9deca761e058ebedfa3b931e1))
+
 ## [0.1.6](https://github.com/home-operations/kopiur/compare/0.1.5...0.1.6) (2026-06-06)
 
 
