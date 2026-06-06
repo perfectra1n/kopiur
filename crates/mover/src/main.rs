@@ -20,13 +20,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use kopiur_api::{LeaseAction, lease_action};
-use kopiur_kopia::{KopiaClient, KopiaError, MaintenanceMode};
+use kopiur_kopia::{ConnectSpec, KopiaClient, KopiaError, MaintenanceMode};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use kopiur_mover::bootstrap::{
     BootstrapResult, MAX_RETURNED_SNAPSHOTS, RESULT_CONFIGMAP_KEY, should_attempt_create,
 };
+use kopiur_mover::credentials;
 use kopiur_mover::env::{KOPIA_BINARY, RESULT_CONFIGMAP, WORK_SPEC_PATH};
 use kopiur_mover::status::StatusUpdate;
 use kopiur_mover::workspec::{
@@ -69,34 +70,43 @@ async fn run() -> Result<()> {
     let client = build_client(&spec);
 
     let started = std::time::Instant::now();
-    // Bootstrap owns its own connect/create lifecycle (and reports via a result
-    // ConfigMap, not the CR status); every other operation connects first, then
-    // runs with periodic progress PATCHes.
-    let result = match &spec.operation {
-        Operation::BootstrapRepository(op) => run_bootstrap_flow(&client, &spec, op).await,
-        // Maintenance, like bootstrap, owns its own connect lifecycle: the lease
-        // decision needs `kopia maintenance info`, which requires repo access the
-        // controller does not have for object stores (ADR §3.7/§5.4).
-        Operation::Maintenance(op) => run_maintenance_flow(&client, &spec, op).await,
-        _ => {
-            // A best-effort status reporter. If we cannot build a kube client
-            // (e.g. running outside a cluster), we log instead of failing.
-            let reporter = StatusReporter::try_new(&spec).await;
-            match client
-                .repository_connect(&spec.repository.to_connect_spec())
-                .await
-            {
-                Err(e) => terminal_failure(&reporter, &e).await,
-                Ok(()) => match execute(&client, &spec, &reporter).await {
-                    Ok(update) => {
-                        reporter.report(&update).await;
-                        info!(phase = %update.phase, "operation succeeded");
-                        Ok(())
-                    }
-                    Err(e) => terminal_failure(&reporter, &e).await,
-                },
-            }
+    // Build the connect spec once, materializing any file-based backend
+    // credentials (SFTP key/known_hosts, GCS service-account JSON, rclone.conf)
+    // from the environment into files the kopia subprocess can read. Every flow
+    // below connects with this prepared spec.
+    let result = match prepare_connect_spec(&spec) {
+        Err(e) => {
+            error!(error = %e, "failed to materialize backend credentials for the mover");
+            Err(e)
         }
+        // Bootstrap owns its own connect/create lifecycle (and reports via a
+        // result ConfigMap, not the CR status); every other operation connects
+        // first, then runs with periodic progress PATCHes.
+        Ok(connect) => match &spec.operation {
+            Operation::BootstrapRepository(op) => {
+                run_bootstrap_flow(&client, &spec, op, &connect).await
+            }
+            // Maintenance, like bootstrap, owns its own connect lifecycle: the
+            // lease decision needs `kopia maintenance info`, which requires repo
+            // access the controller does not have for object stores (ADR §3.7/§5.4).
+            Operation::Maintenance(op) => run_maintenance_flow(&client, &spec, op, &connect).await,
+            _ => {
+                // A best-effort status reporter. If we cannot build a kube client
+                // (e.g. running outside a cluster), we log instead of failing.
+                let reporter = StatusReporter::try_new(&spec).await;
+                match client.repository_connect(&connect).await {
+                    Err(e) => terminal_failure(&reporter, &e).await,
+                    Ok(()) => match execute(&client, &spec, &reporter).await {
+                        Ok(update) => {
+                            reporter.report(&update).await;
+                            info!(phase = %update.phase, "operation succeeded");
+                            Ok(())
+                        }
+                        Err(e) => terminal_failure(&reporter, &e).await,
+                    },
+                }
+            }
+        },
     };
 
     // Push the operation outcome metric, then flush OTLP before the Job exits.
@@ -109,6 +119,24 @@ async fn run() -> Result<()> {
     metrics.shutdown();
 
     result
+}
+
+/// Directory under the writable kopia-cache `emptyDir` where the mover stages
+/// file-based backend credentials (SFTP key/known_hosts, GCS JSON, rclone.conf).
+/// Shares the cache mount so it is writable on the read-only-root mover pod.
+fn credential_staging_dir() -> PathBuf {
+    PathBuf::from(kopiur_kopia::env::DEFAULT_CACHE_DIR).join("creds")
+}
+
+/// Build the repository [`ConnectSpec`] for this run, first materializing any
+/// file-based backend credentials (SFTP/GCS/rclone) from the environment into
+/// files under [`credential_staging_dir`]. Env-only backends (S3/Azure/B2/WebDAV)
+/// pass through unchanged.
+fn prepare_connect_spec(spec: &MoverWorkSpec) -> Result<ConnectSpec> {
+    let mut connect = spec.repository.to_connect_spec();
+    credentials::materialize(&mut connect, &credential_staging_dir())
+        .context("materializing file-based backend credentials")?;
+    Ok(connect)
 }
 
 /// Execute the work-spec operation, emitting periodic "Running" updates while
@@ -189,6 +217,7 @@ async fn run_bootstrap_flow(
     client: &KopiaClient,
     spec: &MoverWorkSpec,
     op: &BootstrapRepositoryOp,
+    connect: &ConnectSpec,
 ) -> Result<()> {
     info!(
         backend = spec.repository.kind_str(),
@@ -196,7 +225,7 @@ async fn run_bootstrap_flow(
         repository = %spec.target_ref.name,
         "bootstrapping repository"
     );
-    let result = run_bootstrap(client, spec, op).await;
+    let result = run_bootstrap(client, op, connect).await;
     // Persist BEFORE returning: a failed bootstrap still exits non-zero (so the
     // Job is marked Failed and backoff is bounded), but the controller must be
     // able to read the structured failure to set an actionable Repository status.
@@ -239,10 +268,10 @@ async fn run_bootstrap_flow(
 /// when gated by [`should_attempt_create`], then read identity + catalog.
 async fn run_bootstrap(
     client: &KopiaClient,
-    spec: &MoverWorkSpec,
     op: &BootstrapRepositoryOp,
+    connect: &ConnectSpec,
 ) -> BootstrapResult {
-    let connect_spec = spec.repository.to_connect_spec();
+    let connect_spec = connect.clone();
 
     let mut created = false;
     if let Err(e) = client.repository_connect(&connect_spec).await {
@@ -344,6 +373,7 @@ async fn run_maintenance_flow(
     client: &KopiaClient,
     spec: &MoverWorkSpec,
     op: &MaintenanceOp,
+    connect: &ConnectSpec,
 ) -> Result<()> {
     info!(
         backend = spec.repository.kind_str(),
@@ -353,10 +383,7 @@ async fn run_maintenance_flow(
     );
     // Connect first: for object stores this pod is the only place with repo
     // access, which is exactly why the lease decision is made here.
-    if let Err(e) = client
-        .repository_connect(&spec.repository.to_connect_spec())
-        .await
-    {
+    if let Err(e) = client.repository_connect(connect).await {
         patch_maintenance_status(&spec.target_ref, &maintenance_failed_body(&e)).await;
         error!(class = %e.class(), "maintenance connect failed");
         return Err(maintenance_err("connect", &e));

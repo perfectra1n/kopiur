@@ -283,6 +283,7 @@ async fn connect_sftp_backend_argv() {
             port: Some(2222),
             username: Some("u".into()),
             keyfile: None,
+            known_hosts: None,
         })
         .await
         .expect("sftp connect argv must match");

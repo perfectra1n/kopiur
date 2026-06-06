@@ -1,11 +1,15 @@
 # The kopiur mover image: the per-Backup/Restore Job binary PLUS the `kopia`
-# binary it invokes (ADR-0003 §4.10). Pinned kopia version for reproducibility
-# and to satisfy the "no :latest" requirement (gap G15).
+# binary it invokes (ADR-0003 §4.10), AND the `rclone` binary kopia shells out to
+# for the rclone backend. Pinned versions for reproducibility and to satisfy the
+# "no :latest" requirement (gap G15).
 #
 # syntax=docker/dockerfile:1
 
 ARG KOPIA_VERSION
 ARG RUST_VERSION
+# rclone is needed only by the rclone backend (kopia execs it). Pinned here; the
+# image-mover mise task may override via --build-arg RCLONE_VERSION.
+ARG RCLONE_VERSION=1.68.2
 
 FROM rust:${RUST_VERSION}-slim-trixie AS builder
 # Per-arch cache mount ids: a concurrent multi-arch buildx run (amd64 + arm64)
@@ -37,9 +41,28 @@ RUN set -eux; \
     tar -xzf /tmp/kopia.tar.gz -C /tmp; \
     install -m 0755 "/tmp/kopia-${KOPIA_VERSION}-linux-${KARCH}/kopia" /usr/local/bin/kopia
 
+# Pull the official rclone release binary at a pinned version (the rclone backend
+# shells out to it). Distributed as a .zip, so this stage needs unzip.
+FROM debian:trixie-slim AS rclone
+ARG RCLONE_VERSION
+ARG TARGETARCH
+RUN set -eux; \
+    test -n "${RCLONE_VERSION}" || { echo "RCLONE_VERSION build arg is required" >&2; exit 1; }; \
+    apt-get update && apt-get install -y --no-install-recommends curl ca-certificates unzip; \
+    case "${TARGETARCH}" in \
+      amd64) RARCH=amd64 ;; \
+      arm64) RARCH=arm64 ;; \
+      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/rclone.zip \
+      "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-${RARCH}.zip"; \
+    unzip -j /tmp/rclone.zip "rclone-v${RCLONE_VERSION}-linux-${RARCH}/rclone" -d /tmp; \
+    install -m 0755 /tmp/rclone /usr/local/bin/rclone
+
 FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 LABEL org.opencontainers.image.source="https://github.com/home-operations/kopiur"
 COPY --from=builder /usr/local/bin/kopiur-mover /usr/local/bin/kopiur-mover
 COPY --from=kopia /usr/local/bin/kopia /usr/local/bin/kopia
+COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/kopiur-mover"]

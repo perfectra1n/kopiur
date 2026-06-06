@@ -106,6 +106,10 @@ pub enum ConnectSpec {
         bucket: String,
         /// Optional object prefix.
         prefix: Option<String>,
+        /// Path to a JSON service-account credentials file inside the mover pod
+        /// (`--credentials-file`). The mover materializes this from the
+        /// credentials Secret at runtime; `None` falls back to ambient ADC.
+        credentials_file: Option<String>,
     },
     /// Backblaze B2 backend.
     B2 {
@@ -124,8 +128,13 @@ pub enum ConnectSpec {
         port: Option<u16>,
         /// SSH username.
         username: Option<String>,
-        /// Path to a private key file inside the mover pod.
+        /// Path to a private key file inside the mover pod (`--keyfile`). The
+        /// mover materializes this from the credentials Secret at runtime.
         keyfile: Option<String>,
+        /// Path to a `known_hosts` file inside the mover pod (`--known-hosts`),
+        /// pinning the server host key. The mover materializes this from the
+        /// credentials Secret at runtime.
+        known_hosts: Option<String>,
     },
     /// WebDAV backend.
     WebDav {
@@ -136,6 +145,10 @@ pub enum ConnectSpec {
     Rclone {
         /// Rclone `remote:path`.
         remote_path: String,
+        /// Path to an `rclone.conf` inside the mover pod, forwarded to rclone via
+        /// `--rclone-args=--config=<path>`. The mover materializes this from the
+        /// config Secret at runtime; `None` uses rclone's default config lookup.
+        config_file: Option<String>,
     },
     /// Google Drive backend.
     Gdrive {
@@ -246,9 +259,14 @@ impl ConnectSpec {
                 opt(&mut a, "--prefix", prefix);
                 a
             }
-            ConnectSpec::Gcs { bucket, prefix } => {
+            ConnectSpec::Gcs {
+                bucket,
+                prefix,
+                credentials_file,
+            } => {
                 let mut a = vec!["gcs".into(), "--bucket".into(), bucket.clone()];
                 opt(&mut a, "--prefix", prefix);
+                opt(&mut a, "--credentials-file", credentials_file);
                 a
             }
             ConnectSpec::B2 { bucket, prefix } => {
@@ -262,6 +280,7 @@ impl ConnectSpec {
                 port,
                 username,
                 keyfile,
+                known_hosts,
             } => {
                 let mut a = vec![
                     "sftp".into(),
@@ -276,13 +295,25 @@ impl ConnectSpec {
                 }
                 opt(&mut a, "--username", username);
                 opt(&mut a, "--keyfile", keyfile);
+                opt(&mut a, "--known-hosts", known_hosts);
                 a
             }
             ConnectSpec::WebDav { url } => {
                 vec!["webdav".into(), "--url".into(), url.clone()]
             }
-            ConnectSpec::Rclone { remote_path } => {
-                vec!["rclone".into(), "--remote-path".into(), remote_path.clone()]
+            ConnectSpec::Rclone {
+                remote_path,
+                config_file,
+            } => {
+                let mut a =
+                    vec!["rclone".into(), "--remote-path".into(), remote_path.clone()];
+                // Forward the rclone config path to the embedded rclone via
+                // `--rclone-args=--config=<path>`.
+                if let Some(cfg) = config_file {
+                    a.push("--rclone-args".into());
+                    a.push(format!("--config={cfg}"));
+                }
+                a
             }
             ConnectSpec::Gdrive { folder_id } => {
                 vec!["gdrive".into(), "--folder-id".into(), folder_id.clone()]
@@ -1057,10 +1088,27 @@ mod tests {
         assert_eq!(
             ConnectSpec::Gcs {
                 bucket: "b".into(),
-                prefix: Some("k/".into())
+                prefix: Some("k/".into()),
+                credentials_file: None,
             }
             .backend_args(),
             vec!["gcs", "--bucket", "b", "--prefix", "k/"]
+        );
+        // The materialized service-account JSON path becomes `--credentials-file`.
+        assert_eq!(
+            ConnectSpec::Gcs {
+                bucket: "b".into(),
+                prefix: None,
+                credentials_file: Some("/var/cache/kopia/creds/gcs.json".into()),
+            }
+            .backend_args(),
+            vec![
+                "gcs",
+                "--bucket",
+                "b",
+                "--credentials-file",
+                "/var/cache/kopia/creds/gcs.json"
+            ]
         );
         assert_eq!(
             ConnectSpec::B2 {
@@ -1080,6 +1128,7 @@ mod tests {
             port: Some(2222),
             username: Some("u".into()),
             keyfile: Some("/keys/id".into()),
+            known_hosts: Some("/keys/known_hosts".into()),
         };
         assert_eq!(
             spec.backend_args(),
@@ -1094,7 +1143,9 @@ mod tests {
                 "--username",
                 "u",
                 "--keyfile",
-                "/keys/id"
+                "/keys/id",
+                "--known-hosts",
+                "/keys/known_hosts"
             ]
         );
     }
@@ -1110,10 +1161,26 @@ mod tests {
         );
         assert_eq!(
             ConnectSpec::Rclone {
-                remote_path: "r:bucket".into()
+                remote_path: "r:bucket".into(),
+                config_file: None,
             }
             .backend_args(),
             vec!["rclone", "--remote-path", "r:bucket"]
+        );
+        // The materialized rclone.conf path is forwarded to rclone via --rclone-args.
+        assert_eq!(
+            ConnectSpec::Rclone {
+                remote_path: "r:bucket".into(),
+                config_file: Some("/var/cache/kopia/creds/rclone.conf".into()),
+            }
+            .backend_args(),
+            vec![
+                "rclone",
+                "--remote-path",
+                "r:bucket",
+                "--rclone-args",
+                "--config=/var/cache/kopia/creds/rclone.conf"
+            ]
         );
         assert_eq!(
             ConnectSpec::Gdrive {
@@ -1171,6 +1238,7 @@ mod tests {
             ConnectSpec::Gcs {
                 bucket: "b".into(),
                 prefix: None,
+                credentials_file: None,
             },
             ConnectSpec::B2 {
                 bucket: "b".into(),
@@ -1182,10 +1250,12 @@ mod tests {
                 port: None,
                 username: None,
                 keyfile: None,
+                known_hosts: None,
             },
             ConnectSpec::WebDav { url: "u".into() },
             ConnectSpec::Rclone {
                 remote_path: "r".into(),
+                config_file: None,
             },
             ConnectSpec::Gdrive {
                 folder_id: "f".into(),

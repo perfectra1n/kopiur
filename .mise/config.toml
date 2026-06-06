@@ -122,13 +122,17 @@ docker build -f docker/Dockerfile \
 '''
 
 [tasks.image-mover]
-description = "Build the mover image locally (ships the kopia binary too)"
+description = "Build the mover image locally (ships the kopia + rclone binaries too)"
 run = '''
 KOPIA_VERSION="${KOPIA_VERSION:-$(mise config get tools.kopia)}"
 RUST_VERSION="${RUST_VERSION:-$(mise config get tools.rust.version)}"
+# rclone is needed only by the rclone backend; pinned (default lives in the
+# Dockerfile, overridable here for reproducible builds).
+RCLONE_VERSION="${RCLONE_VERSION:-1.68.2}"
 docker build -f docker/Dockerfile.mover \
   --build-arg "KOPIA_VERSION=${KOPIA_VERSION}" \
   --build-arg "RUST_VERSION=${RUST_VERSION}" \
+  --build-arg "RCLONE_VERSION=${RCLONE_VERSION}" \
   -t "${KOPIUR_IMAGE_PREFIX:-ghcr.io/home-operations/kopiur}/mover:${KOPIUR_IMAGE_TAG:-dev}" .
 '''
 

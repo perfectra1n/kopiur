@@ -1,0 +1,286 @@
+//! Materialize file-based backend credentials from the mover's environment.
+//!
+//! Most backends authenticate via environment variables that kopia reads
+//! directly (S3 `AWS_*`, Azure `AZURE_*`, B2 `B2_*`, WebDAV `KOPIA_WEBDAV_*`) —
+//! those reach kopia automatically because the mover Job loads the credentials
+//! Secret with `envFrom` and the kopia subprocess inherits the ambient env.
+//!
+//! Three backends, however, need their credentials as **files** that no kopia
+//! env var can supply:
+//!
+//! | Backend | Env key the mover reads | kopia flag it becomes |
+//! |---------|-------------------------|-----------------------|
+//! | SFTP    | [`SFTP_KEY_DATA_ENV`]      | `--keyfile`            |
+//! | SFTP    | [`SFTP_KNOWN_HOSTS_ENV`]   | `--known-hosts`        |
+//! | GCS     | [`GCS_CREDENTIALS_ENV`]    | `--credentials-file`   |
+//! | rclone  | [`RCLONE_CONFIG_ENV`]      | `--rclone-args=--config=…` |
+//!
+//! kopia's SFTP/GCS/rclone flags have no environment-variable forms, and a
+//! Secret key like `ssh-privatekey` is not a valid C-identifier so `envFrom`
+//! would silently drop it. So we standardize on valid-identifier env keys, have
+//! the mover write each value to a private file under the writable cache
+//! `emptyDir`, and point the matching [`ConnectSpec`] field at it. Secrets reach
+//! kopia as a file path on argv — never the secret value itself (ADR §4.10).
+//!
+//! [`materialize`] is pure except for the file writes into the caller-supplied
+//! `staging_dir`, and is exhaustive over [`ConnectSpec`] so a new backend cannot
+//! compile until its credential story is decided here.
+
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use kopiur_kopia::ConnectSpec;
+use tracing::info;
+
+/// SFTP private key (PEM), read from the credentials Secret → `--keyfile`.
+pub const SFTP_KEY_DATA_ENV: &str = "KOPIA_SFTP_KEY_DATA";
+/// SFTP `known_hosts` entries, read from the credentials Secret → `--known-hosts`.
+pub const SFTP_KNOWN_HOSTS_ENV: &str = "KOPIA_SFTP_KNOWN_HOSTS";
+/// GCS service-account key JSON, read from the credentials Secret →
+/// `--credentials-file`.
+pub const GCS_CREDENTIALS_ENV: &str = "KOPIA_GCS_CREDENTIALS";
+/// rclone `rclone.conf` contents, read from the config Secret → rclone `--config`.
+pub const RCLONE_CONFIG_ENV: &str = "KOPIA_RCLONE_CONFIG";
+
+/// Filenames written under the staging dir. Stable so the (single-op) mover pod
+/// is deterministic and the paths are easy to reason about in logs.
+const SFTP_KEY_FILE: &str = "sftp_key";
+const SFTP_KNOWN_HOSTS_FILE: &str = "known_hosts";
+const GCS_CREDS_FILE: &str = "gcs-credentials.json";
+const RCLONE_CONF_FILE: &str = "rclone.conf";
+
+/// Write any file-based backend credentials present in the environment into
+/// `staging_dir`, pointing the matching [`ConnectSpec`] field at the written
+/// file. Backends whose credentials flow purely via env (or that have none) are
+/// no-ops. Exhaustive over [`ConnectSpec`] (ADR §5.5).
+///
+/// The caller passes a writable directory (in the mover Job this is under the
+/// kopia-cache `emptyDir`); files are created `0600`.
+pub fn materialize(connect: &mut ConnectSpec, staging_dir: &Path) -> Result<()> {
+    match connect {
+        ConnectSpec::Sftp {
+            keyfile,
+            known_hosts,
+            ..
+        } => {
+            if let Some(path) = write_env_file(SFTP_KEY_DATA_ENV, staging_dir, SFTP_KEY_FILE)? {
+                *keyfile = Some(path);
+            }
+            if let Some(path) =
+                write_env_file(SFTP_KNOWN_HOSTS_ENV, staging_dir, SFTP_KNOWN_HOSTS_FILE)?
+            {
+                *known_hosts = Some(path);
+            }
+        }
+        ConnectSpec::Gcs {
+            credentials_file, ..
+        } => {
+            if let Some(path) = write_env_file(GCS_CREDENTIALS_ENV, staging_dir, GCS_CREDS_FILE)? {
+                *credentials_file = Some(path);
+            }
+        }
+        ConnectSpec::Rclone { config_file, .. } => {
+            if let Some(path) = write_env_file(RCLONE_CONFIG_ENV, staging_dir, RCLONE_CONF_FILE)? {
+                *config_file = Some(path);
+            }
+        }
+        // Env-only or credential-free backends: nothing to materialize. Listed
+        // explicitly (no `_`) so a new backend forces a decision here.
+        ConnectSpec::Filesystem { .. }
+        | ConnectSpec::S3 { .. }
+        | ConnectSpec::Azure { .. }
+        | ConnectSpec::B2 { .. }
+        | ConnectSpec::WebDav { .. }
+        | ConnectSpec::Gdrive { .. }
+        | ConnectSpec::FromConfig { .. }
+        | ConnectSpec::Server { .. } => {}
+    }
+    Ok(())
+}
+
+/// If `env_key` is set and non-empty, write its value to `staging_dir/file_name`
+/// with mode `0600` and return the file path (as the `String` the connect spec
+/// holds). Returns `Ok(None)` when the env var is unset/empty (the credential
+/// simply isn't provided this way).
+fn write_env_file(env_key: &str, staging_dir: &Path, file_name: &str) -> Result<Option<String>> {
+    let value = match std::env::var(env_key) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(None),
+    };
+    std::fs::create_dir_all(staging_dir)
+        .with_context(|| format!("create credential staging dir {}", staging_dir.display()))?;
+    let path = staging_dir.join(file_name);
+    write_private(&path, value.as_bytes())
+        .with_context(|| format!("write credential file {} (from ${env_key})", path.display()))?;
+    info!(env = env_key, path = %path.display(), "materialized backend credential to file");
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+/// Write `bytes` to `path`, creating/truncating it with mode `0600` so the
+/// private key / credentials are not group/world readable.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(bytes)?;
+    // Re-assert the mode in case the file pre-existed with a wider mode.
+    f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    // `std::env::set_var` is process-global; serialize the env-mutating tests.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn tmp() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kopiur-creds-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn sftp(keyfile: Option<String>, known_hosts: Option<String>) -> ConnectSpec {
+        ConnectSpec::Sftp {
+            host: "h".into(),
+            path: "/r".into(),
+            port: None,
+            username: Some("u".into()),
+            keyfile,
+            known_hosts,
+        }
+    }
+
+    #[test]
+    fn sftp_materializes_key_and_known_hosts_at_0600() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tmp();
+        // SAFETY: guarded by ENV_LOCK; no other thread reads env concurrently.
+        unsafe {
+            std::env::set_var(SFTP_KEY_DATA_ENV, "PRIVATE-KEY-DATA");
+            std::env::set_var(SFTP_KNOWN_HOSTS_ENV, "nas.lan ssh-ed25519 AAAA");
+        }
+        let mut spec = sftp(None, None);
+        materialize(&mut spec, &dir).expect("materialize sftp");
+        match &spec {
+            ConnectSpec::Sftp {
+                keyfile: Some(kf),
+                known_hosts: Some(kh),
+                ..
+            } => {
+                assert_eq!(std::fs::read_to_string(kf).unwrap(), "PRIVATE-KEY-DATA");
+                assert_eq!(
+                    std::fs::read_to_string(kh).unwrap(),
+                    "nas.lan ssh-ed25519 AAAA"
+                );
+                let mode = std::fs::metadata(kf).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "private key must be 0600, got {mode:o}");
+            }
+            other => panic!("expected materialized sftp paths, got {other:?}"),
+        }
+        unsafe {
+            std::env::remove_var(SFTP_KEY_DATA_ENV);
+            std::env::remove_var(SFTP_KNOWN_HOSTS_ENV);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sftp_without_env_leaves_fields_none() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // Ensure the env is clear for this backend.
+        unsafe {
+            std::env::remove_var(SFTP_KEY_DATA_ENV);
+            std::env::remove_var(SFTP_KNOWN_HOSTS_ENV);
+        }
+        let dir = tmp();
+        let mut spec = sftp(None, None);
+        materialize(&mut spec, &dir).expect("materialize sftp (no env)");
+        assert!(
+            matches!(
+                spec,
+                ConnectSpec::Sftp {
+                    keyfile: None,
+                    known_hosts: None,
+                    ..
+                }
+            ),
+            "no env ⇒ no files, fields stay None"
+        );
+        // Nothing should have been created.
+        assert!(!dir.join(SFTP_KEY_FILE).exists());
+    }
+
+    #[test]
+    fn gcs_materializes_credentials_file() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tmp();
+        unsafe { std::env::set_var(GCS_CREDENTIALS_ENV, "{\"type\":\"service_account\"}") };
+        let mut spec = ConnectSpec::Gcs {
+            bucket: "b".into(),
+            prefix: None,
+            credentials_file: None,
+        };
+        materialize(&mut spec, &dir).expect("materialize gcs");
+        match &spec {
+            ConnectSpec::Gcs {
+                credentials_file: Some(p),
+                ..
+            } => assert_eq!(
+                std::fs::read_to_string(p).unwrap(),
+                "{\"type\":\"service_account\"}"
+            ),
+            other => panic!("expected gcs credentials_file, got {other:?}"),
+        }
+        unsafe { std::env::remove_var(GCS_CREDENTIALS_ENV) };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rclone_materializes_config_file() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tmp();
+        unsafe { std::env::set_var(RCLONE_CONFIG_ENV, "[remote]\ntype = s3\n") };
+        let mut spec = ConnectSpec::Rclone {
+            remote_path: "remote:bucket".into(),
+            config_file: None,
+        };
+        materialize(&mut spec, &dir).expect("materialize rclone");
+        match &spec {
+            ConnectSpec::Rclone {
+                config_file: Some(p),
+                ..
+            } => assert_eq!(std::fs::read_to_string(p).unwrap(), "[remote]\ntype = s3\n"),
+            other => panic!("expected rclone config_file, got {other:?}"),
+        }
+        unsafe { std::env::remove_var(RCLONE_CONFIG_ENV) };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn env_only_backend_is_a_noop() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tmp();
+        let mut spec = ConnectSpec::S3 {
+            bucket: "b".into(),
+            endpoint: None,
+            prefix: None,
+            region: None,
+            disable_tls: false,
+            disable_tls_verification: false,
+        };
+        materialize(&mut spec, &dir).expect("materialize s3");
+        // No staging dir created for an env-only backend.
+        assert!(!dir.exists(), "env-only backend must not create files");
+    }
+}

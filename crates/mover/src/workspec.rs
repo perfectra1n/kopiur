@@ -324,6 +324,9 @@ impl RepositoryConnect {
             RepositoryConnect::Gcs { bucket, prefix } => ConnectSpec::Gcs {
                 bucket: bucket.clone(),
                 prefix: prefix.clone(),
+                // The service-account JSON path is materialized by the mover from
+                // the credentials Secret at runtime (see `crate::credentials`).
+                credentials_file: None,
             },
             RepositoryConnect::B2 { bucket, prefix } => ConnectSpec::B2 {
                 bucket: bucket.clone(),
@@ -341,10 +344,16 @@ impl RepositoryConnect {
                 port: *port,
                 username: username.clone(),
                 keyfile: keyfile.clone(),
+                // keyfile/known_hosts are materialized by the mover from the
+                // credentials Secret at runtime (see `crate::credentials`).
+                known_hosts: None,
             },
             RepositoryConnect::WebDav { url } => ConnectSpec::WebDav { url: url.clone() },
             RepositoryConnect::Rclone { remote_path } => ConnectSpec::Rclone {
                 remote_path: remote_path.clone(),
+                // rclone.conf is materialized by the mover from the config Secret
+                // at runtime (see `crate::credentials`).
+                config_file: None,
             },
         }
     }
@@ -756,6 +765,7 @@ mod tests {
                 ConnectSpec::Gcs {
                     bucket: "b".into(),
                     prefix: Some("p/".into()),
+                    credentials_file: None,
                 },
             ),
             (
@@ -782,6 +792,7 @@ mod tests {
                     port: Some(2222),
                     username: Some("u".into()),
                     keyfile: Some("/k".into()),
+                    known_hosts: None,
                 },
             ),
             (
@@ -798,6 +809,7 @@ mod tests {
                 },
                 ConnectSpec::Rclone {
                     remote_path: "r:bucket".into(),
+                    config_file: None,
                 },
             ),
         ];
