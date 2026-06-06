@@ -1,7 +1,7 @@
 //! End-to-end guards for two production bugs that the prior harness masked.
 //!
 //! Gated by `#[cfg(feature = "e2e")]` + `#[ignore]`, skipping gracefully without
-//! a cluster (`scripts/with-e2e.sh`). Run with `mise run test-e2e`.
+//! a cluster (`mise run //crates/e2e:test`). Run with `mise run //crates/e2e:test`.
 //!
 //! 1. **Writable kopia cache (the `/nonexistent` bug).** The controller runs
 //!    short kopia ops in-process. kopia defaults its cache/logs/config under
@@ -139,7 +139,7 @@ async fn pod_logs_for(
 /// signature. Before the fix the connect failed and the log was full of
 /// `mkdir /nonexistent: read-only file system`.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
 async fn controller_kopia_has_writable_cache_and_no_nonexistent_errors() {
     let Some(world) = World::connect().await else {
         return;
@@ -185,7 +185,7 @@ async fn controller_kopia_has_writable_cache_and_no_nonexistent_errors() {
 /// been rejected, exactly the original bug), and we additionally assert the
 /// note's length and that it carries a machine-readable reason.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
 async fn backend_failure_publishes_a_bounded_warning_event() {
     let Some(world) = World::connect().await else {
         return;

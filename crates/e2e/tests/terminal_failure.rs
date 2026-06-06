@@ -102,7 +102,7 @@ fn resource_version(repo: &Repository) -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
 async fn filesystem_permission_denied_hard_stops_without_spam() {
     let Some(world) = World::connect().await else {
         return;

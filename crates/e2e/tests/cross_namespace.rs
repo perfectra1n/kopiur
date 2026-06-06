@@ -2,13 +2,13 @@
 //! Backup** path exercised in a workload namespace SEPARATE from the operator's.
 //!
 //! Gated by `#[cfg(feature = "e2e")]` + `#[ignore]`, skipping gracefully without a
-//! cluster. Driven by `scripts/with-e2e.sh`, which stands up MinIO, the
+//! cluster. Driven by `mise run //crates/e2e:test`, which stands up MinIO, the
 //! `kopiur-xns-crepo` / `kopiur-xns-repo` buckets, and a workload namespace
 //! (`kopiur-e2e-xns`) pre-seeded with a source PVC of known data and the S3
 //! credentials Secret. Run:
 //!
 //! ```text
-//! mise run test-e2e      # or: scripts/with-e2e.sh
+//! mise run //crates/e2e:test
 //! ```
 //!
 //! These assert real operator output for the two cross-namespace shapes:
@@ -226,7 +226,7 @@ fn assert_real_snapshot(status: &serde_json::Value, what: &str) {
 /// workload namespace then drives a mover Job there, the controller mints the mover
 /// RBAC in that namespace, and the Backup reaches `Succeeded` with a real snapshot.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
 async fn clusterrepository_bootstrap_then_cross_namespace_backup_succeeds() {
     let Some(world) = World::connect().await else {
         return;
@@ -292,7 +292,7 @@ async fn clusterrepository_bootstrap_then_cross_namespace_backup_succeeds() {
 /// namespace reaches `Succeeded` — proving the operator reconciles namespaced
 /// Repositories in arbitrary namespaces and mints the mover RBAC there.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
 async fn repository_bootstrap_then_backup_in_workload_namespace_succeeds() {
     let Some(world) = World::connect().await else {
         return;
@@ -357,7 +357,7 @@ async fn repository_bootstrap_then_backup_in_workload_namespace_succeeds() {
 /// the controller mints it before launching the Job, and a first-ever reconcile is
 /// due immediately, so the SA appears without waiting for a cron slot.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + MinIO + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
 async fn maintenance_in_fresh_namespace_mints_mover_rbac() {
     let Some(world) = World::connect().await else {
         return;

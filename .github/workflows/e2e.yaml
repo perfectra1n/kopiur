@@ -60,5 +60,7 @@ jobs:
       # The harness builds the images, creates its own kind cluster, loads the
       # images, installs the chart, runs the e2e crate, and tears down. It uses
       # an isolated kubeconfig and only ever touches the throwaway cluster.
+      # The e2e tasks are a mise monorepo subproject (crates/e2e/mise.toml);
+      # `settings.experimental` in .mise/config.toml enables that mode.
       - name: Run e2e tests
-        run: mise run test-e2e
+        run: mise run //crates/e2e:test

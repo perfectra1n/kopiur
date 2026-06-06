@@ -2,7 +2,7 @@
 //! operator in kind.
 //!
 //! Gated by `#[cfg(feature = "e2e")]` + `#[ignore]`, skipping gracefully without
-//! a cluster (`scripts/with-e2e.sh`). Run with `mise run test-e2e`.
+//! a cluster (`mise run //crates/e2e:test`). Run with `mise run //crates/e2e:test`.
 //!
 //! The headline assertion is the regression guard for the silent-logs bug: the
 //! controller and the mover Jobs used to emit **zero** bytes to stdout because
@@ -50,7 +50,7 @@ async fn pod_logs_for(
 /// pod (a backup mover) — the mover/bootstrap silence was the worst case, since
 /// its only other output was a result ConfigMap.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
 async fn operator_binaries_emit_logs() {
     let Some(world) = World::connect().await else {
         return;

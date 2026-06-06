@@ -1,6 +1,19 @@
 # mise tasks + tooling for kopiur. `mise tasks` lists them; `mise run <task>`.
 # Mise is the source of truth for Rust and project tools in developer shells and CI.
 
+# Monorepo task mode: the e2e harness tasks are co-located with the crate they
+# drive, in `crates/e2e/mise.toml`, and invoked as `mise run //crates/e2e:test`
+# (or any sub-task, e.g. `//crates/e2e:cluster-create`). `settings.experimental`
+# enables this persistently — no MISE_EXPERIMENTAL env var needed in CI or dev
+# shells. Existing root tasks below stay invokable unprefixed (`mise run test`).
+experimental_monorepo_root = true
+
+[settings]
+experimental = true
+
+[monorepo]
+config_roots = ["crates/e2e"]
+
 [tools]
 rust = { version = "1.95.0", components = "rustfmt,clippy,llvm-tools-preview" }
 lefthook = "2.1.9"
@@ -51,155 +64,6 @@ run = "cargo test --workspace --locked"
 [tasks.test-int]
 description = "Cluster + kopia integration tests on an ephemeral kind cluster"
 run = "scripts/with-kind.sh cargo test --workspace --features integration --locked -- --include-ignored"
-
-# --- e2e harness -------------------------------------------------------------
-# The host-level steps (no Kubernetes API exists for them) are discrete mise
-# tasks; the in-cluster provisioning (namespaces, secrets, PV/PVCs, MinIO,
-# buckets, waits) lives in Rust (crates/e2e `World`, driven from the tests).
-#
-# Every e2e task pins an ISOLATED KUBECONFIG under target/ so it can only ever
-# touch the throwaway `kopiur-e2e` cluster — never the user's real context. This
-# is scoped per-task (mise has no global [env] that would leak to other tasks).
-# `test-e2e` exports the same path, so the sub-tasks it invokes inherit it.
-
-[tasks.e2e-images]
-description = "Build the controller/webhook/mover images tagged :e2e for the harness"
-run = """
-set -eu
-export KOPIUR_IMAGE_PREFIX=kopiur KOPIUR_IMAGE_TAG=e2e
-mise run image-controller
-mise run image-webhook
-mise run image-mover
-"""
-
-[tasks.e2e-cluster-up]
-description = "Create (or reuse) the kopiur-e2e kind cluster and load images"
-env = { KUBECONFIG = "{{config_root}}/target/e2e/kubeconfig" }
-run = """
-set -eu
-CLUSTER=kopiur-e2e
-NODE=$CLUSTER-control-plane
-TAG=e2e
-mkdir -p "$(dirname "$KUBECONFIG")"
-if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
-  echo "==> reusing kind cluster '$CLUSTER'"
-else
-  echo "==> creating kind cluster '$CLUSTER'"
-  kind create cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG"
-fi
-kind export kubeconfig --name "$CLUSTER" --kubeconfig "$KUBECONFIG"
-
-echo "==> loading component images into kind"
-kind load docker-image "kopiur/controller:$TAG" "kopiur/webhook:$TAG" "kopiur/mover:$TAG" --name "$CLUSTER"
-
-# Preload MinIO + mc into the node so the in-cluster pull can't time out the
-# rollout (kind load chokes on docker's manifest-list store, so import the saved
-# tarball into the node's containerd k8s.io namespace). Best-effort.
-preload() {
-  img="$1"
-  for attempt in 1 2 3; do docker pull "$img" >/dev/null 2>&1 && break; echo "   (retry $attempt) $img"; sleep 3; done
-  docker save "$img" | docker exec -i "$NODE" ctr --namespace=k8s.io images import - >/dev/null 2>&1 \\
-    && echo "   preloaded $img" || echo "   warn: could not preload $img (will pull in-cluster)"
-}
-preload minio/minio:latest
-preload minio/mc:latest
-"""
-
-[tasks.e2e-node-seed]
-description = "Seed the kopiur-e2e node's hostPath fixtures (repo/src + non-writable ro-repo)"
-run = '''
-set -eu
-NODE=kopiur-e2e-control-plane
-echo "==> seeding hostPath fixtures on $NODE"
-docker exec "$NODE" sh -c '
-  set -e
-  mkdir -p /kopiur-e2e/repo /kopiur-e2e/src/sub
-  printf "hello kopiur e2e\n" > /kopiur-e2e/src/a.txt
-  printf "nested data\n"      > /kopiur-e2e/src/sub/b.txt
-  chmod -R 0777 /kopiur-e2e
-  # A deliberately NON-writable repo dir (root-owned, no write bit) for the
-  # terminal-failure regression test; set AFTER the 0777 above so it sticks.
-  mkdir -p /kopiur-e2e/ro-repo
-  chown 0:0 /kopiur-e2e/ro-repo
-  chmod 0555 /kopiur-e2e/ro-repo
-'
-'''
-
-[tasks.e2e-helm]
-description = "Install the operator chart into the kopiur-e2e cluster (deploy/e2e/values.yaml)"
-env = { KUBECONFIG = "{{config_root}}/target/e2e/kubeconfig" }
-run = """
-set -eu
-echo "==> helm install"
-helm upgrade --install kopiur deploy/helm/kopiur \\
-  --namespace kopiur-e2e --create-namespace \\
-  --wait --timeout 5m \\
-  -f deploy/e2e/values.yaml
-"""
-
-[tasks.e2e-down]
-description = "Delete the ephemeral kopiur-e2e kind cluster"
-env = { KUBECONFIG = "{{config_root}}/target/e2e/kubeconfig" }
-run = """
-set -u
-echo "==> deleting kind cluster 'kopiur-e2e' (kubeconfig: $KUBECONFIG)"
-kind delete cluster --name kopiur-e2e >/dev/null 2>&1 || true
-rm -f "$KUBECONFIG" || true
-"""
-
-[tasks.e2e-diagnostics]
-description = "Dump kopiur-e2e cluster state (CRs/Jobs/pods/events/logs) for debugging"
-env = { KUBECONFIG = "{{config_root}}/target/e2e/kubeconfig" }
-run = '''
-set +e
-NS=kopiur-e2e
-echo "================ E2E DIAGNOSTICS ================" >&2
-kubectl get repositories,clusterrepositories,backupconfigs,backups,backupschedules,restores,maintenances -A -o wide >&2 2>&1
-kubectl get jobs,pods,serviceaccounts,rolebindings -A -o wide >&2 2>&1
-echo "---- Warning Events ----" >&2
-kubectl get events -A --field-selector type=Warning --sort-by=.lastTimestamp >&2 2>&1
-echo "---- controller logs ----" >&2
-kubectl logs -n "$NS" -l app.kubernetes.io/component=controller --tail=400 --all-containers >&2 2>&1
-echo "---- Job pod logs (all namespaces) ----" >&2
-kubectl get pods -A -l batch.kubernetes.io/job-name -o 'jsonpath={range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null \
-  | while read -r mns mpod; do [ -n "$mpod" ] || continue; echo "-- $mns/$mpod --" >&2; kubectl logs -n "$mns" "$mpod" --tail=200 --all-containers >&2 2>&1; done
-echo "---- Job descriptions ----" >&2
-kubectl describe jobs -A >&2 2>&1
-echo "================ END DIAGNOSTICS ================" >&2
-true
-'''
-
-[tasks.test-e2e]
-description = "Full end-to-end: build+load images, kind up, helm install, run Rust e2e, tear down"
-env = { KUBECONFIG = "{{config_root}}/target/e2e/kubeconfig" }
-run = '''
-set -eu
-for bin in docker kind kubectl helm; do
-  command -v "$bin" >/dev/null 2>&1 || { echo "error: '$bin' is required" >&2; exit 127; }
-done
-
-cleanup() {
-  rc=$?
-  # Dump state before teardown so a CI failure is debuggable (the cluster is gone after).
-  [ "$rc" -ne 0 ] && mise run e2e-diagnostics || true
-  if [ "${KOPIUR_KEEP_KIND:-0}" != "1" ]; then
-    mise run e2e-down || true
-  else
-    echo "==> KOPIUR_KEEP_KIND=1; leaving cluster (kubeconfig: $KUBECONFIG)"
-  fi
-  exit $rc
-}
-trap cleanup EXIT
-
-if [ "${KOPIUR_E2E_SKIP_BUILD:-0}" != "1" ]; then mise run e2e-images; fi
-mise run e2e-cluster-up
-mise run e2e-node-seed
-mise run e2e-helm
-
-echo "==> running e2e tests"
-cargo test -p kopiur-e2e --features e2e -- --include-ignored --test-threads=1 --nocapture ${KOPIUR_E2E_TESTFILTER:-}
-echo "==> e2e tests passed"
-'''
 
 [tasks.clippy]
 description = "Clippy across the workspace, warnings are errors"

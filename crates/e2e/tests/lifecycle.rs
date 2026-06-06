@@ -1,14 +1,14 @@
 //! End-to-end lifecycle scenarios against a Helm-deployed operator in kind.
 //!
 //! Gated by `#[cfg(feature = "e2e")]` + `#[ignore]`, skipping gracefully without
-//! a cluster. Driven by `scripts/with-e2e.sh`, which builds + loads the images,
+//! a cluster. Driven by `mise run //crates/e2e:test`, which builds + loads the images,
 //! installs the chart (webhook disabled — its admission logic is covered by the
 //! unit/integration tiers), provisions a hostPath-backed repo PVC visible to both
 //! the controller and the mover Jobs, and a source PVC pre-populated with known
 //! data. Run:
 //!
 //! ```text
-//! just test-e2e         # or: scripts/with-e2e.sh
+//! mise run //crates/e2e:test
 //! ```
 //!
 //! These tests assert on real operator output: a Repository reaching Ready, a
@@ -221,7 +221,7 @@ where
 /// The headline scenario: Repository → Backup (real kopia snapshot) → Restore →
 /// finalizer-driven Delete. Proves the entire data path end-to-end.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
 async fn backup_restore_delete_lifecycle() {
     let Some(world) = World::connect().await else {
         return;
@@ -333,7 +333,7 @@ async fn backup_restore_delete_lifecycle() {
 /// `missing dependency: Repository <ns>/<name>` and never produced a snapshot —
 /// this test would time out at `wait_phase(... "Succeeded")`.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
 async fn cluster_repository_backup_lifecycle() {
     let Some(world) = World::connect().await else {
         return;
@@ -410,7 +410,7 @@ async fn cluster_repository_backup_lifecycle() {
 /// `Running` with the Job stuck in `FailedCreate: serviceaccount ... not found` —
 /// this test would time out waiting for the SA to appear.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
 async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
     let Some(world) = World::connect().await else {
         return;
@@ -545,7 +545,7 @@ async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
 /// annotation — then it clears. Mirrors VolSync's privileged-movers gate: a tenant
 /// could otherwise reuse the minted mover ServiceAccount to run root pods.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
 async fn privileged_mover_requires_namespace_optin() {
     let Some(world) = World::connect().await else {
         return;
@@ -669,7 +669,7 @@ fn backup_json_ns(name: &str, config: &str, ns: &str) -> serde_json::Value {
 
 /// A BackupSchedule with an every-minute cron creates a scheduled Backup CR.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
 async fn schedule_creates_backup() {
     let Some(world) = World::connect().await else {
         return;
@@ -731,7 +731,7 @@ async fn schedule_creates_backup() {
 
 /// A Maintenance claims the repository lease.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
 async fn maintenance_claims_lease() {
     let Some(world) = World::connect().await else {
         return;
@@ -801,7 +801,7 @@ async fn scrape_controller_metrics(client: &Client) -> anyhow::Result<String> {
 /// The webhook is disabled in the e2e harness, so webhook metrics are covered by
 /// the unit tier, not here.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh): kind + built images + helm install"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
 async fn metrics_reflect_backup_lifecycle() {
     let Some(world) = World::connect().await else {
         return;
@@ -916,7 +916,7 @@ async fn metrics_reflect_backup_lifecycle() {
 /// schedule — and the repo reports `MaintenanceConfigured=True`. Replaces the old
 /// "warn when no Maintenance references the repo" behavior.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
 async fn repository_default_creates_managed_maintenance() {
     let Some(world) = World::connect().await else {
         return;
@@ -961,7 +961,7 @@ async fn repository_default_creates_managed_maintenance() {
 /// operator-managed `Maintenance` and flips the condition to `False` (reason
 /// `MaintenanceDisabled`, a deliberate opt-out — no Warning event).
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
 async fn disabling_maintenance_removes_managed() {
     let Some(world) = World::connect().await else {
         return;
@@ -1016,7 +1016,7 @@ async fn disabling_maintenance_removes_managed() {
 /// the repo reports `MaintenanceConfigured=True`. Disabling `spec.maintenance`
 /// must still leave the user's `Maintenance` untouched.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
 async fn external_maintenance_is_not_duplicated() {
     let Some(world) = World::connect().await else {
         return;
@@ -1079,7 +1079,7 @@ async fn external_maintenance_is_not_duplicated() {
 /// (`KOPIUR_NAMESPACE`, which the e2e harness installs as the e2e namespace),
 /// owned by the (cluster-scoped) ClusterRepository.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
 async fn cluster_repository_default_creates_managed_maintenance() {
     let Some(world) = World::connect().await else {
         return;
@@ -1121,7 +1121,7 @@ async fn cluster_repository_default_creates_managed_maintenance() {
 /// `/metrics`: `1` once the operator manages a `Maintenance` for the repo
 /// (default-on), `0` after opting out. Proves the metric surface end-to-end.
 #[tokio::test]
-#[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
 async fn maintenance_configured_reflected_in_metrics() {
     let Some(world) = World::connect().await else {
         return;

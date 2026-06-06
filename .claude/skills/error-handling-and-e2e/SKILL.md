@@ -1,6 +1,6 @@
 ---
 name: error-handling-and-e2e
-description: How Kopiur does strongly-typed, actionable error handling and end-to-end testing. Use when adding or changing any error type, error path, or fallible operation (kopia calls, kube IO, OTLP/telemetry init, validators, the mover), or when writing/extending tests — especially e2e scenarios in crates/e2e. Encodes the thiserror exhaustive-enum + classification pattern, the what/why/fix message rule, degrade-not-crash for non-critical subsystems, and the crates/e2e harness conventions (feature = "e2e", scripts/with-e2e.sh, wait_phase/wait_until, assert real operator output, never a real cluster).
+description: How Kopiur does strongly-typed, actionable error handling and end-to-end testing. Use when adding or changing any error type, error path, or fallible operation (kopia calls, kube IO, OTLP/telemetry init, validators, the mover), or when writing/extending tests — especially e2e scenarios in crates/e2e. Encodes the thiserror exhaustive-enum + classification pattern, the what/why/fix message rule, degrade-not-crash for non-critical subsystems, and the crates/e2e harness conventions (feature = "e2e", mise //crates/e2e:test, World::ensure(Need) provisioning, wait_phase/wait_until, assert real operator output, never a real cluster).
 ---
 
 # Errors & e2e testing in Kopiur
@@ -85,17 +85,24 @@ observability work — metrics that must actually be emitted and scrapable.
 ### Harness conventions (mirror `crates/e2e/tests/lifecycle.rs`)
 
 - **Gate:** `#![cfg(all(unix, feature = "e2e"))]` at the top of the test file,
-  and `#[ignore = "requires the e2e harness (scripts/with-e2e.sh)"]` on each
-  `#[tokio::test]`. So the suite compiles everywhere and is skipped without a
+  and `#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]` on
+  each `#[tokio::test]`. So the suite compiles everywhere and is skipped without a
   cluster; it only runs under the harness.
-- **Run it:** `mise run test-e2e` (or `scripts/with-e2e.sh`). The script builds +
-  loads the controller/mover images into kind, installs the Helm chart, and
-  provisions a hostPath-backed repo PVC + a pre-populated source PVC. The webhook
-  is disabled in the harness (its admission logic is covered by unit/integration
-  tiers).
-- **NEVER target a real cluster.** `scripts/with-kind.sh` / `with-e2e.sh` write
-  an isolated kubeconfig and tear the cluster down; they never touch the
-  homelab kubecontext. Do not add a test that reads the ambient `KUBECONFIG`.
+- **Run it:** `mise run //crates/e2e:test`. The host-level steps are mise tasks
+  in `crates/e2e/mise.toml` (a monorepo subproject): build + load the images into
+  kind, seed the node's hostPath dirs, and `helm upgrade --install` with
+  `deploy/e2e/values.yaml` (webhook disabled — covered by unit/integration tiers).
+- **Declare cluster prerequisites as data.** Each scenario opens with
+  `let Some(world) = World::connect().await else { return; };` then
+  `world.ensure(&[Need::Filesystem /* | Need::Minio | Need::WorkloadNs */]).await?`.
+  `World` (crates/e2e/src/world.rs) provisions namespaces/Secrets/PV-PVCs/MinIO/
+  buckets idempotently via the type-safe `Fixture` apply dispatch — never via
+  `kubectl` in a shell. Add a new fixture kind by extending the `Need`/`Fixture`
+  enums (exhaustive `match`).
+- **NEVER target a real cluster.** `scripts/with-kind.sh` (integration tier) and
+  the `//crates/e2e:*` tasks pin an isolated kubeconfig under `target/e2e/` and
+  tear the cluster down; they never touch the homelab kubecontext. Do not add a
+  test that reads the ambient `KUBECONFIG`.
 - **Helpers live in `kopiur_e2e`** (`crates/e2e/src/lib.rs`): `E2E_NAMESPACE`,
   `try_client()` (returns `None` when no cluster → skip gracefully),
   `wait_until(...)`, `default_timeout()`, `poll_interval()`. Reuse them; don't
