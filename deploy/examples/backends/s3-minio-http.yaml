@@ -1,0 +1,46 @@
+# Backend: S3 — in-cluster MinIO / RustFS over plain HTTP (ADR-0003 §3.1)
+#
+# A variant of the S3 backend for an S3-compatible store reached over plain HTTP
+# (e.g. a MinIO/RustFS Service inside the cluster). kopia's S3 path assumes HTTPS,
+# so you must opt into plain HTTP with `tls.disableTls: true`. The endpoint is a
+# bare host[:port] — NO scheme, NO trailing slash.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.s3`); `tls.disableTls` maps to kopia's `--disable-tls`.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-repo-creds
+  namespace: backups
+type: Opaque
+stringData:
+  # MinIO/RustFS access key pair (the "root" user, or a scoped service account).
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: minio-primary
+  namespace: backups
+spec:
+  backend:
+    s3:
+      bucket: kopia # the bucket holding the repository (create it in MinIO first)
+      prefix: clusters/prod/ # optional; lets several repos share one bucket
+      # Bare host[:port] of the in-cluster Service — no http:// scheme.
+      endpoint: minio.storage.svc.cluster.local:9000
+      region: us-east-1 # MinIO ignores it but kopia wants a value; any string works
+      tls:
+        disableTls: true # talk plain HTTP (kopia otherwise assumes HTTPS)
+      auth:
+        secretRef:
+          name: minio-repo-creds
+  encryption:
+    passwordSecretRef:
+      name: minio-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true # initialize the repo if it does not exist yet

@@ -91,8 +91,12 @@ pub const BUCKETS: &[&str] = &[
 // kopia's SFTP backend has no env-var credential form, so the mover materializes
 // the private key + known_hosts from the credentials Secret into files. These
 // throwaway ed25519 keys exist ONLY for the ephemeral e2e cluster.
-/// SFTP server image (Alpine + OpenSSH).
-pub const SFTP_IMAGE: &str = "atmoz/sftp:alpine";
+/// SFTP server image. Debian (OpenSSH 9.x), NOT `:alpine` (which now ships
+/// OpenSSH 10.2p1): kopia 0.23's bundled go-ssh client hangs ~2 minutes in the
+/// SFTP init handshake against OpenSSH 10.x, so the test server must run a
+/// mainstream OpenSSH version (what real users run). Verified: kopia connects in
+/// <100ms against 9.2 vs ~2min against 10.2.
+pub const SFTP_IMAGE: &str = "atmoz/sftp:debian";
 /// In-cluster SFTP host the Repository points at (must match the `known_hosts`
 /// entry below — kopia matches the host key against the `--host` value).
 pub const SFTP_HOST: &str = "sftp.kopiur-e2e.svc.cluster.local";

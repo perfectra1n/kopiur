@@ -1,0 +1,44 @@
+# Backend: Azure Blob Storage — SAS-token auth (ADR-0003 §3.1)
+#
+# A variant of the Azure backend that authenticates with a SAS (shared access
+# signature) token scoped to the container, instead of the storage-account key.
+# Provide EXACTLY ONE of AZURE_STORAGE_KEY or AZURE_STORAGE_SAS_TOKEN — kopia uses
+# whichever is set. A scoped, time-limited SAS token grants least privilege.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.azure`).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: azure-sas-repo-creds
+  namespace: backups
+type: Opaque
+stringData:
+  # The SAS token, WITHOUT a leading '?'. Generate one scoped to the container
+  # with read/write/list/delete (Blob), e.g. in the portal or:
+  #   az storage container generate-sas --account-name mystorageacct \
+  #     --name kopia-backups --permissions racwdl --expiry 2027-01-01 -o tsv
+  AZURE_STORAGE_SAS_TOKEN: "REPLACE_ME"
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: azure-sas-primary
+  namespace: backups
+spec:
+  backend:
+    azure:
+      container: kopia-backups # the blob container holding the repository
+      prefix: prod/ # optional blob-name prefix within the container
+      storageAccount: mystorageacct # account name (SAS tokens do not encode it)
+      auth:
+        secretRef:
+          name: azure-sas-repo-creds
+  encryption:
+    passwordSecretRef:
+      name: azure-sas-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true

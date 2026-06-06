@@ -56,7 +56,7 @@ The mover reads these **well-known keys** from the Secret you reference and feed
 | **Azure** | `AZURE_STORAGE_KEY` **or** `AZURE_STORAGE_SAS_TOKEN` | Account name can come from `spec.backend.azure.storageAccount`. |
 | **GCS** | `KOPIA_GCS_CREDENTIALS` (service-account JSON) | The mover writes the JSON to a file and passes `--credentials-file`. |
 | **B2** | `B2_KEY_ID`, `B2_KEY` | Backblaze application key ID + key. |
-| **SFTP** | `KOPIA_SFTP_KEY_DATA`, `KOPIA_SFTP_KNOWN_HOSTS` | Key-based auth; the mover writes both to files (`--keyfile`/`--known-hosts`). See [SFTP](backends.md#sftp). |
+| **SFTP** | `KOPIA_SFTP_KEY_DATA`, `KOPIA_SFTP_KNOWN_HOSTS` | Key-based auth; the mover writes both to files (`--keyfile`/`--known-hosts`). See [SFTP](backends/sftp.md). |
 | **WebDAV** | `KOPIA_WEBDAV_USERNAME`, `KOPIA_WEBDAV_PASSWORD` | HTTP basic auth, via `auth.secretRef`. |
 | **rclone** | `KOPIA_RCLONE_CONFIG` (the `rclone.conf`) | Referenced by `backend.rclone.configSecretRef`, not `auth`. |
 | **filesystem** | *(none — local path)* | Only `KOPIA_PASSWORD` is needed. |

@@ -23,7 +23,7 @@ Kopiur separates the backup **recipe** (`BackupConfig`) from its **invocation** 
 | 09 | [Mover UID/GID & permissions](#example-09--mover-uidgid--permissions) | Match the mover's UID/GID to the data owner so it can read it. |
 
 ```admonish tip title="Looking for a specific storage backend?"
-Complete apply-ready `Repository` manifests for **every** backend (S3, Azure, GCS, B2, filesystem, SFTP, WebDAV, rclone) live under [`deploy/examples/backends/`](https://github.com/home-operations/kopiur/tree/main/deploy/examples/backends) and are walked through, with provider prerequisites, on the [Backend configuration](backends.md) page. The numbered ladder below is the task/workflow tutorial.
+Each backend (S3, Azure, GCS, B2, filesystem, SFTP, WebDAV, rclone) has its own dedicated page — provider prerequisites, the exact Secret shape, a field-by-field reference, and a complete apply-ready manifest — starting from the [Backend configuration](backends.md) index. The apply-ready manifests themselves live under [`deploy/examples/backends/`](https://github.com/home-operations/kopiur/tree/main/deploy/examples/backends). The numbered ladder below is the task/workflow tutorial.
 ```
 
 ```admonish warning title="Alpha"

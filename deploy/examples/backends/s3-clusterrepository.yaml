@@ -1,0 +1,59 @@
+# Backend: S3 as a shared ClusterRepository (ADR-0003 §3.1/§3.2)
+#
+# The SAME S3 backend stanza, but on a cluster-scoped ClusterRepository owned by a
+# platform team and referenced by allow-listed tenant namespaces. Two things differ
+# from a namespaced Repository:
+#   1. EVERY Secret reference must carry an explicit `namespace:` (webhook-enforced
+#      — a cluster-scoped CR has no namespace of its own to default to).
+#   2. `allowedNamespaces` gates which namespaces may reference it, and
+#      `identityDefaults` templates each consumer's kopia identity at admission.
+#
+# REQUIRES the operator installed with installScope=cluster.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.s3`) and `allowedNamespaces` (list | selector | all).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kopia-platform-creds
+  namespace: kopiur-system # lives in the platform namespace
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: ClusterRepository
+metadata:
+  name: shared-s3 # cluster-scoped: no namespace on the CR itself
+spec:
+  backend:
+    s3:
+      bucket: org-kopia-repo
+      prefix: "" # bucket root; per-tenant separation comes from identity, not prefix
+      region: us-east-1
+      auth:
+        secretRef:
+          name: kopia-platform-creds
+          namespace: kopiur-system # explicit ns REQUIRED for cluster scope
+  encryption:
+    passwordSecretRef:
+      name: kopia-platform-creds
+      namespace: kopiur-system # explicit ns REQUIRED for cluster scope
+      key: KOPIA_PASSWORD
+  # Tenancy gate (externally-tagged: list | selector | all).
+  allowedNamespaces:
+    list:
+      - billing
+      - payments
+  # Jinja2-compatible templates rendered at admission, pinned to status (ADR §4.2).
+  identityDefaults:
+    hostnameTemplate: "{{ .Namespace }}"
+    usernameTemplate: "{{ .Namespace }}-{{ .ConfigName }}"
+  # Maintenance is default-managed. Maintenance is namespaced but a
+  # ClusterRepository is not, so `namespace` picks where the managed Maintenance
+  # CR lands (defaults to the operator's namespace when omitted).
+  maintenance:
+    namespace: kopiur-system
