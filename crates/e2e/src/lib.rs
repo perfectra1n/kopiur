@@ -8,6 +8,7 @@ use kube::{Client, Error};
 pub mod apply;
 pub mod builders;
 pub mod consts;
+pub mod wait;
 
 /// The namespace the e2e harness installs the operator and runs scenarios in.
 /// Back-compat alias for [`consts::OPERATOR_NS`].
