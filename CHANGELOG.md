@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.9](https://github.com/home-operations/kopiur/compare/0.1.8...0.1.9) (2026-06-06)
+
+
+### Features
+
+* **dev:** update claude documentation skill ([43da6c8](https://github.com/home-operations/kopiur/commit/43da6c882e0ee9a03d153d1648224a8d46b944ad))
+* **docs:** add more useful user-facing documentation ([b296ae0](https://github.com/home-operations/kopiur/commit/b296ae07a3e3c12ab33173ade98619a4bfd093a1))
+* **e2e:** also add features to e2e tests ([8be3884](https://github.com/home-operations/kopiur/commit/8be388404d57e174dd27014b8d7de300b0d97cc0))
+* **sa:** support stronger typing and testing for SA that goes cross namespace ([ff45c39](https://github.com/home-operations/kopiur/commit/ff45c3901cbe73f15c963be14b34bc3ccae03546))
+* **tests:** continue to find wild issues through e2e testing, and resolve them ([77c3032](https://github.com/home-operations/kopiur/commit/77c30322fd3c9ad99964a1bf4184a4e42b7fa51c))
+
+
+### Miscellaneous Chores
+
+* we no longer have auto merge org wide ([23f3d39](https://github.com/home-operations/kopiur/commit/23f3d39768d2e9fe364db1af4369d30eb7c6a2d4))
+
 ## [0.1.8](https://github.com/home-operations/kopiur/compare/0.1.7...0.1.8) (2026-06-06)
 
 
