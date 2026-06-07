@@ -36,6 +36,9 @@ kubeconform = "0.8.0"
 # admonition styling, so there are no separate preprocessor binaries or committed
 # assets to manage. `uv lock` after bumping a docs dependency in pyproject.toml.
 "aqua:astral-sh/uv" = "0.9.9"
+helm-docs = "1.14.2"
+"aqua:dadav/helm-schema" = "0.23.4"
+yq = "4.53.3"
 
 [tasks.build]
 description = "Compile the whole workspace (debug, locked deps)"
@@ -140,6 +143,23 @@ for scope in namespaced cluster; do
   helm template kopiur deploy/helm/kopiur --set installScope="$scope" | kubeconform -strict -summary -ignore-missing-schemas
 done
 kubeconform -strict -summary -ignore-missing-schemas deploy/crds/all-crds.yaml
+"""
+
+[tasks.helm-docs]
+description = "Generate the chart README + values.schema.json from Chart.yaml + values.yaml"
+run = """
+helm-docs --chart-search-root=deploy/helm --log-level=warn
+# required/additionalProperties are skipped so the schema stays permissive: values.yaml
+# supplies every default and the free-form maps stay open. --append-newline gives a
+# clean EOF; the file is .prettierignore'd (a generated artifact), so oxfmt skips it.
+helm-schema --chart-search-root deploy/helm/kopiur --skip-auto-generation required,additionalProperties --append-newline
+"""
+
+[tasks.helm-docs-check]
+description = "Fail if the generated chart README/schema are stale (CI gate)"
+run = """
+mise run helm-docs
+git diff --exit-code deploy/helm/kopiur/README.md deploy/helm/kopiur/values.schema.json
 """
 
 [tasks.kind-up]

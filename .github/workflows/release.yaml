@@ -38,26 +38,17 @@ jobs:
           echo "kopia-version=$(mise config get tools.kopia)" >> "$GITHUB_OUTPUT"
           echo "rust-version=$(mise config get tools.rust.version)" >> "$GITHUB_OUTPUT"
 
-  release:
-    name: Release (${{ matrix.component }})
+  # Build each component image in its own job (not a matrix over the reusable
+  # workflow). The chart pins all three image digests at release time, and a
+  # matrix collapses needs.<job>.outputs.digest to a single value — three
+  # separate jobs keep each builder's first-class `digest` output addressable.
+  release-controller:
+    name: Release (controller)
     needs: versions
     permissions:
       contents: read
       id-token: write
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - component: controller
-            dockerfile: docker/Dockerfile
-            build_args: BIN=kopiur-controller
-          - component: webhook
-            dockerfile: docker/Dockerfile
-            build_args: BIN=kopiur-webhook
-          - component: mover
-            dockerfile: docker/Dockerfile.mover
-            build_args: ""
     uses: docker/github-builder/.github/workflows/build.yml@70ac3fc303efa83d2b94905e6ab78bb83cbdc2ae # v1.11.0
     with:
       build-args: |
@@ -65,11 +56,80 @@ jobs:
         REVISION=${{ github.sha }}
         KOPIA_VERSION=${{ needs.versions.outputs.kopia-version }}
         RUST_VERSION=${{ needs.versions.outputs.rust-version }}
-        ${{ matrix.build_args }}
+        BIN=kopiur-controller
       cache: true
-      cache-scope: ${{ matrix.component }}
-      file: ${{ matrix.dockerfile }}
-      meta-images: ghcr.io/${{ github.repository }}-${{ matrix.component }}
+      cache-scope: controller
+      file: docker/Dockerfile
+      meta-images: ghcr.io/${{ github.repository }}-controller
+      meta-tags: |
+        type=semver,pattern={{version}}
+        type=semver,pattern={{major}}.{{minor}}
+        type=raw,value=rolling,enable=${{ github.event_name == 'release' }}
+        type=ref,event=branch
+      output: image
+      platforms: linux/amd64,linux/arm64
+      push: true
+      sbom: true
+      sign: true
+    secrets:
+      registry-auths: |
+        - registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+  release-webhook:
+    name: Release (webhook)
+    needs: versions
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    uses: docker/github-builder/.github/workflows/build.yml@70ac3fc303efa83d2b94905e6ab78bb83cbdc2ae # v1.11.0
+    with:
+      build-args: |
+        VERSION=${{ github.ref_name }}
+        REVISION=${{ github.sha }}
+        KOPIA_VERSION=${{ needs.versions.outputs.kopia-version }}
+        RUST_VERSION=${{ needs.versions.outputs.rust-version }}
+        BIN=kopiur-webhook
+      cache: true
+      cache-scope: webhook
+      file: docker/Dockerfile
+      meta-images: ghcr.io/${{ github.repository }}-webhook
+      meta-tags: |
+        type=semver,pattern={{version}}
+        type=semver,pattern={{major}}.{{minor}}
+        type=raw,value=rolling,enable=${{ github.event_name == 'release' }}
+        type=ref,event=branch
+      output: image
+      platforms: linux/amd64,linux/arm64
+      push: true
+      sbom: true
+      sign: true
+    secrets:
+      registry-auths: |
+        - registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+  release-mover:
+    name: Release (mover)
+    needs: versions
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    uses: docker/github-builder/.github/workflows/build.yml@70ac3fc303efa83d2b94905e6ab78bb83cbdc2ae # v1.11.0
+    with:
+      build-args: |
+        VERSION=${{ github.ref_name }}
+        REVISION=${{ github.sha }}
+        KOPIA_VERSION=${{ needs.versions.outputs.kopia-version }}
+        RUST_VERSION=${{ needs.versions.outputs.rust-version }}
+      cache: true
+      cache-scope: mover
+      file: docker/Dockerfile.mover
+      meta-images: ghcr.io/${{ github.repository }}-mover
       meta-tags: |
         type=semver,pattern={{version}}
         type=semver,pattern={{major}}.{{minor}}
@@ -88,7 +148,10 @@ jobs:
 
   helm:
     name: Helm
-    needs: release
+    needs:
+      - release-controller
+      - release-webhook
+      - release-mover
     if: ${{ github.event_name == 'release' }}
     runs-on: ubuntu-24.04
     permissions:
@@ -111,6 +174,28 @@ jobs:
 
       - name: Check generated manifests
         run: cargo xtask gen-all --check
+
+      # Pin all three component images to the exact digests the builder produced
+      # — each build job's first-class `digest` output (the signed multi-arch
+      # index) — so the released chart references immutable images instead of
+      # floating tags. Fail closed if any digest is missing. Only the packaged
+      # copy is rewritten; the repo keeps empty digests (floating tags for dev).
+      - name: Pin the released image digests into the chart
+        env:
+          CONTROLLER_DIGEST: ${{ needs.release-controller.outputs.digest }}
+          WEBHOOK_DIGEST: ${{ needs.release-webhook.outputs.digest }}
+          MOVER_DIGEST: ${{ needs.release-mover.outputs.digest }}
+        run: |
+          for pair in "controller:${CONTROLLER_DIGEST}" "webhook:${WEBHOOK_DIGEST}" "mover:${MOVER_DIGEST}"; do
+            comp="${pair%%:*}"
+            digest="${pair#*:}"
+            case "${digest}" in
+              sha256:*) ;;
+              *) echo "build produced no digest for ${comp} (got: '${digest}')"; exit 1 ;;
+            esac
+            yq -i ".image.${comp}.digest = \"${digest}\"" deploy/helm/kopiur/values.yaml
+            echo "pinned ${comp} -> ${digest}"
+          done
 
       - name: Package Helm chart
         run: |
