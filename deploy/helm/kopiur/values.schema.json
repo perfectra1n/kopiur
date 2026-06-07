@@ -157,11 +157,17 @@
       "type": "object"
     },
     "grafanaDashboard": {
-      "description": "Grafana dashboard for the kopiur fleet. Shipped as a ConfigMap labeled for\nthe Grafana sidecar to auto-discover; the same JSON also lives in\ndeploy/dashboards/kopiur.json for manual import.",
+      "description": "Grafana dashboard for the kopiur fleet. The same JSON lives in\ndeploy/dashboards/kopiur.json (the single source of truth, copied into the\nchart by `cargo xtask gen-all`) for manual import. By default it ships as a\nConfigMap labeled for the Grafana sidecar to auto-discover; flip\ngrafanaOperator.enabled to render a grafana-operator GrafanaDashboard CR from\nthe very same JSON instead.",
       "properties": {
+        "annotations": {
+          "description": "Extra annotations added to the dashboard object (ConfigMap or CR).",
+          "required": [],
+          "title": "annotations",
+          "type": "object"
+        },
         "enabled": {
           "default": false,
-          "description": "Create the dashboard ConfigMap.",
+          "description": "Create the dashboard (a sidecar ConfigMap by default).",
           "title": "enabled",
           "type": "boolean"
         },
@@ -172,9 +178,46 @@
         },
         "folderAnnotation": {
           "default": "",
-          "description": "Annotation setting the Grafana folder for the dashboard (optional).",
+          "description": "Annotation setting the Grafana folder for the sidecar ConfigMap (optional).",
           "title": "folderAnnotation",
           "type": "string"
+        },
+        "grafanaOperator": {
+          "properties": {
+            "allowCrossNamespaceImport": {
+              "default": true,
+              "description": "Allow a Grafana in any namespace to import this GrafanaDashboard.",
+              "title": "allowCrossNamespaceImport",
+              "type": "boolean"
+            },
+            "enabled": {
+              "default": false,
+              "description": "Render a grafana-operator GrafanaDashboard CR instead of the sidecar ConfigMap.",
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "folder": {
+              "default": "",
+              "description": "Folder to create the dashboard in (Grafana folder name).",
+              "title": "folder",
+              "type": "string"
+            },
+            "matchLabels": {
+              "description": "spec.instanceSelector.matchLabels — selects which Grafana instance(s) load this dashboard.",
+              "required": [],
+              "title": "matchLabels",
+              "type": "object"
+            },
+            "resyncPeriod": {
+              "default": "10m",
+              "description": "How often grafana-operator re-checks the dashboard for updates.",
+              "title": "resyncPeriod",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "grafanaOperator",
+          "type": "object"
         },
         "label": {
           "default": "grafana_dashboard",
@@ -185,6 +228,18 @@
         "labelValue": {
           "default": "1",
           "title": "labelValue",
+          "type": "string"
+        },
+        "labels": {
+          "description": "Extra labels added to the dashboard object (ConfigMap or CR).",
+          "required": [],
+          "title": "labels",
+          "type": "object"
+        },
+        "namespace": {
+          "default": "",
+          "description": "Namespace for the dashboard object; defaults to the release namespace.",
+          "title": "namespace",
           "type": "string"
         }
       },

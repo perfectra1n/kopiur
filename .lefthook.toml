@@ -13,13 +13,22 @@ glob = [
 ]
 run = "mise run helm-docs && git add deploy/helm/kopiur/README.md deploy/helm/kopiur/values.schema.json"
 
-# The generated chart README/schema are .prettierignore'd; exclude them from the
-# shared formatters too (oxfmt exits non-zero when every input is ignored).
+# The generated chart README and the authored MkDocs site under docs/ are both
+# .prettierignore'd; exclude them from the shared formatter too. Without this,
+# staging only docs/*.md hands oxfmt an all-ignored set and it exits non-zero
+# ("Expected at least one target file"), failing the whole hook.
 [pre-commit.commands.format-markdown]
-exclude = ["deploy/helm/kopiur/README.md"]
+exclude = ["deploy/helm/kopiur/README.md", "docs/**"]
 
 [pre-commit.commands.format-json]
 exclude = ["deploy/helm/kopiur/values.schema.json"]
 
+# Helm chart templates are Go-templated YAML — a `{{- if -}}` guard on line 1 is
+# not valid standalone YAML, so oxfmt's parser errors out (exit 2). They can
+# never be fed to a YAML formatter; skip the whole templates/ dir.
 [pre-commit.commands.format-yaml]
-exclude = ["deploy/crds/*.yaml", "deploy/helm/kopiur/files/crds/*.yaml"]
+exclude = [
+  "deploy/crds/*.yaml",
+  "deploy/helm/kopiur/files/crds/*.yaml",
+  "deploy/helm/kopiur/templates/*.yaml",
+]

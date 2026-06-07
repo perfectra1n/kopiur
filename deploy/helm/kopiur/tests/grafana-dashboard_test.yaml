@@ -1,0 +1,103 @@
+suite: grafana-dashboard
+templates:
+  - grafana-dashboard.yaml
+  - grafana-dashboard-operator.yaml
+tests:
+  - it: renders nothing by default (ConfigMap path)
+    template: grafana-dashboard.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders nothing by default (operator path)
+    template: grafana-dashboard-operator.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: ships the sidecar ConfigMap when enabled
+    template: grafana-dashboard.yaml
+    set:
+      grafanaDashboard.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-kopiur-dashboard
+      - equal:
+          path: metadata.labels["grafana_dashboard"]
+          value: "1"
+      - isNotEmpty:
+          path: data["kopiur.json"]
+
+  - it: does not ship the operator CR in sidecar mode
+    template: grafana-dashboard-operator.yaml
+    set:
+      grafanaDashboard.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the GrafanaDashboard CR in operator mode
+    template: grafana-dashboard-operator.yaml
+    set:
+      grafanaDashboard.enabled: true
+      grafanaDashboard.grafanaOperator.enabled: true
+      grafanaDashboard.grafanaOperator.matchLabels:
+        dashboards: grafana
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: GrafanaDashboard
+      - equal:
+          path: apiVersion
+          value: grafana.integreatly.org/v1beta1
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-kopiur-dashboard
+      - equal:
+          path: spec.allowCrossNamespaceImport
+          value: true
+      - equal:
+          path: spec.resyncPeriod
+          value: "10m"
+      - equal:
+          path: spec.instanceSelector.matchLabels.dashboards
+          value: grafana
+      - isNotEmpty:
+          path: spec.json
+
+  - it: does not ship the sidecar ConfigMap in operator mode
+    template: grafana-dashboard.yaml
+    set:
+      grafanaDashboard.enabled: true
+      grafanaDashboard.grafanaOperator.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: sets the operator folder when provided
+    template: grafana-dashboard-operator.yaml
+    set:
+      grafanaDashboard.enabled: true
+      grafanaDashboard.grafanaOperator.enabled: true
+      grafanaDashboard.grafanaOperator.folder: Backups
+    asserts:
+      - equal:
+          path: spec.folder
+          value: Backups
+
+  - it: places the CR in the override namespace
+    template: grafana-dashboard-operator.yaml
+    set:
+      grafanaDashboard.enabled: true
+      grafanaDashboard.grafanaOperator.enabled: true
+      grafanaDashboard.namespace: grafana
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: grafana

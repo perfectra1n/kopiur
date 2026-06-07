@@ -197,7 +197,7 @@ webhook:
     # this chart creates. Leave name empty to use the chart-managed Issuer.
     issuerRef:
       name: ""
-      kind: Issuer   # Issuer | ClusterIssuer
+      kind: Issuer # Issuer | ClusterIssuer
   # -- Base64-encoded PEM CA bundle injected into the webhook configurations
   # when certManager.enabled is false. Required for the API server to trust a
   # self-managed serving cert. Ignored when certManager.enabled is true.
@@ -231,18 +231,38 @@ metrics:
     # -- Age (seconds) after which a BackupConfig's last success is "stale".
     backupStaleAfterSeconds: 172800 # 48h
 
-# -- Grafana dashboard for the kopiur fleet. Shipped as a ConfigMap labeled for
-# the Grafana sidecar to auto-discover; the same JSON also lives in
-# deploy/dashboards/kopiur.json for manual import.
+# -- Grafana dashboard for the kopiur fleet. The same JSON lives in
+# deploy/dashboards/kopiur.json (the single source of truth, copied into the
+# chart by `cargo xtask gen-all`) for manual import. By default it ships as a
+# ConfigMap labeled for the Grafana sidecar to auto-discover; flip
+# grafanaOperator.enabled to render a grafana-operator GrafanaDashboard CR from
+# the very same JSON instead.
 grafanaDashboard:
-  # -- Create the dashboard ConfigMap.
+  # -- Create the dashboard (a sidecar ConfigMap by default).
   enabled: false
   # -- Label the Grafana sidecar watches for (key: value). Adjust to your stack.
   label: grafana_dashboard
   labelValue: "1"
-  # -- Annotation setting the Grafana folder for the dashboard (optional).
+  # -- Annotation setting the Grafana folder for the sidecar ConfigMap (optional).
   folderAnnotation: ""
   folder: ""
+  # -- Namespace for the dashboard object; defaults to the release namespace.
+  namespace: ""
+  # -- Extra annotations added to the dashboard object (ConfigMap or CR).
+  annotations: {}
+  # -- Extra labels added to the dashboard object (ConfigMap or CR).
+  labels: {}
+  grafanaOperator:
+    # -- Render a grafana-operator GrafanaDashboard CR instead of the sidecar ConfigMap.
+    enabled: false
+    # -- Allow a Grafana in any namespace to import this GrafanaDashboard.
+    allowCrossNamespaceImport: true
+    # -- Folder to create the dashboard in (Grafana folder name).
+    folder: ""
+    # -- How often grafana-operator re-checks the dashboard for updates.
+    resyncPeriod: "10m"
+    # -- spec.instanceSelector.matchLabels — selects which Grafana instance(s) load this dashboard.
+    matchLabels: {}
 
 # =============================================================================
 # OpenTelemetry (OTLP) — traces, logs, and a metrics push, off by default

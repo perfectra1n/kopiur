@@ -10,5 +10,9 @@ deploy/helm/kopiur/values.schema.json
 deploy/crds/
 deploy/helm/kopiur/files/crds/
 
+# Helm chart templates are Go-templated YAML (a `{{- if -}}` guard isn't valid
+# standalone YAML), so oxfmt can't parse them — exclude the whole templates/ dir.
+deploy/helm/kopiur/templates/
+
 # Docs site (MkDocs); leave authored Markdown untouched by oxfmt.
 docs/

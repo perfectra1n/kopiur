@@ -73,10 +73,18 @@ Disable the webhook entirely with `webhook.enabled=false` (validation then falls
 | controller.resources | object | `{"limits":{"memory":"1Gi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | Resource requests/limits for the controller pod. No CPU limit (CPU throttling on an operator only adds reconcile latency; the request reserves a fair share). The memory limit must cover the *burst* on startup/restart, not just steady state (~120Mi): on (re)start the controller reconciles every existing resource at once, spawning concurrent in-process `kopia` subprocesses (whose RSS counts against this container's cgroup) to list/connect a repository that may hold many snapshots. With the OpenTelemetry/OTLP stack linked in, 256Mi was too tight — the burst OOMKilled the controller, which then crash-looped (OOM -> restart -> re-reconcile burst -> OOM). 1Gi gives ample headroom. See crates/e2e/tests/lifecycle.rs. |
 | controller.tolerations | list | `[]` |  |
 | fullnameOverride | string | `""` | Override the full release-qualified name (defaults to "<release>-kopiur"). |
-| grafanaDashboard | object | `{"enabled":false,"folder":"","folderAnnotation":"","label":"grafana_dashboard","labelValue":"1"}` | Grafana dashboard for the kopiur fleet. Shipped as a ConfigMap labeled for the Grafana sidecar to auto-discover; the same JSON also lives in deploy/dashboards/kopiur.json for manual import. |
-| grafanaDashboard.enabled | bool | `false` | Create the dashboard ConfigMap. |
-| grafanaDashboard.folderAnnotation | string | `""` | Annotation setting the Grafana folder for the dashboard (optional). |
+| grafanaDashboard | object | `{"annotations":{},"enabled":false,"folder":"","folderAnnotation":"","grafanaOperator":{"allowCrossNamespaceImport":true,"enabled":false,"folder":"","matchLabels":{},"resyncPeriod":"10m"},"label":"grafana_dashboard","labelValue":"1","labels":{},"namespace":""}` | Grafana dashboard for the kopiur fleet. The same JSON lives in deploy/dashboards/kopiur.json (the single source of truth, copied into the chart by `cargo xtask gen-all`) for manual import. By default it ships as a ConfigMap labeled for the Grafana sidecar to auto-discover; flip grafanaOperator.enabled to render a grafana-operator GrafanaDashboard CR from the very same JSON instead. |
+| grafanaDashboard.annotations | object | `{}` | Extra annotations added to the dashboard object (ConfigMap or CR). |
+| grafanaDashboard.enabled | bool | `false` | Create the dashboard (a sidecar ConfigMap by default). |
+| grafanaDashboard.folderAnnotation | string | `""` | Annotation setting the Grafana folder for the sidecar ConfigMap (optional). |
+| grafanaDashboard.grafanaOperator.allowCrossNamespaceImport | bool | `true` | Allow a Grafana in any namespace to import this GrafanaDashboard. |
+| grafanaDashboard.grafanaOperator.enabled | bool | `false` | Render a grafana-operator GrafanaDashboard CR instead of the sidecar ConfigMap. |
+| grafanaDashboard.grafanaOperator.folder | string | `""` | Folder to create the dashboard in (Grafana folder name). |
+| grafanaDashboard.grafanaOperator.matchLabels | object | `{}` | spec.instanceSelector.matchLabels — selects which Grafana instance(s) load this dashboard. |
+| grafanaDashboard.grafanaOperator.resyncPeriod | string | `"10m"` | How often grafana-operator re-checks the dashboard for updates. |
 | grafanaDashboard.label | string | `"grafana_dashboard"` | Label the Grafana sidecar watches for (key: value). Adjust to your stack. |
+| grafanaDashboard.labels | object | `{}` | Extra labels added to the dashboard object (ConfigMap or CR). |
+| grafanaDashboard.namespace | string | `""` | Namespace for the dashboard object; defaults to the release namespace. |
 | image.controller.digest | string | `""` | Pin by digest (e.g. "sha256:..."); takes precedence over tag. |
 | image.controller.repository | string | `"home-operations/kopiur-controller"` |  |
 | image.controller.tag | string | `""` | Defaults to .Chart.AppVersion when empty. |

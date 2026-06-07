@@ -104,6 +104,7 @@ Keys (see `deploy/helm/kopiur/values.yaml` for the full set):
 | `metrics.serviceMonitor.enabled` | `false`  | scrape the controller `/metrics`                |
 | `metrics.prometheusRule.enabled` | `false`  | install the kopiur alert rules                  |
 | `grafanaDashboard.enabled`       | `false`  | ship the dashboard as a sidecar ConfigMap       |
+| `grafanaDashboard.grafanaOperator.enabled` | `false` | render a grafana-operator `GrafanaDashboard` CR instead of the ConfigMap |
 | `webhook.serviceMonitor.enabled` | `false`  | scrape the webhook `/metrics` (HTTPS)           |
 | `observability.otlp.enabled`     | `false`  | export OTLP from all components                 |
 | `observability.otlp.endpoint`    | `…:4317` | collector gRPC endpoint (required when enabled) |
@@ -122,6 +123,8 @@ The env var **names** are centralized in `crates/telemetry/src/env.rs` (`OTEL_EX
 ## Dashboard
 
 `deploy/dashboards/kopiur.json` is the source of truth (import it into Grafana directly). The chart copy under `deploy/helm/kopiur/files/dashboards/kopiur.json` is **generated** from it by `cargo xtask gen-all` and guarded by `cargo xtask gen-all --check`, so the two can never drift. Edit the source, then regenerate.
+
+Both Helm render paths read that one generated copy: `grafanaDashboard.enabled` emits a sidecar `ConfigMap`, and `grafanaDashboard.grafanaOperator.enabled` emits a grafana-operator `GrafanaDashboard` CR (with the JSON inline under `spec.json`) *instead of* the ConfigMap. So a dashboard change is a single-file edit (`deploy/dashboards/kopiur.json`) + `mise run gen`, regardless of how it's delivered.
 
 ## Grafana via the OTLP path
 
