@@ -64,6 +64,7 @@ fn sample_repository(name: &str) -> Repository {
             cache_defaults: None,
             catalog: None,
             maintenance: None,
+            credential_projection: None,
         },
     )
 }

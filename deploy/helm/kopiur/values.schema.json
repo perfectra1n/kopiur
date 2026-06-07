@@ -575,6 +575,20 @@
       "title": "podSecurityContext",
       "type": "object"
     },
+    "secretProjection": {
+      "description": "=============================================================================\nCredential projection\n=============================================================================\nPer-repository `spec.credentialProjection.enabled` lets the operator copy a\nrepository's credential Secret(s) into each mover Job's namespace, so users with\nmany namespaces don't have to pre-create the Secret everywhere (the chief win is\na shared ClusterRepository whose Secret is pinned to one namespace). That\nrequires the operator to hold cluster-wide `secrets` create/patch.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Grant the operator `secrets` create+patch in its RBAC so per-repository\n`spec.credentialProjection` works. Default on so opt-in repositories function\nwithout a separate RBAC change. SECURITY TRADE-OFF: this is a broader blast\nradius — `create` cannot be scoped to a Secret name, so the operator can write\na Secret in any namespace it manages. Set false to keep `secrets` RBAC\nread-only (then projection-enabled repositories surface an actionable 403 and\nyou manage credential Secrets yourself).",
+          "title": "enabled",
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "title": "secretProjection",
+      "type": "object"
+    },
     "securityContext": {
       "properties": {
         "allowPrivilegeEscalation": {

@@ -26,6 +26,7 @@ Kopiur separates the backup **recipe** (`BackupConfig`) from its **invocation** 
 | 08  | [Maintenance](#example-08--maintenance)                                 | A standalone `Maintenance` for fine-grained control.                    |
 | 09  | [Mover UID/GID & permissions](#example-09--mover-uidgid--permissions)   | Match the mover's UID/GID to the data owner so it can read it.          |
 | 10  | [NFS source (no PVC)](#example-10--nfs-source-no-pvc)                   | Back up a NAS export directly — no PersistentVolumeClaim.               |
+| 11  | [Credential projection](#example-11--credential-projection)             | Let the operator copy the repo Secret into each mover namespace.        |
 
 /// tip | Looking for a specific storage backend?
 
@@ -161,4 +162,12 @@ Back up a NAS export directly: `source.nfs` names an NFS `server` + `path` inste
 
 ```yaml
 --8<-- "deploy/examples/10-nfs-source.yaml"
+```
+
+## Example 11 — Credential projection
+
+A shared `ClusterRepository` keeps its credential Secret in the operator namespace, but movers run in workload namespaces and load creds via namespace-local `envFrom` — so normally you copy that Secret into every namespace yourself. Setting `credentialProjection.enabled: true` opts out of that chore: before each run the operator projects the repository's Secret into the mover's namespace, owned by the consuming `Backup`/`Restore`/`Maintenance` (garbage-collected with it) and refreshed from source each run. It needs the operator's cluster-wide `secrets` create/patch RBAC (Helm `secretProjection.enabled`, default on); see [Movers, RBAC & credentials](movers.md#optional-let-kopiur-project-the-credentials-secret) for the security trade-off.
+
+```yaml
+--8<-- "deploy/examples/11-credential-projection.yaml"
 ```

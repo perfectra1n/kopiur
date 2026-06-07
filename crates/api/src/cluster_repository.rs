@@ -6,7 +6,9 @@
 //! templating (`identityDefaults`).
 
 use crate::backend::Backend;
-use crate::common::{CacheDefaults, CatalogBounds, CreateBehavior, Encryption};
+use crate::common::{
+    CacheDefaults, CatalogBounds, CreateBehavior, CredentialProjection, Encryption,
+};
 use crate::maintenance::RepositoryMaintenanceSpec;
 use crate::repository::{CatalogStatus, RepositoryPhase, StorageStats};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector};
@@ -62,6 +64,13 @@ pub struct ClusterRepositorySpec {
     /// lands (defaulting to the operator's namespace). ADR §3.2/§3.7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<RepositoryMaintenanceSpec>,
+    /// Opt-in credential-Secret projection. The primary beneficiary: this CR's
+    /// `encryption.passwordSecretRef` is pinned to one namespace (webhook-enforced),
+    /// yet movers run in many workload namespaces. Absent/`enabled: false` keeps
+    /// the self-managed default; `enabled: true` makes the operator copy the
+    /// credential Secret(s) into each mover Job's namespace. ADR §3.2/§4.11.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_projection: Option<CredentialProjection>,
 }
 
 /// The set of namespaces permitted to reference this `ClusterRepository`. ADR §3.2.
@@ -217,6 +226,42 @@ catalog:
         let json = serde_json::to_value(&spec).expect("serialize");
         let reparsed: ClusterRepositorySpec = serde_json::from_value(json).expect("reparse");
         assert_eq!(spec, reparsed);
+    }
+
+    #[test]
+    fn credential_projection_roundtrip() {
+        // Opt-in projection parses the cluster's way and round-trips.
+        let yaml = r#"
+backend:
+  filesystem:
+    path: /repo
+encryption:
+  passwordSecretRef:
+    name: kopia-platform-creds
+    namespace: kopiur-system
+    key: KOPIA_PASSWORD
+allowedNamespaces:
+  all: true
+credentialProjection:
+  enabled: true
+"#;
+        let spec: ClusterRepositorySpec = from_yaml(yaml);
+        assert_eq!(
+            spec.credential_projection.as_ref().map(|p| p.enabled),
+            Some(true)
+        );
+        let json = serde_json::to_value(&spec).expect("serialize");
+        assert_eq!(json["credentialProjection"]["enabled"], true);
+        let reparsed: ClusterRepositorySpec = serde_json::from_value(json).expect("reparse");
+        assert_eq!(spec, reparsed);
+
+        // Absent field stays absent (self-managed default), not serialized.
+        let bare: ClusterRepositorySpec = from_yaml(
+            "backend:\n  filesystem:\n    path: /repo\nencryption:\n  passwordSecretRef:\n    name: c\n    namespace: kopiur-system\nallowedNamespaces:\n  all: true\n",
+        );
+        assert!(bare.credential_projection.is_none());
+        let bare_json = serde_json::to_value(&bare).unwrap();
+        assert!(bare_json.get("credentialProjection").is_none());
     }
 
     #[test]

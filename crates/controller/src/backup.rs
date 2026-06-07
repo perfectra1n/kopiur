@@ -34,8 +34,8 @@ use kopiur_mover::workspec::{
 use crate::config;
 use crate::consts::{
     ALLOW_PRIVILEGED_MOVER_ACTION, API_VERSION, CONFIG_LABEL, CREDENTIALS_AVAILABLE_CONDITION,
-    MISSING_CREDENTIALS_REASON, MOVER_PERMITTED_CONDITION, ORIGIN_LABEL,
-    PRIVILEGED_MOVER_NOT_PERMITTED_REASON, SKIP_SNAPSHOT_CLEANUP_ANNOTATION,
+    CREDENTIALS_PROJECTED_REASON, MISSING_CREDENTIALS_REASON, MOVER_PERMITTED_CONDITION,
+    ORIGIN_LABEL, PRIVILEGED_MOVER_NOT_PERMITTED_REASON, SKIP_SNAPSHOT_CLEANUP_ANNOTATION,
     SNAPSHOT_CLEANUP_FINALIZER,
 };
 use crate::context::Context;
@@ -241,7 +241,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
 
     // No Job yet: resolve the recipe and create the mover Job + ConfigMap.
     let (config, repo) = resolve_recipe(ctx, backup, &namespace).await?;
-    let (work_spec, source_volume, repo_volume, creds_secrets) =
+    let (work_spec, source_volume, repo_volume, _) =
         build_backup_run(backup, &config, &repo, &namespace, &name)?;
 
     // The mover Job runs in THIS (workload) namespace, where the operator SA does
@@ -329,54 +329,85 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         io::patch_status(&api, &name, serde_json::json!({ "conditions": conditions })).await?;
     }
 
-    let creds_ctx = io::CredsContext {
-        secret_names: &creds_secrets,
-        repo_kind: io::repo_kind_str(config.spec.repository.kind),
-        repo_name: &config.spec.repository.name,
-        repo_secret_namespace: repo.encryption.password_secret_ref.namespace.as_deref(),
+    let owner = io::owner_ref_for(backup, "Backup")?;
+    // Resolve the credential Secret names the mover loads via envFrom. With
+    // `spec.credentialProjection` enabled, the operator copies the repository's
+    // Secret(s) into THIS namespace (owned by the Backup, GC'd with it) and returns
+    // the projected names; otherwise it verifies the user-managed Secret(s) are
+    // already present here. Either way a problem surfaces as a clear
+    // `CredentialsAvailable=False` condition + Warning Event before we launch a Job
+    // that would hang on a missing-Secret envFrom (ADR §4.12).
+    let creds_secrets = match io::resolve_mover_creds_for(
+        &ctx.client,
+        &namespace,
+        &name,
+        &owner,
+        &repo,
+        io::repo_kind_str(config.spec.repository.kind),
+        &config.spec.repository.name,
+    )
+    .await
+    {
+        Ok(names) => names,
+        Err(Error::MissingDependency(msg)) => {
+            let existing = backup
+                .status
+                .as_ref()
+                .map(|s| s.conditions.clone())
+                .unwrap_or_default();
+            let conditions = io::upsert_condition(
+                &existing,
+                CREDENTIALS_AVAILABLE_CONDITION,
+                false,
+                MISSING_CREDENTIALS_REASON,
+                &msg,
+                backup.meta().generation,
+            );
+            io::patch_status(
+                &api,
+                &name,
+                serde_json::json!({ "phase": "Pending", "conditions": conditions }),
+            )
+            .await?;
+            io::publish_missing_creds_event(ctx, backup, &msg).await;
+            return Err(Error::MissingDependency(msg));
+        }
+        Err(e) => return Err(e),
     };
-    if let Some(msg) = io::first_missing_cred(&ctx.client, &namespace, &creds_ctx).await? {
-        let existing = backup
-            .status
-            .as_ref()
-            .map(|s| s.conditions.clone())
-            .unwrap_or_default();
-        let conditions = io::upsert_condition(
-            &existing,
-            CREDENTIALS_AVAILABLE_CONDITION,
-            false,
-            MISSING_CREDENTIALS_REASON,
-            &msg,
-            backup.meta().generation,
-        );
-        io::patch_status(
-            &api,
-            &name,
-            serde_json::json!({ "phase": "Pending", "conditions": conditions }),
-        )
-        .await?;
-        io::publish_missing_creds_event(ctx, backup, &msg).await;
-        return Err(Error::MissingDependency(msg));
+    if repo.project_credentials {
+        ctx.metrics
+            .inc_secrets_projected(&namespace, creds_secrets.len() as u64);
     }
-    // Creds are present: clear any stale `CredentialsAvailable=False` from a prior
-    // reconcile so a fixed problem stops showing on the object.
+    // Creds are present (or were just projected): clear any stale
+    // `CredentialsAvailable=False` from a prior reconcile so a fixed problem stops
+    // showing on the object.
     if let Some(conds) = backup.status.as_ref().map(|s| s.conditions.as_slice())
         && conds
             .iter()
             .any(|c| c.type_ == CREDENTIALS_AVAILABLE_CONDITION && c.status != "True")
     {
+        let (reason, note) = if repo.project_credentials {
+            (
+                CREDENTIALS_PROJECTED_REASON,
+                "credential Secret(s) projected into the mover namespace",
+            )
+        } else {
+            (
+                "Available",
+                "credentials Secret(s) present in the mover namespace",
+            )
+        };
         let conditions = io::upsert_condition(
             conds,
             CREDENTIALS_AVAILABLE_CONDITION,
             true,
-            "Available",
-            "credentials Secret(s) present in the mover namespace",
+            reason,
+            note,
             backup.meta().generation,
         );
         io::patch_status(&api, &name, serde_json::json!({ "conditions": conditions })).await?;
     }
 
-    let owner = io::owner_ref_for(backup, "Backup")?;
     let labels = run_labels(&config, origin);
     let limits = job_limits(backup);
     let inputs = MoverJobInputs {
@@ -517,7 +548,21 @@ async fn delete_snapshot_via_job(
     // and authenticate to the repository.
     let (config, repo) = resolve_recipe(ctx, backup, namespace).await?;
     let identity = resolve_identity_for(&config, namespace)?;
-    let creds_secrets = io::mover_creds_secrets(&repo.backend, &repo.encryption);
+    let owner = io::owner_ref_for(backup, "Backup")?;
+    // Resolve (and, when `spec.credentialProjection` is enabled, project) the mover's
+    // credential Secret(s) into this namespace before building the Job. Errors
+    // propagate as MissingDependency (Transient) — this is the delete path, so we
+    // requeue rather than surface a CredentialsAvailable condition.
+    let creds_secrets = io::resolve_mover_creds_for(
+        &ctx.client,
+        namespace,
+        &job_name,
+        &owner,
+        &repo,
+        io::repo_kind_str(config.spec.repository.kind),
+        &config.spec.repository.name,
+    )
+    .await?;
     let work_spec = MoverWorkSpec {
         version: 1,
         operation: Operation::SnapshotDelete(SnapshotDeleteOp {
@@ -535,7 +580,6 @@ async fn delete_snapshot_via_job(
         options: MoverOptions::default(),
     };
 
-    let owner = io::owner_ref_for(backup, "Backup")?;
     let mut labels = run_labels(&config, resolve_origin(backup));
     labels.insert(
         "kopiur.home-operations.com/op".to_string(),
@@ -566,8 +610,8 @@ async fn delete_snapshot_via_job(
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
     };
-    // The SnapshotDelete Job runs in this namespace too: mint the mover SA + ensure
-    // its credential Secret(s) are present before launching it.
+    // The SnapshotDelete Job runs in this namespace too: mint the mover SA before
+    // launching it (its credential Secret(s) were resolved/projected above).
     if let Some(sa) = ctx.mover_service_account.as_deref() {
         io::ensure_mover_rbac(
             &ctx.client,
@@ -578,17 +622,6 @@ async fn delete_snapshot_via_job(
         )
         .await?;
     }
-    io::ensure_creds_present(
-        &ctx.client,
-        namespace,
-        &io::CredsContext {
-            secret_names: &inputs.creds_secrets,
-            repo_kind: io::repo_kind_str(config.spec.repository.kind),
-            repo_name: &config.spec.repository.name,
-            repo_secret_namespace: repo.encryption.password_secret_ref.namespace.as_deref(),
-        },
-    )
-    .await?;
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
     io::apply_mover_objects(&ctx.client, namespace, &job_name, &cm, &job).await?;
@@ -1057,6 +1090,8 @@ mod tests {
                     key: Some("KOPIA_PASSWORD".into()),
                 },
             },
+            project_credentials: false,
+            repo_namespace: Some("media-ns".into()),
         }
     }
 

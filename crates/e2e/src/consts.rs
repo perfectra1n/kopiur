@@ -14,6 +14,11 @@ pub const OPERATOR_NS: &str = "kopiur-e2e";
 /// namespace separate from the operator's). Provisioned by `World` (`Need::WorkloadNs`).
 pub const WORKLOAD_NS: &str = "kopiur-e2e-xns";
 
+/// Workload namespace for the credential-projection scenarios. Like [`WORKLOAD_NS`]
+/// it has a source PVC, but DELIBERATELY no credentials Secret — so a mover there
+/// fails without projection and succeeds with it. Provisioned by `Need::ProjectionNs`.
+pub const PROJECTION_NS: &str = "kopiur-e2e-proj";
+
 // --- PersistentVolumes (hostPath, statically bound; storageClassName "") -------
 // The node-side hostPath directories are seeded by the mise `e2e-node-seed` task;
 // these PVs/PVCs (created by `World`) bind to them.
@@ -25,6 +30,9 @@ pub const PV_SRC: &str = "kopiur-e2e-src";
 /// hostPath PV over `/kopiur-e2e/src` for the workload namespace (a hostPath PV
 /// binds 1:1 to a PVC, so the workload namespace needs its own PV over the same dir).
 pub const PV_SRC_XNS: &str = "kopiur-e2e-src-xns";
+/// hostPath PV over `/kopiur-e2e/src` for the projection namespace (1:1 PV↔PVC, so
+/// it needs its own PV over the same source dir). See [`PROJECTION_NS`].
+pub const PV_SRC_PROJ: &str = "kopiur-e2e-src-proj";
 
 // --- PersistentVolumeClaims ----------------------------------------------------
 /// Repo PVC in the operator namespace (binds `PV_REPO`).
@@ -83,6 +91,9 @@ pub const BUCKETS: &[&str] = &[
     "kopiur-maint",
     "kopiur-xns-crepo",
     "kopiur-xns-repo",
+    // Credential-projection scenarios: one repo with projection on, one off.
+    "kopiur-proj-crepo",
+    "kopiur-proj-off",
     // Backed-via-rclone repository (rclone `s3` remote pointing at this MinIO).
     "kopiur-rclone",
     // Repository for the NFS-*source* scenario (the source is NFS; the repo is S3).

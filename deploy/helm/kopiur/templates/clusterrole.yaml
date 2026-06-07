@@ -56,10 +56,21 @@ rules:
     resources:
       - events
     verbs: [create, patch]
+  # Secrets hold repository credentials. Read is always needed. create+patch back
+  # the opt-in credential projection (`spec.credentialProjection`), where the
+  # controller copies a repository's Secret(s) into each mover Job's namespace via
+  # server-side apply (a PATCH). `create` cannot be resourceName-scoped (the
+  # authorizer can't match a name at create time) and the projected name is per-Job,
+  # so the grant is necessarily unscoped — a broader blast radius, hence the toggle.
+  # No `delete`: projected copies carry an ownerRef and are reaped by GC.
   - apiGroups: [""]
     resources:
       - secrets
+    {{- if .Values.secretProjection.enabled }}
+    verbs: [get, list, watch, create, patch]
+    {{- else }}
     verbs: [get, list, watch]
+    {{- end }}
   # Read Namespaces to check the privileged-movers opt-in annotation (§4.11/§G16).
   - apiGroups: [""]
     resources:

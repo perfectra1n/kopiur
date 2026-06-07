@@ -1,7 +1,9 @@
 //! The `Repository` CRD — a namespaced kopia repository. ADR-0003 §3.1.
 
 use crate::backend::Backend;
-use crate::common::{CacheDefaults, CatalogBounds, CreateBehavior, Encryption};
+use crate::common::{
+    CacheDefaults, CatalogBounds, CreateBehavior, CredentialProjection, Encryption,
+};
 use crate::maintenance::RepositoryMaintenanceSpec;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
@@ -48,6 +50,12 @@ pub struct RepositorySpec {
     /// namespace. ADR §3.1/§3.7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<RepositoryMaintenanceSpec>,
+    /// Opt-in credential-Secret projection. Absent/`enabled: false` keeps the
+    /// self-managed default (the credential Secret must already exist in each
+    /// mover Job's namespace); `enabled: true` makes the operator copy it there.
+    /// ADR §3.1/§4.11.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_projection: Option<CredentialProjection>,
 }
 
 /// Lifecycle phase of a repository. ADR §3.1 status.

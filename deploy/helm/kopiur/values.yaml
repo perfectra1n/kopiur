@@ -73,6 +73,24 @@ installCRDs: true
 installScope: namespaced
 
 # =============================================================================
+# Credential projection
+# =============================================================================
+# Per-repository `spec.credentialProjection.enabled` lets the operator copy a
+# repository's credential Secret(s) into each mover Job's namespace, so users with
+# many namespaces don't have to pre-create the Secret everywhere (the chief win is
+# a shared ClusterRepository whose Secret is pinned to one namespace). That
+# requires the operator to hold cluster-wide `secrets` create/patch.
+secretProjection:
+  # -- Grant the operator `secrets` create+patch in its RBAC so per-repository
+  # `spec.credentialProjection` works. Default on so opt-in repositories function
+  # without a separate RBAC change. SECURITY TRADE-OFF: this is a broader blast
+  # radius — `create` cannot be scoped to a Secret name, so the operator can write
+  # a Secret in any namespace it manages. Set false to keep `secrets` RBAC
+  # read-only (then projection-enabled repositories surface an actionable 403 and
+  # you manage credential Secrets yourself).
+  enabled: true
+
+# =============================================================================
 # ServiceAccount
 # =============================================================================
 serviceAccount:

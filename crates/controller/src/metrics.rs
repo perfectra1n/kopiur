@@ -47,6 +47,7 @@ pub struct Metrics {
     snapshot_deletion_failures: Counter<u64>,
     orphaned_snapshots: Counter<u64>,
     schedule_backups_created: Counter<u64>,
+    secrets_projected: Counter<u64>,
 
     // Repository business metrics.
     repo_size_bytes: Gauge<i64>,
@@ -126,6 +127,13 @@ impl Metrics {
             .u64_counter("kopiur_schedule_backups_created")
             .with_description("Total Backup CRs created by a BackupSchedule.")
             .build();
+        let secrets_projected = m
+            .u64_counter("kopiur_secrets_projected")
+            .with_description(
+                "Total credential Secrets projected into a mover Job's namespace \
+                 (opt-in spec.credentialProjection).",
+            )
+            .build();
 
         let repo_size_bytes = m
             .i64_gauge("kopiur_repo_size_bytes")
@@ -172,6 +180,7 @@ impl Metrics {
             snapshot_deletion_failures,
             orphaned_snapshots,
             schedule_backups_created,
+            secrets_projected,
             repo_size_bytes,
             repo_snapshot_count,
             repo_discovered_backups,
@@ -277,6 +286,13 @@ impl Metrics {
         if let Some(v) = duration_seconds {
             self.backup_duration_seconds.record(v, &labels);
         }
+    }
+
+    /// Count `n` credential Secrets projected into mover namespace `ns` (opt-in
+    /// `spec.credentialProjection`).
+    pub fn inc_secrets_projected(&self, ns: &str, n: u64) {
+        self.secrets_projected
+            .add(n, &[KeyValue::new("namespace", ns.to_string())]);
     }
 
     /// Count a snapshot-deletion (finalizer) failure in `namespace`.

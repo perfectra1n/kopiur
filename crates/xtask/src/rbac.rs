@@ -172,8 +172,19 @@ fn workload_rules() -> Vec<PolicyRule> {
         // on create and the Event is silently dropped.
         rule(&[""], &["events".into()], &["create", "patch"]),
         rule(&["events.k8s.io"], &["events".into()], &["create", "patch"]),
-        // Secrets hold repository credentials — read-only, never written.
-        rule(&[""], &["secrets".into()], READ_VERBS),
+        // Secrets hold repository credentials. Read is always needed; create+patch
+        // back the opt-in credential projection (`spec.credentialProjection`), where
+        // the controller copies a repository's Secret(s) into each mover Job's
+        // namespace via server-side apply (a PATCH). `create` cannot be
+        // resourceName-scoped (the authorizer can't match a name at create time) and
+        // the projected name is per-Job, so this is necessarily unscoped. No
+        // `delete`: projected copies carry an ownerRef and are reaped by GC. The
+        // Helm chart gates create/patch behind `secretProjection.enabled`.
+        rule(
+            &[""],
+            &["secrets".into()],
+            &["get", "list", "watch", "create", "patch"],
+        ),
         // Mover Jobs.
         rule(&["batch"], &["jobs".into()], FULL_VERBS),
         // CSI volume snapshots used as a consistent source for snapshotting.

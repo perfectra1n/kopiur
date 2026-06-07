@@ -903,6 +903,7 @@ mod tests {
             cache_defaults: None,
             catalog: None,
             maintenance: None,
+            credential_projection: None,
         };
         assert!(validate_repository_no_inline_retention(&spec).is_ok());
     }
@@ -1028,6 +1029,7 @@ mod tests {
             cache_defaults: None,
             catalog: None,
             maintenance: m,
+            credential_projection: None,
         }
     }
 
@@ -1115,6 +1117,7 @@ mod tests {
             allowed_namespaces: AllowedNamespaces::All(false),
             identity_defaults: None,
             maintenance: None,
+            credential_projection: None,
         };
         assert!(!validate_cluster_repository(&spec).is_empty());
     }

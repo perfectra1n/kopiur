@@ -33,6 +33,10 @@ pub enum Need {
     /// The workload namespace with its own source PV/PVC and S3 credentials
     /// (implies [`Need::Minio`], since those creds target MinIO).
     WorkloadNs,
+    /// The credential-projection workload namespace: its own source PV/PVC but
+    /// DELIBERATELY no credentials Secret, so a mover there can only run if the
+    /// operator projects the repository's Secret in. Implies [`Need::Minio`].
+    ProjectionNs,
     /// A running SFTP server (atmoz/sftp) with a fixed host key + the client's
     /// authorized key, and the SFTP credentials Secret (private key + known_hosts)
     /// the mover reads. Implies [`Need::Filesystem`] for a backup source PVC.
@@ -56,6 +60,7 @@ pub struct World {
     fs: OnceCell<()>,
     minio: OnceCell<()>,
     workload_ns: OnceCell<()>,
+    projection_ns: OnceCell<()>,
     sftp: OnceCell<()>,
     webdav: OnceCell<()>,
     rclone: OnceCell<()>,
@@ -72,6 +77,7 @@ impl World {
             fs: OnceCell::new(),
             minio: OnceCell::new(),
             workload_ns: OnceCell::new(),
+            projection_ns: OnceCell::new(),
             sftp: OnceCell::new(),
             webdav: OnceCell::new(),
             rclone: OnceCell::new(),
@@ -97,6 +103,11 @@ impl World {
                 Need::WorkloadNs => {
                     self.workload_ns
                         .get_or_try_init(|| self.ensure_workload_ns())
+                        .await?;
+                }
+                Need::ProjectionNs => {
+                    self.projection_ns
+                        .get_or_try_init(|| self.ensure_projection_ns())
                         .await?;
                 }
                 Need::Sftp => {
@@ -201,6 +212,26 @@ impl World {
             .into(),
             builders::opaque_secret(consts::WORKLOAD_NS, consts::SECRET_S3_CREDS, &s3_creds())
                 .into(),
+        ];
+        apply_all(&self.client, &fixtures).await
+    }
+
+    /// The credential-projection namespace: a source PV/PVC over the same node
+    /// source dir as the other namespaces, but NO credentials Secret — the whole
+    /// point is that a mover there has nothing to load via envFrom unless the
+    /// operator projects the repository's Secret in (`spec.credentialProjection`).
+    async fn ensure_projection_ns(&self) -> Result<()> {
+        self.minio.get_or_try_init(|| self.ensure_minio()).await?;
+        ensure_namespace(&self.client, consts::PROJECTION_NS).await?;
+        let fixtures: Vec<Fixture> = vec![
+            builders::hostpath_pv(consts::PV_SRC_PROJ, consts::HOSTPATH_SRC, "1Gi").into(),
+            builders::static_pvc(
+                consts::PROJECTION_NS,
+                consts::PVC_SRC,
+                consts::PV_SRC_PROJ,
+                "1Gi",
+            )
+            .into(),
         ];
         apply_all(&self.client, &fixtures).await
     }

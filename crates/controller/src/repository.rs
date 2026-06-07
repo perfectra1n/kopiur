@@ -374,9 +374,8 @@ async fn bootstrap_via_mover(
         .map(|c| c.enabled)
         .unwrap_or(false);
     let work_spec = bootstrap_work_spec(backend, name, namespace, create_enabled, true);
-    let creds_secrets = io::mover_creds_secrets(backend, &repo.spec.encryption);
-    // Mint the mover SA + RoleBinding in the Repository's namespace and confirm the
-    // credential Secret is present before launching the bootstrap Job (ADR §4.12).
+    // Mint the mover SA + RoleBinding in the Repository's namespace before launching
+    // the bootstrap Job (ADR §4.12).
     if let Some(sa) = ctx.mover_service_account.as_deref() {
         io::ensure_mover_rbac(
             &ctx.client,
@@ -387,11 +386,26 @@ async fn bootstrap_via_mover(
         )
         .await?;
     }
-    io::ensure_creds_present(
+    // Resolve the credential Secret(s) the bootstrap mover loads via envFrom:
+    // verify the user-managed Secret is present, or (with `spec.credentialProjection`)
+    // project the repository's Secret(s) into this namespace owned by the Repository.
+    let owner = io::owner_ref_for(repo, "Repository")?;
+    let project = repo
+        .spec
+        .credential_projection
+        .as_ref()
+        .is_some_and(|p| p.enabled);
+    let refs = io::mover_creds_secret_refs(backend, &repo.spec.encryption, Some(namespace));
+    let creds_names: Vec<String> = refs.iter().map(|r| r.name.clone()).collect();
+    let creds_secrets = io::resolve_mover_creds(
         &ctx.client,
         namespace,
+        &job_name,
+        &owner,
+        &refs,
+        project,
         &io::CredsContext {
-            secret_names: &creds_secrets,
+            secret_names: &creds_names,
             repo_kind: "Repository",
             repo_name: name,
             repo_secret_namespace: repo
@@ -403,7 +417,10 @@ async fn bootstrap_via_mover(
         },
     )
     .await?;
-    let owner = io::owner_ref_for(repo, "Repository")?;
+    if project {
+        ctx.metrics
+            .inc_secrets_projected(namespace, creds_secrets.len() as u64);
+    }
     let mut labels = BTreeMap::new();
     labels.insert(
         "kopiur.home-operations.com/repository".to_string(),

@@ -92,6 +92,15 @@ pub const BOOTSTRAP_JOB_FAILED_REASON: &str = "BootstrapJobFailed";
 pub const CREDENTIALS_AVAILABLE_CONDITION: &str = "CredentialsAvailable";
 /// `reason`/Event reason for [`CREDENTIALS_AVAILABLE_CONDITION`] = `False`.
 pub const MISSING_CREDENTIALS_REASON: &str = "MissingCredentialsSecret";
+/// `reason` for [`CREDENTIALS_AVAILABLE_CONDITION`] = `True` when the operator
+/// supplied the credential Secret(s) itself via projection (opt-in
+/// `spec.credentialProjection`), rather than the user pre-creating them.
+pub const CREDENTIALS_PROJECTED_REASON: &str = "Projected";
+/// Annotation stamped on a projected credential Secret recording its source
+/// (`<namespace>/<name>`), so an operator can see a copy is kopiur-managed and
+/// where it came from. Paired with the `app.kubernetes.io/managed-by=kopiur` +
+/// `app.kubernetes.io/component=credentials` labels.
+pub const PROJECTED_FROM_ANNOTATION: &str = "kopiur.home-operations.com/projected-from";
 
 /// Namespace annotation a cluster admin sets to allow elevated (root/privileged)
 /// movers in that namespace (ADR §4.11/§G16). Without it, a `BackupConfig` whose

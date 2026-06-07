@@ -60,10 +60,17 @@ rules:
     resources:
       - events
     verbs: [create, patch]
+  # create+patch back the opt-in credential projection (spec.credentialProjection),
+  # gated by secretProjection.enabled; read-only otherwise. See the ClusterRole for
+  # the full rationale.
   - apiGroups: [""]
     resources:
       - secrets
+    {{- if .Values.secretProjection.enabled }}
+    verbs: [get, list, watch, create, patch]
+    {{- else }}
     verbs: [get, list, watch]
+    {{- end }}
   - apiGroups: [batch]
     resources:
       - jobs

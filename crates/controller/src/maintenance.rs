@@ -237,12 +237,31 @@ async fn spawn_maintenance_job(
             mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
             read_only: false,
         });
-    let creds_secrets = io::mover_creds_secrets(&repo.backend, &repo.encryption);
+    let owner = io::owner_ref_for(maint, "Maintenance")?;
+    // Resolve the credential Secret(s) the mover loads via envFrom. A maintenance
+    // Job for a ClusterRepository lands in a namespace that often lacks the source
+    // Secret, so projection (`spec.credentialProjection`) is especially useful here:
+    // the operator copies it in, owned by this Maintenance. Errors propagate as
+    // MissingDependency (Transient) and the run requeues.
+    let creds_secrets = io::resolve_mover_creds_for(
+        &ctx.client,
+        namespace,
+        job_name,
+        &owner,
+        repo,
+        io::repo_kind_str(maint.spec.repository.kind),
+        &maint.spec.repository.name,
+    )
+    .await?;
+    if repo.project_credentials {
+        ctx.metrics
+            .inc_secrets_projected(namespace, creds_secrets.len() as u64);
+    }
 
     let inputs = MoverJobInputs {
         name: job_name,
         namespace,
-        owner: io::owner_ref_for(maint, "Maintenance")?,
+        owner,
         work_spec: &work_spec,
         image: &ctx.mover_image,
         image_pull_policy: mover_pull_policy_pub(),
