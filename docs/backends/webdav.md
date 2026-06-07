@@ -16,39 +16,41 @@ also reach it as an [rclone](rclone.md) remote, but native WebDAV is simpler.
 
 Loaded with `envFrom`; the keys reach kopia as environment variables.
 
-| Secret key | Required | What it is |
-|---|---|---|
-| `KOPIA_WEBDAV_USERNAME` | yes | Basic-auth username. |
-| `KOPIA_WEBDAV_PASSWORD` | yes | Basic-auth password (an app password where the server supports it). |
-| `KOPIA_PASSWORD` | **yes** | The repository encryption password. |
+| Secret key              | Required | What it is                                                          |
+| ----------------------- | -------- | ------------------------------------------------------------------- |
+| `KOPIA_WEBDAV_USERNAME` | yes      | Basic-auth username.                                                |
+| `KOPIA_WEBDAV_PASSWORD` | yes      | Basic-auth password (an app password where the server supports it). |
+| `KOPIA_PASSWORD`        | **yes**  | The repository encryption password.                                 |
 
 ```yaml
 stringData:
-  KOPIA_WEBDAV_USERNAME: "REPLACE_ME"
-  KOPIA_WEBDAV_PASSWORD: "REPLACE_ME"
-  KOPIA_PASSWORD: "choose-something-long-and-random"
+    KOPIA_WEBDAV_USERNAME: "REPLACE_ME"
+    KOPIA_WEBDAV_PASSWORD: "REPLACE_ME"
+    KOPIA_PASSWORD: "choose-something-long-and-random"
 ```
 
-```admonish warning title="Lose the password, lose the backups"
+/// warning | Lose the password, lose the backups
+
 `KOPIA_PASSWORD` encrypts the repository and cannot be recovered if lost. It is
 **separate** from the WebDAV login password. Store it outside the cluster and back
 up the Secret. See [Encryption](../repositories.md#encryption-and-repository-creation).
-```
+
+///
 
 ## The Repository
 
 ```yaml
-{{#include ../../deploy/examples/backends/webdav.yaml}}
+--8<-- "deploy/examples/backends/webdav.yaml"
 ```
 
 ## Fields reference (`backend.webDav`)
 
 Note the spec key is `webDav` (camelCase, capital D).
 
-| Field | Required | Default | What it controls |
-|---|---|---|---|
-| `url` | yes | — | The WebDAV collection URL holding the repository. |
-| `auth.secretRef` | no | — | Names the basic-auth Secret above. |
+| Field            | Required | Default | What it controls                                  |
+| ---------------- | -------- | ------- | ------------------------------------------------- |
+| `url`            | yes      | —       | The WebDAV collection URL holding the repository. |
+| `auth.secretRef` | no       | —       | Names the basic-auth Secret above.                |
 
 ## Customization — the values you actually change
 

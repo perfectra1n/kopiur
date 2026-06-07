@@ -21,29 +21,21 @@ oxfmt = "0.53.0"
 zizmor = "1.25.2"
 helm = "4.2.0"
 kubectl = "1.36.1"
+# The shared pre-commit hooks (home-operations/.github lefthook config) run
+# `shellcheck` on staged *.sh files; pin it so the hook resolves a binary.
+shellcheck = "0.11.0"
 kind = "0.32.0"
 kopia = "0.23.0"
 kubeconform = "0.8.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.19.8"
 "aqua:taiki-e/cargo-llvm-cov" = "0.8.7"
-# Docs site toolchain (mdBook + preprocessors + link checker). See `mise run docs`.
-# mermaid/admonish ship .tar.gz, so the (non-deprecated) github backend extracts
-# them with the exec bit intact. mdbook-linkcheck only ships a .zip, which the
-# github backend extracts as non-executable (0644) and ubi is deprecated, so we
-# build it from source via the cargo backend (always executable; cached by
-# mise-action in CI).
-#
-# VERSION LOCK — do not bump mdBook to 0.5.x yet. mdbook-admonish 1.20.0 (its
-# latest release) is built against mdBook 0.4's preprocessor protocol and cannot
-# parse mdBook 0.5's `Book` JSON (it aborts with `missing field \`sections\``).
-# mdbook-mermaid 0.17.0 is the inverse — it requires mdBook 0.5 and fails on 0.4.
-# So admonish (0.4-only) and mermaid 0.17 (0.5-only) cannot share one mdBook.
-# Verified matrix: mdBook 0.4.52 works with admonish 1.20.0 + mermaid 0.16.2.
-# Revisit the 0.5 bump once mdbook-admonish ships an mdBook-0.5 release.
-"aqua:rust-lang/mdBook" = "0.4.52"
-"github:badboy/mdbook-mermaid" = "0.16.2"
-"github:tommilligan/mdbook-admonish" = "1.20.0"
-"cargo:mdbook-linkcheck" = "0.7.7"
+# Docs site toolchain. The docs are an MkDocs Material site (see `mise run docs`);
+# the MkDocs + Material + pymdown-extensions versions are pinned in pyproject.toml
+# / uv.lock and run via uv, so the only mise-managed tool here is uv itself (which
+# creates the locked venv on first `uv run`). Material bundles mermaid.js and the
+# admonition styling, so there are no separate preprocessor binaries or committed
+# assets to manage. `uv lock` after bumping a docs dependency in pyproject.toml.
+"aqua:astral-sh/uv" = "0.9.9"
 
 [tasks.build]
 description = "Compile the whole workspace (debug, locked deps)"
@@ -163,12 +155,12 @@ description = "Supply-chain + license audit"
 run = "cargo deny check"
 
 [tasks.docs]
-description = "Build the full docs site (mdBook user docs + workspace rustdoc) into book/html"
+description = "Build the full docs site (MkDocs user docs + workspace rustdoc) into site/"
 run = "scripts/build-docs.sh"
 
 [tasks.docs-serve]
-description = "Serve the mdBook user docs locally with live reload (HTML renderer only; no rustdoc)"
-run = "mdbook serve --open"
+description = "Serve the MkDocs user docs locally with live reload (no rustdoc nesting)"
+run = "uv run mkdocs serve"
 
 [tasks.ci]
 description = "The full local hermetic gate: format, lint, build, test, and drift check"

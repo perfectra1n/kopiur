@@ -57,11 +57,10 @@ jobs:
 
       - name: Upload artifact
         if: github.event_name != 'pull_request'
-        # book/html (not book/): the mdbook-linkcheck renderer gives the HTML
-        # renderer its own subdirectory.
+        # MkDocs builds into site/ (with rustdoc nested under site/rustdoc/).
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: ./book/html
+          path: ./site
 
   publish:
     name: Publish to GitHub Pages

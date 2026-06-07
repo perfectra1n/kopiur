@@ -1,19 +1,21 @@
 # Getting started
 
-This is the **end-to-end walkthrough**: from a cluster with nothing installed to a verified backup *and* a verified restore. It hand-holds every step and shows you exactly what to look for so you know each one worked. Budget ~15 minutes.
+This is the **end-to-end walkthrough**: from a cluster with nothing installed to a verified backup _and_ a verified restore. It hand-holds every step and shows you exactly what to look for so you know each one worked. Budget ~15 minutes.
 
 If you only want the install reference (every Helm value, scopes, cert options), see [Installation](install.md). This page is the guided first run.
 
-```admonish tip title="The mental model — read this first"
+/// tip | The mental model — read this first
+
 Kopiur splits one job into three resources so each can change independently:
 
-- a **`Repository`** is *where* snapshots are stored (your S3 bucket, NAS, B2…);
-- a **`BackupConfig`** is the **recipe** — *what* to back up. It is idempotent and **runs nothing on its own**;
+- a **`Repository`** is _where_ snapshots are stored (your S3 bucket, NAS, B2…);
+- a **`BackupConfig`** is the **recipe** — _what_ to back up. It is idempotent and **runs nothing on its own**;
 - a **`Backup`** is an **invocation** — one snapshot, as a Kubernetes object. It is the universal trigger (created by a schedule, by `kubectl`, or by automation);
-- a **`BackupSchedule`** is the **cron** — *when* the recipe runs. It creates `Backup` CRs for you.
+- a **`BackupSchedule`** is the **cron** — _when_ the recipe runs. It creates `Backup` CRs for you.
 
 A `Restore` reads a snapshot back into a PVC. That's the whole model. Everything below is just those pieces in order.
-```
+
+///
 
 ## What you need
 
@@ -22,9 +24,11 @@ A `Restore` reads a snapshot back into a PVC. That's the whole model. Everything
 - A storage backend kopia can reach. This guide uses **S3 / S3-compatible** (AWS S3, MinIO, RustFS, Ceph RGW…). Any of the [eight backends](repositories.md) works the same way — only the `Repository` changes.
 - A **PersistentVolumeClaim** with some data in it to back up. The walkthrough assumes one named `app-data` in a namespace called `demo`.
 
-```admonish note title="No spare PVC?"
+/// note | No spare PVC?
+
 Create a throwaway one to follow along:
-~~~console
+
+```console
 $ kubectl create namespace demo
 $ kubectl -n demo apply -f - <<'EOF'
 apiVersion: v1
@@ -34,9 +38,11 @@ spec:
   accessModes: [ReadWriteOnce]
   resources: { requests: { storage: 1Gi } }
 EOF
-~~~
-Mount it in a throwaway pod and write a file if you want to see real data move.
 ```
+
+Mount it in a throwaway pod and write a file if you want to see real data move.
+
+///
 
 ## Step 1 — Install the operator
 
@@ -78,36 +84,38 @@ $ kubectl -n demo create secret generic repo-creds \
     --from-literal=KOPIA_PASSWORD="$(openssl rand -base64 24)"
 ```
 
-```admonish warning title="Save the KOPIA_PASSWORD"
+/// warning | Save the KOPIA_PASSWORD
+
 The `KOPIA_PASSWORD` encrypts the repository. **If you lose it, the backups are unrecoverable** — kopia cannot decrypt without it. Store it in your password manager / secret store, not just in the cluster. The backend keys (`AWS_*`) are your object-store credentials; the well-known key names per backend are in the [Repositories reference](repositories.md#credential-secret-keys-by-backend).
-```
+
+///
 
 ## Step 3 — Create the Repository
 
-Tell Kopiur where to store snapshots. `create.enabled: true` lets the operator *initialize* a brand-new kopia repository in the bucket; drop it (or set `false`) to require that one already exists.
+Tell Kopiur where to store snapshots. `create.enabled: true` lets the operator _initialize_ a brand-new kopia repository in the bucket; drop it (or set `false`) to require that one already exists.
 
 ```yaml
 apiVersion: kopiur.home-operations.com/v1alpha1
 kind: Repository
 metadata:
-  name: primary
-  namespace: demo
+    name: primary
+    namespace: demo
 spec:
-  backend:
-    s3: # externally tagged — the bucket lives under `s3`
-      bucket: my-kopia-bucket
-      prefix: demo/ # optional: share one bucket across repos
-      endpoint: s3.us-east-1.amazonaws.com # omit for AWS default; set for MinIO/RustFS
-      region: us-east-1
-      auth:
-        secretRef:
-          name: repo-creds # the backend keys from Step 2
-  encryption:
-    passwordSecretRef:
-      name: repo-creds
-      key: KOPIA_PASSWORD # which key in the Secret holds the password
-  create:
-    enabled: true # create the repo if the bucket is empty
+    backend:
+        s3: # externally tagged — the bucket lives under `s3`
+            bucket: my-kopia-bucket
+            prefix: demo/ # optional: share one bucket across repos
+            endpoint: s3.us-east-1.amazonaws.com # omit for AWS default; set for MinIO/RustFS
+            region: us-east-1
+            auth:
+                secretRef:
+                    name: repo-creds # the backend keys from Step 2
+    encryption:
+        passwordSecretRef:
+            name: repo-creds
+            key: KOPIA_PASSWORD # which key in the Secret holds the password
+    create:
+        enabled: true # create the repo if the bucket is empty
 ```
 
 Apply it, then **wait for `Ready`** — this is the gate everything else waits on:
@@ -130,23 +138,23 @@ $ kubectl -n demo describe repository primary    # see Conditions + Events
 
 ## Step 4 — Write the recipe (BackupConfig)
 
-Now describe *what* to back up and *how long to keep it*. Retention is **GFS** (grandfather-father-son) and is the only thing that prunes successful backups.
+Now describe _what_ to back up and _how long to keep it_. Retention is **GFS** (grandfather-father-son) and is the only thing that prunes successful backups.
 
 ```yaml
 apiVersion: kopiur.home-operations.com/v1alpha1
 kind: BackupConfig
 metadata:
-  name: app-data
-  namespace: demo
+    name: app-data
+    namespace: demo
 spec:
-  repository:
-    name: primary # kind defaults to Repository (same namespace)
-  sources:
-    - pvc:
-        name: app-data # the PVC to snapshot
-  retention:
-    keepDaily: 7
-    keepWeekly: 4
+    repository:
+        name: primary # kind defaults to Repository (same namespace)
+    sources:
+        - pvc:
+              name: app-data # the PVC to snapshot
+    retention:
+        keepDaily: 7
+        keepWeekly: 4
 ```
 
 ```console
@@ -166,11 +174,11 @@ Trigger one snapshot by creating a `Backup` that references the recipe:
 apiVersion: kopiur.home-operations.com/v1alpha1
 kind: Backup
 metadata:
-  generateName: app-data-manual- # let the API server pick a unique name
-  namespace: demo
+    generateName: app-data-manual- # let the API server pick a unique name
+    namespace: demo
 spec:
-  configRef:
-    name: app-data
+    configRef:
+        name: app-data
 ```
 
 ```console
@@ -201,17 +209,17 @@ A backup you've never restored is a hope, not a backup. Restore the snapshot you
 apiVersion: kopiur.home-operations.com/v1alpha1
 kind: Restore
 metadata:
-  name: app-data-verify
-  namespace: demo
+    name: app-data-verify
+    namespace: demo
 spec:
-  source:
-    backupRef:
-      name: app-data-manual-abc12 # the Backup from Step 5
-  target:
-    pvc: # operator creates this PVC
-      name: app-data-restored
-      capacity: 1Gi
-      accessModes: [ReadWriteOnce]
+    source:
+        backupRef:
+            name: app-data-manual-abc12 # the Backup from Step 5
+    target:
+        pvc: # operator creates this PVC
+            name: app-data-restored
+            capacity: 1Gi
+            accessModes: [ReadWriteOnce]
 ```
 
 ```console
@@ -233,15 +241,15 @@ Manual backups prove the pipeline; a `BackupSchedule` makes it routine. It creat
 apiVersion: kopiur.home-operations.com/v1alpha1
 kind: BackupSchedule
 metadata:
-  name: app-data-nightly
-  namespace: demo
+    name: app-data-nightly
+    namespace: demo
 spec:
-  configRef:
-    name: app-data
-  schedule:
-    cron: "H 2 * * *" # "H" = a deterministic per-schedule minute, ~02:00 nightly
-    jitter: 30m # spread the start over a 30-minute window
-    runOnCreate: false # GitOps-friendly: don't fire the instant you apply this
+    configRef:
+        name: app-data
+    schedule:
+        cron: "H 2 * * *" # "H" = a deterministic per-schedule minute, ~02:00 nightly
+        jitter: 30m # spread the start over a 30-minute window
+        runOnCreate: false # GitOps-friendly: don't fire the instant you apply this
 ```
 
 ```console
@@ -281,6 +289,8 @@ $ kubectl -n demo delete backupconfig app-data
 $ kubectl -n demo delete repository primary
 ```
 
-```admonish warning title="Deleting a Backup deletes its snapshot"
-A scheduled/manual `Backup` defaults to `deletionPolicy: Delete`, so removing the CR runs `kopia snapshot delete` via a finalizer. Use `Retain` (or `Orphan`) if you want the CR gone but the snapshot kept — see [Backups → deletionPolicy](backups.md#deletionpolicy-what-happens-to-the-snapshot).
-```
+/// warning | Deleting a Backup deletes its snapshot
+
+A scheduled/manual `Backup` defaults to `deletionPolicy: Delete`, so removing the CR runs `kopia snapshot delete` via a finalizer. Use `Retain` (or `Orphan`) if you want the CR gone but the snapshot kept — see [Backups → deletionPolicy](backups.md#deletionpolicy--what-happens-to-the-snapshot).
+
+///

@@ -9,9 +9,9 @@ Kopiur is a Kopia-native Kubernetes backup operator (Rust / kube-rs). This guide
 - **Kubernetes >= 1.24.** The deploy-or-restore volume-populator path (`Restore` + `PVC.spec.dataSourceRef`) relies on the `AnyVolumeDataSource` feature, available from 1.24 (ADR §4.7).
 - **Helm 3 or 4.**
 - A **kopia repository backend** you can reach: S3/MinIO, Azure Blob, GCS, B2, filesystem (PVC), SFTP, WebDAV, or rclone.
-- *(Optional)* **cert-manager** — the simplest way to provision the admission webhook's serving certificate. Without it you provide the cert yourself.
-- *(Optional)* **volume-data-source-validator** — recommended alongside CSI populators so a malformed `dataSourceRef` is surfaced as an event rather than a silently-stuck PVC (ADR §4.7).
-- *(Optional)* **Prometheus Operator** — if you want the chart's `ServiceMonitor`.
+- _(Optional)_ **cert-manager** — the simplest way to provision the admission webhook's serving certificate. Without it you provide the cert yourself.
+- _(Optional)_ **volume-data-source-validator** — recommended alongside CSI populators so a malformed `dataSourceRef` is surfaced as an event rather than a silently-stuck PVC (ADR §4.7).
+- _(Optional)_ **Prometheus Operator** — if you want the chart's `ServiceMonitor`.
 
 ## Quickstart
 
@@ -53,10 +53,10 @@ helm install kopiur deploy/helm/kopiur -n kopiur-system --set webhook.enabled=fa
 
 ## Install scope
 
-| Mode | `--set installScope=` | RBAC | Manages | `ClusterRepository` |
-|---|---|---|---|---|
-| Namespaced (default) | `namespaced` | Role | release namespace only | not reconciled |
-| Cluster | `cluster` | ClusterRole | cluster-wide | reconciled |
+| Mode                 | `--set installScope=` | RBAC        | Manages                | `ClusterRepository` |
+| -------------------- | --------------------- | ----------- | ---------------------- | ------------------- |
+| Namespaced (default) | `namespaced`          | Role        | release namespace only | not reconciled      |
+| Cluster              | `cluster`             | ClusterRole | cluster-wide           | reconciled          |
 
 Use **cluster** scope for a shared platform repository (`ClusterRepository`) referenced by many tenant namespaces. See `deploy/examples/02-cluster-repository.yaml`.
 
@@ -89,16 +89,16 @@ kubectl get repositories,backupconfigs,backupschedules -n billing
 
 Eight runnable walkthroughs live in `deploy/examples/`:
 
-| File | Pattern |
-|---|---|
-| `01-single-pvc-scheduled.yaml` | Single PVC, scheduled daily |
-| `02-cluster-repository.yaml` | Shared platform `ClusterRepository` (cluster scope) |
-| `03-restore-by-backup.yaml` | Restore by picking a `Backup` |
-| `04-multi-pvc-selector.yaml` | Multi-PVC label selector + group snapshot |
-| `05-deploy-or-restore-gitops.yaml` | Deploy-or-restore (PVC `dataSourceRef`) |
-| `06-manual-backup.yaml` | Manual one-shot `Backup` |
-| `07-restore-discovered.yaml` | Restore a discovered / foreign snapshot |
-| `08-maintenance.yaml` | `kopia maintenance` schedule + ownership lease |
+| File                               | Pattern                                             |
+| ---------------------------------- | --------------------------------------------------- |
+| `01-single-pvc-scheduled.yaml`     | Single PVC, scheduled daily                         |
+| `02-cluster-repository.yaml`       | Shared platform `ClusterRepository` (cluster scope) |
+| `03-restore-by-backup.yaml`        | Restore by picking a `Backup`                       |
+| `04-multi-pvc-selector.yaml`       | Multi-PVC label selector + group snapshot           |
+| `05-deploy-or-restore-gitops.yaml` | Deploy-or-restore (PVC `dataSourceRef`)             |
+| `06-manual-backup.yaml`            | Manual one-shot `Backup`                            |
+| `07-restore-discovered.yaml`       | Restore a discovered / foreign snapshot             |
+| `08-maintenance.yaml`              | `kopia maintenance` schedule + ownership lease      |
 
 ## Observability
 

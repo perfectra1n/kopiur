@@ -1,0 +1,167 @@
+# MkDocs configuration for the Kopiur documentation site.
+#
+# The book source is the existing `docs/` tree, so the many in-repo references
+# to docs/adr/0003-*.md etc. keep resolving. Unlike mdBook there is no SUMMARY.md
+# — the page order and grouping live in `nav:` below, and any docs/*.md NOT in
+# `nav:` builds but is unlinked (mkdocs --strict warns about it).
+#
+# `mise run docs` (scripts/build-docs.sh) builds this site *and* nests the
+# workspace rustdoc under /rustdoc/. The site is published to the custom domain
+# https://kopiur.home-operations.com/ (served at the root, so site_url ends "/").
+# The domain is pinned by the CNAME file scripts/build-docs.sh writes into the
+# artifact; the repo's Settings -> Pages custom-domain field must match.
+#
+# The MkDocs + Material toolchain is pinned in pyproject.toml / uv.lock and run
+# via uv (see .mise/config.toml). Material bundles mermaid.js and the admonition
+# styling, so there are no committed preprocessor assets to regenerate.
+site_name: Kopiur
+site_description: A Kopia-native Kubernetes backup operator written in Rust on kube-rs.
+site_author: kopiur contributors
+site_url: https://kopiur.home-operations.com/
+
+repo_url: https://github.com/home-operations/kopiur
+repo_name: home-operations/kopiur
+# Appended to repo_url + a doc's path relative to docs_dir, e.g.
+# .../edit/main/docs/getting-started.md — matches the old mdBook edit-url-template.
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+site_dir: site
+
+# Fail the build on a broken internal link or a nav entry pointing at a missing
+# file. This is our doc lint (it replaces the mdbook-linkcheck renderer); the
+# build-docs.sh / CI invocation passes --strict.
+validation:
+  links:
+    absolute_links: relative_to_docs
+    not_found: warn
+    anchors: warn
+  nav:
+    omitted_files: warn
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    # Light/dark toggle (replaces mdBook's "navy" default theme).
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.indexes # a section's first child can be its landing page (backends.md)
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+
+markdown_extensions:
+  # Admonitions use the pymdownx "blocks" syntax (/// note | Title ... ///) rather
+  # than the indented `!!! note` form ON PURPOSE: the repo's pre-commit hook runs
+  # `oxfmt` over markdown, and oxfmt (a CommonMark formatter) strips the 4-space
+  # body indentation that `!!! note` requires, silently breaking every admonition.
+  # The blocks form keeps its body at column 0, so oxfmt leaves it intact.
+  # (Convention: keep a blank line before the closing /// so oxfmt doesn't fold it
+  # into a preceding list item.)
+  - pymdownx.blocks.admonition:
+      # The blocks extension only activates for the type names registered here
+      # (its built-in default list does NOT include `info`, which the docs use).
+      # Each name doubles as the Material CSS class, so this is the canonical
+      # Material admonition set.
+      types:
+        - note
+        - abstract
+        - info
+        - tip
+        - success
+        - question
+        - warning
+        - failure
+        - danger
+        - bug
+        - example
+        - quote
+  - pymdownx.blocks.details # collapsible admonitions, if ever needed
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+      # GitHub-compatible heading slugs (does NOT collapse consecutive dashes), so
+      # anchors like #example-01--single-pvc-scheduled — produced by "## Example 01
+      # — Single PVC, scheduled" — match both the in-repo cross-links and how GitHub
+      # renders the same .md files. Python-Markdown's default slugify would collapse
+      # the "--" to "-" and break every example deep-link.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.inlinehilite
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences:
+      custom_fences:
+        # ```mermaid fenced diagrams, rendered by Material's bundled mermaid.js.
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.snippets:
+      # base_path = repo root so docs can pull apply-ready manifests from
+      # deploy/examples/ via `--8<-- "deploy/examples/NN-name.yaml"` (the
+      # mdBook {{#include}} replacement). check_paths fails the build on a
+      # missing/renamed manifest.
+      base_path:
+        - "."
+      check_paths: true
+
+plugins:
+  - search
+
+nav:
+  - Introduction: index.md
+  - User guide:
+      - Getting started: getting-started.md
+      - Installation: install.md
+      - Repositories & backends: repositories.md
+      - Backend configuration:
+          - backends.md
+          - S3 & S3-compatible: backends/s3.md
+          - Azure Blob Storage: backends/azure.md
+          - Google Cloud Storage: backends/gcs.md
+          - Backblaze B2: backends/b2.md
+          - Filesystem (PVC): backends/filesystem.md
+          - SFTP: backends/sftp.md
+          - WebDAV: backends/webdav.md
+          - rclone: backends/rclone.md
+      - Backups & schedules: backups.md
+      - Restores: restores.md
+      - Movers, RBAC & credentials: movers.md
+      - Permissions, UID & GID: permissions.md
+      - Maintenance: maintenance.md
+      - Examples: examples.md
+      - Troubleshooting: troubleshooting.md
+  - Reference:
+      - API reference (rustdoc): api-reference.md
+  - Developer:
+      - API conventions: dev/api-conventions.md
+      - Observability: dev/observability.md
+  - Architecture Decision Records:
+      - ADR-0003 — Kopiur, a Kopia-native operator in Rust: adr/0003-kopiur-rust-operator.md
+      - ADR-0001 — onedr0p draft (superseded): adr/0001-onedr0p-kopia-operator.md
+      - ADR-0002 — bo0tzz draft (superseded): adr/0002-bo0tzz-kopia-operator.md

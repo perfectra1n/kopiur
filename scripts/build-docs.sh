@@ -2,24 +2,21 @@
 # build-docs.sh — assemble the full Kopiur documentation site.
 #
 # Produces one directory ready for GitHub Pages:
-#   book/html/            ← mdBook user docs (site root)
-#   book/html/rustdoc/    ← `cargo doc` API reference for the whole workspace
+#   site/            ← MkDocs Material user docs (site root)
+#   site/rustdoc/    ← `cargo doc` API reference for the whole workspace
 #
-# Why book/html and not book/: enabling the mdbook-linkcheck renderer alongside
-# the HTML renderer makes mdBook give each renderer its own subdirectory, so the
-# HTML lands in book/html/. The Pages workflow uploads ./book/html.
+# `mkdocs build --strict` fails on a broken intra-site link or a missing nav
+# file (validation config in mkdocs.yml), so this script doubles as our doc lint
+# (it replaces the old mdbook-linkcheck renderer).
 #
-# `mdbook build` also runs the link checker (warning-policy = "error" in
-# book.toml), so a broken intra-book link fails this script.
-#
-# Run via `mise run docs` so mdBook + the preprocessors + the link checker
-# resolve to the versions pinned in .mise/config.toml.
+# Run via `mise run docs` so uv (and therefore the uv.lock-pinned MkDocs +
+# Material + pymdown-extensions) resolves to the versions pinned in the repo.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-OUT="book/html"
+OUT="site"
 # The crate the rustdoc redirect lands on (kopiur-api is the public entry point).
 LANDING_CRATE="kopiur_api"
 # Custom domain the site is served from. Written into the artifact as a CNAME so
@@ -29,16 +26,9 @@ SITE_DOMAIN="kopiur.home-operations.com"
 echo "==> cargo doc (workspace, no deps)"
 cargo doc --no-deps --workspace --locked
 
-echo "==> mdbook build (html + linkcheck)"
-# mdBook spawns its preprocessors (mdbook-mermaid, mdbook-admonish) by bare name
-# via PATH. A globally cargo-installed mdBook toolchain in ~/.cargo/bin can shadow
-# the mise-pinned, version-matched ones and break the build, because the 0.4 and
-# 0.5 preprocessor protocols are mutually incompatible (mdbook-admonish is 0.4-only,
-# mdbook-mermaid 0.17+ is 0.5-only — see the VERSION LOCK note in .mise/config.toml).
-# Drop any `.cargo/bin` entry from PATH for the mdBook step only (cargo doc above
-# already ran) so the mise-pinned matrix always wins, regardless of stray globals.
-DOCS_PATH="$(printf '%s' "$PATH" | awk -v RS=: -v ORS=: '$0 !~ /\.cargo\/bin$/' | sed 's/:$//')"
-PATH="$DOCS_PATH" mdbook build
+echo "==> mkdocs build (--strict: broken link or missing nav file fails here)"
+# uv run resolves MkDocs + plugins from the committed uv.lock into a managed venv.
+uv run mkdocs build --strict --site-dir "$OUT"
 
 echo "==> nesting rustdoc under ${OUT}/rustdoc"
 rm -rf "${OUT}/rustdoc"
@@ -68,4 +58,4 @@ touch "${OUT}/.nojekyll"
 # Pin the custom domain in the published artifact.
 echo "${SITE_DOMAIN}" > "${OUT}/CNAME"
 
-echo "==> docs site assembled at ${OUT}/ (book + rustdoc) for https://${SITE_DOMAIN}/"
+echo "==> docs site assembled at ${OUT}/ (mkdocs + rustdoc) for https://${SITE_DOMAIN}/"

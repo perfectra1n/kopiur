@@ -1,6 +1,6 @@
 # kopiur-api conventions (READ BEFORE EDITING `crates/api`)
 
-These conventions are load-bearing — they were derived empirically against `kube 3.1` + `k8s-openapi 0.27` + `schemars 1.2` on Rust 1.95. Violating them breaks either CRD schema generation or compilation. ADR-0003 is the source of truth for *what* the fields are; this file is *how* to encode them in Rust.
+These conventions are load-bearing — they were derived empirically against `kube 3.1` + `k8s-openapi 0.27` + `schemars 1.2` on Rust 1.95. Violating them breaks either CRD schema generation or compilation. ADR-0003 is the source of truth for _what_ the fields are; this file is _how_ to encode them in Rust.
 
 ## 1. CRD top-level types
 
@@ -33,7 +33,7 @@ Do **NOT** use `#[serde(tag = "...")]` (internally tagged). kube's structural-sc
 pub enum Backend { S3(S3Backend), Filesystem(FilesystemBackend), ... }
 ```
 
-Wire shape: `backend: { s3: {...} }` (this matches ADR-0001 §3.1's YAML). The enum still gives compile-time "exactly one variant" + exhaustive `match` — the ADR §5.5 thesis is fully preserved. Provide a `kind_str(&self) -> &'static str` helper for status/metrics/printcolumns. Webhook validates per-variant *content*.
+Wire shape: `backend: { s3: {...} }` (this matches ADR-0001 §3.1's YAML). The enum still gives compile-time "exactly one variant" + exhaustive `match` — the ADR §5.5 thesis is fully preserved. Provide a `kind_str(&self) -> &'static str` helper for status/metrics/printcolumns. Webhook validates per-variant _content_.
 
 This applies to: `Backend`, `AllowedNamespaces`, `RestoreSource`, `RestoreTarget`, `Hook`, and any other "exactly one of" surface.
 

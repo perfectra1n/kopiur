@@ -2,13 +2,15 @@
 
 Backing up is three resources, not one — and keeping them separate is the whole point. This page explains what each does, then walks the handful of fields you'll actually change.
 
-```admonish tip title="Recipe / invocation / schedule"
-- **`BackupConfig`** = the **recipe**. *What* to back up, how long to keep it, how to capture it. It is **idempotent and runs nothing on its own** — applying it just records intent.
+/// tip | Recipe / invocation / schedule
+
+- **`BackupConfig`** = the **recipe**. _What_ to back up, how long to keep it, how to capture it. It is **idempotent and runs nothing on its own** — applying it just records intent.
 - **`Backup`** = one **invocation**. A single kopia snapshot represented as a Kubernetes object. It is the **universal trigger**: a schedule creates one, or you `kubectl create` one, or Argo Events / Tekton / a Helm hook does.
-- **`BackupSchedule`** = the **cron**. *When* the recipe runs. It creates `Backup` CRs for you on a cadence.
+- **`BackupSchedule`** = the **cron**. _When_ the recipe runs. It creates `Backup` CRs for you on a cadence.
 
 Why split them? So you can re-run a recipe on demand without touching the schedule, pause a schedule without losing the recipe, and trigger backups from anything that can create a Kubernetes object — without three slightly-different copies of "what to back up".
-```
+
+///
 
 All three are namespaced and live in the same namespace as the PVCs they back up (that's where the mover Job runs — see [Movers, RBAC & credentials](movers.md)).
 
@@ -20,17 +22,17 @@ A minimal recipe is a repository, a source, and a retention policy:
 apiVersion: kopiur.home-operations.com/v1alpha1
 kind: BackupConfig
 metadata:
-  name: postgres-data
-  namespace: billing
+    name: postgres-data
+    namespace: billing
 spec:
-  repository:
-    name: primary # kind defaults to Repository (same namespace)
-  sources:
-    - pvc:
-        name: postgres-data
-  retention:
-    keepDaily: 14
-    keepWeekly: 4
+    repository:
+        name: primary # kind defaults to Repository (same namespace)
+    sources:
+        - pvc:
+              name: postgres-data
+    retention:
+        keepDaily: 14
+        keepWeekly: 4
 ```
 
 ### Sources — what to back up
@@ -39,46 +41,48 @@ spec:
 
 ```yaml
 sources:
-  - pvc:
-      name: postgres-data # one PVC by name
+    - pvc:
+          name: postgres-data # one PVC by name
 ```
 
 Or match many PVCs at once (see [example 04](examples.md#example-04--multi-pvc-selector)):
 
 ```yaml
 sources:
-  - pvcSelector:
-      labelSelector:
-        matchLabels: { backup: include }
-    sourcePathStrategy: PvcName # or PvcNamespacedName to disambiguate same-named PVCs
+    - pvcSelector:
+          labelSelector:
+              matchLabels: { backup: include }
+      sourcePathStrategy: PvcName # or PvcNamespacedName to disambiguate same-named PVCs
 ```
 
-```admonish warning title="Multi-PVC defaults to a consistent group"
-When a selector matches several PVCs, `groupBy` defaults to `VolumeGroupSnapshot` — one consistent point-in-time snapshot across all of them. You must set `groupBy: None` *explicitly* to accept independent per-PVC snapshots; there is no silent fallback, because an inconsistent multi-volume backup is a data-integrity hazard.
-```
+/// warning | Multi-PVC defaults to a consistent group
+
+When a selector matches several PVCs, `groupBy` defaults to `VolumeGroupSnapshot` — one consistent point-in-time snapshot across all of them. You must set `groupBy: None` _explicitly_ to accept independent per-PVC snapshots; there is no silent fallback, because an inconsistent multi-volume backup is a data-integrity hazard.
+
+///
 
 ### How the source is captured — `copyMethod`
 
-| `copyMethod` | What happens | When |
-|---|---|---|
-| `Snapshot` *(default)* | Point-in-time CSI `VolumeSnapshot`, then kopia reads that. | The safe default — consistent, no app downtime. |
-| `Clone` | CSI clone of the volume, mounted read-only. | When your CSI driver prefers clones. |
-| `Direct` | Read the live PVC directly, no snapshot. | No point-in-time guarantee; only for quiesced or read-mostly data. |
+| `copyMethod`           | What happens                                               | When                                                               |
+| ---------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------ |
+| `Snapshot` _(default)_ | Point-in-time CSI `VolumeSnapshot`, then kopia reads that. | The safe default — consistent, no app downtime.                    |
+| `Clone`                | CSI clone of the volume, mounted read-only.                | When your CSI driver prefers clones.                               |
+| `Direct`               | Read the live PVC directly, no snapshot.                   | No point-in-time guarantee; only for quiesced or read-mostly data. |
 
 `volumeSnapshotClassName` selects the snapshot class when `Snapshot`/`Clone` is used.
 
 ### Retention — how long backups are kept (GFS)
 
-Retention is **grandfather-father-son** and is the **only** thing that prunes *successful* backups. Kopiur enforces it by deleting `Backup` CRs outside the window (which, with the default `deletionPolicy`, deletes the underlying snapshots too).
+Retention is **grandfather-father-son** and is the **only** thing that prunes _successful_ backups. Kopiur enforces it by deleting `Backup` CRs outside the window (which, with the default `deletionPolicy`, deletes the underlying snapshots too).
 
 ```yaml
 retention:
-  keepLatest: 10 # keep the N most recent regardless of age
-  keepHourly: 24
-  keepDaily: 14
-  keepWeekly: 8
-  keepMonthly: 12
-  keepAnnual: 3
+    keepLatest: 10 # keep the N most recent regardless of age
+    keepHourly: 24
+    keepDaily: 14
+    keepWeekly: 8
+    keepMonthly: 12
+    keepAnnual: 3
 ```
 
 Set only the buckets you care about; omit the rest. There is deliberately **no** `successfulJobsHistoryLimit` — successful retention is GFS, full stop. (Failed runs are bounded separately by `failedJobsHistoryLimit` on the `BackupSchedule`.)
@@ -95,23 +99,23 @@ Override either part when you need stable identities across renames or clusters:
 
 ```yaml
 identity:
-  username: postgres-data
-  hostname: billing
+    username: postgres-data
+    hostname: billing
 ```
 
-(For a shared `ClusterRepository`, the repo can supply identity *templates* so tenants get distinct identities automatically — see [Repositories → identityDefaults](repositories.md#identitydefaults--per-tenant-identity). An explicit `identity` here always wins.)
+(For a shared `ClusterRepository`, the repo can supply identity _templates_ so tenants get distinct identities automatically — see [Repositories → identityDefaults](repositories.md#identitydefaults--per-tenant-identity). An explicit `identity` here always wins.)
 
 ### policy — kopia tuning and ignores
 
 ```yaml
 policy:
-  compression:
-    compressor: zstd
-    neverCompress: ["*.zip", "*.gz", "*.mp4"] # skip already-compressed files
-  ignore:
-    paths: ["*.tmp", "*/cache/*", "lost+found"]
-    cacheDirs: true # honor CACHEDIR.TAG
-  extraArgs: [] # escape hatch for kopia flags not modeled above
+    compression:
+        compressor: zstd
+        neverCompress: ["*.zip", "*.gz", "*.mp4"] # skip already-compressed files
+    ignore:
+        paths: ["*.tmp", "*/cache/*", "lost+found"]
+        cacheDirs: true # honor CACHEDIR.TAG
+    extraArgs: [] # escape hatch for kopia flags not modeled above
 ```
 
 ### hooks — quiesce the app around the snapshot
@@ -120,19 +124,19 @@ Hooks run **in the workload** (not the mover), before and after the snapshot —
 
 ```yaml
 hooks:
-  beforeSnapshot:
-    - workloadExec: # exec into a workload pod/container
-        podSelector:
-          matchLabels: { app: postgres }
-        container: postgres
-        command: ["/bin/sh", "-c", "pg_backup_start"]
-        timeout: 2m
-  afterSnapshot:
-    - workloadExec:
-        podSelector:
-          matchLabels: { app: postgres }
-        container: postgres
-        command: ["/bin/sh", "-c", "pg_backup_stop"]
+    beforeSnapshot:
+        - workloadExec: # exec into a workload pod/container
+              podSelector:
+                  matchLabels: { app: postgres }
+              container: postgres
+              command: ["/bin/sh", "-c", "pg_backup_start"]
+              timeout: 2m
+    afterSnapshot:
+        - workloadExec:
+              podSelector:
+                  matchLabels: { app: postgres }
+              container: postgres
+              command: ["/bin/sh", "-c", "pg_backup_stop"]
 ```
 
 The other two forms are `runJob` (run a full one-shot `Job` — the k8up `PreBackupPod` analog) and `httpRequest` (POST to a URL for cross-system orchestration). A hook failure **aborts** the backup unless you set `continueOnFailure: true`.
@@ -141,9 +145,11 @@ The other two forms are `runJob` (run a full one-shot `Job` — the k8up `PreBac
 
 `spec.mover` overrides the mover Job for this recipe: `resources`, `cache` (overrides the repository's `cacheDefaults`), and `securityContext`.
 
-```admonish warning title="A privileged mover needs namespace opt-in"
+/// warning | A privileged mover needs namespace opt-in
+
 If `mover.securityContext` runs as root (`runAsUser: 0`), sets `privileged: true`, allows escalation, adds capabilities, or sets `privilegedMode: true`, the namespace must opt in with an annotation or the `Backup` is refused. See [Movers → Privileged movers](movers.md#privileged-movers).
-```
+
+///
 
 ## Backup — one snapshot, the universal trigger
 
@@ -153,13 +159,13 @@ You usually let a `BackupSchedule` create `Backup` CRs. To run one **now** — f
 apiVersion: kopiur.home-operations.com/v1alpha1
 kind: Backup
 metadata:
-  generateName: postgres-data-manual- # API server appends a unique suffix
-  namespace: billing
+    generateName: postgres-data-manual- # API server appends a unique suffix
+    namespace: billing
 spec:
-  configRef:
-    name: postgres-data # which recipe to run
-  tags:
-    reason: pre-upgrade # arbitrary kopia snapshot tags
+    configRef:
+        name: postgres-data # which recipe to run
+    tags:
+        reason: pre-upgrade # arbitrary kopia snapshot tags
 ```
 
 Watch it move through its phases:
@@ -178,11 +184,11 @@ postgres-data-manual-x9f   Succeeded   manual   k1f1ec0a8   44s
 
 A `Backup` CR **owns** its kopia snapshot via a finalizer. What happens to the snapshot when the CR is deleted is governed by `deletionPolicy`:
 
-| Policy | On `Backup` deletion | Default for |
-|---|---|---|
-| `Delete` | Finalizer runs `kopia snapshot delete`, then removes the CR. | `scheduled` / `manual` backups. |
-| `Retain` | CR is removed; the snapshot **stays** in the repository. | `discovered` backups (forced — Kopiur won't delete what it didn't create). |
-| `Orphan` | CR is removed **without contacting the repository** — escape hatch for "the bucket is already gone". | — |
+| Policy   | On `Backup` deletion                                                                                 | Default for                                                                |
+| -------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `Delete` | Finalizer runs `kopia snapshot delete`, then removes the CR.                                         | `scheduled` / `manual` backups.                                            |
+| `Retain` | CR is removed; the snapshot **stays** in the repository.                                             | `discovered` backups (forced — Kopiur won't delete what it didn't create). |
+| `Orphan` | CR is removed **without contacting the repository** — escape hatch for "the bucket is already gone". | —                                                                          |
 
 Set it per-`Backup` (`spec.deletionPolicy`) or set the recipe-wide default with `BackupConfig.spec.defaultDeletionPolicy`. This is also how retention pruning reclaims space: pruned `Backup` CRs use `Delete`, so the snapshots go with them.
 
@@ -194,37 +200,39 @@ A schedule binds a recipe to a cadence and creates `Backup` CRs (see [example 01
 apiVersion: kopiur.home-operations.com/v1alpha1
 kind: BackupSchedule
 metadata:
-  name: postgres-data-nightly
-  namespace: billing
+    name: postgres-data-nightly
+    namespace: billing
 spec:
-  configRef:
-    name: postgres-data
-  schedule:
-    cron: "H 2 * * *" # see "H" below
-    jitter: 30m
-    timezone: America/Los_Angeles # IANA tz; omit for the controller default
-    runOnCreate: false
-    suspend: false
-    concurrencyPolicy: Forbid
-  failedJobsHistoryLimit: 3
+    configRef:
+        name: postgres-data
+    schedule:
+        cron: "H 2 * * *" # see "H" below
+        jitter: 30m
+        timezone: America/Los_Angeles # IANA tz; omit for the controller default
+        runOnCreate: false
+        suspend: false
+        concurrencyPolicy: Forbid
+    failedJobsHistoryLimit: 3
 ```
 
 ### The fields you'll change
 
-| Field | What it does |
-|---|---|
-| `schedule.cron` | When to fire. Supports Jenkins-style **`H`** (see below). |
-| `schedule.jitter` | Spread firings over a window (e.g. `30m`), so many schedules don't all hit at once. |
-| `schedule.timezone` | IANA timezone the cron is evaluated in. |
-| `schedule.runOnCreate` | `false` (default) means applying the schedule does **not** fire immediately — GitOps-friendly. Set `true` to backup the moment it's created. |
-| `schedule.suspend` | `true` pauses future firings (in-flight and past runs are untouched). |
-| `schedule.concurrencyPolicy` | What to do if a run is still in flight: `Forbid` (default, skip), `Allow` (run anyway), `Replace` (cancel the old one). |
-| `schedule.startingDeadlineSeconds` | If a slot is missed by more than this (operator was down), skip it rather than fire late. |
-| `failedJobsHistoryLimit` | How many **failed** `Backup` CRs from this schedule to keep. Successful retention is GFS on the `BackupConfig`. |
+| Field                              | What it does                                                                                                                                 |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schedule.cron`                    | When to fire. Supports Jenkins-style **`H`** (see below).                                                                                    |
+| `schedule.jitter`                  | Spread firings over a window (e.g. `30m`), so many schedules don't all hit at once.                                                          |
+| `schedule.timezone`                | IANA timezone the cron is evaluated in.                                                                                                      |
+| `schedule.runOnCreate`             | `false` (default) means applying the schedule does **not** fire immediately — GitOps-friendly. Set `true` to backup the moment it's created. |
+| `schedule.suspend`                 | `true` pauses future firings (in-flight and past runs are untouched).                                                                        |
+| `schedule.concurrencyPolicy`       | What to do if a run is still in flight: `Forbid` (default, skip), `Allow` (run anyway), `Replace` (cancel the old one).                      |
+| `schedule.startingDeadlineSeconds` | If a slot is missed by more than this (operator was down), skip it rather than fire late.                                                    |
+| `failedJobsHistoryLimit`           | How many **failed** `Backup` CRs from this schedule to keep. Successful retention is GFS on the `BackupConfig`.                              |
 
-```admonish tip title="What `H` means"
+/// tip | What `H` means
+
 `H` is a Jenkins-style placeholder for "pick a stable value for me." `cron: "H 2 * * *"` doesn't mean minute 0 — it deterministically derives a fixed minute from this schedule's identity, so the schedule fires at, say, 02:17 every night. Combined with `jitter`, this spreads load across many schedules instead of stampeding the repository at exactly 02:00. The pinned next firing is in `status.nextSchedule.at`.
-```
+
+///
 
 Inspect what the controller has computed:
 

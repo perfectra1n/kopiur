@@ -2,14 +2,16 @@
 
 The single most common reason a backup runs but reads **nothing** — or a restore writes files the app then can't open — is a **UID/GID mismatch**. This page shows how to find the right numbers, how to set them, and how to verify it worked, without guesswork.
 
-```admonish tip title="The mental model: the mover is a separate pod"
+/// tip | The mental model: the mover is a separate pod
+
 A backup does not run inside your app's pod. Kopiur launches a short-lived **mover** Job that mounts your PVC and runs kopia. Linux file permissions don't care that it's "your" data — they only see the **UID/GID the mover process runs as**. So the rule is simply:
 
 - **Backup** — the mover's UID/GID must be able to **read** every file in the source PVC.
 - **Restore** — the mover's UID/GID must be able to **write** into the target PVC.
 
 Get the numbers to line up and permissions stop being a problem.
-```
+
+///
 
 ## What the mover runs as by default
 
@@ -19,7 +21,7 @@ That default reads data that is **world-readable** or **owned by `65532`**. If y
 
 1. Run the mover as the **same UID/GID** that owns the data (best).
 2. Run the mover with a **GID** that matches a group the files are readable by.
-3. Run the mover as **root** — reads anything, but is *elevated* and needs an admin opt-in (last resort).
+3. Run the mover as **root** — reads anything, but is _elevated_ and needs an admin opt-in (last resort).
 
 The rest of this page is how to do (1)/(2) reliably, and when to reach for (3).
 
@@ -68,23 +70,25 @@ Set it per-recipe under `spec.mover.securityContext` (a standard Kubernetes cont
 
 ```yaml
 spec:
-  mover:
-    securityContext:
-      runAsUser: 1000 # the UID that owns the data
-      runAsGroup: 1000 # the GID that owns the data
-      runAsNonRoot: true # keep the unprivileged guarantee
-      allowPrivilegeEscalation: false
-      capabilities:
-        drop: ["ALL"]
-      seccompProfile:
-        type: RuntimeDefault
+    mover:
+        securityContext:
+            runAsUser: 1000 # the UID that owns the data
+            runAsGroup: 1000 # the GID that owns the data
+            runAsNonRoot: true # keep the unprivileged guarantee
+            allowPrivilegeEscalation: false
+            capabilities:
+                drop: ["ALL"]
+            seccompProfile:
+                type: RuntimeDefault
 ```
 
 A complete, apply-ready example (Repository + BackupConfig with this block, plus the root-mover variant commented out) is [Example 09](examples.md#example-09--mover-uidgid--permissions):
 
-```admonish warning title="`fsGroup` is not a knob here"
+/// warning | `fsGroup` is not a knob here
+
 Kopiur does **not** set a pod-level `securityContext`, so `fsGroup` (which would `chgrp` the volume on mount) is **not** available on the mover. Make permissions line up with `runAsUser`/`runAsGroup` instead: match the owning UID, or match a GID the files are group-readable by, or use a root mover. (This keeps the mover pod spec minimal and its security context auditable in one place.)
-```
+
+///
 
 ## Step 3 — Verify it worked
 
@@ -112,11 +116,11 @@ If the data is owned by **assorted UIDs you can't match** (a `lost+found`, a mul
 
 ```yaml
 spec:
-  mover:
-    securityContext:
-      runAsUser: 0
-      runAsNonRoot: false
-    privilegedMode: true # also preserves UID/GID ownership on RESTORE
+    mover:
+        securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+        privilegedMode: true # also preserves UID/GID ownership on RESTORE
 ```
 
 A root (or otherwise elevated) mover is a **privileged mover**, and granting it is a per-namespace admin decision. If the namespace hasn't opted in, the `Backup` is refused with a clear `MoverPermitted=False` condition telling you the exact command:
@@ -127,11 +131,13 @@ $ kubectl annotate namespace app kopiur.home-operations.com/privileged-movers=tr
 
 Anything that trips the "privileged" detector needs that opt-in: `runAsUser: 0`, `privileged: true`, `allowPrivilegeEscalation: true`, added Linux capabilities, `runAsNonRoot: false`, or `privilegedMode: true`. Full detail and the revoke path are in [Movers → Privileged movers](movers.md#privileged-movers).
 
-```admonish tip title="Prefer matching the UID over going root"
-A root mover widens the blast radius of the minted mover ServiceAccount. Reach for it only when you genuinely can't match the owning UID/GID. Most single-app PVCs back up fine as their app's UID.
-```
+/// tip | Prefer matching the UID over going root
 
-## Filesystem repositories: the *other* permission
+A root mover widens the blast radius of the minted mover ServiceAccount. Reach for it only when you genuinely can't match the owning UID/GID. Most single-app PVCs back up fine as their app's UID.
+
+///
+
+## Filesystem repositories: the _other_ permission
 
 The UID/GID story above is about reading **source data**. A [filesystem (PVC-backed) repository](backends/filesystem.md) adds a second surface: the **repository path itself must be writable** by the operator/mover UID.
 
@@ -152,31 +158,31 @@ A restore writes files into the **target** PVC, so the same rules apply in rever
 
 - The mover must be able to **write** the target. For a freshly created target PVC (`target.pvc`) this is usually fine; for an existing PVC (`target.pvcRef`) the mover UID must have write access to it.
 - **Preserving original ownership** — kopia restores files with the UID/GID they had when snapshotted. Reproducing that ownership requires a privileged (root) mover with `privilegedMode: true`; an unprivileged mover writes files owned by its own UID instead.
-- **`spec.options.ignorePermissionErrors`** (default `true`) lets a restore complete and *report* permission problems via a condition rather than failing hard. Set it `false` to fail-closed when exact permissions matter.
+- **`spec.options.ignorePermissionErrors`** (default `true`) lets a restore complete and _report_ permission problems via a condition rather than failing hard. Set it `false` to fail-closed when exact permissions matter.
 
 See [Restores](restores.md) for the full restore surface.
 
 ## Troubleshooting
 
-| Symptom | Where it shows | Cause | Fix |
-|---|---|---|---|
-| Backup `Succeeded` but **0 files / 0 bytes** | `Backup` `.status` | Mover UID can't read the source files. | Match `spec.mover.securityContext.runAsUser/Group` to the data owner (Steps 1–2). |
-| Mover log: `permission denied` reading source | Mover pod logs | Same as above — partial read. | Same as above; or a root mover if UIDs can't be matched. |
-| Backup stuck `Pending`, `MoverPermitted=False` | `Backup` condition / Event | Mover requests privilege; namespace not opted in. | `kubectl annotate namespace <ns> kopiur.home-operations.com/privileged-movers=true`, or drop the elevated context. |
-| `Repository` `Failed`, `PermissionDenied` | `Repository` Event / condition | Filesystem repo path not writable by the operator UID. | `chown -R <uid> <path>` (the Event names the UID), then reconcile. |
-| Restored files unreadable by the app | After restore | Files restored as the mover's UID, not the original owner. | Use a root mover with `privilegedMode: true` to preserve ownership. |
+| Symptom                                        | Where it shows                 | Cause                                                      | Fix                                                                                                                |
+| ---------------------------------------------- | ------------------------------ | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Backup `Succeeded` but **0 files / 0 bytes**   | `Backup` `.status`             | Mover UID can't read the source files.                     | Match `spec.mover.securityContext.runAsUser/Group` to the data owner (Steps 1–2).                                  |
+| Mover log: `permission denied` reading source  | Mover pod logs                 | Same as above — partial read.                              | Same as above; or a root mover if UIDs can't be matched.                                                           |
+| Backup stuck `Pending`, `MoverPermitted=False` | `Backup` condition / Event     | Mover requests privilege; namespace not opted in.          | `kubectl annotate namespace <ns> kopiur.home-operations.com/privileged-movers=true`, or drop the elevated context. |
+| `Repository` `Failed`, `PermissionDenied`      | `Repository` Event / condition | Filesystem repo path not writable by the operator UID.     | `chown -R <uid> <path>` (the Event names the UID), then reconcile.                                                 |
+| Restored files unreadable by the app           | After restore                  | Files restored as the mover's UID, not the original owner. | Use a root mover with `privilegedMode: true` to preserve ownership.                                                |
 
 ## Quick reference
 
-| Thing | Value |
-|---|---|
-| Default mover UID | `65532` (distroless `nonroot`), `runAsNonRoot: true` |
-| Set the mover UID/GID | `BackupConfig.spec.mover.securityContext.runAsUser` / `runAsGroup` |
-| `fsGroup` | **not** supported (no pod-level securityContext) — match UID/GID instead |
-| Root / preserve-ownership | `runAsUser: 0` + `privilegedMode: true` (needs the namespace opt-in) |
-| Privileged-mover opt-in | `kubectl annotate namespace <ns> kopiur.home-operations.com/privileged-movers=true` |
-| Filesystem repo not writable | Event prints `chown -R <uid> <path>` with the real operator UID |
-| Restore ignore/permission errors | `Restore.spec.options.ignorePermissionErrors` (default `true`) |
+| Thing                            | Value                                                                               |
+| -------------------------------- | ----------------------------------------------------------------------------------- |
+| Default mover UID                | `65532` (distroless `nonroot`), `runAsNonRoot: true`                                |
+| Set the mover UID/GID            | `BackupConfig.spec.mover.securityContext.runAsUser` / `runAsGroup`                  |
+| `fsGroup`                        | **not** supported (no pod-level securityContext) — match UID/GID instead            |
+| Root / preserve-ownership        | `runAsUser: 0` + `privilegedMode: true` (needs the namespace opt-in)                |
+| Privileged-mover opt-in          | `kubectl annotate namespace <ns> kopiur.home-operations.com/privileged-movers=true` |
+| Filesystem repo not writable     | Event prints `chown -R <uid> <path>` with the real operator UID                     |
+| Restore ignore/permission errors | `Restore.spec.options.ignorePermissionErrors` (default `true`)                      |
 
 ## See also
 

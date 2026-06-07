@@ -14,10 +14,10 @@ fewer moving parts. Use rclone for everything else.
 - A working **`rclone.conf`** that defines the remote you'll reference. Build and
   test it locally first:
 
-  ```console
-  $ rclone config            # interactively create a remote, e.g. named "mydrive"
-  $ rclone ls mydrive:       # confirm it works before putting it in a Secret
-  ```
+    ```console
+    $ rclone config            # interactively create a remote, e.g. named "mydrive"
+    $ rclone ls mydrive:       # confirm it works before putting it in a Secret
+    ```
 
 - The **remote name** in your `remotePath` (`mydrive:` below) must match a section
   header (`[mydrive]`) in that `rclone.conf`.
@@ -28,45 +28,49 @@ rclone is one of the three **file-delivered** backends. The mover reads the whol
 config from a well-known env key, writes it to a private (`0600`) file, and runs
 rclone with `--config`.
 
-| Secret key | Required | What it is |
-|---|---|---|
-| `KOPIA_RCLONE_CONFIG` | yes | The **entire `rclone.conf`**, verbatim. Materialized to a file → rclone `--config`. |
-| `KOPIA_PASSWORD` | **yes** | The repository encryption password. |
+| Secret key            | Required | What it is                                                                          |
+| --------------------- | -------- | ----------------------------------------------------------------------------------- |
+| `KOPIA_RCLONE_CONFIG` | yes      | The **entire `rclone.conf`**, verbatim. Materialized to a file → rclone `--config`. |
+| `KOPIA_PASSWORD`      | **yes**  | The repository encryption password.                                                 |
 
 ```yaml
 stringData:
-  KOPIA_RCLONE_CONFIG: |
-    [mydrive]
-    type = drive
-    scope = drive
-    token = {"access_token":"REPLACE_ME", ...}
-  KOPIA_PASSWORD: "choose-something-long-and-random"
+    KOPIA_RCLONE_CONFIG: |
+        [mydrive]
+        type = drive
+        scope = drive
+        token = {"access_token":"REPLACE_ME", ...}
+    KOPIA_PASSWORD: "choose-something-long-and-random"
 ```
 
-```admonish info title="Why KOPIA_RCLONE_CONFIG and not rclone.conf"
+/// info | Why KOPIA_RCLONE_CONFIG and not rclone.conf
+
 The mover loads credentials with `envFrom`, and a dotted key like `rclone.conf` is
 not a valid environment-variable name — Kubernetes drops it. So the config goes
 under `KOPIA_RCLONE_CONFIG`; the mover writes it to `rclone.conf` for you.
-```
+
+///
 
 ## The Repository
 
 ```yaml
-{{#include ../../deploy/examples/backends/rclone.yaml}}
+--8<-- "deploy/examples/backends/rclone.yaml"
 ```
 
-```admonish warning title="rclone uses `configSecretRef`, not `auth`"
+/// warning | rclone uses `configSecretRef`, not `auth`
+
 Unlike the object-store backends, rclone references its config via
 `backend.rclone.configSecretRef` — there is **no** `auth` block. The remote name in
 `remotePath` must match a section in the `rclone.conf`.
-```
+
+///
 
 ## Fields reference (`backend.rclone`)
 
-| Field | Required | Default | What it controls |
-|---|---|---|---|
-| `remotePath` | yes | — | rclone path in `remote:path` form (e.g. `mydrive:backups/kopia`). |
-| `configSecretRef` | no¹ | — | Secret holding the `rclone.conf` (under `KOPIA_RCLONE_CONFIG`). **Not** `auth`. |
+| Field             | Required | Default | What it controls                                                                |
+| ----------------- | -------- | ------- | ------------------------------------------------------------------------------- |
+| `remotePath`      | yes      | —       | rclone path in `remote:path` form (e.g. `mydrive:backups/kopia`).               |
+| `configSecretRef` | no¹      | —       | Secret holding the `rclone.conf` (under `KOPIA_RCLONE_CONFIG`). **Not** `auth`. |
 
 ¹ Optional in the schema, but in practice required: rclone can't reach a remote
 without its config.
@@ -94,11 +98,13 @@ picking a `Backup` ([Restores](../restores.md),
 
 ## Troubleshooting
 
-```admonish warning title="Remote name must match"
+/// warning | Remote name must match
+
 `directory not found` / `didn't find section in config file` almost always means
 the remote name in `remotePath` doesn't match a `[section]` in your `rclone.conf`.
 Keep them identical.
-```
+
+///
 
 - **Auth/token errors** — tokens in `rclone.conf` expire or get revoked; re-run
   `rclone config reconnect <remote>:` locally and re-paste the config.

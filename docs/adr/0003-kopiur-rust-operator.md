@@ -10,13 +10,13 @@
 
 This document is the **canonical ADR-0001 for the `kopiur` project**. The two predecessor drafts (`docs/adr/0001-onedr0p-kopia-operator.md`, `docs/adr/0002-bo0tzz-kopia-operator.md`) are preserved as historical input — they assumed Go and disagreed on several points. This ADR resolves those disagreements explicitly:
 
-| Topic | onedr0p draft | bo0tzz draft | Kopiur (this ADR) |
-|---|---|---|---|
-| CRD count | 7 (`Repository`, `ClusterRepository`, `BackupConfig`, `Backup`, `BackupSchedule`, `Restore`, `Maintenance`) | 5 (no `ClusterRepository`, `Maintenance` merged loosely) | **7 — keep `ClusterRepository`** (§3.2) |
-| Successful retention | GFS only (`BackupConfig.spec.retention`) | GFS *and* `successfulJobsHistoryLimit` | **GFS only** (§4.4); failures bounded separately |
-| Snapshot deletion when CR deleted | `deletionPolicy` (Delete default for produced, Retain forced for discovered) | Not addressed | **Adopt onedr0p model** (§4.5) |
-| Implementation language | Go (controller-runtime) | Go (controller-runtime) | **Rust (`kube-rs` + `tokio`)** |
-| Mover image | Go binary + `kopia` | Go binary + `kopia` | **Rust binary + `kopia`** (§4.10) |
+| Topic                             | onedr0p draft                                                                                               | bo0tzz draft                                             | Kopiur (this ADR)                                |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------ |
+| CRD count                         | 7 (`Repository`, `ClusterRepository`, `BackupConfig`, `Backup`, `BackupSchedule`, `Restore`, `Maintenance`) | 5 (no `ClusterRepository`, `Maintenance` merged loosely) | **7 — keep `ClusterRepository`** (§3.2)          |
+| Successful retention              | GFS only (`BackupConfig.spec.retention`)                                                                    | GFS _and_ `successfulJobsHistoryLimit`                   | **GFS only** (§4.4); failures bounded separately |
+| Snapshot deletion when CR deleted | `deletionPolicy` (Delete default for produced, Retain forced for discovered)                                | Not addressed                                            | **Adopt onedr0p model** (§4.5)                   |
+| Implementation language           | Go (controller-runtime)                                                                                     | Go (controller-runtime)                                  | **Rust (`kube-rs` + `tokio`)**                   |
+| Mover image                       | Go binary + `kopia`                                                                                         | Go binary + `kopia`                                      | **Rust binary + `kopia`** (§4.10)                |
 
 ---
 
@@ -41,29 +41,29 @@ The API group is **`kopiur.home-operations.com`** with initial version `v1alpha1
 
 ### 1.1 The most important gaps we are addressing
 
-| # | Gap | volsync refs |
-|---|---|---|
-| G1 | Repository is not a Kubernetes resource; cannot be shared/reused cleanly | implicit; perfectra1n CRD shape |
-| G2 | One `ReplicationSource` = one PVC | `#1115`, `#1116`, `#320` |
-| G3 | First reconcile triggers an immediate backup, no GitOps-friendly "skip first run" | `#627` |
-| G4 | No cron jitter / `H` substitution, no timezone | `#1421`, `#702` |
-| G5 | Restic repo locking / piling-up jobs | `#1042`, `#1429`, `#646` |
-| G6 | No retry-limit / backoffLimit override | `#1228`, `#1042` |
-| G7 | Restore proceeds with empty PVC if no snapshot found | `#1211` |
-| G8 | Snapshot selection is restic-format `restoreAsOf` only; no browse | `#7`, `#1211` |
-| G9 | `latestImage` always wins — no immutable restore source | `disc #1115` |
-| G10 | Volume populator + Direct copyMethod incompatibility | `disc #1115`, `#1129` |
-| G11 | Maintenance ownership is implicit & runs in the same pod as backup | perfectra1n fork redesigned this three times |
-| G12 | Policy passthrough is brittle: every kopia knob needs CRD/jq script changes | fork `#13`, `#23` |
-| G13 | Snapshot actions run in mover, not workload | fork `#22` |
-| G14 | OOMs unpredictable; no resource guidance | `#626`, `#707`, `#1228` |
-| G15 | Mover image is `:latest` by default | volsync `restic/builder.go:42` |
-| G16 | Restricted PSA / OpenShift SCC / unprivileged-mode `lost+found` papercuts | `#367`, `#1033`, `#1889`, `#1430` |
-| G17 | Trigger semantics are baked into the source CR — no manual/external trigger path | `#1559` |
-| G18 | Mover-pod lifecycle (zombie pods, stuck jobs) | fork `#8`, volsync `#1415` |
-| G19 | Maintainers' explicit door-closing on new movers | `#1743`, `#1029`, `#320` |
-| G20 | Deleting the source CR doesn't delete snapshots from the repository | implicit |
-| G21 | No Rust-native, type-safe controller surface for the Kubernetes ecosystem's backup tier | (new) |
+| #   | Gap                                                                                     | volsync refs                                 |
+| --- | --------------------------------------------------------------------------------------- | -------------------------------------------- |
+| G1  | Repository is not a Kubernetes resource; cannot be shared/reused cleanly                | implicit; perfectra1n CRD shape              |
+| G2  | One `ReplicationSource` = one PVC                                                       | `#1115`, `#1116`, `#320`                     |
+| G3  | First reconcile triggers an immediate backup, no GitOps-friendly "skip first run"       | `#627`                                       |
+| G4  | No cron jitter / `H` substitution, no timezone                                          | `#1421`, `#702`                              |
+| G5  | Restic repo locking / piling-up jobs                                                    | `#1042`, `#1429`, `#646`                     |
+| G6  | No retry-limit / backoffLimit override                                                  | `#1228`, `#1042`                             |
+| G7  | Restore proceeds with empty PVC if no snapshot found                                    | `#1211`                                      |
+| G8  | Snapshot selection is restic-format `restoreAsOf` only; no browse                       | `#7`, `#1211`                                |
+| G9  | `latestImage` always wins — no immutable restore source                                 | `disc #1115`                                 |
+| G10 | Volume populator + Direct copyMethod incompatibility                                    | `disc #1115`, `#1129`                        |
+| G11 | Maintenance ownership is implicit & runs in the same pod as backup                      | perfectra1n fork redesigned this three times |
+| G12 | Policy passthrough is brittle: every kopia knob needs CRD/jq script changes             | fork `#13`, `#23`                            |
+| G13 | Snapshot actions run in mover, not workload                                             | fork `#22`                                   |
+| G14 | OOMs unpredictable; no resource guidance                                                | `#626`, `#707`, `#1228`                      |
+| G15 | Mover image is `:latest` by default                                                     | volsync `restic/builder.go:42`               |
+| G16 | Restricted PSA / OpenShift SCC / unprivileged-mode `lost+found` papercuts               | `#367`, `#1033`, `#1889`, `#1430`            |
+| G17 | Trigger semantics are baked into the source CR — no manual/external trigger path        | `#1559`                                      |
+| G18 | Mover-pod lifecycle (zombie pods, stuck jobs)                                           | fork `#8`, volsync `#1415`                   |
+| G19 | Maintainers' explicit door-closing on new movers                                        | `#1743`, `#1029`, `#320`                     |
+| G20 | Deleting the source CR doesn't delete snapshots from the repository                     | implicit                                     |
+| G21 | No Rust-native, type-safe controller surface for the Kubernetes ecosystem's backup tier | (new)                                        |
 
 G21 is the new entry: it's not a volsync defect, it's a positive reason to choose Rust. Memory safety, exhaustive enum matching at the type level, and `kube-rs`'s strongly-typed CRD derive macro produce a controller surface where invalid states are unrepresentable at compile time — exactly the property a stateful data-protection controller wants.
 
@@ -75,20 +75,20 @@ G21 is the new entry: it's not a volsync defect, it's a positive reason to choos
 
 Seven CRDs in `kopiur.home-operations.com/v1alpha1`. Six are namespaced; **`ClusterRepository`** is cluster-scoped.
 
-| CRD | Scope | Layer | Purpose |
-|---|---|---|---|
-| **`Repository`** | Namespaced | Storage | A kopia repository owned by one namespace: credentials, backend, encryption, optional catalog-materialization bounds. Many `BackupConfig`s/`Restore`s reference one. |
-| **`ClusterRepository`** | Cluster | Storage | A shared kopia repository operated by the platform team, referenceable from allow-listed namespaces. Identity defaults are templated per consumer namespace. |
-| **`BackupConfig`** | Namespaced | Recipe | *What* to back up: PVC selector, identity, retention, policy, hooks. Idempotent — doesn't run anything on its own. |
-| **`Backup`** | Namespaced | Invocation + Catalog | A single kopia snapshot as a Kubernetes object. Created by `BackupSchedule`, `kubectl create`, or any other trigger source. Also materialized by the operator from the kopia catalog for snapshots it didn't produce (foreign or pre-install). |
-| **`BackupSchedule`** | Namespaced | Cron | *When* it runs: cron (with jitter + timezone) + `configRef`. Creates `Backup` CRs. |
-| **`Restore`** | Namespaced | Operation | A restore from a snapshot/identity to a PVC. Used directly, or referenced by `PVC.spec.dataSourceRef`. |
-| **`Maintenance`** | Namespaced | Lifecycle | One per `Repository`/`ClusterRepository`: schedules `kopia maintenance run` quick + full, manages ownership lease. |
+| CRD                     | Scope      | Layer                | Purpose                                                                                                                                                                                                                                        |
+| ----------------------- | ---------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`Repository`**        | Namespaced | Storage              | A kopia repository owned by one namespace: credentials, backend, encryption, optional catalog-materialization bounds. Many `BackupConfig`s/`Restore`s reference one.                                                                           |
+| **`ClusterRepository`** | Cluster    | Storage              | A shared kopia repository operated by the platform team, referenceable from allow-listed namespaces. Identity defaults are templated per consumer namespace.                                                                                   |
+| **`BackupConfig`**      | Namespaced | Recipe               | _What_ to back up: PVC selector, identity, retention, policy, hooks. Idempotent — doesn't run anything on its own.                                                                                                                             |
+| **`Backup`**            | Namespaced | Invocation + Catalog | A single kopia snapshot as a Kubernetes object. Created by `BackupSchedule`, `kubectl create`, or any other trigger source. Also materialized by the operator from the kopia catalog for snapshots it didn't produce (foreign or pre-install). |
+| **`BackupSchedule`**    | Namespaced | Cron                 | _When_ it runs: cron (with jitter + timezone) + `configRef`. Creates `Backup` CRs.                                                                                                                                                             |
+| **`Restore`**           | Namespaced | Operation            | A restore from a snapshot/identity to a PVC. Used directly, or referenced by `PVC.spec.dataSourceRef`.                                                                                                                                         |
+| **`Maintenance`**       | Namespaced | Lifecycle            | One per `Repository`/`ClusterRepository`: schedules `kopia maintenance run` quick + full, manages ownership lease.                                                                                                                             |
 
 `Backup` is also the single canonical representation of a kopia snapshot — both ones we produced and ones we discover in the repo. Three retention drivers cover the lifecycle:
 
 - **`BackupConfig.spec.retention`** (GFS — `keepLatest`/`keepHourly`/`keepDaily`/...) is the primary mechanism. The operator periodically computes the retention set for each `(BackupConfig identity, source)` tuple and deletes `Backup` CRs outside it. Each deleted CR's `deletionPolicy` determines whether the underlying kopia snapshot goes with it. Details in §4.4.
-- **`BackupSchedule.spec.failedJobsHistoryLimit`** bounds *failed* `Backup` CRs from a schedule (GFS doesn't apply to failures).
+- **`BackupSchedule.spec.failedJobsHistoryLimit`** bounds _failed_ `Backup` CRs from a schedule (GFS doesn't apply to failures).
 - **`Repository.spec.catalog.retain` / `ClusterRepository.spec.catalog.retain`** bounds the `origin: discovered` `Backup` CR set, keeping etcd footprint sane for large repos. Discovered `Backup`s always have `deletionPolicy: Retain` so this never deletes real snapshots (§4.5).
 
 Manual `Backup` CRs (`origin: manual` with no schedule parent) are user-owned and not auto-GC'd; their snapshots are tied to their `deletionPolicy`.
@@ -113,9 +113,9 @@ This is the resolution of the onedr0p-vs-bo0tzz retention disagreement: GFS is t
 
 Same as the onedr0p draft:
 
-| Origin | Namespace |
-|---|---|
-| `scheduled` / `manual` — produced by us | The `BackupConfig`'s namespace |
+| Origin                                             | Namespace                                                                                                                                                                                                                                                         |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scheduled` / `manual` — produced by us            | The `BackupConfig`'s namespace                                                                                                                                                                                                                                    |
 | `discovered` — materialized from the kopia catalog | The `Repository`'s namespace, or — for snapshots discovered under a `ClusterRepository` — the namespace named in the snapshot's identity, if it exists and is in the `allowedNamespaces` set. Falls back to a configurable `catalog.fallbackNamespace` otherwise. |
 
 ---
@@ -172,7 +172,7 @@ pub enum Backend {
 }
 ```
 
-The `#[serde(tag = "kind")]` enum is what enforces the `oneOf` shape that ADR-0001 expressed via a JSON-schema rule and webhook check. In Rust it's a compile-time invariant: a deserialized `Backend` value is always exactly one variant. The webhook still validates *content* (bucket name format, credential secret reachability) but cannot receive a multi-variant value.
+The `#[serde(tag = "kind")]` enum is what enforces the `oneOf` shape that ADR-0001 expressed via a JSON-schema rule and webhook check. In Rust it's a compile-time invariant: a deserialized `Backend` value is always exactly one variant. The webhook still validates _content_ (bucket name format, credential secret reachability) but cannot receive a multi-variant value.
 
 ### 3.2 `ClusterRepository`
 
@@ -276,6 +276,7 @@ See ADR-0001 §4.9.
 The mover is a **statically-linked Rust binary** built with `--target x86_64-unknown-linux-musl` (and `aarch64-unknown-linux-musl` for ARM). It is roughly 8 MB. The container image is built on `gcr.io/distroless/static-debian12:nonroot` plus the `kopia` binary from the official release, totaling ~70 MB.
 
 The mover binary:
+
 1. Reads its work spec from a downward-API-mounted JSON file (the controller writes a `ConfigMap` per `Backup`/`Restore` run with the resolved identity, paths, hook plan, options).
 2. Invokes `kopia --json` and streams output through a `serde_json` `Deserializer::from_reader`.
 3. Reports progress every 5 s via a `PATCH` to the `Backup.status` subresource using `kube::Api::patch_status`.
@@ -349,16 +350,16 @@ Long-running snapshot/restore subprocesses are managed by the mover pod, not the
 
 This is the section that has to justify Rust over Go for a maintainer reading the ADR cold. The candid version:
 
-| Property | Rust + kube-rs | Go + controller-runtime |
-|---|---|---|
-| **Discriminated-union safety** | Native (`enum`, exhaustive `match`). Compile-time guarantee that every variant is handled. | Tagged structs + `oneof` validation in webhook. Runtime check only. |
-| **Memory footprint (controller)** | ~50 MB resident at idle in profiling builds | ~150 MB typical for a controller-runtime binary at idle |
-| **Mover image size** | ~70 MB (distroless + kopia + 8 MB Rust binary) | ~120 MB (distroless + kopia + 35 MB Go binary) |
-| **Ecosystem maturity** | `kube-rs` is production-grade and used by CRI-O, Stackable, Linkerd's Rust components, the Volsync rust-mover-shim experiments | controller-runtime is older, larger, more battle-tested across a wider population |
-| **Hiring pool** | Smaller. Notable. | Larger. |
-| **CRD codegen** | `schemars` derive produces JSON Schema directly from the spec struct | `controller-gen` does the same; both work; Rust's is slightly tighter (no `+kubebuilder:` magic comments) |
-| **Reconciler ergonomics** | `async fn reconcile` with `?` operator for error propagation, `tokio::select!` for cancellation | Function returning `(Result, error)`; cancellation via `context.Context` |
-| **Test ergonomics** | `kube::Client::try_default()` against `kind` + `serial_test`; first-class `Mock` clients via `tower::ServiceExt` | Same pattern via `envtest`; arguably more mature |
+| Property                          | Rust + kube-rs                                                                                                                 | Go + controller-runtime                                                                                   |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| **Discriminated-union safety**    | Native (`enum`, exhaustive `match`). Compile-time guarantee that every variant is handled.                                     | Tagged structs + `oneof` validation in webhook. Runtime check only.                                       |
+| **Memory footprint (controller)** | ~50 MB resident at idle in profiling builds                                                                                    | ~150 MB typical for a controller-runtime binary at idle                                                   |
+| **Mover image size**              | ~70 MB (distroless + kopia + 8 MB Rust binary)                                                                                 | ~120 MB (distroless + kopia + 35 MB Go binary)                                                            |
+| **Ecosystem maturity**            | `kube-rs` is production-grade and used by CRI-O, Stackable, Linkerd's Rust components, the Volsync rust-mover-shim experiments | controller-runtime is older, larger, more battle-tested across a wider population                         |
+| **Hiring pool**                   | Smaller. Notable.                                                                                                              | Larger.                                                                                                   |
+| **CRD codegen**                   | `schemars` derive produces JSON Schema directly from the spec struct                                                           | `controller-gen` does the same; both work; Rust's is slightly tighter (no `+kubebuilder:` magic comments) |
+| **Reconciler ergonomics**         | `async fn reconcile` with `?` operator for error propagation, `tokio::select!` for cancellation                                | Function returning `(Result, error)`; cancellation via `context.Context`                                  |
+| **Test ergonomics**               | `kube::Client::try_default()` against `kind` + `serial_test`; first-class `Mock` clients via `tower::ServiceExt`               | Same pattern via `envtest`; arguably more mature                                                          |
 
 The hiring-pool concern is real but the project's likely contributor base (the kubesearch / homelab-ops / self-hosted-k8s community that's already running the perfectra1n volsync fork) skews higher Rust-literate than typical, and the maintainer set this project would actually ship with is one or two people, not a team of ten.
 
@@ -371,6 +372,7 @@ The exhaustiveness guarantee is the load-bearing argument. Backup software has t
 See ADR-0001 §5 — all walkthroughs there apply unchanged. The CRDs are language-agnostic; only the controller binary is Rust.
 
 The walkthroughs in ADR-0001 §5.1 through §5.9 cover:
+
 - Single PVC, scheduled daily
 - Shared platform repository (`ClusterRepository`)
 - Restore by picking a backup

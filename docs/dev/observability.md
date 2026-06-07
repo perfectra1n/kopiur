@@ -7,7 +7,7 @@ Kopiur exposes Prometheus metrics, and can additionally export OpenTelemetry (OT
 Metrics are instrumented **once** against the OpenTelemetry metrics API. A single `SdkMeterProvider` fans out to two readers:
 
 1. an **`opentelemetry-prometheus` exporter** that populates a `prometheus::Registry` behind the always-on `/metrics` pull endpoint (so a `ServiceMonitor` scrapes the pods directly — no collector required), and
-2. an **OTLP `PeriodicReader`** that *pushes* the same measurements to a collector — added only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+2. an **OTLP `PeriodicReader`** that _pushes_ the same measurements to a collector — added only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
 
 Recording a value updates both; there is no double instrumentation. Traces (the controller's `#[instrument]` reconcile spans) and logs (bridged from `tracing` events) export over OTLP via `tracing-opentelemetry` and `opentelemetry-appender-tracing`.
 
@@ -25,11 +25,11 @@ Every component writes structured `tracing` events to **stdout** via an fmt laye
 
 Helm knobs (`logging.*`, applied to controller + webhook, and through to movers):
 
-| Key | Default | Effect |
-|---|---|---|
-| `logging.level` | `""` → falls back to `controller.logLevel` | sets `RUST_LOG` (e.g. `info,kopia=debug`) |
-| `logging.format` | `text` | sets `KOPIUR_LOG_FORMAT` (`text`/`json`) |
-| `controller.logLevel` | `info` | **deprecated** alias for `logging.level` (kept for back-compat) |
+| Key                   | Default                                    | Effect                                                          |
+| --------------------- | ------------------------------------------ | --------------------------------------------------------------- |
+| `logging.level`       | `""` → falls back to `controller.logLevel` | sets `RUST_LOG` (e.g. `info,kopia=debug`)                       |
+| `logging.format`      | `text`                                     | sets `KOPIUR_LOG_FORMAT` (`text`/`json`)                        |
+| `controller.logLevel` | `info`                                     | **deprecated** alias for `logging.level` (kept for back-compat) |
 
 ```bash
 # JSON logs everywhere, and show kopia's progress in mover logs:
@@ -39,41 +39,42 @@ helm upgrade --install kopiur deploy/helm/kopiur -n kopiur-system \
 
 ## HTTP endpoints
 
-| Component | Endpoint | Notes |
-|---|---|---|
-| Controller | `GET /metrics`, `/healthz`, `/readyz` on `:8080` (axum) | probes hit the real health routes |
-| Webhook | `GET /metrics` on its TLS port (8443) | plus `/healthz`, `/readyz` |
-| Mover | none (short-lived Job) | OTLP **push** only; flushed before exit |
+| Component  | Endpoint                                                | Notes                                   |
+| ---------- | ------------------------------------------------------- | --------------------------------------- |
+| Controller | `GET /metrics`, `/healthz`, `/readyz` on `:8080` (axum) | probes hit the real health routes       |
+| Webhook    | `GET /metrics` on its TLS port (8443)                   | plus `/healthz`, `/readyz`              |
+| Mover      | none (short-lived Job)                                  | OTLP **push** only; flushed before exit |
 
 ## Metrics
 
 All metrics are under the `kopiur_` namespace. The Prometheus exporter applies the OTel→Prometheus conventions, so a counter instrument named `kopiur_x` is exported as `kopiur_x_total`.
 
-| Metric | Type | Labels | Source |
-|---|---|---|---|
-| `kopiur_controller_reconciliations_total` | counter | `kind` | every reconcile |
-| `kopiur_controller_reconcile_errors_total` | counter | `kind`, `class` (`transient`/`structural`) | `error_policy` |
-| `kopiur_controller_reconcile_duration_seconds` | histogram | `kind` | every reconcile |
-| `kopiur_resource_phase` | gauge (0/1) | `kind`, `namespace`, `name`, `phase` | CR status; 1 = active phase, 0 = others; **zeroed on deletion** |
-| `kopiur_backup_last_success_timestamp_seconds` | gauge | `namespace`, `name` | Backup → Succeeded |
-| `kopiur_backup_consecutive_failures` | gauge | `namespace`, `name` | BackupConfig reconcile (trailing Failed before the latest Succeeded) |
-| `kopiur_backup_size_bytes` | gauge | `namespace`, `name` | Backup `status.stats.sizeBytes` |
-| `kopiur_backup_files` | gauge | `namespace`, `name` | Backup file counts (absent when unknown) |
-| `kopiur_backup_duration_seconds` | gauge | `namespace`, `name` | Backup `status.timing.durationSeconds` |
-| `kopiur_orphaned_snapshots_total` | counter | `namespace` | Orphan policy / skip-cleanup escape hatch |
-| `kopiur_snapshot_deletion_failures_total` | counter | `namespace` | finalizer snapshot-delete failures |
-| `kopiur_schedule_backups_created_total` | counter | `namespace`, `name` | BackupSchedule fires |
-| `kopiur_repo_size_bytes` | gauge | `namespace`, `name` | logical bytes under management (newest snapshot per source) |
-| `kopiur_repo_snapshot_count` | gauge | `namespace`, `name` | repository catalog scan |
-| `kopiur_repo_discovered_backups` | gauge | `namespace`, `name` | repository catalog scan |
-| `kopiur_repository_maintenance_configured` | gauge (0/1) | `kind`, `namespace`, `name` | Repository/ClusterRepository reconcile once Ready; 1 = a `Maintenance` references it, 0 = none (also emits a `MaintenanceNotConfigured` Warning event + `MaintenanceConfigured` condition) |
-| `kopiur_restore_duration_seconds` | gauge | `namespace`, `name` | restore Job completion − start |
-| `kopiur_maintenance_last_reclaimed_bytes` | gauge | `namespace`, `name` | full maintenance run |
-| `kopiur_webhook_admission_total` | counter | `kind`, `decision` (`allowed`/`denied`) | admission webhook |
-| `kopiur_mover_operations_total` | counter | `operation`, `result` | mover Job (OTLP push) |
-| `kopiur_mover_operation_duration_seconds` | histogram | `operation`, `result` | mover Job (OTLP push) |
+| Metric                                         | Type        | Labels                                     | Source                                                                                                                                                                                     |
+| ---------------------------------------------- | ----------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `kopiur_controller_reconciliations_total`      | counter     | `kind`                                     | every reconcile                                                                                                                                                                            |
+| `kopiur_controller_reconcile_errors_total`     | counter     | `kind`, `class` (`transient`/`structural`) | `error_policy`                                                                                                                                                                             |
+| `kopiur_controller_reconcile_duration_seconds` | histogram   | `kind`                                     | every reconcile                                                                                                                                                                            |
+| `kopiur_resource_phase`                        | gauge (0/1) | `kind`, `namespace`, `name`, `phase`       | CR status; 1 = active phase, 0 = others; **zeroed on deletion**                                                                                                                            |
+| `kopiur_backup_last_success_timestamp_seconds` | gauge       | `namespace`, `name`                        | Backup → Succeeded                                                                                                                                                                         |
+| `kopiur_backup_consecutive_failures`           | gauge       | `namespace`, `name`                        | BackupConfig reconcile (trailing Failed before the latest Succeeded)                                                                                                                       |
+| `kopiur_backup_size_bytes`                     | gauge       | `namespace`, `name`                        | Backup `status.stats.sizeBytes`                                                                                                                                                            |
+| `kopiur_backup_files`                          | gauge       | `namespace`, `name`                        | Backup file counts (absent when unknown)                                                                                                                                                   |
+| `kopiur_backup_duration_seconds`               | gauge       | `namespace`, `name`                        | Backup `status.timing.durationSeconds`                                                                                                                                                     |
+| `kopiur_orphaned_snapshots_total`              | counter     | `namespace`                                | Orphan policy / skip-cleanup escape hatch                                                                                                                                                  |
+| `kopiur_snapshot_deletion_failures_total`      | counter     | `namespace`                                | finalizer snapshot-delete failures                                                                                                                                                         |
+| `kopiur_schedule_backups_created_total`        | counter     | `namespace`, `name`                        | BackupSchedule fires                                                                                                                                                                       |
+| `kopiur_repo_size_bytes`                       | gauge       | `namespace`, `name`                        | logical bytes under management (newest snapshot per source)                                                                                                                                |
+| `kopiur_repo_snapshot_count`                   | gauge       | `namespace`, `name`                        | repository catalog scan                                                                                                                                                                    |
+| `kopiur_repo_discovered_backups`               | gauge       | `namespace`, `name`                        | repository catalog scan                                                                                                                                                                    |
+| `kopiur_repository_maintenance_configured`     | gauge (0/1) | `kind`, `namespace`, `name`                | Repository/ClusterRepository reconcile once Ready; 1 = a `Maintenance` references it, 0 = none (also emits a `MaintenanceNotConfigured` Warning event + `MaintenanceConfigured` condition) |
+| `kopiur_restore_duration_seconds`              | gauge       | `namespace`, `name`                        | restore Job completion − start                                                                                                                                                             |
+| `kopiur_maintenance_last_reclaimed_bytes`      | gauge       | `namespace`, `name`                        | full maintenance run                                                                                                                                                                       |
+| `kopiur_webhook_admission_total`               | counter     | `kind`, `decision` (`allowed`/`denied`)    | admission webhook                                                                                                                                                                          |
+| `kopiur_mover_operations_total`                | counter     | `operation`, `result`                      | mover Job (OTLP push)                                                                                                                                                                      |
+| `kopiur_mover_operation_duration_seconds`      | histogram   | `operation`, `result`                      | mover Job (OTLP push)                                                                                                                                                                      |
 
 Notes:
+
 - `kopiur_resource_phase` is **zeroed when a CR is deleted** so `… == 1` alerts clear before the object is garbage-collected (OTel sync gauges can't drop a series; zeroing is the available remedy). Series for long-deleted resources persist at `0`.
 - Per-resource gauges are re-read from the freshest status on each successful reconcile, so they don't lag a cycle behind a phase transition.
 
@@ -98,17 +99,17 @@ helm upgrade --install kopiur deploy/helm/kopiur -n kopiur-system \
 
 Keys (see `deploy/helm/kopiur/values.yaml` for the full set):
 
-| Key | Default | Effect |
-|---|---|---|
-| `metrics.serviceMonitor.enabled` | `false` | scrape the controller `/metrics` |
-| `metrics.prometheusRule.enabled` | `false` | install the kopiur alert rules |
-| `grafanaDashboard.enabled` | `false` | ship the dashboard as a sidecar ConfigMap |
-| `webhook.serviceMonitor.enabled` | `false` | scrape the webhook `/metrics` (HTTPS) |
-| `observability.otlp.enabled` | `false` | export OTLP from all components |
-| `observability.otlp.endpoint` | `…:4317` | collector gRPC endpoint (required when enabled) |
-| `observability.otlp.protocol` | `grpc` | only gRPC is compiled in |
-| `observability.otlp.headers` | `""` | e.g. `authorization=Bearer …` |
-| `observability.otlp.strict` | `false` | fail-fast on telemetry misconfig |
+| Key                              | Default  | Effect                                          |
+| -------------------------------- | -------- | ----------------------------------------------- |
+| `metrics.serviceMonitor.enabled` | `false`  | scrape the controller `/metrics`                |
+| `metrics.prometheusRule.enabled` | `false`  | install the kopiur alert rules                  |
+| `grafanaDashboard.enabled`       | `false`  | ship the dashboard as a sidecar ConfigMap       |
+| `webhook.serviceMonitor.enabled` | `false`  | scrape the webhook `/metrics` (HTTPS)           |
+| `observability.otlp.enabled`     | `false`  | export OTLP from all components                 |
+| `observability.otlp.endpoint`    | `…:4317` | collector gRPC endpoint (required when enabled) |
+| `observability.otlp.protocol`    | `grpc`   | only gRPC is compiled in                        |
+| `observability.otlp.headers`     | `""`     | e.g. `authorization=Bearer …`                   |
+| `observability.otlp.strict`      | `false`  | fail-fast on telemetry misconfig                |
 
 When OTLP is enabled the controller passes the same `OTEL_EXPORTER_OTLP_*` env to every mover `Job` it creates, so mover traces/logs/metrics reach the same collector.
 
@@ -129,20 +130,23 @@ If you run OTLP-only and don't scrape the pods, point Prometheus at the collecto
 ```yaml
 # otel-collector config (configmap data)
 receivers:
-  otlp:
-    protocols:
-      grpc:
-        endpoint: 0.0.0.0:4317
+    otlp:
+        protocols:
+            grpc:
+                endpoint: 0.0.0.0:4317
 exporters:
-  prometheus:
-    endpoint: 0.0.0.0:8889       # scrape this with Prometheus
-  # debug:                        # uncomment to see traces/logs in the collector log
+    prometheus:
+        endpoint: 0.0.0.0:8889 # scrape this with Prometheus
+    # debug:                        # uncomment to see traces/logs in the collector log
 service:
-  pipelines:
-    metrics: { receivers: [otlp], exporters: [prometheus] }
-    traces:  { receivers: [otlp], exporters: [debug] }
-    logs:    { receivers: [otlp], exporters: [debug] }
+    pipelines:
+        metrics: { receivers: [otlp], exporters: [prometheus] }
+        traces: { receivers: [otlp], exporters: [debug] }
+        logs: { receivers: [otlp], exporters: [debug] }
 ```
 
 For most users the direct-scrape `ServiceMonitor` path is simpler; OTLP is for shops that already run a collector and want traces + logs alongside metrics.
+
+```
+
 ```

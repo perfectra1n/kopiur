@@ -35,13 +35,13 @@ NAME      PHASE     BACKEND   AGE
 primary   Failed    S3        2m
 ```
 
-| Phase / symptom | Likely cause | Fix |
-|---|---|---|
-| `Failed`, connect error | Wrong endpoint/region/bucket, or the bucket doesn't exist and `create.enabled` is `false`. | Fix the backend identifiers; set `create.enabled: true` for a genuinely new repo. |
-| `Failed`, auth/"Access Denied" | Backend keys wrong or under the wrong Secret keys. | Check the [credential key names](repositories.md#credential-secret-keys-by-backend) and the access key/secret. |
-| `Failed`, decryption error | `KOPIA_PASSWORD` doesn't match an existing repository. | Use the original password — there is no recovery for a lost one. |
-| `Failed`, TLS error | Self-signed or HTTP-only endpoint. | Set `backend.s3.tls.disableTls: true` (HTTP) or point `tls.caBundleRef` at the CA. |
-| Stuck `Pending` | Operator not running, or not watching this scope. | Check the controller is up; for `ClusterRepository`, confirm `installScope=cluster`. |
+| Phase / symptom                | Likely cause                                                                               | Fix                                                                                                            |
+| ------------------------------ | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `Failed`, connect error        | Wrong endpoint/region/bucket, or the bucket doesn't exist and `create.enabled` is `false`. | Fix the backend identifiers; set `create.enabled: true` for a genuinely new repo.                              |
+| `Failed`, auth/"Access Denied" | Backend keys wrong or under the wrong Secret keys.                                         | Check the [credential key names](repositories.md#credential-secret-keys-by-backend) and the access key/secret. |
+| `Failed`, decryption error     | `KOPIA_PASSWORD` doesn't match an existing repository.                                     | Use the original password — there is no recovery for a lost one.                                               |
+| `Failed`, TLS error            | Self-signed or HTTP-only endpoint.                                                         | Set `backend.s3.tls.disableTls: true` (HTTP) or point `tls.caBundleRef` at the CA.                             |
+| Stuck `Pending`                | Operator not running, or not watching this scope.                                          | Check the controller is up; for `ClusterRepository`, confirm `installScope=cluster`.                           |
 
 ```console
 $ kubectl describe repository primary -n <ns>   # the condition message names the exact cause
@@ -91,12 +91,12 @@ Common causes: the source PVC's `VolumeSnapshotClass` is wrong/missing (for `cop
 $ kubectl describe restore <name> -n <ns>
 ```
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| `Failed`, "no matching snapshot" | The source resolved to nothing and `onMissingSnapshot: Fail`. | Verify the `backupRef`/identity; for deploy-or-restore use `fromConfig` (which defaults to `Continue`). |
-| Stuck `Resolving` | Waiting for the source snapshot to appear (`waitTimeout`). | Confirm the snapshot exists; raise `policy.waitTimeout` if a schedule is about to produce it. |
-| PVC stuck `Pending` (populator) | Volume-populator handshake not completing. | Need Kubernetes ≥ 1.24; install `volume-data-source-validator` to see the real event. See [Restores → deploy-or-restore](restores.md#deploy-or-restore-gitops). |
-| `identity` source rejected at admission | `source.identity` requires an explicit `spec.repository`. | Add `spec.repository`. |
+| Symptom                                 | Cause                                                         | Fix                                                                                                                                                             |
+| --------------------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Failed`, "no matching snapshot"        | The source resolved to nothing and `onMissingSnapshot: Fail`. | Verify the `backupRef`/identity; for deploy-or-restore use `fromConfig` (which defaults to `Continue`).                                                         |
+| Stuck `Resolving`                       | Waiting for the source snapshot to appear (`waitTimeout`).    | Confirm the snapshot exists; raise `policy.waitTimeout` if a schedule is about to produce it.                                                                   |
+| PVC stuck `Pending` (populator)         | Volume-populator handshake not completing.                    | Need Kubernetes ≥ 1.24; install `volume-data-source-validator` to see the real event. See [Restores → deploy-or-restore](restores.md#deploy-or-restore-gitops). |
+| `identity` source rejected at admission | `source.identity` requires an explicit `spec.repository`.     | Add `spec.repository`.                                                                                                                                          |
 
 ## Schedule isn't firing
 
@@ -119,10 +119,10 @@ $ kubectl get maintenance -A
 $ kubectl describe maintenance <name> -n <ns>
 ```
 
-| `LeaseOwned=False` reason | Meaning |
-|---|---|
-| `WaitingForRepository` | The repository isn't `Ready` yet — fix that first. |
-| lease held elsewhere | Another owner holds the maintenance lease (shared repo). Adjust `takeoverPolicy` only if you're sure no one else maintains it. |
+| `LeaseOwned=False` reason | Meaning                                                                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `WaitingForRepository`    | The repository isn't `Ready` yet — fix that first.                                                                             |
+| lease held elsewhere      | Another owner holds the maintenance lease (shared repo). Adjust `takeoverPolicy` only if you're sure no one else maintains it. |
 
 `status.full.lastRunAt` shows the last full pass. See the [Maintenance guide](maintenance.md) for ownership and the schedule model.
 

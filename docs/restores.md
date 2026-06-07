@@ -2,20 +2,23 @@
 
 A `Restore` reads a snapshot back into a PVC. It answers three questions, and its whole spec is just those three: **from where** (`source`), **to where** (`target`), and **how** (`options`/`policy`).
 
-```admonish tip title="The shape of a Restore"
-~~~yaml
+/// tip | The shape of a Restore
+
+```yaml
 spec:
-  source: { <one of three>: ... }  # FROM: which snapshot
-  target: { <one of two>: ... }    # TO: which PVC  (omit entirely = passive populator)
-  options: { ... }                 # HOW kopia writes (file deletion, permissions)
-  policy: { ... }                  # what to do if the snapshot is missing
-~~~
-`source` is required; everything else is optional with safe defaults.
+    source: { <one of three>: ... } # FROM: which snapshot
+    target: { <one of two>: ... } # TO: which PVC  (omit entirely = passive populator)
+    options: { ... } # HOW kopia writes (file deletion, permissions)
+    policy: { ... } # what to do if the snapshot is missing
 ```
+
+`source` is required; everything else is optional with safe defaults.
+
+///
 
 Restore is "pick a row, write it somewhere" — there's no timestamp arithmetic in the common case. A `Restore` resolves its source **once at admission** and pins it to status, so it never silently retargets a different snapshot later.
 
-## Where to restore *from* — `source`
+## Where to restore _from_ — `source`
 
 Exactly one of three modes (externally tagged — you set one key):
 
@@ -25,9 +28,9 @@ You browsed the catalog and picked a `Backup` CR. No timestamps — just referen
 
 ```yaml
 source:
-  backupRef:
-    name: postgres-data-20260524-021300
-    namespace: billing # optional; defaults to the Restore's namespace
+    backupRef:
+        name: postgres-data-20260524-021300
+        namespace: billing # optional; defaults to the Restore's namespace
 ```
 
 To find candidates:
@@ -44,10 +47,10 @@ Restore the latest (or an offset/point-in-time) snapshot for a `BackupConfig`'s 
 
 ```yaml
 source:
-  fromConfig:
-    name: postgres-data
-    offset: 0 # 0 = latest, 1 = previous, ...
-    # asOf: 2026-05-01T00:00:00Z   # or: newest snapshot at/before this instant
+    fromConfig:
+        name: postgres-data
+        offset: 0 # 0 = latest, 1 = previous, ...
+        # asOf: 2026-05-01T00:00:00Z   # or: newest snapshot at/before this instant
 ```
 
 ### `identity` — a raw kopia identity
@@ -57,14 +60,14 @@ For snapshots written by a foreign kopia client, or ones that have aged out of t
 ```yaml
 repository: { kind: Repository, name: primary, namespace: backups }
 source:
-  identity:
-    username: postgres-data
-    hostname: billing
-    sourcePath: /data
-    snapshotID: k1f1ec0a8 # pin an exact snapshot, or use asOf / offset
+    identity:
+        username: postgres-data
+        hostname: billing
+        sourcePath: /data
+        snapshotID: k1f1ec0a8 # pin an exact snapshot, or use asOf / offset
 ```
 
-## Where to restore *to* — `target`
+## Where to restore _to_ — `target`
 
 ### `pvc` — create a new PVC
 
@@ -72,19 +75,19 @@ The operator creates the PVC and restores into it. Best for verification restore
 
 ```yaml
 target:
-  pvc:
-    name: postgres-data-restored
-    storageClassName: fast-ssd # optional; cluster default otherwise
-    capacity: 100Gi
-    accessModes: [ReadWriteOnce]
+    pvc:
+        name: postgres-data-restored
+        storageClassName: fast-ssd # optional; cluster default otherwise
+        capacity: 100Gi
+        accessModes: [ReadWriteOnce]
 ```
 
 ### `pvcRef` — write into an existing PVC
 
 ```yaml
 target:
-  pvcRef:
-    name: postgres-data # an existing PVC in this namespace
+    pvcRef:
+        name: postgres-data # an existing PVC in this namespace
 ```
 
 ### No `target` — passive populator mode
@@ -95,26 +98,28 @@ Omit `target` entirely and the `Restore` becomes a **passive volume-populator so
 
 ```yaml
 options:
-  enableFileDeletion: false # default: additive restore (don't delete extra files in the target)
-  ignorePermissionErrors: true # default true
-  writeFilesAtomically: true # default true
+    enableFileDeletion: false # default: additive restore (don't delete extra files in the target)
+    ignorePermissionErrors: true # default true
+    writeFilesAtomically: true # default true
 policy:
-  onMissingSnapshot: Fail # see table below
-  waitTimeout: 5m # how long to wait for the source snapshot to appear
+    onMissingSnapshot: Fail # see table below
+    waitTimeout: 5m # how long to wait for the source snapshot to appear
 ```
 
-```admonish warning title="`enableFileDeletion` makes the target a mirror"
+/// warning | `enableFileDeletion` makes the target a mirror
+
 By default a restore is **additive** — it writes the snapshot's files and leaves anything else in the target alone. `enableFileDeletion: true` deletes files in the target that aren't in the snapshot, making it an exact mirror. Use it deliberately.
-```
+
+///
 
 ### `onMissingSnapshot` — fail-closed vs proceed
 
-| Value | Behavior | Default for |
-|---|---|---|
-| `Fail` | No matching snapshot ⇒ the restore fails. | `backupRef` / `identity` (explicit sources). |
-| `Continue` | No matching snapshot ⇒ proceed without restoring (the volume comes up empty). | `fromConfig`. |
+| Value      | Behavior                                                                      | Default for                                  |
+| ---------- | ----------------------------------------------------------------------------- | -------------------------------------------- |
+| `Fail`     | No matching snapshot ⇒ the restore fails.                                     | `backupRef` / `identity` (explicit sources). |
+| `Continue` | No matching snapshot ⇒ proceed without restoring (the volume comes up empty). | `fromConfig`.                                |
 
-The defaults are the point: an *explicit* restore that finds nothing is an error you want surfaced; a *deploy-or-restore* that finds nothing should let the app start with a fresh volume.
+The defaults are the point: an _explicit_ restore that finds nothing is an error you want surfaced; a _deploy-or-restore_ that finds nothing should let the app start with a fresh volume.
 
 ## Deploy-or-restore (GitOps)
 
@@ -122,9 +127,11 @@ The headline pattern: commit one bundle and apply it to **any** cluster. On a fr
 
 The mechanism is a **passive `Restore`** (`source.fromConfig`, no `target`, `onMissingSnapshot: Continue`) consumed by a PVC's `dataSourceRef` as a volume populator. The full manifest is [example 05](examples.md#example-05--deploy-or-restore-gitops).
 
-```admonish note title="Kubernetes ≥ 1.24"
+/// note | Kubernetes ≥ 1.24
+
 The volume-populator handshake relies on the `AnyVolumeDataSource` feature (GA from 1.24). The optional `volume-data-source-validator` surfaces a malformed `dataSourceRef` as an event instead of a silently-stuck PVC.
-```
+
+///
 
 ## Restoring a snapshot Kopiur didn't create
 
