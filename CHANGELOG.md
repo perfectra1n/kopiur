@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.10](https://github.com/home-operations/kopiur/compare/0.1.9...0.1.10) (2026-06-07)
+
+
+### Features
+
+* **backend:** also update support for various backends ([99d0942](https://github.com/home-operations/kopiur/commit/99d0942ec41cc97aaa5f46cf6a72073d251354f7))
+* **docs:** add a slew of backend docs ([6bb1388](https://github.com/home-operations/kopiur/commit/6bb1388fb68672cb9daef014a5556d0c79691050))
+* **docs:** create docs for the various backends ([49b19b3](https://github.com/home-operations/kopiur/commit/49b19b391e9236849935edd25b4073184a2a92d9))
+* **docs:** migrate documentation site from mdBook to MkDocs Material ([527508c](https://github.com/home-operations/kopiur/commit/527508c9856d37a5353b35ae7e847c04c25f1e00))
+* **docs:** promote rustdoc to a top-level header tab ([3c6d3c8](https://github.com/home-operations/kopiur/commit/3c6d3c809e4e4e2f7396b325301b1bdd763d9d89))
+* **docs:** surface rustdoc in the MkDocs header ([ecc98a6](https://github.com/home-operations/kopiur/commit/ecc98a6dfb24695c57761a4e6d77362e43ee9344))
+* **e2e:** make sure that values are consistent in e2e tests ([f5fe886](https://github.com/home-operations/kopiur/commit/f5fe8867e408ef119016757cc11a4174a14e9101))
+* **tests:** implement more thorough e2e testing ([4e0d266](https://github.com/home-operations/kopiur/commit/4e0d26616d554a9a1b8f986d475299a2786b4e0b))
+* **tests:** update broken unit test ([60d34be](https://github.com/home-operations/kopiur/commit/60d34beeb5364dd6e7a88c47ca0adc96ead00257))
+
 ## [0.1.9](https://github.com/home-operations/kopiur/compare/0.1.8...0.1.9) (2026-06-06)
 
 
