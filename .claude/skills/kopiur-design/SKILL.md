@@ -13,6 +13,7 @@ for the quick map; `docs/dev/api-conventions.md` for the encoding rulebook.
 ## The thesis you must protect (ADR §5.5)
 
 Invalid states are unrepresentable; reconcilers handle every variant. Concretely:
+
 - Model every "exactly one of" surface as a Rust `enum`, never a bag of mutually
   exclusive `Option` fields + a runtime check.
 - In reconcile/finalizer paths, use exhaustive `match` — avoid `_ =>` catch-alls
@@ -84,11 +85,44 @@ scripts/with-kind.sh cargo test --workspace --features integration -- --include-
 - Delegating a milestone to a subagent is encouraged when it's well-specified,
   but always re-run `cargo test`/`clippy` yourself before trusting the result.
 
-## Every bug fix ships with a regression test (non-negotiable)
+## Every change ships with tests (non-negotiable)
+
+This is **data-protection software**: an untested path can silently lose backups.
+So **every new feature AND every bug fix ships with tests** — you have NOT
+finished until the work is proven by tests that would fail without it.
+
+### New features: cover every tier the feature touches
+
+A new feature (a CRD field, a backend, a reconciler path, a mover op) is not done
+until it has, **at minimum**:
+
+1. **Unit/serde tests** for the leaf logic — validators, the externally-tagged
+   wire shape (`from_yaml` round-trip), pure decision functions, and any
+   `match`-on-enum mapping. Cheapest tier; catches the most. Also test the
+   controller _glue_ that maps a CRD field to a mover input (e.g. the function
+   that turns `source.nfs` into a mover volume mount) — extract it so it's
+   callable without a cluster, then assert on its output.
+2. **An e2e scenario that exercises the feature end to end** against a live
+   operator and asserts the user-visible success condition (a `Backup` reaching
+   `Succeeded` with a real `kopiaSnapshotID`, a `Repository` `Ready`, a `Restore`
+   `Completed`). If the feature needs a new piece of cluster infrastructure to
+   test (an NFS server, an SFTP server, a new backend), **stand it up in the e2e
+   `World`** (`Need`/`Fixture`) — see `[[error-handling-and-e2e]]`.
+3. Integration tier (`#[ignore]` + `--features integration`) when the surface is
+   an API-server interaction (admission, RBAC) that doesn't need the mover images.
+
+**No e2e test is "too large" or "too expensive" to include.** This tool guards
+real data; thorough end-to-end proof is the requirement, not a nice-to-have. If a
+feature _can_ be exercised against a live operator, it gets an e2e scenario — even
+when that means provisioning a server, building an image, or a multi-minute run.
+The only acceptable reason to skip an e2e is that the feature genuinely has no
+runtime-observable behavior (a pure type/refactor) — and then say so explicitly.
+
+### Bug fixes: a regression test that fails without the fix
 
 When you fix a bug — especially one a user hit at runtime — you have NOT finished
 until a test would fail without your fix and passes with it. A fix without a test
-is an invitation for the same bug to return. Default to writing the test *first*
+is an invitation for the same bug to return. Default to writing the test _first_
 (reproduce the failure), then fix.
 
 Pick the cheapest tier that actually exercises the broken path:
@@ -98,14 +132,14 @@ Pick the cheapest tier that actually exercises the broken path:
    tested pure fn" idiom (ADR §5.2/§5.4). Example: the "ClusterRepository refs are
    ignored" bug (controller resolved every `repository` ref as a namespaced
    `Repository` regardless of `kind`) became `io::repo_lookup(&RepositoryRef, …) ->
-   RepoLookup` with unit tests asserting `kind: ClusterRepository` maps to a
+RepoLookup` with unit tests asserting `kind: ClusterRepository` maps to a
    cluster-scoped lookup, never a namespaced get. Runs in `cargo test`, no cluster.
 2. **e2e test for whole-pipeline bugs.** If the failure only shows up against a live
    operator (a reconcile that never reaches `Succeeded`, a missing dependency, an
    RBAC/SA gap, a dropped option), add a scenario to `crates/e2e/tests/lifecycle.rs`
-   that reproduces the *exact* user-visible symptom and asserts the success
+   that reproduces the _exact_ user-visible symptom and asserts the success
    condition (e.g. Backup reaching `Succeeded` with a real `kopiaSnapshotID`). Write
-   the test so it would have *timed out / failed* on the buggy code. See
+   the test so it would have _timed out / failed_ on the buggy code. See
    `cluster_repository_backup_lifecycle` for the template.
 3. Integration tier (`#[ignore]` + `--features integration`) for API-server
    interactions that don't need the mover images.

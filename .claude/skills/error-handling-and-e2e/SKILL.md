@@ -75,12 +75,35 @@ in `kubectl get`, dashboards, and alerts.
 
 ### When to write an e2e test
 
-Per `[[regression-test-every-bugfix]]`, every fix ships with a test at the
-cheapest tier that exercises the broken path. Reach for e2e (not a unit test)
-when the failure **only appears against a live operator**: a reconcile that never
-reaches its terminal phase, a missing runtime dependency, an RBAC/SA gap, a
-dropped option that survives serialization but breaks at runtime, or — for the
-observability work — metrics that must actually be emitted and scrapable.
+**Both bug fixes and new features ship with e2e coverage** (`[[kopiur-design]]` —
+"Every change ships with tests"). Per `[[regression-test-every-bugfix]]`, a _fix_
+ships with a test at the cheapest tier that exercises the broken path; a _new
+feature_ additionally gets a full-pipeline e2e scenario whenever it has any
+runtime-observable behavior. Reach for e2e (not just a unit test) when the
+behavior **only appears against a live operator**: a reconcile that must reach its
+terminal phase, a runtime dependency, an RBAC/SA gap, an option that survives
+serialization but acts at runtime, a new backend/volume source the mover must
+actually mount, or metrics that must be emitted and scrapable.
+
+**No e2e is too large to include — this tool is data-protection software and must
+be thoroughly tested.** If a feature needs new cluster infrastructure to exercise
+(an NFS server, an SFTP server, a fresh namespace, a second backend), **provision
+it in the `World`** rather than skipping the test:
+
+- Add a `Need` variant + an `ensure_*` method (idempotent `Fixture` apply), plus a
+  `builders::*` Deployment/Service for any in-cluster server. Mirror the existing
+  servers (`ensure_sftp`/`ensure_webdav`/`ensure_nfs`).
+- Pin every server image (never `:latest`) and **verify it actually serves the
+  mover on a real kind cluster** before trusting a green run — a server the client
+  can't talk to fails slowly and confusingly, not fast (see
+  `[[sftp-openssh10-go-ssh-hang]]`). Note in the test/PR if it's pinned-but-not-
+  yet-cluster-verified.
+- A multi-minute run, an extra built image, or a privileged helper pod are all
+  acceptable costs. The bar is "is the feature exercised end to end," not "is the
+  test cheap."
+
+The only features that legitimately skip e2e are those with no runtime-observable
+behavior (a pure type change/refactor) — and then say so explicitly.
 
 ### Harness conventions (mirror `crates/e2e/tests/lifecycle.rs`)
 
@@ -147,6 +170,10 @@ When the assertion is "a metric is emitted," drive the real lifecycle, then
 - [ ] Message text unit-tested where a human acts on it.
 - [ ] Bug fix has a test that fails without the fix (unit if possible, e2e if the
       bug is pipeline-only).
+- [ ] **New feature has tests at every tier it touches**: unit/serde for the leaf
+      logic + controller glue, AND a full-pipeline e2e scenario (provisioning any
+      new `World` infra needed). No e2e skipped for being "too large"; only skipped
+      when the feature has no runtime-observable behavior — stated explicitly.
 - [ ] e2e gated `feature = "e2e"` + `#[ignore]`, uses `kopiur_e2e` helpers,
       asserts the user-visible success condition, never a real cluster.
 - [ ] `cargo test --workspace` + `clippy -D warnings` + `fmt --check` green;

@@ -1,6 +1,7 @@
 //! The `BackupConfig` CRD — the *recipe*. Idempotent; runs nothing on its own.
 //! ADR-0001 §3.3, ADR-0003 §4.8.
 
+use crate::backend::NfsVolume;
 use crate::common::{
     DeletionPolicy, Identity, MoverSpec, PodSelector, RepositoryRef, ResolvedIdentity, Retention,
 };
@@ -63,20 +64,26 @@ pub struct BackupConfigSpec {
     pub mover: Option<MoverSpec>,
 }
 
-/// A single backup source. `pvc` and `pvcSelector` are mutually exclusive
-/// (webhook-enforced — NOT an enum, because both forms share the sibling
+/// A single backup source. `pvc`, `pvcSelector`, and `nfs` are mutually exclusive
+/// (webhook-enforced — NOT an enum, because the forms share the sibling
 /// `sourcePath*` keys and YAML lists them as optional siblings). ADR §3.3.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Source {
-    /// Single PVC by name. Mutually exclusive with `pvcSelector`. ADR §3.3.
+    /// Single PVC by name. Mutually exclusive with `pvcSelector`/`nfs`. ADR §3.3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pvc: Option<PvcSource>,
     /// Label/namespace selector matching many PVCs (multi-PVC sources).
-    /// Mutually exclusive with `pvc`. ADR §3.3/§5.4.
+    /// Mutually exclusive with `pvc`/`nfs`. ADR §3.3/§5.4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pvc_selector: Option<PvcSelector>,
-    /// What kopia records as the source path (default `/pvc/<name>`). ADR §3.3/§4.2.
+    /// An inline NFS export to back up directly — no PVC. Mounted read-only at the
+    /// source path (default: the export's `path`). Mutually exclusive with
+    /// `pvc`/`pvcSelector`. ADR §3.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nfs: Option<NfsVolume>,
+    /// What kopia records as the source path (default `/pvc/<name>` for a PVC, or
+    /// the NFS export `path` for an NFS source). ADR §3.3/§4.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path_override: Option<String>,
     /// How a selector-matched PVC's source path is derived (`pvcName` vs

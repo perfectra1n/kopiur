@@ -296,6 +296,66 @@ pub fn webdav_service(ns: &str) -> Service {
     }))
 }
 
+/// The in-cluster NFS server `Deployment` (the canonical Kubernetes `volume-nfs`
+/// image, kernel `nfsd`). Runs **privileged** — it loads `nfsd` and binds the RPC
+/// ports — and exports `/exports` read-write. The export is backed by an
+/// `emptyDir` so each fresh server starts clean (a reused server keeps prior
+/// repo/snapshot state, which the tests tolerate). The mover mounts this export
+/// inline (no PVC) as the filesystem repo volume or as an NFS backup source.
+pub fn nfs_deployment(ns: &str) -> Deployment {
+    from_json(json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": { "name": "nfs", "namespace": ns },
+        "spec": {
+            "replicas": 1,
+            "selector": { "matchLabels": { "app": "nfs" } },
+            "template": {
+                "metadata": { "labels": { "app": "nfs" } },
+                "spec": {
+                    "containers": [{
+                        "name": "nfs",
+                        "image": consts::NFS_IMAGE,
+                        "imagePullPolicy": "IfNotPresent",
+                        // The volume-nfs image needs to load nfsd and bind RPC ports.
+                        "securityContext": { "privileged": true },
+                        "ports": [
+                            { "name": "nfs", "containerPort": 2049 },
+                            { "name": "mountd", "containerPort": 20048 },
+                            { "name": "rpcbind", "containerPort": 111 },
+                        ],
+                        // /exports is the image's exported path; back it with an
+                        // emptyDir so the export directory exists and is writable.
+                        "volumeMounts": [{ "name": "export", "mountPath": "/exports" }],
+                        "readinessProbe": {
+                            "tcpSocket": { "port": 2049 },
+                            "periodSeconds": 3,
+                        },
+                    }],
+                    "volumes": [{ "name": "export", "emptyDir": {} }],
+                },
+            },
+        },
+    }))
+}
+
+/// The `Service` fronting the NFS server (nfsd 2049 + mountd 20048 + rpcbind 111).
+pub fn nfs_service(ns: &str) -> Service {
+    from_json(json!({
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": { "name": "nfs", "namespace": ns },
+        "spec": {
+            "selector": { "app": "nfs" },
+            "ports": [
+                { "name": "nfs", "port": 2049, "targetPort": 2049 },
+                { "name": "mountd", "port": 20048, "targetPort": 20048 },
+                { "name": "rpcbind", "port": 111, "targetPort": 111 },
+            ],
+        },
+    }))
+}
+
 /// A one-shot `Pod` that creates all [`consts::BUCKETS`] via `mc` (idempotent
 /// `mb --ignore-existing`), retrying `mc alias set` until MinIO answers. The
 /// harness runs it to completion, then deletes it.
@@ -476,6 +536,44 @@ mod tests {
             .filter_map(|e| e.get("name").and_then(|n| n.as_str()))
             .collect();
         assert!(names.contains(&"USERNAME") && names.contains(&"PASSWORD"));
+    }
+
+    #[test]
+    fn nfs_deployment_is_privileged_and_exports_with_nfsd_probe() {
+        let d = nfs_deployment(consts::OPERATOR_NS);
+        let v = val(&d);
+        let c = v
+            .pointer("/spec/template/spec/containers/0")
+            .expect("container");
+        assert_eq!(c.pointer("/image").unwrap(), consts::NFS_IMAGE);
+        // Privileged: the volume-nfs image loads nfsd and binds RPC ports.
+        assert_eq!(c.pointer("/securityContext/privileged").unwrap(), true);
+        // Readiness gates on nfsd (2049), so the server is up before a mover mounts.
+        assert_eq!(c.pointer("/readinessProbe/tcpSocket/port").unwrap(), 2049);
+        // The export dir is mounted (backed by an emptyDir on the pod).
+        assert_eq!(
+            c.pointer("/volumeMounts/0/mountPath").unwrap(),
+            consts::NFS_EXPORT_PATH
+        );
+        assert!(
+            v.pointer("/spec/template/spec/volumes/0/emptyDir")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn nfs_service_exposes_nfsd_mountd_and_rpcbind() {
+        let s = nfs_service(consts::OPERATOR_NS);
+        let v = val(&s);
+        let ports: Vec<i64> = v
+            .pointer("/spec/ports")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.get("port").and_then(|n| n.as_i64()))
+            .collect();
+        assert!(ports.contains(&2049) && ports.contains(&20048) && ports.contains(&111));
     }
 
     #[test]

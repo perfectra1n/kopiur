@@ -37,7 +37,7 @@ spec:
 
 ### Sources — what to back up
 
-`sources` is a list. Each entry is **either** a single PVC **or** a label selector (mutually exclusive — the webhook rejects setting both on one source).
+`sources` is a list. Each entry is **exactly one of** a single PVC, a label selector, or an inline NFS export (mutually exclusive — the webhook rejects setting more than one on a source).
 
 ```yaml
 sources:
@@ -54,6 +54,17 @@ sources:
               matchLabels: { backup: include }
       sourcePathStrategy: PvcName # or PvcNamespacedName to disambiguate same-named PVCs
 ```
+
+Or back up an **NFS export directly** — no PVC (see [example 10](examples.md#example-10--nfs-source-no-pvc)):
+
+```yaml
+sources:
+    - nfs:
+          server: expanse.internal # NFS server hostname or IP
+          path: /mnt/eros/Media # the export (an absolute path)
+```
+
+The operator mounts the export read-only into the backup mover and kopia snapshots it. By default kopia records the export `path` as the snapshot `sourcePath`; override it with `sourcePathOverride`. An NFS source works with **any** repository backend.
 
 /// warning | Multi-PVC defaults to a consistent group
 
@@ -93,7 +104,7 @@ kopia stores every snapshot under an identity. Kopiur resolves it **once at admi
 
 - `username` ← the `BackupConfig` name
 - `hostname` ← the namespace
-- `sourcePath` ← `/pvc/<pvcName>`
+- `sourcePath` ← `/pvc/<pvcName>` for a PVC source, or the export `path` for an `nfs` source
 
 Override either part when you need stable identities across renames or clusters:
 

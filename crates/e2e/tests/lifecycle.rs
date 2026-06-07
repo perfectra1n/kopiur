@@ -49,7 +49,7 @@ fn repository_json(name: &str) -> serde_json::Value {
         "kind": "Repository",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
-            "backend": { "filesystem": { "path": "/repo", "pvcName": "kopiur-e2e-repo" } },
+            "backend": { "filesystem": { "path": "/repo", "volume": { "pvc": { "name": "kopiur-e2e-repo" } } } },
             "encryption": {
                 "passwordSecretRef": { "name": CREDS_SECRET, "key": "KOPIA_PASSWORD" }
             },
@@ -81,7 +81,7 @@ fn cluster_repository_json(name: &str) -> serde_json::Value {
         "kind": "ClusterRepository",
         "metadata": { "name": name },
         "spec": {
-            "backend": { "filesystem": { "path": "/repo", "pvcName": "kopiur-e2e-repo" } },
+            "backend": { "filesystem": { "path": "/repo", "volume": { "pvc": { "name": "kopiur-e2e-repo" } } } },
             "encryption": {
                 "passwordSecretRef": {
                     "name": CREDS_SECRET, "namespace": E2E_NAMESPACE, "key": "KOPIA_PASSWORD"

@@ -25,6 +25,7 @@ Kopiur separates the backup **recipe** (`BackupConfig`) from its **invocation** 
 | 07  | [Restore a discovered backup](#example-07--restore-a-discovered-backup) | Restore foreign / pre-install snapshots.                                |
 | 08  | [Maintenance](#example-08--maintenance)                                 | A standalone `Maintenance` for fine-grained control.                    |
 | 09  | [Mover UID/GID & permissions](#example-09--mover-uidgid--permissions)   | Match the mover's UID/GID to the data owner so it can read it.          |
+| 10  | [NFS source (no PVC)](#example-10--nfs-source-no-pvc)                   | Back up a NAS export directly — no PersistentVolumeClaim.               |
 
 /// tip | Looking for a specific storage backend?
 
@@ -150,4 +151,14 @@ The mover Job is a separate pod that mounts and reads your PVC, so it must run a
 
 ```yaml
 --8<-- "deploy/examples/09-mover-permissions.yaml"
+```
+
+---
+
+## Example 10 — NFS source (no PVC)
+
+Back up a NAS export directly: `source.nfs` names an NFS `server` + `path` instead of a `pvc`, and the operator mounts the export read-only into the backup mover for kopia to snapshot — no `PersistentVolumeClaim`, no StorageClass. kopia records the export `path` as the snapshot source path by default (override with `sourcePathOverride`). An NFS source is mutually exclusive with `pvc`/`pvcSelector` (webhook-enforced) and works with **any** repository backend. The repository here is itself an [inline-NFS filesystem repo](backends/filesystem.md#inline-nfs-no-pvc), but that's independent of the source.
+
+```yaml
+--8<-- "deploy/examples/10-nfs-source.yaml"
 ```

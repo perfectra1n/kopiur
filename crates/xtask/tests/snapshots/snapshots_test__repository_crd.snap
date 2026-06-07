@@ -169,14 +169,43 @@ spec:
                     description: A local filesystem path, backed by a PVC the operator mounts into the mover.
                     properties:
                       path:
-                        description: Mount path inside the mover pod. Backed by a PVC the operator mounts.
+                        description: Mount path inside the mover pod where kopia writes the repository (e.g. `/repo`).
                         type: string
-                      pvcName:
+                      volume:
                         description: |-
-                          Name of the `PersistentVolumeClaim` to mount at `path`. Absent for a path
-                          already present on the node/image.
+                          What backs `path`. A PVC (`{ pvc: { name } }`) or an inline NFS export
+                          (`{ nfs: { server, path } }`). Absent for a path already present on the
+                          node/image (a `hostPath`/baked-in mount; mainly the e2e harness).
                         nullable: true
-                        type: string
+                        oneOf:
+                        - required:
+                          - pvc
+                        - required:
+                          - nfs
+                        properties:
+                          nfs:
+                            description: An inline NFS export mounted directly (no PVC).
+                            properties:
+                              path:
+                                description: Exported path on the NFS server (e.g. `/export/kopia` or `/mnt/eros/Media`).
+                                type: string
+                              server:
+                                description: NFS server hostname or IP (e.g. `nas.lan` or `expanse.internal`).
+                                type: string
+                            required:
+                            - path
+                            - server
+                            type: object
+                          pvc:
+                            description: A `PersistentVolumeClaim` mounted read-write at the repo path.
+                            properties:
+                              name:
+                                description: Name of the `PersistentVolumeClaim` to mount (in the mover's namespace).
+                                type: string
+                            required:
+                            - name
+                            type: object
+                        type: object
                     required:
                     - path
                     type: object

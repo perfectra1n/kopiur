@@ -41,7 +41,7 @@ use crate::consts::{
 use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
 use crate::io::{self, ResolvedRepository};
-use crate::jobs::{self, JobLimits, MoverJobInputs, PvcMount};
+use crate::jobs::{self, JobLimits, MoverJobInputs, VolumeMountSpec};
 
 /// The decision the deletion handler must execute. Derived purely from the
 /// effective `DeletionPolicy` and the object's annotations — no IO.
@@ -241,7 +241,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
 
     // No Job yet: resolve the recipe and create the mover Job + ConfigMap.
     let (config, repo) = resolve_recipe(ctx, backup, &namespace).await?;
-    let (work_spec, source_pvc, repo_pvc, creds_secrets) =
+    let (work_spec, source_volume, repo_volume, creds_secrets) =
         build_backup_run(backup, &config, &repo, &namespace, &name)?;
 
     // The mover Job runs in THIS (workload) namespace, where the operator SA does
@@ -394,8 +394,8 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
             .as_ref()
             .and_then(|m| m.security_context.clone()),
         labels,
-        source_pvc,
-        repo_pvc,
+        source_volume,
+        repo_volume,
         creds_secrets,
         result_configmap: None,
         service_account: ctx.mover_service_account.as_deref(),
@@ -541,11 +541,12 @@ async fn delete_snapshot_via_job(
         "kopiur.home-operations.com/op".to_string(),
         "snapshot-delete".to_string(),
     );
-    let repo_pvc = io::filesystem_repo_pvc(&repo.backend).map(|claim_name| PvcMount {
-        claim_name,
-        mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
-        read_only: false,
-    });
+    let repo_volume =
+        io::filesystem_repo_mount_source(&repo.backend).map(|source| VolumeMountSpec {
+            source,
+            mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
+            read_only: false,
+        });
     let inputs = MoverJobInputs {
         name: &job_name,
         namespace,
@@ -557,8 +558,8 @@ async fn delete_snapshot_via_job(
         resources: None,
         security_context: None,
         labels,
-        source_pvc: None,
-        repo_pvc,
+        source_volume: None,
+        repo_volume,
         creds_secrets,
         result_configmap: None,
         service_account: ctx.mover_service_account.as_deref(),
@@ -699,12 +700,13 @@ async fn resolve_recipe(
     Ok((config, repo))
 }
 
-/// Build everything a backup run needs: the work spec, the source PVC mount, the
-/// repo PVC mount (filesystem only), and the credentials Secret name.
+/// Build everything a backup run needs: the work spec, the source volume mount
+/// (PVC or inline NFS), the repo volume mount (filesystem only), and the
+/// credentials Secret name.
 type BackupRun<'a> = (
     MoverWorkSpec,
-    Option<PvcMount>,
-    Option<PvcMount>,
+    Option<VolumeMountSpec>,
+    Option<VolumeMountSpec>,
     Vec<String>,
 );
 fn build_backup_run(
@@ -716,19 +718,46 @@ fn build_backup_run(
 ) -> Result<BackupRun<'static>> {
     let identity = resolve_identity_for(config, namespace)?;
 
-    // First source's PVC + path drive the mount and the snapshot source path.
+    // First source's volume + path drive the mount and the snapshot source path.
     let source = config
         .spec
         .sources
         .first()
         .ok_or_else(|| Error::Invariant("BackupConfig has no sources".into()))?;
-    let pvc_name = source.pvc.as_ref().map(|p| p.name.clone()).ok_or_else(|| {
-        Error::Invariant("e2e backup path requires an explicit source.pvc".into())
-    })?;
-    let source_path = source
-        .source_path_override
-        .clone()
-        .unwrap_or_else(|| format!("/pvc/{pvc_name}"));
+
+    // The mover snapshots whatever is mounted at `source_path`, so the mount path
+    // and the kopia source path are the same. PVC: `/pvc/<name>` by default; NFS:
+    // the export path by default; either overridable by `sourcePathOverride`.
+    let (source_path, source_volume) = match (&source.pvc, &source.nfs) {
+        (Some(pvc), None) => {
+            let path = source
+                .source_path_override
+                .clone()
+                .unwrap_or_else(|| format!("/pvc/{}", pvc.name));
+            (
+                path.clone(),
+                VolumeMountSpec::pvc(pvc.name.clone(), path, true),
+            )
+        }
+        (None, Some(nfs)) => {
+            let path = source
+                .source_path_override
+                .clone()
+                .unwrap_or_else(|| nfs.path.clone());
+            (
+                path.clone(),
+                VolumeMountSpec::nfs(nfs.server.clone(), nfs.path.clone(), path, true),
+            )
+        }
+        // `pvcSelector` (multi-PVC) and the mutually-exclusive cases are rejected
+        // at admission by `validate_source`; the single-source mover path requires
+        // an explicit `pvc` or `nfs`.
+        _ => {
+            return Err(Error::Invariant(
+                "backup mover path requires exactly one of source.pvc or source.nfs".into(),
+            ));
+        }
+    };
 
     let creds_secrets = io::mover_creds_secrets(&repo.backend, &repo.encryption);
 
@@ -750,39 +779,32 @@ fn build_backup_run(
         options: MoverOptions::default(),
     };
 
-    let source_pvc = Some(PvcMount {
-        claim_name: pvc_name,
-        mount_path: source_path,
-        read_only: true,
-    });
-    let repo_pvc = io::filesystem_repo_pvc(&repo.backend).map(|claim_name| PvcMount {
-        claim_name,
-        mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
-        read_only: false,
-    });
+    let source_volume = Some(source_volume);
+    let repo_volume =
+        io::filesystem_repo_mount_source(&repo.backend).map(|source| VolumeMountSpec {
+            source,
+            mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
+            read_only: false,
+        });
 
-    Ok((work_spec, source_pvc, repo_pvc, creds_secrets))
+    Ok((work_spec, source_volume, repo_volume, creds_secrets))
 }
 
 /// Resolve identity from a `BackupConfig` (overrides + defaults) into the mover
 /// wire identity. Reuses `api::identity::resolve_identity` (the tested kernel).
 fn resolve_identity_for(config: &BackupConfig, namespace: &str) -> Result<MoverIdentity> {
-    let pvc_name = config
-        .spec
-        .sources
-        .first()
-        .and_then(|s| s.pvc.as_ref().map(|p| p.name.clone()));
-    let source_path_override = config
-        .spec
-        .sources
-        .first()
-        .and_then(|s| s.source_path_override.clone());
+    let first = config.spec.sources.first();
+    let pvc_name = first.and_then(|s| s.pvc.as_ref().map(|p| p.name.clone()));
+    // A non-PVC NFS source supplies the sourcePath default (the export path).
+    let nfs_source_path = first.and_then(|s| s.nfs.as_ref().map(|n| n.path.clone()));
+    let source_path_override = first.and_then(|s| s.source_path_override.clone());
     let inputs = kopiur_api::IdentityInputs {
         object_name: &config.name_any(),
         namespace,
         overrides: config.spec.identity.as_ref(),
         template: None,
         pvc_name: pvc_name.as_deref(),
+        default_source_path: nfs_source_path.as_deref(),
         source_path_override: source_path_override.as_deref(),
     };
     let resolved: ApiResolvedIdentity =
@@ -957,7 +979,7 @@ mod tests {
         let cases = vec![
             Backend::Filesystem(FilesystemBackend {
                 path: "/repo".into(),
-                pvc_name: None,
+                volume: None,
             }),
             Backend::S3(S3Backend {
                 bucket: "b".into(),
@@ -1010,6 +1032,189 @@ mod tests {
             };
             assert_eq!(spec.kind_str(), want, "backend {}", backend.kind_str());
         }
+    }
+
+    // --- build_backup_run: the source volume (PVC vs inline NFS) glue ----------
+
+    fn resolved_s3_repo() -> io::ResolvedRepository {
+        use kopiur_api::backend::S3Backend;
+        use kopiur_api::common::{Encryption, SecretKeyRef};
+        io::ResolvedRepository {
+            // An object-store repo so there is no repo volume to mount — isolates
+            // the SOURCE-volume assertion.
+            backend: Backend::S3(S3Backend {
+                bucket: "b".into(),
+                prefix: None,
+                endpoint: None,
+                region: None,
+                auth: None,
+                tls: None,
+            }),
+            encryption: Encryption {
+                password_secret_ref: SecretKeyRef {
+                    name: "creds".into(),
+                    namespace: None,
+                    key: Some("KOPIA_PASSWORD".into()),
+                },
+            },
+        }
+    }
+
+    fn config_with_source(name: &str, source: kopiur_api::backup_config::Source) -> BackupConfig {
+        use kopiur_api::backup_config::BackupConfigSpec;
+        use kopiur_api::common::{RepositoryKind, RepositoryRef};
+        BackupConfig::new(
+            name,
+            BackupConfigSpec {
+                repository: RepositoryRef {
+                    kind: RepositoryKind::Repository,
+                    name: "repo".into(),
+                    namespace: None,
+                },
+                identity: None,
+                sources: vec![source],
+                copy_method: None,
+                volume_snapshot_class_name: None,
+                group_by: None,
+                retention: None,
+                default_deletion_policy: None,
+                policy: None,
+                hooks: None,
+                mover: None,
+            },
+        )
+    }
+
+    fn dummy_backup() -> Backup {
+        Backup::new(
+            "b1",
+            kopiur_api::backup::BackupSpec {
+                config_ref: None,
+                tags: None,
+                failure_policy: None,
+                deletion_policy: None,
+            },
+        )
+    }
+
+    #[test]
+    fn build_backup_run_maps_nfs_source_to_inline_nfs_mount() {
+        use crate::jobs::MountSource;
+        use kopiur_api::backend::NfsVolume;
+        use kopiur_api::backup_config::Source;
+        let cfg = config_with_source(
+            "media",
+            Source {
+                pvc: None,
+                pvc_selector: None,
+                nfs: Some(NfsVolume {
+                    server: "expanse.internal".into(),
+                    path: "/mnt/eros/Media".into(),
+                }),
+                source_path_override: None,
+                source_path_strategy: None,
+            },
+        );
+        let repo = resolved_s3_repo();
+        let (ws, source_volume, repo_volume, _creds) =
+            build_backup_run(&dummy_backup(), &cfg, &repo, "media-ns", "media").unwrap();
+
+        // The NFS export becomes an inline-NFS source mount (read-only), mounted at
+        // and snapshotted under the export path (no override → defaults to it).
+        let src = source_volume.expect("an NFS source mount");
+        assert_eq!(
+            src.source,
+            MountSource::Nfs {
+                server: "expanse.internal".into(),
+                path: "/mnt/eros/Media".into(),
+            }
+        );
+        assert_eq!(src.mount_path, "/mnt/eros/Media");
+        assert!(src.read_only, "a backup source is mounted read-only");
+        // kopia records the export path as the snapshot source path.
+        match ws.operation {
+            Operation::Backup(op) => assert_eq!(op.source_path, "/mnt/eros/Media"),
+            other => panic!("expected a Backup operation, got {other:?}"),
+        }
+        // Object-store repo → no repo volume to mount.
+        assert!(repo_volume.is_none());
+    }
+
+    #[test]
+    fn build_backup_run_honors_source_path_override_for_nfs() {
+        use kopiur_api::backend::NfsVolume;
+        use kopiur_api::backup_config::Source;
+        let cfg = config_with_source(
+            "media",
+            Source {
+                pvc: None,
+                pvc_selector: None,
+                nfs: Some(NfsVolume {
+                    server: "nas.lan".into(),
+                    path: "/export/media".into(),
+                }),
+                source_path_override: Some("/data".into()),
+                source_path_strategy: None,
+            },
+        );
+        let repo = resolved_s3_repo();
+        let (ws, source_volume, _repo, _creds) =
+            build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "media").unwrap();
+        // The override drives both the mount path and the recorded source path.
+        assert_eq!(source_volume.unwrap().mount_path, "/data");
+        match ws.operation {
+            Operation::Backup(op) => assert_eq!(op.source_path, "/data"),
+            other => panic!("expected a Backup operation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_backup_run_maps_pvc_source_to_pvc_mount() {
+        use crate::jobs::MountSource;
+        use kopiur_api::backup_config::{PvcSource, Source};
+        let cfg = config_with_source(
+            "pg",
+            Source {
+                pvc: Some(PvcSource {
+                    name: "pg-data".into(),
+                }),
+                pvc_selector: None,
+                nfs: None,
+                source_path_override: None,
+                source_path_strategy: None,
+            },
+        );
+        let repo = resolved_s3_repo();
+        let (_ws, source_volume, _repo, _creds) =
+            build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "pg").unwrap();
+        let src = source_volume.expect("a PVC source mount");
+        assert_eq!(
+            src.source,
+            MountSource::Pvc {
+                claim_name: "pg-data".into()
+            }
+        );
+        assert_eq!(src.mount_path, "/pvc/pg-data");
+    }
+
+    #[test]
+    fn build_backup_run_rejects_a_source_with_neither_pvc_nor_nfs() {
+        use kopiur_api::backup_config::Source;
+        // pvcSelector-only / empty single source: the single-source mover path
+        // needs an explicit pvc or nfs (the webhook rejects this earlier; the
+        // controller defends against it rather than building a bogus Job).
+        let cfg = config_with_source(
+            "x",
+            Source {
+                pvc: None,
+                pvc_selector: None,
+                nfs: None,
+                source_path_override: None,
+                source_path_strategy: None,
+            },
+        );
+        let repo = resolved_s3_repo();
+        assert!(build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "x").is_err());
     }
 
     // --- plan_deletion: exhaustive over every DeletionPolicy ----------------

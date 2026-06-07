@@ -41,7 +41,7 @@ use crate::consts::{
 use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
 use crate::io;
-use crate::jobs::{self, JobLimits, MoverJobInputs, PvcMount};
+use crate::jobs::{self, JobLimits, MoverJobInputs, VolumeMountSpec};
 
 /// How long a finished maintenance Job lingers before the TTL controller reaps
 /// it (G2). Long enough that the controller reliably observes the terminal state
@@ -229,13 +229,14 @@ async fn spawn_maintenance_job(
     let mut annotations = BTreeMap::new();
     annotations.insert(MAINTENANCE_SLOT_ANNOTATION.to_string(), slot.to_rfc3339());
 
-    // Filesystem repos need the repo PVC mounted read-write; object stores reach
-    // the backend over the network (creds via env), so no PVC.
-    let repo_pvc = io::filesystem_repo_pvc(&repo.backend).map(|claim_name| PvcMount {
-        claim_name,
-        mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
-        read_only: false,
-    });
+    // Filesystem repos need the repo volume (PVC or inline NFS) mounted read-write;
+    // object stores reach the backend over the network (creds via env), so none.
+    let repo_volume =
+        io::filesystem_repo_mount_source(&repo.backend).map(|source| VolumeMountSpec {
+            source,
+            mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
+            read_only: false,
+        });
     let creds_secrets = io::mover_creds_secrets(&repo.backend, &repo.encryption);
 
     let inputs = MoverJobInputs {
@@ -253,8 +254,8 @@ async fn spawn_maintenance_job(
             .as_ref()
             .and_then(|m| m.security_context.clone()),
         labels,
-        source_pvc: None,
-        repo_pvc,
+        source_volume: None,
+        repo_volume,
         creds_secrets,
         result_configmap: None,
         service_account: ctx.mover_service_account.as_deref(),

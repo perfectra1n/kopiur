@@ -1,0 +1,79 @@
+# Example 10 — Back up an NFS export directly (ADR-0003 §3.3)
+#
+# A BackupConfig whose source is an inline NFS export — no PersistentVolumeClaim.
+# The operator mounts the export read-only into the backup mover and kopia
+# snapshots it. Reach for this to back up a NAS share (a media library, a docs
+# tree) that lives outside Kubernetes and you don't want to wrap in a PVC.
+#
+# The repository here is itself an inline-NFS filesystem repo (see
+# backends/nfs.yaml), but the source and the repository are independent: an NFS
+# source works with ANY backend (S3, B2, …).
+#
+# sourcePath: kopia records the export's `path` as the snapshot source path by
+# default (here `/mnt/eros/Media`); override it with `sourcePathOverride`. The
+# export is mounted read-only at that same path inside the mover.
+#
+# Field shapes verified against crates/api: `source.nfs` is mutually exclusive
+# with `source.pvc`/`source.pvcSelector` (webhook-enforced).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: media-repo-creds
+  namespace: media
+type: Opaque
+stringData:
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: media-repo
+  namespace: media
+spec:
+  backend:
+    filesystem:
+      path: /repo
+      volume:
+        nfs:
+          server: nas.lan
+          path: /export/kopia
+  encryption:
+    passwordSecretRef:
+      name: media-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: BackupConfig
+metadata:
+  name: media-library
+  namespace: media
+spec:
+  repository:
+    name: media-repo
+  sources:
+    # An inline NFS export as the backup SOURCE — no PVC. Mounted read-only.
+    - nfs:
+        server: expanse.internal
+        path: /mnt/eros/Media
+      # Optional: what kopia records as the source path. Defaults to the export
+      # `path` above. Uncomment to record a different identity path.
+      # sourcePathOverride: /media
+  retention:
+    keepDaily: 7
+    keepWeekly: 4
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: BackupSchedule
+metadata:
+  name: media-library-nightly
+  namespace: media
+spec:
+  configRef:
+    name: media-library
+  schedule:
+    cron: "H 4 * * *"
+    jitter: 30m
+    runOnCreate: false

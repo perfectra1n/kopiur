@@ -1,19 +1,22 @@
-# Filesystem (PVC-backed)
+# Filesystem (PVC or inline NFS)
 
-The filesystem backend stores the kopia repository on a **local path** that
-Kopiur mounts into the mover from a `PersistentVolumeClaim` — typically a NAS/NFS
-share. There are **no object-store credentials**: the only secret is
-`KOPIA_PASSWORD`. The thing that bites people here is **ownership**, not auth.
+The filesystem backend stores the kopia repository on a **local path** Kopiur
+mounts into the mover. That path is backed by either a `PersistentVolumeClaim` or
+an **inline NFS export** (`volume.nfs` — no PVC; see [below](#inline-nfs-no-pvc)),
+typically a NAS/NFS share. There are **no object-store credentials**: the only
+secret is `KOPIA_PASSWORD`. The thing that bites people here is **ownership**, not
+auth.
 
 Reach for this when your "off-site" is an on-prem NAS or any `ReadWriteMany`
 volume. For a remote server reached over SSH, see [SFTP](sftp.md).
 
 ## Provider prerequisites
 
-- A **`PersistentVolumeClaim`** the mover can mount **read-write**. Use
-  `ReadWriteMany` (NFS/NAS) so that backup, restore, _and_ maintenance movers —
-  which may run as different Jobs at the same time — can all mount it. The example
-  bundles a PVC.
+- Storage the mover can mount **read-write**: either a **`PersistentVolumeClaim`**
+  or an **NFS export**. For a PVC, use `ReadWriteMany` (NFS/NAS) so that backup,
+  restore, _and_ maintenance movers — which may run as different Jobs at the same
+  time — can all mount it. The example bundles a PVC; the
+  [inline-NFS variant](#inline-nfs-no-pvc) needs no PVC at all.
 - The repository path must be **writable by the UID the mover runs as** (default
   `65532`). See Troubleshooting.
 
@@ -46,25 +49,67 @@ outside the cluster and back up the Secret. See [Encryption](../repositories.md#
 
 ## Fields reference (`backend.filesystem`)
 
-| Field     | Required | Default | What it controls                                                                                     |
-| --------- | -------- | ------- | ---------------------------------------------------------------------------------------------------- |
-| `path`    | yes      | —       | **Mount path inside the mover pod** where kopia writes the repository (e.g. `/repo`).                |
-| `pvcName` | no       | —       | The `PersistentVolumeClaim` mounted at `path`. Omit only if `path` already exists on the node/image. |
+| Field               | Required | Default | What it controls                                                                                                                |
+| ------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `path`              | yes      | —       | **Mount path inside the mover pod** where kopia writes the repository (e.g. `/repo`).                                           |
+| `volume`            | no       | —       | What backs `path`: **exactly one of** `pvc` or `nfs`. Omit entirely only if `path` already exists on the node/image (hostPath). |
+| `volume.pvc.name`   | —        | —       | The `PersistentVolumeClaim` mounted read-write at `path`.                                                                       |
+| `volume.nfs.server` | —        | —       | NFS server hostname or IP — for an inline NFS export with no PVC (see below).                                                   |
+| `volume.nfs.path`   | —        | —       | The absolute export path on the NFS server.                                                                                     |
+
+/// note | `volume` is an "exactly one of" choice
+
+`volume: { pvc: … }` and `volume: { nfs: … }` are externally-tagged variants — set
+one, never both. An empty/absent `volume` means "the path is already present in
+the mover" (a `hostPath`/baked-in mount; mainly the e2e harness).
+
+///
 
 ## Customization — the values you actually change
 
-- **`pvcName`** — the PVC to mount (its size/StorageClass live on the PVC, not here).
+- **`volume.pvc.name`** — the PVC to mount (its size/StorageClass live on the PVC, not here).
+- **`volume.nfs`** — point straight at an NFS export instead of a PVC ([below](#inline-nfs-no-pvc)).
 - **`path`** — the in-pod mount point; `/repo` is a fine default.
 - **mover `securityContext`** — set `runAsUser`/`fsGroup` on the consuming
   `BackupConfig` to match the share's ownership; see [Permissions](../permissions.md).
 - **`create.enabled`** — initialize the repository if missing.
 
+## Inline NFS (no PVC) { #inline-nfs-no-pvc }
+
+kopia has **no native NFS backend** — NFS is reached _through_ the filesystem
+backend by mounting the export at `path`. Instead of pre-creating a
+`ReadWriteMany` PVC, name an NFS export directly under `volume.nfs` and the
+operator synthesizes a Kubernetes inline `nfs` volume on every mover Job
+(bootstrap, backup, restore, maintenance):
+
+```yaml
+--8<-- "deploy/examples/backends/nfs.yaml"
+```
+
+This is the lowest-friction path to an on-prem NAS repository: no PVC, no
+StorageClass, no provisioner — just a `server` and an absolute `path`. The same
+`volume.nfs` shape works on a `ClusterRepository`. To back up an NFS export
+_as a source_ (rather than as the repository), see
+[Example 10](../examples.md#example-10--nfs-source-no-pvc).
+
+/// note | A volume-backed repo bootstraps in a mover Job
+
+A bare-path filesystem repo is reachable from the controller and is
+connected/created in-process. A PVC- or NFS-backed repo is **not** reachable from
+the controller, so the operator runs the connect/create in a short mover Job that
+mounts the volume — the same path object stores use. The Repository moves
+`Initializing` → `Ready` as that Job completes.
+
+///
+
 ## As a `ClusterRepository`
 
-A `ClusterRepository` may also use a filesystem backend, but note the PVC and its
-`ReadWriteMany` reach must be available in whatever namespace the movers run in —
-see [Movers](../movers.md). A cloud/object backend is usually a better fit for a
-shared platform repository.
+A `ClusterRepository` may also use a filesystem backend. For a PVC, the claim and
+its `ReadWriteMany` reach must be available in whatever namespace the movers run
+in — see [Movers](../movers.md). An [inline NFS export](#inline-nfs-no-pvc) sees
+the same reach from any mover namespace (it's named, not claimed), which can make
+it simpler than a cross-namespace PVC — though a cloud/object backend is usually
+the better fit for a shared platform repository.
 
 ## Back up and restore against this repository
 
@@ -74,11 +119,12 @@ The lifecycle is backend-independent. Once `Ready`, add a `BackupConfig` +
 picking a `Backup` ([Restores](../restores.md),
 [Example 03](../examples.md#example-03--restore-by-picking-a-backup)).
 
-/// note | ReadWriteMany matters
+/// note | ReadWriteMany matters (for PVCs)
 
 Backup, restore, and maintenance run as separate mover Jobs and may overlap. A
 `ReadWriteOnce` volume can only attach to one node at a time and will block the
-others; use `ReadWriteMany`.
+others; use `ReadWriteMany`. An [inline NFS export](#inline-nfs-no-pvc) sidesteps
+this — NFS is inherently multi-mount, so concurrent movers all reach it.
 
 ///
 
@@ -96,8 +142,9 @@ the mover `securityContext`. Full story: [Permissions, UID & GID](../permissions
 
 - **`permission denied`** on create/connect — `chown -R 65532 <path>` (or set the
   mover UID to the owner). See above.
-- **Mover Job pending** — the PVC isn't bound or isn't `ReadWriteMany`; check the
-  PVC and StorageClass.
+- **Mover Job pending** — for a PVC, it isn't bound or isn't `ReadWriteMany`; check
+  the PVC and StorageClass. For NFS, the pod can't mount the export — confirm the
+  `server`/`path` are reachable from the cluster nodes and the export permits them.
 
 ## See also
 

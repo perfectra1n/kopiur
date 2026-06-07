@@ -27,7 +27,7 @@ use crate::consts::{API_VERSION, CREDENTIALS_AVAILABLE_CONDITION, MISSING_CREDEN
 use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
 use crate::io::{self, ResolvedRepository};
-use crate::jobs::{self, JobLimits, MoverJobInputs, PvcMount};
+use crate::jobs::{self, JobLimits, MoverJobInputs, VolumeMountSpec};
 
 /// Which source mode a restore uses, as a stable string (mirrors
 /// `RestoreSource::kind_str`, re-derived through an exhaustive match so a new
@@ -406,11 +406,12 @@ async fn drive_direct_restore(
         options: MoverOptions::default(),
     };
     let owner = io::owner_ref_for(restore, "Restore")?;
-    let repo_pvc = io::filesystem_repo_pvc(&repo.backend).map(|claim_name| PvcMount {
-        claim_name,
-        mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
-        read_only: true,
-    });
+    let repo_volume =
+        io::filesystem_repo_mount_source(&repo.backend).map(|source| VolumeMountSpec {
+            source,
+            mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
+            read_only: true,
+        });
     let inputs = MoverJobInputs {
         name,
         namespace,
@@ -423,12 +424,8 @@ async fn drive_direct_restore(
         security_context: None,
         labels: io::child_labels(&[("kopiur.home-operations.com/op", "restore")]),
         // Restore writes INTO the target PVC, mounted read-write at /restore.
-        source_pvc: Some(PvcMount {
-            claim_name: target_pvc,
-            mount_path: target_path,
-            read_only: false,
-        }),
-        repo_pvc,
+        source_volume: Some(VolumeMountSpec::pvc(target_pvc, target_path, false)),
+        repo_volume,
         creds_secrets,
         result_configmap: None,
         service_account: ctx.mover_service_account.as_deref(),

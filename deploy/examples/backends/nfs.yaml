@@ -1,0 +1,50 @@
+# Backend: Filesystem over inline NFS (ADR-0003 §3.1)
+#
+# kopia has NO native NFS backend — NFS is reached through the *filesystem*
+# backend by mounting the export at `path`. This example points the repository at
+# an inline NFS export directly: no PersistentVolumeClaim, no StorageClass. The
+# operator synthesizes a Kubernetes inline `nfs` volume on every mover Job
+# (bootstrap, backup, restore, maintenance) and mounts it read-write at `path`.
+#
+# Reach for this when your off-site is an on-prem NAS you'd rather name directly
+# than wrap in a PVC. For a PVC-backed filesystem repo, see filesystem.yaml; for a
+# remote server over SSH, see sftp.yaml.
+#
+# PERMISSIONS: the export must be WRITABLE by the UID the mover runs as (default
+# 65532). If create/connect fails with "permission denied", the operator's Warning
+# Event names the exact UID and the `chown -R <uid> <path>` to run on the NAS. See
+# the Permissions guide.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.filesystem`) with an externally-tagged `volume` (`volume.nfs`).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nfs-repo-creds
+  namespace: backups
+type: Opaque
+stringData:
+  # Filesystem/NFS backends need ONLY the repository encryption password — the
+  # data sits on your NAS but kopia still encrypts it. No object-store keys.
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: nas-primary
+  namespace: backups
+spec:
+  backend:
+    filesystem:
+      path: /repo # mount path INSIDE the mover pod where kopia writes the repo
+      volume:
+        nfs:
+          server: nas.lan # NFS server hostname or IP
+          path: /export/kopia # the export on the server (must be an absolute path)
+  encryption:
+    passwordSecretRef:
+      name: nfs-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true

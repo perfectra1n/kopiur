@@ -42,7 +42,12 @@ spec:
   backend:
     filesystem:
       path: /repo # mount path INSIDE the mover pod
-      pvcName: nas-repo # the PVC mounted at `path` (omit if path is on the node/image)
+      # `volume` is what backs `path`: a PVC (here) or an inline NFS export
+      # (see nfs.yaml). Omit `volume` entirely if `path` already exists on the
+      # node/image (a hostPath/baked-in mount).
+      volume:
+        pvc:
+          name: nas-repo # the PVC mounted read-write at `path`
   encryption:
     passwordSecretRef:
       name: fs-repo-creds

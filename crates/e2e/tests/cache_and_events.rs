@@ -57,7 +57,7 @@ fn fs_repository_json(name: &str) -> serde_json::Value {
         "kind": "Repository",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
-            "backend": { "filesystem": { "path": "/repo", "pvcName": "kopiur-e2e-repo" } },
+            "backend": { "filesystem": { "path": "/repo", "volume": { "pvc": { "name": "kopiur-e2e-repo" } } } },
             "encryption": {
                 "passwordSecretRef": { "name": "kopia-creds", "key": "KOPIA_PASSWORD" }
             },

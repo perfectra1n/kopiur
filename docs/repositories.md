@@ -76,16 +76,16 @@ Because a `ClusterRepository` is cluster-scoped it has no namespace of its own, 
 
 Kopiur supports eight backends; each is selected by the `spec.backend.<key>` you set.
 
-| Backend                                                               | `spec.backend` key | Where it goes           |
-| --------------------------------------------------------------------- | ------------------ | ----------------------- |
-| Amazon S3 + any S3-compatible store (MinIO, RustFS, Ceph RGW, Wasabi) | `s3`               | a bucket                |
-| Azure Blob Storage                                                    | `azure`            | a container             |
-| Google Cloud Storage                                                  | `gcs`              | a bucket                |
-| Backblaze B2                                                          | `b2`               | a bucket                |
-| Filesystem (NAS/PVC)                                                  | `filesystem`       | a mounted PVC path      |
-| SFTP                                                                  | `sftp`             | a path on an SSH server |
-| WebDAV                                                                | `webDav`           | a collection URL        |
-| rclone (everything else)                                              | `rclone`           | any rclone remote       |
+| Backend                                                               | `spec.backend` key | Where it goes             |
+| --------------------------------------------------------------------- | ------------------ | ------------------------- |
+| Amazon S3 + any S3-compatible store (MinIO, RustFS, Ceph RGW, Wasabi) | `s3`               | a bucket                  |
+| Azure Blob Storage                                                    | `azure`            | a container               |
+| Google Cloud Storage                                                  | `gcs`              | a bucket                  |
+| Backblaze B2                                                          | `b2`               | a bucket                  |
+| Filesystem (NAS/PVC or inline NFS)                                    | `filesystem`       | a mounted PVC or NFS path |
+| SFTP                                                                  | `sftp`             | a path on an SSH server   |
+| WebDAV                                                                | `webDav`           | a collection URL          |
+| rclone (everything else)                                              | `rclone`           | any rclone remote         |
 
 /// tip | Per-backend setup lives on its own page
 

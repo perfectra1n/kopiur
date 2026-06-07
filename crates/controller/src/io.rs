@@ -22,7 +22,7 @@ use kube::{Api, Resource, ResourceExt};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use kopiur_api::backend::Backend;
+use kopiur_api::backend::{Backend, RepoVolume};
 use kopiur_api::common::{Encryption, RepositoryKind, RepositoryRef};
 use kopiur_api::maintenance::{
     MaintenanceSpec, Ownership, RepositoryMaintenanceSpec, default_maintenance_schedule,
@@ -39,6 +39,7 @@ use crate::consts::{
 };
 use crate::context::Context;
 use crate::error::{Error, Result};
+use crate::jobs::MountSource;
 
 /// The field-manager used for every server-side apply the controller performs.
 pub const FIELD_MANAGER: &str = "kopiur.home-operations.com/controller";
@@ -466,10 +467,20 @@ pub fn filesystem_repo_path(backend: &Backend) -> Option<String> {
     }
 }
 
-/// The repo PVC name for a `Filesystem` backend, if any (mounted read-write).
-pub fn filesystem_repo_pvc(backend: &Backend) -> Option<String> {
+/// The repo volume source for a `Filesystem` backend, if any — a PVC or an inline
+/// NFS export the mover mounts at [`filesystem_repo_path`]. `None` for object
+/// stores and for a bare-path filesystem repo (a `hostPath`/baked-in mount).
+pub fn filesystem_repo_mount_source(backend: &Backend) -> Option<MountSource> {
     match backend {
-        Backend::Filesystem(f) => f.pvc_name.clone(),
+        Backend::Filesystem(f) => f.volume.as_ref().map(|v| match v {
+            RepoVolume::Pvc(p) => MountSource::Pvc {
+                claim_name: p.name.clone(),
+            },
+            RepoVolume::Nfs(n) => MountSource::Nfs {
+                server: n.server.clone(),
+                path: n.path.clone(),
+            },
+        }),
         _ => None,
     }
 }
@@ -1680,12 +1691,40 @@ mod tests {
 
     #[test]
     fn filesystem_path_and_pvc_extracted() {
+        use kopiur_api::backend::{PvcVolume, RepoVolume};
         let b = Backend::Filesystem(FilesystemBackend {
             path: "/repo".into(),
-            pvc_name: Some("repo-pvc".into()),
+            volume: Some(RepoVolume::Pvc(PvcVolume {
+                name: "repo-pvc".into(),
+            })),
         });
         assert_eq!(filesystem_repo_path(&b).as_deref(), Some("/repo"));
-        assert_eq!(filesystem_repo_pvc(&b).as_deref(), Some("repo-pvc"));
+        assert_eq!(
+            filesystem_repo_mount_source(&b),
+            Some(MountSource::Pvc {
+                claim_name: "repo-pvc".into()
+            })
+        );
+    }
+
+    #[test]
+    fn filesystem_nfs_volume_extracted() {
+        use kopiur_api::backend::{NfsVolume, RepoVolume};
+        let b = Backend::Filesystem(FilesystemBackend {
+            path: "/repo".into(),
+            volume: Some(RepoVolume::Nfs(NfsVolume {
+                server: "nas.lan".into(),
+                path: "/export/kopia".into(),
+            })),
+        });
+        assert_eq!(filesystem_repo_path(&b).as_deref(), Some("/repo"));
+        assert_eq!(
+            filesystem_repo_mount_source(&b),
+            Some(MountSource::Nfs {
+                server: "nas.lan".into(),
+                path: "/export/kopia".into(),
+            })
+        );
     }
 
     #[test]
@@ -1700,7 +1739,7 @@ mod tests {
             tls: None,
         });
         assert_eq!(filesystem_repo_path(&b), None);
-        assert_eq!(filesystem_repo_pvc(&b), None);
+        assert_eq!(filesystem_repo_mount_source(&b), None);
     }
 
     #[test]
@@ -1727,7 +1766,7 @@ mod tests {
         );
         let fs = Backend::Filesystem(FilesystemBackend {
             path: "/repo".into(),
-            pvc_name: None,
+            volume: None,
         });
         assert!(backend_auth_secret_ref(&fs).is_none());
     }

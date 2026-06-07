@@ -20,7 +20,7 @@ pub mod jitter;
 pub mod retention;
 pub mod validate;
 
-pub use backend::Backend;
+pub use backend::{Backend, NfsVolume, PvcVolume, RepoVolume};
 pub use backup::{
     Backup, BackupPhase, BackupSpec, BackupStats, BackupStatus, BackupTiming, Origin,
 };
@@ -132,6 +132,58 @@ create:
         assert_eq!(spec.backend.kind_str(), "Filesystem");
         let v = serde_json::to_value(&spec.backend).unwrap();
         assert_eq!(v["filesystem"]["path"], "/repo");
+    }
+
+    #[test]
+    fn filesystem_repo_volume_pvc_is_externally_tagged() {
+        // `volume: { pvc: { name } }` — the externally-tagged RepoVolume wire shape.
+        let spec: RepositorySpec = from_yaml(
+            "backend:\n  filesystem:\n    path: /repo\n    volume:\n      pvc:\n        name: nas-repo\nencryption:\n  passwordSecretRef:\n    name: s\n",
+        );
+        let Backend::Filesystem(fs) = &spec.backend else {
+            panic!("expected filesystem backend");
+        };
+        match fs.volume.as_ref().expect("volume present") {
+            RepoVolume::Pvc(p) => assert_eq!(p.name, "nas-repo"),
+            other => panic!("expected pvc volume, got {}", other.kind_str()),
+        }
+        // Round-trips through JSON under the camelCase `pvc` key.
+        let v = serde_json::to_value(&spec.backend).unwrap();
+        assert_eq!(v["filesystem"]["volume"]["pvc"]["name"], "nas-repo");
+    }
+
+    #[test]
+    fn filesystem_repo_volume_nfs_is_externally_tagged() {
+        // `volume: { nfs: { server, path } }` — inline NFS repo, no PVC.
+        let spec: RepositorySpec = from_yaml(
+            "backend:\n  filesystem:\n    path: /repo\n    volume:\n      nfs:\n        server: nas.lan\n        path: /export/kopia\nencryption:\n  passwordSecretRef:\n    name: s\n",
+        );
+        let Backend::Filesystem(fs) = &spec.backend else {
+            panic!("expected filesystem backend");
+        };
+        match fs.volume.as_ref().expect("volume present") {
+            RepoVolume::Nfs(n) => {
+                assert_eq!(n.server, "nas.lan");
+                assert_eq!(n.path, "/export/kopia");
+            }
+            other => panic!("expected nfs volume, got {}", other.kind_str()),
+        }
+        let v = serde_json::to_value(&spec.backend).unwrap();
+        assert_eq!(v["filesystem"]["volume"]["nfs"]["server"], "nas.lan");
+        assert_eq!(v["filesystem"]["volume"]["nfs"]["path"], "/export/kopia");
+    }
+
+    #[test]
+    fn backup_config_nfs_source_roundtrips() {
+        use crate::BackupConfigSpec;
+        let spec: BackupConfigSpec = from_yaml(
+            "repository:\n  name: repo\nsources:\n  - nfs:\n      server: expanse.internal\n      path: /mnt/eros/Media\n",
+        );
+        let src = &spec.sources[0];
+        let nfs = src.nfs.as_ref().expect("nfs source present");
+        assert_eq!(nfs.server, "expanse.internal");
+        assert_eq!(nfs.path, "/mnt/eros/Media");
+        assert!(src.pvc.is_none() && src.pvc_selector.is_none());
     }
 
     #[test]

@@ -139,7 +139,7 @@ A root mover widens the blast radius of the minted mover ServiceAccount. Reach f
 
 ## Filesystem repositories: the _other_ permission
 
-The UID/GID story above is about reading **source data**. A [filesystem (PVC-backed) repository](backends/filesystem.md) adds a second surface: the **repository path itself must be writable** by the operator/mover UID.
+The UID/GID story above is about reading **source data**. A [filesystem repository](backends/filesystem.md) (PVC- or NFS-backed) adds a second surface: the **repository path itself must be writable** by the operator/mover UID.
 
 When create/connect can't write the repo path, Kopiur does not hang — it emits a Warning Event (and a `Bootstrapped=False` condition) naming the **actual** UID it runs as and the fix:
 

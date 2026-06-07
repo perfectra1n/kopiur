@@ -14,6 +14,7 @@
 //! `Vec<ValidationError>` so a user sees every independent problem in one apply.
 //! An empty vec means valid.
 
+use crate::backend::NfsVolume;
 use crate::backup::{BackupSpec, Origin};
 use crate::backup_config::{BackupConfigSpec, Source};
 use crate::backup_schedule::BackupScheduleSpec;
@@ -141,22 +142,56 @@ pub fn validate_backup_deletion_policy(
     }
 }
 
-/// A single backup `Source` is well-formed: `pvc` and `pvcSelector` are mutually
-/// exclusive, and at least one must be set (ADR §3.3 — modeled as sibling Options
-/// because both forms share `sourcePath*` keys, so it's a webhook check, not an
-/// enum).
+/// A single backup `Source` is well-formed: **exactly one** of `pvc`,
+/// `pvcSelector`, or `nfs` is set (ADR §3.3 — modeled as sibling Options because
+/// the forms share `sourcePath*` keys, so it's a webhook check, not an enum). When
+/// the source is `nfs`, its server/path are also validated.
 pub fn validate_source(source: &Source) -> ValidationResult {
-    match (source.pvc.is_some(), source.pvc_selector.is_some()) {
-        (true, true) => Err(ValidationError::MutuallyExclusive {
-            a: "pvc".to_string(),
-            b: "pvcSelector".to_string(),
+    let set: Vec<&str> = [
+        ("pvc", source.pvc.is_some()),
+        ("pvcSelector", source.pvc_selector.is_some()),
+        ("nfs", source.nfs.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(name, present)| present.then_some(name))
+    .collect();
+
+    match set.as_slice() {
+        [] => Err(ValidationError::MissingRequiredField {
+            field: "source.pvc, source.pvcSelector, or source.nfs".to_string(),
+        }),
+        [first, second, ..] => Err(ValidationError::MutuallyExclusive {
+            a: (*first).to_string(),
+            b: (*second).to_string(),
             context: "backup source".to_string(),
         }),
-        (false, false) => Err(ValidationError::MissingRequiredField {
-            field: "source.pvc or source.pvcSelector".to_string(),
-        }),
-        _ => Ok(()),
+        [_only] => match &source.nfs {
+            Some(nfs) => validate_nfs_volume(nfs, "backup source"),
+            None => Ok(()),
+        },
     }
+}
+
+/// An inline [`NfsVolume`] is well-formed: a non-empty server and an absolute
+/// export path. The structural schema can't express either, so the webhook does.
+/// `context` names where it appears (e.g. `"backup source"`, `"filesystem repo"`)
+/// for an actionable message.
+pub fn validate_nfs_volume(nfs: &NfsVolume, context: &str) -> ValidationResult {
+    if nfs.server.trim().is_empty() {
+        return Err(ValidationError::MissingRequiredField {
+            field: format!("{context} nfs.server"),
+        });
+    }
+    if !nfs.path.starts_with('/') {
+        return Err(ValidationError::InvalidFieldValue {
+            field: format!("{context} nfs.path"),
+            reason: format!(
+                "must be an absolute export path beginning with '/' (got {:?})",
+                nfs.path
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// A `Restore` spec is internally consistent (ADR §3.6/§4.6).
@@ -311,10 +346,34 @@ pub fn validate_repository(spec: &RepositorySpec) -> Vec<ValidationError> {
     if let Err(e) = validate_repository_no_inline_retention(spec) {
         errs.push(e);
     }
+    if let Err(e) = validate_backend(&spec.backend) {
+        errs.push(e);
+    }
     if let Some(m) = &spec.maintenance {
         errs.extend(validate_repository_maintenance(m, false));
     }
     errs
+}
+
+/// Validate backend *content* the structural schema can't express. Today this is
+/// the inline-NFS volume on a `Filesystem` backend; object stores carry their own
+/// (bucket/credential) checks elsewhere. Exhaustive `match` so a new `Backend`
+/// variant must be considered here before it compiles.
+pub fn validate_backend(backend: &crate::backend::Backend) -> ValidationResult {
+    use crate::backend::{Backend, RepoVolume};
+    match backend {
+        Backend::Filesystem(fs) => match &fs.volume {
+            Some(RepoVolume::Nfs(nfs)) => validate_nfs_volume(nfs, "filesystem repo"),
+            Some(RepoVolume::Pvc(_)) | None => Ok(()),
+        },
+        Backend::S3(_)
+        | Backend::Azure(_)
+        | Backend::Gcs(_)
+        | Backend::B2(_)
+        | Backend::Sftp(_)
+        | Backend::WebDav(_)
+        | Backend::Rclone(_) => Ok(()),
+    }
 }
 
 /// Validate a `Maintenance` spec, accumulating all problems (ADR §3.7).
@@ -342,6 +401,9 @@ pub fn validate_cluster_repository(spec: &ClusterRepositorySpec) -> Vec<Validati
             field: "allowedNamespaces.all must be true to grant access (false is meaningless)"
                 .to_string(),
         });
+    }
+    if let Err(e) = validate_backend(&spec.backend) {
+        errs.push(e);
     }
     if let Some(m) = &spec.maintenance {
         errs.extend(validate_repository_maintenance(m, true));
@@ -553,6 +615,7 @@ mod tests {
                 namespace_selector: None,
                 label_selector: None,
             }),
+            nfs: None,
             source_path_override: None,
             source_path_strategy: None,
         };
@@ -567,6 +630,134 @@ mod tests {
         let src = Source {
             pvc: None,
             pvc_selector: None,
+            nfs: None,
+            source_path_override: None,
+            source_path_strategy: None,
+        };
+        assert!(matches!(
+            validate_source(&src),
+            Err(ValidationError::MissingRequiredField { .. })
+        ));
+    }
+
+    #[test]
+    fn nfs_source_alone_is_accepted() {
+        let src = Source {
+            pvc: None,
+            pvc_selector: None,
+            nfs: Some(NfsVolume {
+                server: "nas.lan".into(),
+                path: "/export/media".into(),
+            }),
+            source_path_override: None,
+            source_path_strategy: None,
+        };
+        assert!(validate_source(&src).is_ok());
+    }
+
+    #[test]
+    fn nfs_source_with_pvc_is_mutually_exclusive() {
+        use crate::backup_config::PvcSource;
+        let src = Source {
+            pvc: Some(PvcSource { name: "p".into() }),
+            pvc_selector: None,
+            nfs: Some(NfsVolume {
+                server: "nas.lan".into(),
+                path: "/export/media".into(),
+            }),
+            source_path_override: None,
+            source_path_strategy: None,
+        };
+        assert!(matches!(
+            validate_source(&src),
+            Err(ValidationError::MutuallyExclusive { .. })
+        ));
+    }
+
+    #[test]
+    fn nfs_source_with_relative_path_is_rejected() {
+        let src = Source {
+            pvc: None,
+            pvc_selector: None,
+            nfs: Some(NfsVolume {
+                server: "nas.lan".into(),
+                path: "export/media".into(),
+            }),
+            source_path_override: None,
+            source_path_strategy: None,
+        };
+        assert!(matches!(
+            validate_source(&src),
+            Err(ValidationError::InvalidFieldValue { .. })
+        ));
+    }
+
+    // --- validate_backend (filesystem inline-NFS repo content) ---
+
+    #[test]
+    fn filesystem_nfs_repo_volume_valid_passes() {
+        use crate::backend::{Backend, FilesystemBackend, NfsVolume, RepoVolume};
+        let b = Backend::Filesystem(FilesystemBackend {
+            path: "/repo".into(),
+            volume: Some(RepoVolume::Nfs(NfsVolume {
+                server: "nas.lan".into(),
+                path: "/export/kopia".into(),
+            })),
+        });
+        assert!(validate_backend(&b).is_ok());
+    }
+
+    #[test]
+    fn filesystem_nfs_repo_volume_relative_path_is_rejected() {
+        use crate::backend::{Backend, FilesystemBackend, NfsVolume, RepoVolume};
+        let b = Backend::Filesystem(FilesystemBackend {
+            path: "/repo".into(),
+            volume: Some(RepoVolume::Nfs(NfsVolume {
+                server: "nas.lan".into(),
+                path: "export/kopia".into(), // not absolute
+            })),
+        });
+        assert!(matches!(
+            validate_backend(&b),
+            Err(ValidationError::InvalidFieldValue { .. })
+        ));
+    }
+
+    #[test]
+    fn filesystem_pvc_and_object_backends_need_no_content_check() {
+        use crate::backend::{Backend, FilesystemBackend, PvcVolume, RepoVolume, S3Backend};
+        let pvc = Backend::Filesystem(FilesystemBackend {
+            path: "/repo".into(),
+            volume: Some(RepoVolume::Pvc(PvcVolume {
+                name: "repo-pvc".into(),
+            })),
+        });
+        let bare = Backend::Filesystem(FilesystemBackend {
+            path: "/repo".into(),
+            volume: None,
+        });
+        let s3 = Backend::S3(S3Backend {
+            bucket: "b".into(),
+            prefix: None,
+            endpoint: None,
+            region: None,
+            auth: None,
+            tls: None,
+        });
+        assert!(validate_backend(&pvc).is_ok());
+        assert!(validate_backend(&bare).is_ok());
+        assert!(validate_backend(&s3).is_ok());
+    }
+
+    #[test]
+    fn nfs_source_with_empty_server_is_rejected() {
+        let src = Source {
+            pvc: None,
+            pvc_selector: None,
+            nfs: Some(NfsVolume {
+                server: "  ".into(),
+                path: "/export/media".into(),
+            }),
             source_path_override: None,
             source_path_strategy: None,
         };
@@ -699,7 +890,7 @@ mod tests {
         let spec = RepositorySpec {
             backend: Backend::Filesystem(FilesystemBackend {
                 path: "/repo".into(),
-                pvc_name: None,
+                volume: None,
             }),
             encryption: Encryption {
                 password_secret_ref: SecretKeyRef {
@@ -757,6 +948,7 @@ mod tests {
                     name: "data".into(),
                 }),
                 pvc_selector: None,
+                nfs: None,
                 source_path_override: None,
                 source_path_strategy: None,
             }],
@@ -823,7 +1015,7 @@ mod tests {
         RepositorySpec {
             backend: Backend::Filesystem(FilesystemBackend {
                 path: "/repo".into(),
-                pvc_name: None,
+                volume: None,
             }),
             encryption: Encryption {
                 password_secret_ref: SecretKeyRef {
@@ -908,7 +1100,7 @@ mod tests {
         let spec = ClusterRepositorySpec {
             backend: Backend::Filesystem(FilesystemBackend {
                 path: "/r".into(),
-                pvc_name: None,
+                volume: None,
             }),
             encryption: Encryption {
                 password_secret_ref: SecretKeyRef {

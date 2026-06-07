@@ -48,11 +48,14 @@ pub struct IdentityInputs<'a> {
     /// `ClusterRepository.spec.identityDefaults`, if the consumer targets one.
     pub template: Option<&'a IdentityTemplate>,
     /// The PVC name backing `sourcePath`'s `/pvc/<name>` default. `None` for
-    /// surfaces without a single PVC (e.g. a maintenance identity); then
-    /// `sourcePath` is left `None`.
+    /// surfaces without a single PVC (a non-PVC source like NFS, or a maintenance
+    /// identity). When set it takes precedence over [`Self::default_source_path`].
     pub pvc_name: Option<&'a str>,
-    /// An explicit `sourcePathOverride` (ADR §3.3), which beats the `/pvc/<name>`
-    /// default.
+    /// The `sourcePath` default for a non-PVC source (e.g. an NFS export's path),
+    /// used when there is no `pvc_name` and no override. `None` leaves `sourcePath`
+    /// unset (kopia's identity-only `username@hostname` form).
+    pub default_source_path: Option<&'a str>,
+    /// An explicit `sourcePathOverride` (ADR §3.3), which beats every default.
     pub source_path_override: Option<&'a str>,
 }
 
@@ -116,6 +119,7 @@ use std::error::Error as _;
 ///     overrides: None,
 ///     template: None,
 ///     pvc_name: Some("postgres-data"),
+///     default_source_path: None,
 ///     source_path_override: None,
 /// };
 /// let id = resolve_identity(&inputs).unwrap();
@@ -150,7 +154,10 @@ pub fn resolve_identity(inputs: &IdentityInputs<'_>) -> ValidationResult<Resolve
 
     let source_path = match inputs.source_path_override {
         Some(p) => Some(p.to_string()),
-        None => inputs.pvc_name.map(|n| format!("/pvc/{n}")),
+        None => inputs
+            .pvc_name
+            .map(|n| format!("/pvc/{n}"))
+            .or_else(|| inputs.default_source_path.map(String::from)),
     };
 
     Ok(ResolvedIdentity {
@@ -174,6 +181,7 @@ pub fn resolve_identity(inputs: &IdentityInputs<'_>) -> ValidationResult<Resolve
 ///     overrides: None,
 ///     template: None,
 ///     pvc_name: None,
+///     default_source_path: None,
 ///     source_path_override: None,
 /// };
 /// let id = resolve_identity(&inputs).unwrap();
@@ -204,8 +212,41 @@ mod tests {
             overrides,
             template,
             pvc_name: pvc,
+            default_source_path: None,
             source_path_override: None,
         }
+    }
+
+    #[test]
+    fn nfs_source_uses_default_source_path() {
+        // No PVC, but an NFS export supplies the sourcePath default.
+        let r = resolve_identity(&IdentityInputs {
+            object_name: "media",
+            namespace: "default",
+            overrides: None,
+            template: None,
+            pvc_name: None,
+            default_source_path: Some("/mnt/eros/Media"),
+            source_path_override: None,
+        })
+        .unwrap();
+        assert_eq!(r.source_path.as_deref(), Some("/mnt/eros/Media"));
+        assert_eq!(identity_string(&r), "media@default:/mnt/eros/Media");
+    }
+
+    #[test]
+    fn override_beats_default_source_path() {
+        let r = resolve_identity(&IdentityInputs {
+            object_name: "media",
+            namespace: "default",
+            overrides: None,
+            template: None,
+            pvc_name: None,
+            default_source_path: Some("/mnt/eros/Media"),
+            source_path_override: Some("/data"),
+        })
+        .unwrap();
+        assert_eq!(r.source_path.as_deref(), Some("/data"));
     }
 
     #[test]

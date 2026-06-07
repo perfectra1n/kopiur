@@ -193,22 +193,17 @@ pub fn config_identity(
     config: &BackupConfig,
     namespace: &str,
 ) -> Result<kopiur_api::common::ResolvedIdentity> {
-    let pvc_name = config
-        .spec
-        .sources
-        .first()
-        .and_then(|s| s.pvc.as_ref().map(|p| p.name.clone()));
-    let source_path_override = config
-        .spec
-        .sources
-        .first()
-        .and_then(|s| s.source_path_override.clone());
+    let first = config.spec.sources.first();
+    let pvc_name = first.and_then(|s| s.pvc.as_ref().map(|p| p.name.clone()));
+    let nfs_source_path = first.and_then(|s| s.nfs.as_ref().map(|n| n.path.clone()));
+    let source_path_override = first.and_then(|s| s.source_path_override.clone());
     let inputs = kopiur_api::IdentityInputs {
         object_name: &config.name_any(),
         namespace,
         overrides: config.spec.identity.as_ref(),
         template: None,
         pvc_name: pvc_name.as_deref(),
+        default_source_path: nfs_source_path.as_deref(),
         source_path_override: source_path_override.as_deref(),
     };
     kopiur_api::resolve_identity(&inputs).map_err(|e| Error::Validation(e.to_string()))
@@ -221,22 +216,17 @@ fn resolve_config_identity(
     namespace: &str,
 ) -> Result<kopiur_api::backup_config::ResolvedConfig> {
     use kopiur_api::backup_config::{ResolvedConfig, ResolvedConfigSource};
-    let pvc_name = config
-        .spec
-        .sources
-        .first()
-        .and_then(|s| s.pvc.as_ref().map(|p| p.name.clone()));
-    let source_path_override = config
-        .spec
-        .sources
-        .first()
-        .and_then(|s| s.source_path_override.clone());
+    let first = config.spec.sources.first();
+    let pvc_name = first.and_then(|s| s.pvc.as_ref().map(|p| p.name.clone()));
+    let nfs_source_path = first.and_then(|s| s.nfs.as_ref().map(|n| n.path.clone()));
+    let source_path_override = first.and_then(|s| s.source_path_override.clone());
     let inputs = kopiur_api::IdentityInputs {
         object_name: &config.name_any(),
         namespace,
         overrides: config.spec.identity.as_ref(),
         template: None,
         pvc_name: pvc_name.as_deref(),
+        default_source_path: nfs_source_path.as_deref(),
         source_path_override: source_path_override.as_deref(),
     };
     let identity =
@@ -250,7 +240,8 @@ fn resolve_config_identity(
             source_path: s
                 .source_path_override
                 .clone()
-                .or_else(|| s.pvc.as_ref().map(|p| format!("/pvc/{}", p.name))),
+                .or_else(|| s.pvc.as_ref().map(|p| format!("/pvc/{}", p.name)))
+                .or_else(|| s.nfs.as_ref().map(|n| n.path.clone())),
         })
         .collect();
     Ok(ResolvedConfig {

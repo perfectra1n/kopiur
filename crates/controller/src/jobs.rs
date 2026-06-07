@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, EmptyDirVolumeSource, EnvFromSource,
-    PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec, ResourceRequirements,
-    SeccompProfile, SecretEnvSource, SecurityContext, Volume, VolumeMount,
+    NFSVolumeSource, PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec,
+    ResourceRequirements, SeccompProfile, SecretEnvSource, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use kopiur_mover::workspec::MoverWorkSpec;
@@ -61,15 +61,101 @@ impl Default for JobLimits {
     }
 }
 
-/// A PVC mounted into the mover pod at a path.
-#[derive(Debug, Clone)]
-pub struct PvcMount {
-    /// The `PersistentVolumeClaim` name in the mover's namespace.
-    pub claim_name: String,
+/// Where a mover-pod volume's data comes from. Mirrors `api::backend::RepoVolume`
+/// / a backup source: a PVC by name, or an inline NFS export. A new variant must
+/// be handled in [`build_job`]'s volume construction before it compiles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MountSource {
+    /// A `PersistentVolumeClaim` in the mover's namespace.
+    Pvc {
+        /// Name of the `PersistentVolumeClaim` to mount.
+        claim_name: String,
+    },
+    /// An inline NFS export, mounted with no PVC.
+    Nfs {
+        /// NFS server hostname or IP.
+        server: String,
+        /// Exported path on the NFS server.
+        path: String,
+    },
+}
+
+/// A volume mounted into the mover pod at a path, from either a PVC or NFS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeMountSpec {
+    /// What backs the volume.
+    pub source: MountSource,
     /// Absolute mount path inside the mover container.
     pub mount_path: String,
     /// Whether the mount is read-only (Backup sources are mounted read-only).
     pub read_only: bool,
+}
+
+impl VolumeMountSpec {
+    /// A PVC-backed mount.
+    pub fn pvc(
+        claim_name: impl Into<String>,
+        mount_path: impl Into<String>,
+        read_only: bool,
+    ) -> Self {
+        VolumeMountSpec {
+            source: MountSource::Pvc {
+                claim_name: claim_name.into(),
+            },
+            mount_path: mount_path.into(),
+            read_only,
+        }
+    }
+
+    /// An inline-NFS-backed mount.
+    pub fn nfs(
+        server: impl Into<String>,
+        path: impl Into<String>,
+        mount_path: impl Into<String>,
+        read_only: bool,
+    ) -> Self {
+        VolumeMountSpec {
+            source: MountSource::Nfs {
+                server: server.into(),
+                path: path.into(),
+            },
+            mount_path: mount_path.into(),
+            read_only,
+        }
+    }
+
+    /// Build the k8s `Volume` (named `name`) for this mount's source.
+    fn to_volume(&self, name: &str) -> Volume {
+        match &self.source {
+            MountSource::Pvc { claim_name } => Volume {
+                name: name.to_string(),
+                persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                    claim_name: claim_name.clone(),
+                    read_only: Some(self.read_only),
+                }),
+                ..Default::default()
+            },
+            MountSource::Nfs { server, path } => Volume {
+                name: name.to_string(),
+                nfs: Some(NFSVolumeSource {
+                    server: server.clone(),
+                    path: path.clone(),
+                    read_only: Some(self.read_only),
+                }),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Build the k8s `VolumeMount` (named `name`) for this mount.
+    fn to_volume_mount(&self, name: &str) -> VolumeMount {
+        VolumeMount {
+            name: name.to_string(),
+            mount_path: self.mount_path.clone(),
+            read_only: Some(self.read_only),
+            ..Default::default()
+        }
+    }
 }
 
 /// All inputs needed to build a mover run's `ConfigMap` + `Job`.
@@ -96,12 +182,13 @@ pub struct MoverJobInputs<'a> {
     pub security_context: Option<SecurityContext>,
     /// Extra labels applied to both objects (origin/config/snapshot keys).
     pub labels: BTreeMap<String, String>,
-    /// The source PVC to back up, mounted read-only at the snapshot source path
-    /// (Backup ops). `None` for non-PVC sources / restore / delete ops.
-    pub source_pvc: Option<PvcMount>,
-    /// The repo PVC for the filesystem backend, mounted read-write at the repo
-    /// path so kopia can write the repository. `None` for object-store backends.
-    pub repo_pvc: Option<PvcMount>,
+    /// The source volume to back up (PVC or inline NFS), mounted read-only at the
+    /// snapshot source path (Backup ops). `None` for restore / delete ops.
+    pub source_volume: Option<VolumeMountSpec>,
+    /// The repo volume for the filesystem backend (PVC or inline NFS), mounted
+    /// read-write at the repo path so kopia can write the repository. `None` for
+    /// object-store backends and bare-path filesystem repos.
+    pub repo_volume: Option<VolumeMountSpec>,
     /// Names of `Secret`s whose keys are exposed as env vars to the mover
     /// (`KOPIA_PASSWORD` from the encryption secret, plus backend credentials
     /// like `AWS_*` from the backend `auth.secretRef`). Each distinct secret
@@ -209,37 +296,13 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
         ..Default::default()
     });
 
-    if let Some(src) = &inputs.source_pvc {
-        volumes.push(Volume {
-            name: "source".to_string(),
-            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                claim_name: src.claim_name.clone(),
-                read_only: Some(src.read_only),
-            }),
-            ..Default::default()
-        });
-        volume_mounts.push(VolumeMount {
-            name: "source".to_string(),
-            mount_path: src.mount_path.clone(),
-            read_only: Some(src.read_only),
-            ..Default::default()
-        });
+    if let Some(src) = &inputs.source_volume {
+        volumes.push(src.to_volume("source"));
+        volume_mounts.push(src.to_volume_mount("source"));
     }
-    if let Some(repo) = &inputs.repo_pvc {
-        volumes.push(Volume {
-            name: "repo".to_string(),
-            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                claim_name: repo.claim_name.clone(),
-                read_only: Some(repo.read_only),
-            }),
-            ..Default::default()
-        });
-        volume_mounts.push(VolumeMount {
-            name: "repo".to_string(),
-            mount_path: repo.mount_path.clone(),
-            read_only: Some(repo.read_only),
-            ..Default::default()
-        });
+    if let Some(repo) = &inputs.repo_volume {
+        volumes.push(repo.to_volume("repo"));
+        volume_mounts.push(repo.to_volume_mount("repo"));
     }
 
     // Credentials (KOPIA_PASSWORD + backend creds) come from Secret(s) as env,
@@ -419,8 +482,8 @@ mod tests {
             resources: None,
             security_context: None,
             labels,
-            source_pvc: None,
-            repo_pvc: None,
+            source_volume: None,
+            repo_volume: None,
             creds_secrets: Vec::new(),
             result_configmap: None,
             service_account: Some("kopiur-operator"),
@@ -540,16 +603,8 @@ mod tests {
     fn job_mounts_source_and_repo_pvcs_and_secret_env() {
         let ws = sample_work_spec();
         let mut i = inputs(&ws, JobLimits::default());
-        i.source_pvc = Some(PvcMount {
-            claim_name: "data-pvc".into(),
-            mount_path: "/data".into(),
-            read_only: true,
-        });
-        i.repo_pvc = Some(PvcMount {
-            claim_name: "repo-pvc".into(),
-            mount_path: "/repo".into(),
-            read_only: false,
-        });
+        i.source_volume = Some(VolumeMountSpec::pvc("data-pvc", "/data", true));
+        i.repo_volume = Some(VolumeMountSpec::pvc("repo-pvc", "/repo", false));
         i.creds_secrets = vec!["kopia-creds".into()];
         i.image_pull_policy = Some("IfNotPresent");
 
@@ -589,6 +644,57 @@ mod tests {
 
         // Image pull policy applied.
         assert_eq!(container.image_pull_policy.as_deref(), Some("IfNotPresent"));
+    }
+
+    #[test]
+    fn job_mounts_inline_nfs_source_and_repo_volumes() {
+        // An NFS source (read-only) and an NFS repo (read-write) both become inline
+        // `nfs` Volume sources — no PVC ref — mounted at their respective paths.
+        let ws = sample_work_spec();
+        let mut i = inputs(&ws, JobLimits::default());
+        i.source_volume = Some(VolumeMountSpec::nfs(
+            "expanse.internal",
+            "/mnt/eros/Media",
+            "/mnt/eros/Media",
+            true,
+        ));
+        i.repo_volume = Some(VolumeMountSpec::nfs(
+            "nas.lan",
+            "/export/kopia",
+            "/repo",
+            false,
+        ));
+
+        let job = build_job(&i);
+        let pod = job.spec.unwrap().template.spec.unwrap();
+        let vols = pod.volumes.as_ref().unwrap();
+
+        // Source NFS: read-only, no PVC ref.
+        let src = vols
+            .iter()
+            .find(|v| v.name == "source")
+            .expect("source vol");
+        assert!(src.persistent_volume_claim.is_none());
+        let src_nfs = src.nfs.as_ref().expect("source is an nfs volume");
+        assert_eq!(src_nfs.server, "expanse.internal");
+        assert_eq!(src_nfs.path, "/mnt/eros/Media");
+        assert_eq!(src_nfs.read_only, Some(true));
+
+        // Repo NFS: read-write.
+        let repo = vols.iter().find(|v| v.name == "repo").expect("repo vol");
+        let repo_nfs = repo.nfs.as_ref().expect("repo is an nfs volume");
+        assert_eq!(repo_nfs.server, "nas.lan");
+        assert_eq!(repo_nfs.path, "/export/kopia");
+        assert_eq!(repo_nfs.read_only, Some(false));
+
+        // Mounts land at the requested in-pod paths.
+        let mounts = pod.containers[0].volume_mounts.as_ref().unwrap();
+        let src_mount = mounts.iter().find(|m| m.name == "source").unwrap();
+        assert_eq!(src_mount.mount_path, "/mnt/eros/Media");
+        assert_eq!(src_mount.read_only, Some(true));
+        let repo_mount = mounts.iter().find(|m| m.name == "repo").unwrap();
+        assert_eq!(repo_mount.mount_path, "/repo");
+        assert_eq!(repo_mount.read_only, Some(false));
     }
 
     #[test]

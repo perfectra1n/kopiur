@@ -27,16 +27,16 @@ A backend is chosen by **which key you set** (`backend.s3`, `backend.azure`, …
 
 ## Pick your backend
 
-| Backend                                    | Covers                                                       | Spec key             |
-| ------------------------------------------ | ------------------------------------------------------------ | -------------------- |
-| [S3 & S3-compatible](backends/s3.md)       | Amazon S3, MinIO, RustFS, Ceph RGW, Wasabi, Cloudflare R2, … | `backend.s3`         |
-| [Azure Blob Storage](backends/azure.md)    | Azure Blob containers (key or SAS token)                     | `backend.azure`      |
-| [Google Cloud Storage](backends/gcs.md)    | GCS buckets (service-account key)                            | `backend.gcs`        |
-| [Backblaze B2](backends/b2.md)             | Backblaze B2 native API                                      | `backend.b2`         |
-| [Filesystem (PVC)](backends/filesystem.md) | A NAS/PVC mounted into the mover                             | `backend.filesystem` |
-| [SFTP](backends/sftp.md)                   | Any server reachable over SSH/SFTP                           | `backend.sftp`       |
-| [WebDAV](backends/webdav.md)               | Nextcloud, Apache `mod_dav`, …                               | `backend.webDav`     |
-| [rclone](backends/rclone.md)               | Google Drive, OneDrive, Dropbox, and dozens more             | `backend.rclone`     |
+| Backend                                          | Covers                                                       | Spec key             |
+| ------------------------------------------------ | ------------------------------------------------------------ | -------------------- |
+| [S3 & S3-compatible](backends/s3.md)             | Amazon S3, MinIO, RustFS, Ceph RGW, Wasabi, Cloudflare R2, … | `backend.s3`         |
+| [Azure Blob Storage](backends/azure.md)          | Azure Blob containers (key or SAS token)                     | `backend.azure`      |
+| [Google Cloud Storage](backends/gcs.md)          | GCS buckets (service-account key)                            | `backend.gcs`        |
+| [Backblaze B2](backends/b2.md)                   | Backblaze B2 native API                                      | `backend.b2`         |
+| [Filesystem (PVC / NFS)](backends/filesystem.md) | A NAS/PVC or inline NFS export mounted into the mover        | `backend.filesystem` |
+| [SFTP](backends/sftp.md)                         | Any server reachable over SSH/SFTP                           | `backend.sftp`       |
+| [WebDAV](backends/webdav.md)                     | Nextcloud, Apache `mod_dav`, …                               | `backend.webDav`     |
+| [rclone](backends/rclone.md)                     | Google Drive, OneDrive, Dropbox, and dozens more             | `backend.rclone`     |
 
 ## How to use these pages
 

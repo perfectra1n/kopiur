@@ -44,7 +44,7 @@ metadata:
     name: nas-primary
     namespace: billing
 spec:
-    backend: { filesystem: { path: /repo, pvcName: nas-primary } }
+    backend: { filesystem: { path: /repo, volume: { pvc: { name: nas-primary } } } }
     encryption:
         passwordSecretRef: { name: nas-primary-kopia, key: KOPIA_PASSWORD }
     maintenance:

@@ -91,7 +91,7 @@ impl Backend {
     ///
     /// let b = Backend::Filesystem(FilesystemBackend {
     ///     path: "/repo".into(),
-    ///     pvc_name: None,
+    ///     volume: None,
     /// });
     /// assert_eq!(b.kind_str(), "Filesystem");
     ///
@@ -186,16 +186,68 @@ pub struct B2Backend {
     pub auth: Option<BackendAuth>,
 }
 
-/// Local-filesystem backend, backed by a PVC the operator mounts. ADR §3.1.
+/// Local-filesystem backend: kopia writes the repository to a path inside the
+/// mover pod. The path is populated by a [`RepoVolume`] the operator mounts — a
+/// `PersistentVolumeClaim` or an inline NFS export. ADR §3.1.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FilesystemBackend {
-    /// Mount path inside the mover pod. Backed by a PVC the operator mounts.
+    /// Mount path inside the mover pod where kopia writes the repository (e.g. `/repo`).
     pub path: String,
-    /// Name of the `PersistentVolumeClaim` to mount at `path`. Absent for a path
-    /// already present on the node/image.
+    /// What backs `path`. A PVC (`{ pvc: { name } }`) or an inline NFS export
+    /// (`{ nfs: { server, path } }`). Absent for a path already present on the
+    /// node/image (a `hostPath`/baked-in mount; mainly the e2e harness).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pvc_name: Option<String>,
+    pub volume: Option<RepoVolume>,
+}
+
+/// What backs a filesystem repository's mount path. Externally-tagged; exactly
+/// one variant. ADR §3.1.
+///
+/// Wire shape: `volume: { pvc: { name: "repo-pvc" } }` or
+/// `volume: { nfs: { server: "nas.lan", path: "/export/kopia" } }`.
+///
+/// kopia has no NFS backend — NFS is reached through the *filesystem* backend by
+/// mounting the export at `path`. Modeling it as a volume source (not a `Backend`
+/// variant) keeps that truth: the kopia connect spec is `Filesystem { path }`
+/// regardless, and the mover is transparent to how the path is mounted.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RepoVolume {
+    /// A `PersistentVolumeClaim` mounted read-write at the repo path.
+    Pvc(PvcVolume),
+    /// An inline NFS export mounted directly (no PVC).
+    Nfs(NfsVolume),
+}
+
+impl RepoVolume {
+    /// Stable discriminant string for status/metrics.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            RepoVolume::Pvc(_) => "Pvc",
+            RepoVolume::Nfs(_) => "Nfs",
+        }
+    }
+}
+
+/// A `PersistentVolumeClaim` mounted into the mover pod. ADR §3.1.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PvcVolume {
+    /// Name of the `PersistentVolumeClaim` to mount (in the mover's namespace).
+    pub name: String,
+}
+
+/// An inline NFS export mounted directly into the mover pod — no PVC, no
+/// StorageClass. Used both as a filesystem-repo volume and as a backup source.
+/// ADR §3.1/§3.3.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NfsVolume {
+    /// NFS server hostname or IP (e.g. `nas.lan` or `expanse.internal`).
+    pub server: String,
+    /// Exported path on the NFS server (e.g. `/export/kopia` or `/mnt/eros/Media`).
+    pub path: String,
 }
 
 /// SFTP backend. ADR §3.1.

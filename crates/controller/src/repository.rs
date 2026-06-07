@@ -147,11 +147,27 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
     let api: Api<Repository> = Api::namespaced(ctx.client.clone(), &namespace);
 
     // The controller may run kopia in-process for the FILESYSTEM backend only
-    // (ADR §5.4 permits short idempotent ops; filesystem repos are reachable from
-    // the controller's own filesystem when using a hostPath/shared mount, or in
-    // the e2e harness). For object-store backends, connect-validate would run as
-    // a short Job — documented as a follow-up below.
+    // (ADR §5.4 permits short idempotent ops; a *bare-path* filesystem repo is
+    // reachable from the controller's own filesystem via a hostPath/shared mount,
+    // or in the e2e harness). A filesystem repo backed by a PVC or an inline NFS
+    // export is NOT reachable in-process, so — like object stores — it bootstraps
+    // in a short mover Job that mounts the repo volume.
     match &repo.spec.backend {
+        // Volume-backed filesystem repos (PVC / inline NFS) and every object store
+        // bootstrap via the mover Job. `filesystem_repo_mount_source` returns the
+        // volume to mount (None for object stores → no extra volume).
+        Backend::Filesystem(fs) if fs.volume.is_some() => {
+            return bootstrap_via_mover(
+                ctx,
+                repo,
+                &namespace,
+                &name,
+                &repo_uid,
+                &api,
+                &repo.spec.backend,
+            )
+            .await;
+        }
         Backend::Filesystem(fs) => {
             // Hard-stop: if we already terminally failed to connect for THIS spec
             // generation, don't re-read the password Secret or re-hit the backend.
@@ -301,19 +317,21 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
             // store in-process. The Job writes its result into the work-spec
             // ConfigMap; the controller (sole writer of the Repository status)
             // reads it back to set phase/uniqueId and materialize the catalog.
-            return bootstrap_object_store(ctx, repo, &namespace, &name, &repo_uid, &api, other)
-                .await;
+            return bootstrap_via_mover(ctx, repo, &namespace, &name, &repo_uid, &api, other).await;
         }
     }
 
     Ok(Action::requeue(Duration::from_secs(300)))
 }
 
-/// Drive the object-store bootstrap state machine: launch the mover Job, then on
-/// each reconcile reflect its progress (`Initializing` → `Ready`/`Failed`),
-/// reading the result the mover wrote into the work-spec ConfigMap.
+/// Drive the mover-Job bootstrap state machine: launch the Job, then on each
+/// reconcile reflect its progress (`Initializing` → `Ready`/`Failed`), reading the
+/// result the mover wrote into the work-spec ConfigMap. Used for object stores AND
+/// for volume-backed filesystem repos (PVC / inline NFS) — neither is reachable
+/// from the controller in-process. A filesystem backend's repo volume is mounted
+/// read-write so the mover can create/connect the repository.
 #[allow(clippy::too_many_arguments)]
-async fn bootstrap_object_store(
+async fn bootstrap_via_mover(
     ctx: &Context,
     repo: &Repository,
     namespace: &str,
@@ -391,6 +409,14 @@ async fn bootstrap_object_store(
         "kopiur.home-operations.com/repository".to_string(),
         name.to_string(),
     );
+    // A filesystem backend mounts its repo volume (PVC / inline NFS) read-write so
+    // the mover can create/connect the repository; object stores mount nothing.
+    let repo_volume =
+        io::filesystem_repo_mount_source(backend).map(|source| jobs::VolumeMountSpec {
+            source,
+            mount_path: io::filesystem_repo_path(backend).unwrap_or_default(),
+            read_only: false,
+        });
     let inputs = MoverJobInputs {
         name: &job_name,
         namespace,
@@ -409,8 +435,8 @@ async fn bootstrap_object_store(
         resources: None,
         security_context: None,
         labels,
-        source_pvc: None,
-        repo_pvc: None,
+        source_volume: None,
+        repo_volume,
         creds_secrets,
         result_configmap: Some(&job_name),
         service_account: ctx.mover_service_account.as_deref(),

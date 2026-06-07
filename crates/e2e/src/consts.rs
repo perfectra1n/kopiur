@@ -85,6 +85,8 @@ pub const BUCKETS: &[&str] = &[
     "kopiur-xns-repo",
     // Backed-via-rclone repository (rclone `s3` remote pointing at this MinIO).
     "kopiur-rclone",
+    // Repository for the NFS-*source* scenario (the source is NFS; the repo is S3).
+    "kopiur-nfssrc",
 ];
 
 // --- SFTP backend (in-cluster atmoz/sftp server, key-based auth) ---------------
@@ -185,6 +187,26 @@ pub const KEY_RCLONE_CONFIG: &str = "KOPIA_RCLONE_CONFIG";
 /// rclone `remote:path` the Repository points at (remote defined in the config
 /// below; targets the `kopiur-rclone` MinIO bucket).
 pub const RCLONE_REMOTE_PATH: &str = "miniors3:kopiur-rclone/repo";
+
+// --- NFS backend (in-cluster NFS server; inline-NFS filesystem repo + source) --
+/// In-cluster NFS server image — the canonical Kubernetes NFS-server example
+/// (kernel `nfsd`), which exports `/exports` read-write (`no_root_squash`).
+///
+/// Runs **privileged**: kind nodes share the host kernel, so the host must have
+/// the `nfsd` module available (`modprobe nfsd` on the host if a mover Job hangs
+/// mounting the export). Pinned (never `:latest`) and must be verified on a real
+/// kind cluster before trusting a green run — same hard-won lesson as the SFTP
+/// image (see [`SFTP_IMAGE`]): a server the client can't actually talk to fails
+/// in a slow, confusing way, not a fast one.
+pub const NFS_IMAGE: &str = "registry.k8s.io/volume-nfs:0.8";
+/// In-cluster NFS host the Repository's `volume.nfs.server` (and an NFS *source*)
+/// point at. Resolves to the `nfs` Service in [`OPERATOR_NS`].
+pub const NFS_HOST: &str = "nfs.kopiur-e2e.svc.cluster.local";
+/// Export path the server shares (the `volume-nfs` image exports `/exports`).
+/// Used as both `volume.nfs.path` (repo) and `source.nfs.path` (source).
+pub const NFS_EXPORT_PATH: &str = "/exports";
+/// Secret holding just the repo password for the NFS/filesystem repo.
+pub const SECRET_NFS_CREDS: &str = "kopia-nfs-creds";
 
 // --- identity / apply ----------------------------------------------------------
 /// Distroless-nonroot uid the controller AND mover Jobs share so a hostPath repo

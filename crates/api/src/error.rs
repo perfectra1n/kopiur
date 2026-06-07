@@ -121,6 +121,16 @@ pub enum ValidationError {
         field: String,
     },
 
+    /// A field was set but its value is malformed (e.g. an NFS export path that is
+    /// not absolute). The schema can't express the constraint, so the webhook does.
+    #[error("invalid value for {field}: {reason}")]
+    InvalidFieldValue {
+        /// The offending field (e.g. `"backup source nfs.path"`).
+        field: String,
+        /// What's wrong and how to fix it (e.g. `"must be an absolute path"`).
+        reason: String,
+    },
+
     /// Rendering a `ClusterRepository.identityDefaults` template with `tera` failed
     /// (ADR §4.2). Surfaced at admission so a bad template never reaches status.
     #[error("failed to render identity template: {reason}")]

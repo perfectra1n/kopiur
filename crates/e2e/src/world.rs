@@ -43,6 +43,11 @@ pub enum Need {
     /// The rclone credentials Secret (an `rclone.conf` whose `s3` remote points at
     /// the in-cluster MinIO). Implies [`Need::Minio`].
     Rclone,
+    /// A running in-cluster NFS server (exports `/exports`) plus the NFS repo
+    /// credentials Secret (just `KOPIA_PASSWORD`). Backs both an inline-NFS
+    /// filesystem repo and an NFS backup source. Implies [`Need::Filesystem`] for
+    /// the backup source/restore-destination PVCs the scenarios reuse.
+    Nfs,
 }
 
 /// Handle to a reachable cluster plus per-`Need` idempotency latches.
@@ -54,6 +59,7 @@ pub struct World {
     sftp: OnceCell<()>,
     webdav: OnceCell<()>,
     rclone: OnceCell<()>,
+    nfs: OnceCell<()>,
 }
 
 impl World {
@@ -69,6 +75,7 @@ impl World {
             sftp: OnceCell::new(),
             webdav: OnceCell::new(),
             rclone: OnceCell::new(),
+            nfs: OnceCell::new(),
         })
     }
 
@@ -100,6 +107,9 @@ impl World {
                 }
                 Need::Rclone => {
                     self.rclone.get_or_try_init(|| self.ensure_rclone()).await?;
+                }
+                Need::Nfs => {
+                    self.nfs.get_or_try_init(|| self.ensure_nfs()).await?;
                 }
             }
         }
@@ -273,6 +283,25 @@ impl World {
             .into(),
         ];
         apply_all(&self.client, &fixtures).await
+    }
+
+    /// Stand up the in-cluster NFS server (exports `/exports`) and seed the NFS
+    /// repo credentials Secret (just the repo password — NFS, like the filesystem
+    /// backend, needs no backend `auth`). Implies a backup source/dest PVC.
+    async fn ensure_nfs(&self) -> Result<()> {
+        self.fs.get_or_try_init(|| self.ensure_filesystem()).await?;
+        let fixtures: Vec<Fixture> = vec![
+            builders::opaque_secret(
+                consts::OPERATOR_NS,
+                consts::SECRET_NFS_CREDS,
+                &[(consts::KEY_KOPIA_PASSWORD, consts::KOPIA_PASSWORD)],
+            )
+            .into(),
+            builders::nfs_deployment(consts::OPERATOR_NS).into(),
+            builders::nfs_service(consts::OPERATOR_NS).into(),
+        ];
+        apply_all(&self.client, &fixtures).await?;
+        wait::deployment_ready(&self.client, consts::OPERATOR_NS, "nfs").await
     }
 }
 

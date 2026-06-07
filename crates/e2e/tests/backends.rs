@@ -276,3 +276,119 @@ async fn rclone_bootstrap_backup_restore() {
     });
     run_backend_lifecycle(&world, "e2e-rclone", repo_json).await;
 }
+
+/// Inline-NFS **repository**, end to end. The filesystem backend names an NFS
+/// export under `volume.nfs` (no PVC). Because the controller can't mount NFS
+/// in-process, this Repository can only reach `Ready` via the *bootstrap mover
+/// Job* that mounts the export — the regression guard for the M3 routing: before
+/// it, a volume-backed filesystem repo tried (and failed) to connect in-process.
+/// Every subsequent mover (backup, restore) must also mount the export.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + nfs server + built images + helm install"]
+async fn nfs_repo_bootstrap_backup_restore() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Nfs, Need::Filesystem])
+        .await
+        .expect("provision nfs server + source/dest PVCs");
+
+    let repo_json = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "Repository",
+        "metadata": { "name": "e2e-nfs-repo", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "backend": { "filesystem": {
+                "path": "/repo",
+                "volume": { "nfs": { "server": consts::NFS_HOST, "path": consts::NFS_EXPORT_PATH } }
+            }},
+            "encryption": { "passwordSecretRef": { "name": consts::SECRET_NFS_CREDS, "key": consts::KEY_KOPIA_PASSWORD } },
+            "create": { "enabled": true }
+        }
+    });
+    run_backend_lifecycle(&world, "e2e-nfs", repo_json).await;
+}
+
+/// Inline-NFS **source**, end to end. The repository is S3 (MinIO) — proving an
+/// NFS source is independent of the backend — and the `BackupConfig` source is an
+/// inline NFS export with no PVC. The operator mounts the export read-only into
+/// the backup mover and kopia snapshots it. Asserts the Backup reaches
+/// `Succeeded` with a real kopia snapshot id (the M2 source-NFS path).
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + nfs server + MinIO + built images + helm install"]
+async fn nfs_source_backup() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Nfs, Need::Minio])
+        .await
+        .expect("provision nfs server (source) + MinIO (repo)");
+
+    let client = world.client().clone();
+    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    // S3 (MinIO) repository — the source-under-test is independent of it.
+    let repo_json = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "Repository",
+        "metadata": { "name": "e2e-nfssrc-repo", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "backend": { "s3": {
+                "bucket": "kopiur-nfssrc",
+                "endpoint": "minio.kopiur-e2e.svc.cluster.local:9000",
+                "region": "us-east-1",
+                "tls": { "disableTls": true },
+                "auth": { "secretRef": { "name": consts::SECRET_S3_CREDS, "namespace": E2E_NAMESPACE } }
+            }},
+            "encryption": { "passwordSecretRef": { "name": consts::SECRET_S3_CREDS, "key": consts::KEY_KOPIA_PASSWORD } },
+            "create": { "enabled": true }
+        }
+    });
+    repos
+        .create(&PostParams::default(), &cr(repo_json))
+        .await
+        .expect("create NFS-source S3 Repository");
+    wait_phase(&repos, "e2e-nfssrc-repo", "Ready")
+        .await
+        .expect("S3 Repository should reach Ready");
+
+    // BackupConfig whose SOURCE is an inline NFS export (no PVC).
+    let cfg_json = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "BackupConfig",
+        "metadata": { "name": "e2e-nfssrc-cfg", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "repository": { "kind": "Repository", "name": "e2e-nfssrc-repo" },
+            "sources": [ { "nfs": { "server": consts::NFS_HOST, "path": consts::NFS_EXPORT_PATH } } ],
+            "retention": { "keepLatest": 5 }
+        }
+    });
+    configs
+        .create(&PostParams::default(), &cr(cfg_json))
+        .await
+        .expect("create NFS-source BackupConfig");
+    backups
+        .create(
+            &PostParams::default(),
+            &cr(backup_json("e2e-nfssrc-backup", "e2e-nfssrc-cfg")),
+        )
+        .await
+        .expect("create NFS-source Backup");
+    wait_phase(&backups, "e2e-nfssrc-backup", "Succeeded")
+        .await
+        .expect("NFS-source Backup should reach Succeeded");
+    let bstatus = status_json(&backups, "e2e-nfssrc-backup").await;
+    let snap_id = bstatus
+        .get("snapshot")
+        .and_then(|s| s.get("kopiaSnapshotID"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        !snap_id.is_empty(),
+        "NFS-source Backup must carry a real kopia snapshot id, got {bstatus}"
+    );
+}
