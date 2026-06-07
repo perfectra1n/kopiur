@@ -61,6 +61,7 @@ theme:
         icon: material/weather-sunny
         name: Switch to light mode
   features:
+    - navigation.tabs
     - navigation.indexes # a section's first child can be its landing page (backends.md)
     - navigation.instant
     - navigation.tracking
@@ -158,6 +159,10 @@ nav:
       - Troubleshooting: troubleshooting.md
   - Reference:
       - API reference (rustdoc): api-reference.md
+      # Root-absolute link straight into the rustdoc tree that build-docs.sh nests
+      # at /rustdoc/. It exists only in the assembled site/ (and in production), not
+      # during `mkdocs serve` — the api-reference page above is the serve-time landing.
+      - rustdoc (Rust API) ↗: /rustdoc/index.html
   - Developer:
       - API conventions: dev/api-conventions.md
       - Observability: dev/observability.md
