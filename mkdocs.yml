@@ -159,10 +159,12 @@ nav:
       - Troubleshooting: troubleshooting.md
   - Reference:
       - API reference (rustdoc): api-reference.md
-      # Root-absolute link straight into the rustdoc tree that build-docs.sh nests
-      # at /rustdoc/. It exists only in the assembled site/ (and in production), not
-      # during `mkdocs serve` — the api-reference page above is the serve-time landing.
-      - rustdoc (Rust API) ↗: /rustdoc/index.html
+  # Top-level entry → its OWN tab in the header bar (navigation.tabs), so the Rust
+  # API docs are one click from the top of every page. Root-absolute link into the
+  # rustdoc tree build-docs.sh nests at /rustdoc/; it exists in the assembled site/
+  # and in production, not during `mkdocs serve` (the Reference page is the
+  # serve-time landing that explains this).
+  - Rust API ↗: /rustdoc/index.html
   - Developer:
       - API conventions: dev/api-conventions.md
       - Observability: dev/observability.md
