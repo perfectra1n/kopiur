@@ -77,7 +77,7 @@ pub fn repo_kind_str(kind: RepositoryKind) -> &'static str {
 
 /// The actionable message for the first credential Secret missing from the mover
 /// Job's namespace, or `None` if all are present. Lets a caller surface the
-/// blocking condition + Event before requeueing (see [`publish_missing_creds_event`]).
+/// blocking condition + Event before requeueing (see [`crate::io::publish_missing_creds_event`]).
 pub async fn first_missing_cred(
     client: &kube::Client,
     job_ns: &str,
@@ -173,12 +173,12 @@ pub struct MoverCreds {
 }
 
 /// Resolve the credential Secret names a mover Job should load via `envFrom`,
-/// handling both the self-managed (opt-out) path and default projection.
+/// handling both the self-managed default and opt-in projection.
 ///
-/// - `project == false` (the user opted out): verify each `refs` Secret already
-///   exists in `job_ns`; a missing one yields an actionable [`Error::MissingDependency`].
+/// - `project == false` (the default): verify each `refs` Secret already exists in
+///   `job_ns`; a missing one yields an actionable [`Error::MissingDependency`].
 ///   Returns the original names, `projected: 0`.
-/// - `project == true` (the default): for each ref, if its source namespace **is**
+/// - `project == true` (opted in): for each ref, if its source namespace **is**
 ///   `job_ns` the Secret is already where the mover needs it — verify it is present
 ///   (identical to the opt-out path) and use its original name, copying nothing. If
 ///   the source namespace **differs** (a shared `ClusterRepository`), read the

@@ -61,7 +61,7 @@ $ kubectl get backup <name> -n <ns> \
 ```
 
 - For a namespaced `Repository`, the repo and Secret are already together — nothing extra.
-- For a `ClusterRepository`, you must **replicate** the credential Secret into each workload namespace (Kopiur won't copy the shared repo's root credentials for you). See [Movers → the ClusterRepository gotcha](movers.md#the-credentials-secret-yours-to-place).
+- For a `ClusterRepository`, the credential Secret must reach each workload namespace. The easy fix: set [`credentialProjection.enabled: true`](movers.md#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos) on the repo so Kopiur copies it for you (off by default). Otherwise replicate it yourself. See [Movers → the credentials Secret](movers.md#the-credentials-secret).
 
 ### `MoverPermitted=False` — privileged mover not opted in
 

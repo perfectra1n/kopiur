@@ -50,10 +50,10 @@ pub struct RepositorySpec {
     /// namespace. ADR §3.1/§3.7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<RepositoryMaintenanceSpec>,
-    /// Credential-Secret projection. **Default-on**: when absent or
+    /// Credential-Secret projection. **Opt-in** (default off): when
     /// `enabled: true`, the operator copies the credential Secret(s) into each
     /// mover Job's namespace as needed (a no-op when they already live there).
-    /// Set `enabled: false` to opt out and manage the Secret yourself. ADR §3.1/§4.11.
+    /// Absent/`enabled: false` keeps the self-managed default. ADR §3.1/§4.11.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_projection: Option<CredentialProjection>,
 }

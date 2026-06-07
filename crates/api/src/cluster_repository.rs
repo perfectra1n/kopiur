@@ -64,12 +64,12 @@ pub struct ClusterRepositorySpec {
     /// lands (defaulting to the operator's namespace). ADR §3.2/§3.7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<RepositoryMaintenanceSpec>,
-    /// Credential-Secret projection. **Default-on** and the primary beneficiary:
-    /// this CR's `encryption.passwordSecretRef` is pinned to one namespace
-    /// (webhook-enforced), yet movers run in many workload namespaces — so when
-    /// absent or `enabled: true` the operator copies the credential Secret(s) into
-    /// each mover Job's namespace. Set `enabled: false` to manage them yourself.
-    /// ADR §3.2/§4.11.
+    /// Credential-Secret projection. **Opt-in** (default off) and the primary
+    /// beneficiary: this CR's `encryption.passwordSecretRef` is pinned to one
+    /// namespace (webhook-enforced), yet movers run in many workload namespaces —
+    /// so `enabled: true` makes the operator copy the credential Secret(s) into
+    /// each mover Job's namespace instead of you placing one in each. Strongly
+    /// recommended for shared repositories. ADR §3.2/§4.11.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_projection: Option<CredentialProjection>,
 }
@@ -256,8 +256,8 @@ credentialProjection:
         let reparsed: ClusterRepositorySpec = serde_json::from_value(json).expect("reparse");
         assert_eq!(spec, reparsed);
 
-        // Absent field stays absent (the controller treats absent as on — the
-        // default-on opt-out — without forcing the sub-object into the spec).
+        // Absent field stays absent (the controller treats absent as off — the
+        // self-managed default — without forcing the sub-object into the spec).
         let bare: ClusterRepositorySpec = from_yaml(
             "backend:\n  filesystem:\n    path: /repo\nencryption:\n  passwordSecretRef:\n    name: c\n    namespace: kopiur-system\nallowedNamespaces:\n  all: true\n",
         );
@@ -265,14 +265,14 @@ credentialProjection:
         let bare_json = serde_json::to_value(&bare).unwrap();
         assert!(bare_json.get("credentialProjection").is_none());
 
-        // An empty `credentialProjection: {}` defaults `enabled` to true (default-on).
+        // An empty `credentialProjection: {}` defaults `enabled` to false (opt-in).
         let empty: ClusterRepositorySpec = from_yaml(
             "backend:\n  filesystem:\n    path: /repo\nencryption:\n  passwordSecretRef:\n    name: c\n    namespace: kopiur-system\nallowedNamespaces:\n  all: true\ncredentialProjection: {}\n",
         );
         assert_eq!(
             empty.credential_projection.map(|p| p.enabled),
-            Some(true),
-            "credentialProjection defaults enabled=true (default-on opt-out)"
+            Some(false),
+            "credentialProjection.enabled defaults to false (opt-in)"
         );
     }
 

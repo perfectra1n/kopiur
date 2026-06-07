@@ -394,8 +394,7 @@ async fn bootstrap_via_mover(
         .spec
         .credential_projection
         .as_ref()
-        .map(|p| p.enabled)
-        .unwrap_or(true);
+        .is_some_and(|p| p.enabled);
     let refs = io::mover_creds_secret_refs(backend, &repo.spec.encryption, Some(namespace));
     let creds_names: Vec<String> = refs.iter().map(|r| r.name.clone()).collect();
     let creds = io::resolve_mover_creds(

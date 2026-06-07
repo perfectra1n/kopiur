@@ -74,7 +74,7 @@ The mover reads these **well-known keys** from the Secret you reference and feed
 
 /// note | ClusterRepository Secret references need a namespace
 
-Because a `ClusterRepository` is cluster-scoped it has no namespace of its own, so **every** Secret reference in it (`auth.secretRef`, `encryption.passwordSecretRef`) **must** carry an explicit `namespace:` (webhook-enforced). And remember the credential Secret also has to exist in each **workload** namespace — see [Movers → the ClusterRepository gotcha](movers.md#the-credentials-secret-yours-to-place).
+Because a `ClusterRepository` is cluster-scoped it has no namespace of its own, so **every** Secret reference in it (`auth.secretRef`, `encryption.passwordSecretRef`) **must** carry an explicit `namespace:` (webhook-enforced). The credential Secret also has to exist in each **workload** namespace a mover runs in — either place it there yourself, or (recommended for a shared repo) turn on [**credential projection**](movers.md#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos) and let Kopiur copy it for you.
 
 ///
 
@@ -170,7 +170,7 @@ For namespace `billing` + config `postgres-data`, that resolves to `billing-post
 /// warning | Two requirements for ClusterRepository backups
 
 1. Install the operator with **`installScope=cluster`** (otherwise `ClusterRepository` is never reconciled — see [Installation → scope](install.md#install-scope)).
-2. Replicate the credential Secret into each **workload** namespace; Kopiur deliberately does not copy the shared repo's root credentials for you. See [Movers → the ClusterRepository gotcha](movers.md#the-credentials-secret-yours-to-place).
+2. Get the credential Secret into each **workload** namespace a mover runs in. The easy way: set [`credentialProjection.enabled: true`](movers.md#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos) on the `ClusterRepository` and Kopiur copies it for you (off by default, recommended for shared repos). Otherwise replicate it yourself.
 
 ///
 

@@ -83,7 +83,7 @@ You don't manage the files — just put the value under the right key; the secre
 
 /// note | ClusterRepository: Secret refs need a namespace
 
-The per-backend pages use a namespaced `Repository`. For a cluster-scoped `ClusterRepository` the same backend stanzas apply, but **every** Secret reference must carry an explicit `namespace:` (webhook-enforced), and the credential Secret must also be replicated into each workload namespace — see [Movers → the ClusterRepository gotcha](movers.md#the-credentials-secret-yours-to-place). A worked S3 example is on the [S3 page](backends/s3.md#as-a-clusterrepository).
+The per-backend pages use a namespaced `Repository`. For a cluster-scoped `ClusterRepository` the same backend stanzas apply, but **every** Secret reference must carry an explicit `namespace:` (webhook-enforced), and the credential Secret must also reach each workload namespace — either replicate it yourself or turn on [credential projection](movers.md#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos) (recommended for shared repos). A worked S3 example is on the [S3 page](backends/s3.md#as-a-clusterrepository).
 
 ///
 
