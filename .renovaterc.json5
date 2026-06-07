@@ -1,4 +1,16 @@
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
   extends: ["local>home-operations/renovate-config"],
+  // Regenerate the chart's committed docs after an upgrade so a value bump
+  // doesn't leave README.md / values.schema.json stale and fail helm-docs-check.
+  // Runs the helm-docs + helm-schema binaries shipped in the Renovate container
+  // (mirrors `mise run helm-docs`).
+  postUpgradeTasks: {
+    commands: [
+      "helm-docs --chart-search-root=deploy/helm --log-level=warn",
+      "helm-schema --chart-search-root deploy/helm/kopiur --skip-auto-generation required,additionalProperties --append-newline",
+    ],
+    fileFilters: ["deploy/helm/kopiur/README.md", "deploy/helm/kopiur/values.schema.json"],
+    executionMode: "branch",
+  },
 }
