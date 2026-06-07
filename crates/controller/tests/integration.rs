@@ -51,7 +51,7 @@ fn sample_repository(name: &str) -> Repository {
         RepositorySpec {
             backend: Backend::Filesystem(FilesystemBackend {
                 path: "/repo".into(),
-                pvc_name: None,
+                volume: None,
             }),
             encryption: Encryption {
                 password_secret_ref: SecretKeyRef {
@@ -84,6 +84,7 @@ fn sample_backup_config(name: &str) -> BackupConfig {
                     name: "data".into(),
                 }),
                 pvc_selector: None,
+                nfs: None,
                 source_path_override: None,
                 source_path_strategy: None,
             }],
