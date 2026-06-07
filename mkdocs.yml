@@ -136,6 +136,9 @@ plugins:
 
 nav:
   - Introduction: index.md
+  - Concepts:
+      - How Kopia works: concepts/how-kopia-works.md
+      - Why Kopiur is designed this way: concepts/why-kopiur.md
   - User guide:
       - Getting started: getting-started.md
       - Installation: install.md

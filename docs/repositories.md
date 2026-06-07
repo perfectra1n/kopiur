@@ -11,6 +11,12 @@ There are two flavors:
 
 Both have the **same** backend/encryption/create surface; `ClusterRepository` adds a tenancy gate (`allowedNamespaces`) and identity templating. See [ClusterRepository](#clusterrepository-a-shared-repository) below.
 
+/// tip | One shared repository is the recommended default
+
+Point as many backups as you can at **one** repository. Kopia deduplicates by content hash across every writer, so pooling workloads into a single repository stores their common content once — and each `BackupConfig` writes under its own identity, so their snapshots never collide. See [Recommended: one shared repository](concepts/how-kopia-works.md#recommended-one-shared-repository) for the mechanism and the trade-offs.
+
+///
+
 /// tip | Anatomy of a Repository
 
 ```yaml
@@ -186,6 +192,7 @@ A complete, apply-ready example is [`deploy/examples/02-cluster-repository.yaml`
 
 ## See also
 
+- [How Kopia works](concepts/how-kopia-works.md) — dedup, the identity model, and why one shared repository maximizes it.
 - [Backend configuration](backends.md) — per-backend setup cookbook (prereqs, Secret keys, apply-ready manifests).
 - [Movers, RBAC & credentials](movers.md) — where the credential Secret must live.
 - [Maintenance](maintenance.md) — the default-managed space reclamation per repo.

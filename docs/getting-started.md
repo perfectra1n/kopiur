@@ -15,6 +15,8 @@ Kopiur splits one job into three resources so each can change independently:
 
 A `Restore` reads a snapshot back into a PVC. That's the whole model. Everything below is just those pieces in order.
 
+For the full picture — how Kopia dedups, the `username@hostname:path` identity model, and why these are separate resources — see [Concepts](concepts/how-kopia-works.md).
+
 ///
 
 ## What you need
@@ -272,6 +274,7 @@ You created a **Repository** (where), a **BackupConfig** (what), invoked it with
 
 From here:
 
+- **[Concepts](concepts/how-kopia-works.md)** — the _why_ behind what you just did: dedup, the identity model, the three-resource split, and one-shared-repository guidance.
 - **[Repositories & backends](repositories.md)** — point Kopiur at Azure, GCS, B2, a NAS (filesystem/SFTP/WebDAV), or rclone; and share one repo across namespaces with `ClusterRepository`.
 - **[Backups & schedules](backups.md)** — multi-PVC selectors, hooks (quiesce a database before snapshotting), retention tuning, `deletionPolicy`.
 - **[Restores](restores.md)** — point-in-time restore, deploy-or-restore (GitOps), and restoring snapshots Kopiur didn't create.

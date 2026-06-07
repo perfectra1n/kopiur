@@ -30,17 +30,17 @@ spec:
   backend:
     s3:
       bucket: org-kopia-repo
-      prefix: ""                       # bucket root, maximum dedup across tenants
+      prefix: "" # bucket root, maximum dedup across tenants
       endpoint: s3.us-east-1.amazonaws.com
       region: us-east-1
       auth:
         secretRef:
           name: kopia-platform-creds
-          namespace: kopiur-system     # explicit ns required for cluster scope
+          namespace: kopiur-system # explicit ns required for cluster scope
   encryption:
     passwordSecretRef:
       name: kopia-platform-creds
-      namespace: kopiur-system         # explicit ns required for cluster scope
+      namespace: kopiur-system # explicit ns required for cluster scope
       key: KOPIA_PASSWORD
   # Tenancy gate (externally-tagged: list | selector | all).
   allowedNamespaces:
@@ -48,6 +48,7 @@ spec:
       - billing
       - payments
       - identity
+      - media
   # Jinja2-compatible templates rendered at admission (ADR §4.2).
   identityDefaults:
     hostnameTemplate: "{{ .Namespace }}"
@@ -76,3 +77,24 @@ spec:
   retention:
     keepDaily: 14
 # Identity resolves to billing-postgres-data@billing:/pvc/postgres-data.
+---
+# A SECOND tenant, in a different namespace, points at the SAME ClusterRepository.
+# Both apps share one deduplicated content pool, but their snapshots never collide
+# because each writes under its own templated identity (ADR-0001 §4.3). This is the
+# recommended layout — one shared repository, many apps — covered in the
+# "How Kopia works" concepts page.
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: BackupConfig
+metadata:
+  name: jellyfin-config
+  namespace: media
+spec:
+  repository:
+    kind: ClusterRepository
+    name: shared-primary
+  sources:
+    - pvc:
+        name: jellyfin-config
+  retention:
+    keepDaily: 7
+# Identity resolves to media-jellyfin-config@media:/pvc/jellyfin-config.
