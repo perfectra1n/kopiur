@@ -583,17 +583,18 @@ spec:
                 type: object
               credentialProjection:
                 description: |-
-                  Opt-in credential-Secret projection. Absent/`enabled: false` keeps the
-                  self-managed default (the credential Secret must already exist in each
-                  mover Job's namespace); `enabled: true` makes the operator copy it there.
-                  ADR §3.1/§4.11.
+                  Credential-Secret projection. **Default-on**: when absent or
+                  `enabled: true`, the operator copies the credential Secret(s) into each
+                  mover Job's namespace as needed (a no-op when they already live there).
+                  Set `enabled: false` to opt out and manage the Secret yourself. ADR §3.1/§4.11.
                 nullable: true
                 properties:
                   enabled:
-                    default: false
+                    default: true
                     description: |-
-                      When true, the operator copies the repository's credential Secret(s) into
-                      the namespace of each mover Job that uses this repository. Off by default.
+                      Whether the operator projects the repository's credential Secret(s) into
+                      each mover Job's namespace. Defaults to `true` (default-on); set `false`
+                      to manage the Secret in each workload namespace yourself.
                     type: boolean
                 type: object
               encryption:
@@ -1711,18 +1712,20 @@ spec:
                 type: object
               credentialProjection:
                 description: |-
-                  Opt-in credential-Secret projection. The primary beneficiary: this CR's
-                  `encryption.passwordSecretRef` is pinned to one namespace (webhook-enforced),
-                  yet movers run in many workload namespaces. Absent/`enabled: false` keeps
-                  the self-managed default; `enabled: true` makes the operator copy the
-                  credential Secret(s) into each mover Job's namespace. ADR §3.2/§4.11.
+                  Credential-Secret projection. **Default-on** and the primary beneficiary:
+                  this CR's `encryption.passwordSecretRef` is pinned to one namespace
+                  (webhook-enforced), yet movers run in many workload namespaces — so when
+                  absent or `enabled: true` the operator copies the credential Secret(s) into
+                  each mover Job's namespace. Set `enabled: false` to manage them yourself.
+                  ADR §3.2/§4.11.
                 nullable: true
                 properties:
                   enabled:
-                    default: false
+                    default: true
                     description: |-
-                      When true, the operator copies the repository's credential Secret(s) into
-                      the namespace of each mover Job that uses this repository. Off by default.
+                      Whether the operator projects the repository's credential Secret(s) into
+                      each mover Job's namespace. Defaults to `true` (default-on); set `false`
+                      to manage the Secret in each workload namespace yourself.
                     type: boolean
                 type: object
               encryption:

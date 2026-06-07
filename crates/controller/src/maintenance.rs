@@ -243,7 +243,7 @@ async fn spawn_maintenance_job(
     // Secret, so projection (`spec.credentialProjection`) is especially useful here:
     // the operator copies it in, owned by this Maintenance. Errors propagate as
     // MissingDependency (Transient) and the run requeues.
-    let creds_secrets = io::resolve_mover_creds_for(
+    let creds = io::resolve_mover_creds_for(
         &ctx.client,
         namespace,
         job_name,
@@ -253,10 +253,11 @@ async fn spawn_maintenance_job(
         &maint.spec.repository.name,
     )
     .await?;
-    if repo.project_credentials {
+    if creds.projected > 0 {
         ctx.metrics
-            .inc_secrets_projected(namespace, creds_secrets.len() as u64);
+            .inc_secrets_projected(namespace, creds.projected);
     }
+    let creds_secrets = creds.names;
 
     let inputs = MoverJobInputs {
         name: job_name,

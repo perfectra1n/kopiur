@@ -147,26 +147,38 @@ pub struct Encryption {
     pub password_secret_ref: SecretKeyRef,
 }
 
-/// Opt-in projection of a repository's credential `Secret`(s) into the namespace
-/// where each mover Job runs. ADR §3.1/§4.11.
+/// Projection of a repository's credential `Secret`(s) into the namespace where
+/// each mover Job runs. **Default-on** (opt-out). ADR §3.1/§4.11.
 ///
-/// Default off: Kopiur's baseline contract is that users self-manage credential
-/// Secrets in every namespace a mover runs in (a mover loads them via namespace-
-/// local `envFrom`). For a shared `ClusterRepository` whose Secret is pinned to
-/// one namespace, that means hand-copying it everywhere. When `enabled`, the
-/// operator instead reads the source Secret(s) and writes a kopiur-managed copy
-/// into the Job's namespace, owned by the consuming CR (garbage-collected with it)
-/// and refreshed from source on every run.
+/// A mover loads credentials via namespace-local `envFrom`, so the Secret must
+/// exist in the Job's (workload) namespace. By default the operator supplies it
+/// for you: before each run it reads the repository's source Secret(s) and writes
+/// a kopiur-managed copy into the Job's namespace, owned by the consuming CR
+/// (garbage-collected with it) and refreshed from source on every run. Set
+/// `enabled: false` to opt out and manage the Secret in each namespace yourself.
+///
+/// Projection is a no-op when the source Secret already lives in the Job's
+/// namespace (the common namespaced-`Repository` layout): there is nothing to
+/// copy, so the operator just verifies it is present — identical to the
+/// self-managed path. It only actually copies for the cross-namespace case (a
+/// shared `ClusterRepository` whose Secret is pinned to another namespace).
 ///
 /// A sub-object (not a bare `bool`) so future knobs (key remapping, a copy-name
 /// template, immutability) slot in without API breakage (ADR §4.11).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialProjection {
-    /// When true, the operator copies the repository's credential Secret(s) into
-    /// the namespace of each mover Job that uses this repository. Off by default.
-    #[serde(default)]
+    /// Whether the operator projects the repository's credential Secret(s) into
+    /// each mover Job's namespace. Defaults to `true` (default-on); set `false`
+    /// to manage the Secret in each workload namespace yourself.
+    #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl Default for CredentialProjection {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// Behavior when the repository does not yet exist. ADR §3.1 `create`.

@@ -162,19 +162,32 @@ pub fn build_projected_secret(
     }
 }
 
+/// The credential Secret names a mover Job should load via `envFrom`, plus how
+/// many of them the operator actually projected (copied cross-namespace) this run.
+pub struct MoverCreds {
+    /// Names to put in the Job's `envFrom`, in order.
+    pub names: Vec<String>,
+    /// How many `names` are freshly-projected cross-namespace copies (for the
+    /// `kopiur_secrets_projected` metric). Same-namespace Secrets are not counted.
+    pub projected: u64,
+}
+
 /// Resolve the credential Secret names a mover Job should load via `envFrom`,
-/// handling both the self-managed default and opt-in projection.
+/// handling both the self-managed (opt-out) path and default projection.
 ///
-/// - `project == false` (default): the user owns the Secrets. Verify each `refs`
-///   Secret already exists in `job_ns` (today's behavior); a missing one yields an
-///   actionable [`Error::MissingDependency`]. Returns the original names.
-/// - `project == true`: the operator owns the copies. For each ref, read the
-///   source Secret from its resolved source namespace and apply a per-Job copy
-///   (named [`projected_creds_name`], owned by `owner`) into `job_ns`; returns the
-///   projected names for the Job's `envFrom`. A missing source Secret (or an
-///   unresolvable source namespace) yields an actionable [`Error::MissingDependency`];
-///   a `403` on apply is mapped to a message pointing at the Helm RBAC toggle
-///   (degrade-not-crash — projection requires cluster-wide `secrets` create/patch).
+/// - `project == false` (the user opted out): verify each `refs` Secret already
+///   exists in `job_ns`; a missing one yields an actionable [`Error::MissingDependency`].
+///   Returns the original names, `projected: 0`.
+/// - `project == true` (the default): for each ref, if its source namespace **is**
+///   `job_ns` the Secret is already where the mover needs it — verify it is present
+///   (identical to the opt-out path) and use its original name, copying nothing. If
+///   the source namespace **differs** (a shared `ClusterRepository`), read the
+///   source Secret and apply a per-Job copy (named [`projected_creds_name`], owned
+///   by `owner`) into `job_ns`, and use the projected name. A missing source Secret
+///   (or an unresolvable source namespace) yields an actionable
+///   [`Error::MissingDependency`]; a `403` on apply is mapped to a message pointing
+///   at the Helm RBAC toggle (degrade-not-crash — projection needs cluster-wide
+///   `secrets` create/patch).
 ///
 /// Re-reading the source and re-applying on every run keeps copies fresh, so there
 /// is no drift to reconcile and no source-watch to maintain.
@@ -186,18 +199,35 @@ pub async fn resolve_mover_creds(
     refs: &[CredsSecretRef],
     project: bool,
     ctx: &CredsContext<'_>,
-) -> Result<Vec<String>> {
+) -> Result<MoverCreds> {
     if !project {
         ensure_creds_present(client, job_ns, ctx).await?;
-        return Ok(refs.iter().map(|r| r.name.clone()).collect());
+        return Ok(MoverCreds {
+            names: refs.iter().map(|r| r.name.clone()).collect(),
+            projected: 0,
+        });
     }
 
     let dst: Api<Secret> = Api::namespaced(client.clone(), job_ns);
-    let mut projected = Vec::with_capacity(refs.len());
+    let mut names = Vec::with_capacity(refs.len());
+    let mut projected = 0u64;
     for (idx, r) in refs.iter().enumerate() {
         let src_ns = r.namespace.as_deref().ok_or_else(|| {
             Error::MissingDependency(projection_unresolved_ns_message(&r.name, ctx))
         })?;
+        // Already in the mover's namespace (the common namespaced-Repository case):
+        // nothing to copy. Verify it is present — exactly the self-managed path —
+        // and use its original name, so default-on projection is a no-op here.
+        if src_ns == job_ns {
+            if dst.get_opt(&r.name).await?.is_none() {
+                return Err(Error::MissingDependency(missing_creds_message(
+                    &r.name, job_ns, ctx,
+                )));
+            }
+            names.push(r.name.clone());
+            continue;
+        }
+        // Cross-namespace: project a per-Job copy owned by the consuming CR.
         let src_api: Api<Secret> = Api::namespaced(client.clone(), src_ns);
         let src = src_api.get_opt(&r.name).await?.ok_or_else(|| {
             Error::MissingDependency(projection_source_missing_message(
@@ -209,9 +239,10 @@ pub async fn resolve_mover_creds(
         apply(&dst, &proj_name, &secret)
             .await
             .map_err(|e| map_projection_apply_error(e, &proj_name, job_ns))?;
-        projected.push(proj_name);
+        names.push(proj_name);
+        projected += 1;
     }
-    Ok(projected)
+    Ok(MoverCreds { names, projected })
 }
 
 /// Resolve the mover Job's `envFrom` credential Secret names for a consumer run
@@ -230,7 +261,7 @@ pub async fn resolve_mover_creds_for(
     repo: &ResolvedRepository,
     repo_kind: &str,
     repo_name: &str,
-) -> Result<Vec<String>> {
+) -> Result<MoverCreds> {
     let refs = mover_creds_secret_refs(
         &repo.backend,
         &repo.encryption,

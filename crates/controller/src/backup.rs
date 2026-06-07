@@ -337,7 +337,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
     // already present here. Either way a problem surfaces as a clear
     // `CredentialsAvailable=False` condition + Warning Event before we launch a Job
     // that would hang on a missing-Secret envFrom (ADR §4.12).
-    let creds_secrets = match io::resolve_mover_creds_for(
+    let creds = match io::resolve_mover_creds_for(
         &ctx.client,
         &namespace,
         &name,
@@ -348,7 +348,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
     )
     .await
     {
-        Ok(names) => names,
+        Ok(c) => c,
         Err(Error::MissingDependency(msg)) => {
             let existing = backup
                 .status
@@ -374,9 +374,9 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         }
         Err(e) => return Err(e),
     };
-    if repo.project_credentials {
+    if creds.projected > 0 {
         ctx.metrics
-            .inc_secrets_projected(&namespace, creds_secrets.len() as u64);
+            .inc_secrets_projected(&namespace, creds.projected);
     }
     // Creds are present (or were just projected): clear any stale
     // `CredentialsAvailable=False` from a prior reconcile so a fixed problem stops
@@ -386,7 +386,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
             .iter()
             .any(|c| c.type_ == CREDENTIALS_AVAILABLE_CONDITION && c.status != "True")
     {
-        let (reason, note) = if repo.project_credentials {
+        let (reason, note) = if creds.projected > 0 {
             (
                 CREDENTIALS_PROJECTED_REASON,
                 "credential Secret(s) projected into the mover namespace",
@@ -407,6 +407,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         );
         io::patch_status(&api, &name, serde_json::json!({ "conditions": conditions })).await?;
     }
+    let creds_secrets = creds.names;
 
     let labels = run_labels(&config, origin);
     let limits = job_limits(backup);
@@ -553,7 +554,7 @@ async fn delete_snapshot_via_job(
     // credential Secret(s) into this namespace before building the Job. Errors
     // propagate as MissingDependency (Transient) — this is the delete path, so we
     // requeue rather than surface a CredentialsAvailable condition.
-    let creds_secrets = io::resolve_mover_creds_for(
+    let creds = io::resolve_mover_creds_for(
         &ctx.client,
         namespace,
         &job_name,
@@ -563,6 +564,11 @@ async fn delete_snapshot_via_job(
         &config.spec.repository.name,
     )
     .await?;
+    if creds.projected > 0 {
+        ctx.metrics
+            .inc_secrets_projected(namespace, creds.projected);
+    }
+    let creds_secrets = creds.names;
     let work_spec = MoverWorkSpec {
         version: 1,
         operation: Operation::SnapshotDelete(SnapshotDeleteOp {

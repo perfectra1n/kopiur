@@ -328,7 +328,7 @@ async fn drive_direct_restore(
     }
     let owner = io::owner_ref_for(restore, "Restore")?;
     let repo_ref = restore.spec.repository.as_ref();
-    let creds_secrets = match io::resolve_mover_creds_for(
+    let creds = match io::resolve_mover_creds_for(
         &ctx.client,
         namespace,
         name,
@@ -343,7 +343,7 @@ async fn drive_direct_restore(
     )
     .await
     {
-        Ok(names) => names,
+        Ok(c) => c,
         Err(Error::MissingDependency(msg)) => {
             let existing = restore
                 .status
@@ -369,9 +369,9 @@ async fn drive_direct_restore(
         }
         Err(e) => return Err(e),
     };
-    if repo.project_credentials {
+    if creds.projected > 0 {
         ctx.metrics
-            .inc_secrets_projected(namespace, creds_secrets.len() as u64);
+            .inc_secrets_projected(namespace, creds.projected);
     }
     // Creds present (or projected): clear any stale `CredentialsAvailable=False`.
     if let Some(conds) = restore.status.as_ref().map(|s| s.conditions.as_slice())
@@ -379,7 +379,7 @@ async fn drive_direct_restore(
             .iter()
             .any(|c| c.type_ == CREDENTIALS_AVAILABLE_CONDITION && c.status != "True")
     {
-        let (reason, note) = if repo.project_credentials {
+        let (reason, note) = if creds.projected > 0 {
             (
                 CREDENTIALS_PROJECTED_REASON,
                 "credential Secret(s) projected into the mover namespace",
@@ -400,6 +400,7 @@ async fn drive_direct_restore(
         );
         io::patch_status(api, name, serde_json::json!({ "conditions": conditions })).await?;
     }
+    let creds_secrets = creds.names;
 
     let identity = MoverIdentity {
         username: "restore".into(),

@@ -394,10 +394,11 @@ async fn bootstrap_via_mover(
         .spec
         .credential_projection
         .as_ref()
-        .is_some_and(|p| p.enabled);
+        .map(|p| p.enabled)
+        .unwrap_or(true);
     let refs = io::mover_creds_secret_refs(backend, &repo.spec.encryption, Some(namespace));
     let creds_names: Vec<String> = refs.iter().map(|r| r.name.clone()).collect();
-    let creds_secrets = io::resolve_mover_creds(
+    let creds = io::resolve_mover_creds(
         &ctx.client,
         namespace,
         &job_name,
@@ -417,10 +418,11 @@ async fn bootstrap_via_mover(
         },
     )
     .await?;
-    if project {
+    if creds.projected > 0 {
         ctx.metrics
-            .inc_secrets_projected(namespace, creds_secrets.len() as u64);
+            .inc_secrets_projected(namespace, creds.projected);
     }
+    let creds_secrets = creds.names;
     let mut labels = BTreeMap::new();
     labels.insert(
         "kopiur.home-operations.com/repository".to_string(),
