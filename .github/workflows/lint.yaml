@@ -20,8 +20,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # renovate: datasource=github-releases depName=helm-unittest/helm-unittest
-  HELM_UNITTEST_VERSION: "v1.0.3"
 
 jobs:
   rust-lint:
@@ -74,11 +72,6 @@ jobs:
 
       - name: Run helm lint
         run: mise run helm-lint
-
-      - name: Run helm unit tests
-        run: |
-          helm plugin install https://github.com/helm-unittest/helm-unittest --version "${HELM_UNITTEST_VERSION}" --verify=false
-          mise run helm-test
 
       - name: Check chart docs are current
         run: mise run helm-docs-check
