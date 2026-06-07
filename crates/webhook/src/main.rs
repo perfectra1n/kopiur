@@ -89,6 +89,13 @@ async fn serve_tls(
         .await
         .map_err(|e| anyhow::anyhow!("failed to load TLS cert/key: {e}"))?;
 
+    // Hot-reload the serving cert so an operator-rotated leaf (the
+    // `webhook.tls.mode: self` path: the controller rewrites the mounted Secret,
+    // which the kubelet syncs into these files) is served without a pod restart.
+    // A reload failure (e.g. mid-write files) keeps the current config and is
+    // retried next tick — never fatal.
+    spawn_cert_reload(config.clone(), cert_path.to_string(), key_path.to_string());
+
     let handle = Handle::new();
     // Trigger graceful shutdown of axum-server when a signal arrives.
     let shutdown_handle = handle.clone();
@@ -104,6 +111,29 @@ async fn serve_tls(
         .serve(router.into_make_service())
         .await?;
     Ok(())
+}
+
+/// Periodically re-read the cert/key PEM files into the live [`RustlsConfig`],
+/// so a rotated serving leaf is picked up with zero downtime. The first tick
+/// fires immediately and is skipped (the config was just loaded).
+fn spawn_cert_reload(
+    config: axum_server::tls_rustls::RustlsConfig,
+    cert_path: String,
+    key_path: String,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(kopiur_webhook::config::TLS_RELOAD_INTERVAL);
+        ticker.tick().await; // consume the immediate first tick
+        loop {
+            ticker.tick().await;
+            match config.reload_from_pem_file(&cert_path, &key_path).await {
+                Ok(()) => tracing::debug!("reloaded webhook TLS cert from disk"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to reload webhook TLS cert; keeping current")
+                }
+            }
+        }
+    });
 }
 
 /// Resolve on SIGTERM (Kubernetes pod termination) or Ctrl-C.

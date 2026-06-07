@@ -60,6 +60,15 @@ pub enum Error {
     /// Structural.
     #[error("invariant violated: {0}")]
     Invariant(String),
+
+    /// Self-managed webhook TLS setup failed: minting the CA/leaf, writing the
+    /// serving Secret, or injecting `caBundle` into a webhook configuration
+    /// ([`crate::webhook_tls`]). Transient — the webhook config or namespace may
+    /// not exist yet at boot, and the periodic reconcile retries. Never fatal to
+    /// the controller (degrade-not-crash): admission simply stays untrusted until
+    /// it succeeds.
+    #[error("webhook TLS setup failed: {0}")]
+    WebhookSetup(String),
 }
 
 /// How a reconcile error should be re-driven — the classification that picks the
@@ -110,7 +119,9 @@ impl Error {
     /// [`Terminal`](ErrorClass::Terminal) — retrying it on a tight loop only spams.
     pub fn class(&self) -> ErrorClass {
         match self {
-            Error::Kube(_) | Error::MissingDependency(_) => ErrorClass::Transient,
+            Error::Kube(_) | Error::MissingDependency(_) | Error::WebhookSetup(_) => {
+                ErrorClass::Transient
+            }
             Error::Kopia(e) => {
                 if e.class().is_retryable() {
                     ErrorClass::Transient
@@ -156,6 +167,16 @@ mod tests {
     fn kube_and_missing_are_transient() {
         assert_eq!(
             Error::MissingDependency("repo".into()).class(),
+            ErrorClass::Transient
+        );
+    }
+
+    #[test]
+    fn webhook_setup_is_transient() {
+        // Webhook-TLS setup retries (the config/namespace may not exist yet at
+        // boot); it must never hard-stop the controller.
+        assert_eq!(
+            Error::WebhookSetup("no such config".into()).class(),
             ErrorClass::Transient
         );
     }

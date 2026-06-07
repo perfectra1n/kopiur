@@ -13,10 +13,10 @@ Requires Kubernetes **>= 1.24** — the CSI volume-populator path (`Restore` +
 ## TL;DR
 
 ```bash
-# namespaced install (default), self-managed webhook cert disabled-by-default:
+# namespaced install (default). The webhook cert is self-managed by default —
+# no cert-manager, no manual steps:
 helm install kopiur deploy/helm/kopiur \
-  --namespace kopiur-system --create-namespace \
-  --set webhook.certManager.enabled=true   # easiest: let cert-manager mint the cert
+  --namespace kopiur-system --create-namespace
 ```
 
 See [`docs/install.md`](../../../docs/install.md) for the full quickstart and prerequisites.
@@ -38,12 +38,15 @@ helm install kopiur deploy/helm/kopiur --set installScope=cluster ...
 
 The RBAC rules are **synced from `cargo xtask gen-rbac`** (the checked-in `deploy/rbac/operator-*.yaml`), which derives the `kopiur.home-operations.com` permissions from the kube-rs `Resource` traits. The xtask is the source of truth; the chart templates carry a header comment to that effect and own only the names/labels.
 
-### Webhook TLS: cert-manager vs self-managed
+### Webhook TLS: `webhook.tls.mode`
 
-The admission webhook always serves TLS. Two options:
+The admission webhook always serves TLS. `webhook.tls.mode` picks how the serving certificate is provisioned and trusted:
 
-- **`webhook.certManager.enabled=true`** — the chart provisions a cert-manager `Certificate` (+ a self-signed `Issuer`, unless you point `webhook.certManager.issuerRef` at your own) and lets cert-manager's `ca-injector` populate the `caBundle` on both webhook configurations. Requires cert-manager installed in the cluster.
-- **`webhook.certManager.enabled=false`** (default) — you supply the serving cert yourself: create the `Secret` named by `webhook.tls.secretName` (type `kubernetes.io/tls`) and set `webhook.caBundle` (base64 PEM) so the API server trusts the webhook.
+- **`self`** (default) — the operator mints its own CA + serving cert, writes the `Secret` (`webhook.tls.secretName`), and injects the `caBundle` into both webhook configurations itself. **No cert-manager, no manual steps.** The leaf is auto-rotated before expiry and the webhook hot-reloads it with zero downtime. (The webhook pod waits in `ContainerCreating` until the controller mints the Secret — a few seconds after the controller is ready.)
+- **`cert-manager`** — the chart provisions a cert-manager `Certificate` (+ a self-signed `Issuer`, unless you point `webhook.certManager.issuerRef` at your own) and lets cert-manager's `ca-injector` populate the `caBundle`. Requires cert-manager installed.
+- **`manual`** — you supply the serving cert yourself: create the `Secret` named by `webhook.tls.secretName` (type `kubernetes.io/tls`) and set `webhook.caBundle` (base64 PEM) so the API server trusts the webhook.
+
+In `self` mode the operator's ServiceAccount is granted the minimal extra RBAC to write that one Secret and `patch` the `caBundle` of its two webhook configurations (resourceName-scoped); a namespaced install also gets a tiny ClusterRole for the cluster-scoped webhook-config patch.
 
 Disable the webhook entirely with `webhook.enabled=false` (validation then falls back to the controller's defensive checks only — not recommended).
 
@@ -61,7 +64,7 @@ Metrics are always available on the controller's `/metrics` (also `/healthz`, `/
 
 ```bash
 helm lint deploy/helm/kopiur
-helm template kopiur deploy/helm/kopiur --set installScope=cluster --set webhook.certManager.enabled=true
+helm template kopiur deploy/helm/kopiur --set installScope=cluster --set webhook.tls.mode=cert-manager
 ```
 
 {{ template "chart.maintainersSection" . }}

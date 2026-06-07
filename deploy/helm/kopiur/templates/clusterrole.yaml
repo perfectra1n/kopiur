@@ -92,4 +92,28 @@ rules:
     resources:
       - rolebindings
     verbs: [get, create, update, patch]
+  {{- if eq (include "kopiur.webhook.selfManaged" .) "true" }}
+  # Self-managed webhook TLS (webhook.tls.mode: self): the controller mints its
+  # own serving cert and injects the caBundle into its webhook configurations, so
+  # cert-manager is not required. get+patch are resourceName-scoped to the two
+  # configs the chart owns. `secrets` create is unscoped (the authorizer cannot
+  # match a resourceName at create time); the rotation re-apply (update/patch) is
+  # scoped to the serving Secret by name. SYNCED from xtask (webhook_cert_* rules).
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - validatingwebhookconfigurations
+      - mutatingwebhookconfigurations
+    resourceNames:
+      - {{ include "kopiur.fullname" . }}-validating
+      - {{ include "kopiur.fullname" . }}-mutating
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames:
+      - {{ .Values.webhook.tls.secretName }}
+    verbs: [update, patch]
+  {{- end }}
 {{- end }}

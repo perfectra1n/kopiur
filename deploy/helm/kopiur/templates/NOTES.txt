@@ -15,15 +15,28 @@ Webhook: {{ if .Values.webhook.enabled }}enabled (failurePolicy={{ .Values.webho
 
    kubectl get crd -l app.kubernetes.io/part-of=kopiur
    # repositories, clusterrepositories, backupconfigs, backups,
-   # backupschedules, restores, maintenances (all in group kopiur.dev)
+   # backupschedules, restores, maintenances (all in group kopiur.home-operations.com)
 
-{{- if and .Values.webhook.enabled (not .Values.webhook.certManager.enabled) }}
+{{- if .Values.webhook.enabled }}
+{{- if eq .Values.webhook.tls.mode "self" }}
 
-   NOTE: webhook.certManager.enabled is false. You must:
+   Webhook TLS: self-managed (webhook.tls.mode: self). The controller mints the
+   serving cert into Secret "{{ .Values.webhook.tls.secretName }}" and injects the caBundle into
+   the webhook configurations — no cert-manager and no manual steps. The webhook
+   pod stays in ContainerCreating until the controller creates that Secret (a few
+   seconds after the controller becomes ready).
+{{- else if eq .Values.webhook.tls.mode "cert-manager" }}
+
+   Webhook TLS: cert-manager (webhook.tls.mode: cert-manager). cert-manager must
+   be installed; it issues the serving cert and its ca-injector populates caBundle.
+{{- else if eq .Values.webhook.tls.mode "manual" }}
+
+   NOTE: webhook.tls.mode is "manual". You must:
      a) create the TLS Secret "{{ .Values.webhook.tls.secretName }}" (kubernetes.io/tls) in
         namespace {{ .Release.Namespace }} with the webhook serving cert, and
      b) set webhook.caBundle (base64 PEM) so the API server trusts it.
-   Otherwise admission of kopiur.dev objects will fail{{ if eq .Values.webhook.failurePolicy "Fail" }} (failurePolicy=Fail){{ end }}.
+   Otherwise admission of kopiur.home-operations.com objects will fail{{ if eq .Values.webhook.failurePolicy "Fail" }} (failurePolicy=Fail){{ end }}.
+{{- end }}
 {{- end }}
 
 3. Create your first repository and start backing up a PVC. Minimal example:
@@ -36,7 +49,7 @@ Webhook: {{ if .Values.webhook.enabled }}enabled (failurePolicy={{ .Values.webho
      AWS_SECRET_ACCESS_KEY: "..."
      KOPIA_PASSWORD: "choose-something-long"
    ---
-   apiVersion: kopiur.dev/v1alpha1
+   apiVersion: kopiur.home-operations.com/v1alpha1
    kind: Repository
    metadata: { name: nas-primary, namespace: {{ .Release.Namespace }} }
    spec:

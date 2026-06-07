@@ -647,20 +647,14 @@
         },
         "caBundle": {
           "default": "",
-          "description": "Base64-encoded PEM CA bundle injected into the webhook configurations\nwhen certManager.enabled is false. Required for the API server to trust a\nself-managed serving cert. Ignored when certManager.enabled is true.",
+          "description": "Base64-encoded PEM CA bundle injected into the webhook configurations.\nOnly used when tls.mode is manual; required there so the API server trusts\nthe serving cert. Ignored in self and cert-manager modes (caBundle is\npopulated by the operator or cert-manager's ca-injector respectively).",
           "title": "caBundle",
           "type": "string"
         },
         "certManager": {
           "properties": {
-            "enabled": {
-              "default": false,
-              "description": "Provision a cert-manager Certificate + self-signed Issuer for the\nwebhook, and let cert-manager's ca-injector populate caBundle on the\nwebhook configurations (via the cert-manager.io/inject-ca-from annotation).\nWhen false you must supply webhook.tls.secretName yourself and set\nwebhook.caBundle (base64 PEM) so the API server trusts the webhook.",
-              "title": "enabled",
-              "type": "boolean"
-            },
             "issuerRef": {
-              "description": "Use an existing Issuer/ClusterIssuer instead of the self-signed Issuer\nthis chart creates. Leave name empty to use the chart-managed Issuer.",
+              "description": "Use an existing Issuer/ClusterIssuer instead of the self-signed Issuer\nthis chart creates. Only used when tls.mode is cert-manager. Leave name\nempty to use the chart-managed self-signed Issuer.",
               "properties": {
                 "kind": {
                   "default": "Issuer",
@@ -810,11 +804,17 @@
           "type": "integer"
         },
         "tls": {
-          "description": "TLS for the webhook server. The webhook ALWAYS serves TLS (k8s requires\nHTTPS for admission). Two ways to provide the serving cert:",
+          "description": "TLS for the webhook server. The webhook ALWAYS serves TLS (k8s requires\nHTTPS for admission). How the serving cert is provisioned is chosen by\ntls.mode below.",
           "properties": {
+            "mode": {
+              "default": "self",
+              "description": "How the webhook serving certificate is provisioned and trusted. One of:\n  self         — the operator mints its own CA + serving cert, writes the\n                 Secret, and injects caBundle into the webhook\n                 configurations itself. No cert-manager, no manual steps,\n                 and the leaf is auto-rotated before expiry. (default)\n  cert-manager — cert-manager issues the serving cert and its ca-injector\n                 populates caBundle (requires cert-manager installed;\n                 configure certManager.issuerRef below).\n  manual       — you pre-create the tls.secretName Secret (kubernetes.io/tls)\n                 and set webhook.caBundle (base64 PEM) yourself.",
+              "title": "mode",
+              "type": "string"
+            },
             "secretName": {
               "default": "kopiur-webhook-tls",
-              "description": "Name of the Secret holding tls.crt / tls.key (and optionally ca.crt).\nWhen certManager.enabled is true this is the Secret cert-manager writes.\nOtherwise YOU must create this Secret before install (kubernetes.io/tls).",
+              "description": "Name of the Secret holding tls.crt / tls.key (and, in self mode, ca.crt).\nIn self mode the operator creates and owns it; in cert-manager mode\ncert-manager writes it; in manual mode YOU create it before install.",
               "title": "secretName",
               "type": "string"
             }

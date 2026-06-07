@@ -75,6 +75,21 @@ spec:
               value: {{ include "kopiur.moverName" . | quote }}
             - name: KOPIUR_MOVER_ROLE_KIND
               value: {{ eq .Values.installScope "cluster" | ternary "ClusterRole" "Role" | quote }}
+            {{- if eq (include "kopiur.webhook.selfManaged" .) "true" }}
+            # Self-managed webhook TLS (webhook.tls.mode: self): the controller
+            # mints the serving cert into this Secret and injects caBundle into
+            # the two webhook configurations below. No cert-manager required.
+            - name: KOPIUR_WEBHOOK_TLS_MANAGED
+              value: "true"
+            - name: KOPIUR_WEBHOOK_SECRET_NAME
+              value: {{ .Values.webhook.tls.secretName | quote }}
+            - name: KOPIUR_WEBHOOK_SERVICE_NAME
+              value: {{ include "kopiur.webhook.fullname" . | quote }}
+            - name: KOPIUR_WEBHOOK_VALIDATING_CONFIG
+              value: {{ include "kopiur.fullname" . }}-validating
+            - name: KOPIUR_WEBHOOK_MUTATING_CONFIG
+              value: {{ include "kopiur.fullname" . }}-mutating
+            {{- end }}
             {{- include "kopiur.otlpEnv" . | nindent 12 }}
             {{- with .Values.controller.extraEnv }}
             {{- toYaml . | nindent 12 }}

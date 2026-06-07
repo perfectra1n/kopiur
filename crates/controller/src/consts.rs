@@ -111,3 +111,10 @@ pub const ALLOW_PRIVILEGED_MOVER_ACTION: &str = "AnnotateNamespaceForPrivilegedM
 pub const CHECK_PERMISSIONS_ACTION: &str = "CheckPermissions";
 /// `action` for any other backend failure: check the backend configuration.
 pub const CHECK_BACKEND_ACTION: &str = "CheckBackend";
+
+/// Annotation the controller stamps on the self-managed webhook TLS Secret
+/// recording the serving leaf's `notAfter` as a Unix timestamp (seconds). Read
+/// back to decide leaf rotation without parsing the certificate
+/// ([`crate::webhook_tls`]).
+pub const WEBHOOK_CERT_NOT_AFTER_ANNOTATION: &str =
+    "kopiur.home-operations.com/webhook-cert-not-after";

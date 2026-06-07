@@ -5,7 +5,7 @@ metadata:
   name: {{ include "kopiur.fullname" . }}-mutating
   labels:
     {{- include "kopiur.labels" . | nindent 4 }}
-  {{- if .Values.webhook.certManager.enabled }}
+  {{- if eq .Values.webhook.tls.mode "cert-manager" }}
   annotations:
     cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "kopiur.webhook.fullname" . }}
   {{- end }}
@@ -19,9 +19,11 @@ webhooks:
     # (ADR §4.2/§4.5) are pinned once; safe to re-run if another webhook mutates.
     reinvocationPolicy: IfNeeded
     clientConfig:
-      {{- if not .Values.webhook.certManager.enabled }}
+      {{- if eq .Values.webhook.tls.mode "manual" }}
       caBundle: {{ .Values.webhook.caBundle | quote }}
       {{- end }}
+      # self mode: the operator injects caBundle at runtime (omitted here so its
+      # field manager owns it). cert-manager mode: ca-injector populates it.
       service:
         name: {{ include "kopiur.webhook.fullname" . }}
         namespace: {{ .Release.Namespace }}

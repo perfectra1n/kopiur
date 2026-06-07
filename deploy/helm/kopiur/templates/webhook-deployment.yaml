@@ -1,4 +1,8 @@
 {{- if .Values.webhook.enabled -}}
+{{- $mode := .Values.webhook.tls.mode | default "self" -}}
+{{- if not (has $mode (list "self" "cert-manager" "manual")) -}}
+{{- fail (printf "webhook.tls.mode must be one of self|cert-manager|manual, got %q" $mode) -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

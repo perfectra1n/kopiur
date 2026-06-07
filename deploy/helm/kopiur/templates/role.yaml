@@ -86,4 +86,55 @@ rules:
     resources:
       - rolebindings
     verbs: [get, create, update, patch]
+  {{- if eq (include "kopiur.webhook.selfManaged" .) "true" }}
+  # Self-managed webhook TLS (webhook.tls.mode: self): writing the serving Secret
+  # (namespace-local). create is unscoped (no resourceName at create time); the
+  # rotation re-apply is scoped to the serving Secret by name. The cluster-scoped
+  # webhook-config patch can't live in a Role — it's granted by the ClusterRole
+  # below. SYNCED from xtask (webhook_cert_secret_rules).
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames:
+      - {{ .Values.webhook.tls.secretName }}
+    verbs: [update, patch]
+  {{- end }}
+{{- end }}
+{{- if and (eq .Values.installScope "namespaced") (eq (include "kopiur.webhook.selfManaged" .) "true") }}
+---
+# Webhook configurations are cluster-scoped, so even a namespaced install needs a
+# (tightly resourceName-scoped) ClusterRole to inject their caBundle in self mode.
+# This is the ONLY cluster-level grant a namespaced install carries.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kopiur.fullname" . }}-webhook-cert
+  labels:
+    {{- include "kopiur.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - validatingwebhookconfigurations
+      - mutatingwebhookconfigurations
+    resourceNames:
+      - {{ include "kopiur.fullname" . }}-validating
+      - {{ include "kopiur.fullname" . }}-mutating
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kopiur.fullname" . }}-webhook-cert
+  labels:
+    {{- include "kopiur.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kopiur.fullname" . }}-webhook-cert
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kopiur.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
 {{- end }}

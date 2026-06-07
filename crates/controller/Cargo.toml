@@ -30,11 +30,16 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 libc = { workspace = true }
+rcgen = { workspace = true }
+time = { workspace = true }
 
 [dev-dependencies]
 serial_test = { workspace = true }
 tower = { workspace = true }
 http = "1"
+# Parse minted certs in webhook_tls tests to assert SANs + CA chaining. Matches
+# the version rcgen pulls via its `x509-parser` feature.
+x509-parser = "0.18"
 
 [features]
 integration = []

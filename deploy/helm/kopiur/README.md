@@ -15,10 +15,10 @@ Requires Kubernetes **>= 1.24** — the CSI volume-populator path (`Restore` +
 ## TL;DR
 
 ```bash
-# namespaced install (default), self-managed webhook cert disabled-by-default:
+# namespaced install (default). The webhook cert is self-managed by default —
+# no cert-manager, no manual steps:
 helm install kopiur deploy/helm/kopiur \
-  --namespace kopiur-system --create-namespace \
-  --set webhook.certManager.enabled=true   # easiest: let cert-manager mint the cert
+  --namespace kopiur-system --create-namespace
 ```
 
 See [`docs/install.md`](../../../docs/install.md) for the full quickstart and prerequisites.
@@ -40,12 +40,15 @@ helm install kopiur deploy/helm/kopiur --set installScope=cluster ...
 
 The RBAC rules are **synced from `cargo xtask gen-rbac`** (the checked-in `deploy/rbac/operator-*.yaml`), which derives the `kopiur.home-operations.com` permissions from the kube-rs `Resource` traits. The xtask is the source of truth; the chart templates carry a header comment to that effect and own only the names/labels.
 
-### Webhook TLS: cert-manager vs self-managed
+### Webhook TLS: `webhook.tls.mode`
 
-The admission webhook always serves TLS. Two options:
+The admission webhook always serves TLS. `webhook.tls.mode` picks how the serving certificate is provisioned and trusted:
 
-- **`webhook.certManager.enabled=true`** — the chart provisions a cert-manager `Certificate` (+ a self-signed `Issuer`, unless you point `webhook.certManager.issuerRef` at your own) and lets cert-manager's `ca-injector` populate the `caBundle` on both webhook configurations. Requires cert-manager installed in the cluster.
-- **`webhook.certManager.enabled=false`** (default) — you supply the serving cert yourself: create the `Secret` named by `webhook.tls.secretName` (type `kubernetes.io/tls`) and set `webhook.caBundle` (base64 PEM) so the API server trusts the webhook.
+- **`self`** (default) — the operator mints its own CA + serving cert, writes the `Secret` (`webhook.tls.secretName`), and injects the `caBundle` into both webhook configurations itself. **No cert-manager, no manual steps.** The leaf is auto-rotated before expiry and the webhook hot-reloads it with zero downtime. (The webhook pod waits in `ContainerCreating` until the controller mints the Secret — a few seconds after the controller is ready.)
+- **`cert-manager`** — the chart provisions a cert-manager `Certificate` (+ a self-signed `Issuer`, unless you point `webhook.certManager.issuerRef` at your own) and lets cert-manager's `ca-injector` populate the `caBundle`. Requires cert-manager installed.
+- **`manual`** — you supply the serving cert yourself: create the `Secret` named by `webhook.tls.secretName` (type `kubernetes.io/tls`) and set `webhook.caBundle` (base64 PEM) so the API server trusts the webhook.
+
+In `self` mode the operator's ServiceAccount is granted the minimal extra RBAC to write that one Secret and `patch` the `caBundle` of its two webhook configurations (resourceName-scoped); a namespaced install also gets a tiny ClusterRole for the cluster-scoped webhook-config patch.
 
 Disable the webhook entirely with `webhook.enabled=false` (validation then falls back to the controller's defensive checks only — not recommended).
 
@@ -132,9 +135,8 @@ Disable the webhook entirely with `webhook.enabled=false` (validation then falls
 | serviceAccount.create | bool | `true` | Create the ServiceAccount. Disable to bring your own. |
 | serviceAccount.name | string | `""` | Name to use; defaults to the chart fullname when empty. |
 | webhook.affinity | object | `{}` |  |
-| webhook.caBundle | string | `""` | Base64-encoded PEM CA bundle injected into the webhook configurations when certManager.enabled is false. Required for the API server to trust a self-managed serving cert. Ignored when certManager.enabled is true. |
-| webhook.certManager.enabled | bool | `false` | Provision a cert-manager Certificate + self-signed Issuer for the webhook, and let cert-manager's ca-injector populate caBundle on the webhook configurations (via the cert-manager.io/inject-ca-from annotation). When false you must supply webhook.tls.secretName yourself and set webhook.caBundle (base64 PEM) so the API server trusts the webhook. |
-| webhook.certManager.issuerRef | object | `{"kind":"Issuer","name":""}` | Use an existing Issuer/ClusterIssuer instead of the self-signed Issuer this chart creates. Leave name empty to use the chart-managed Issuer. |
+| webhook.caBundle | string | `""` | Base64-encoded PEM CA bundle injected into the webhook configurations. Only used when tls.mode is manual; required there so the API server trusts the serving cert. Ignored in self and cert-manager modes (caBundle is populated by the operator or cert-manager's ca-injector respectively). |
+| webhook.certManager.issuerRef | object | `{"kind":"Issuer","name":""}` | Use an existing Issuer/ClusterIssuer instead of the self-signed Issuer this chart creates. Only used when tls.mode is cert-manager. Leave name empty to use the chart-managed self-signed Issuer. |
 | webhook.containerPort | int | `8443` | Port the webhook container listens on (must match listenAddr above). |
 | webhook.enabled | bool | `true` | Deploy the webhook (Deployment + Service + Validating/Mutating configs). When false, validation falls back to the controller's defensive checks only. |
 | webhook.failurePolicy | string | `"Fail"` | failurePolicy for both webhook configurations: Fail (fail-closed, recommended for a backup operator — ADR §7.2) or Ignore. |
@@ -153,7 +155,8 @@ Disable the webhook entirely with `webhook.enabled=false` (validation then falls
 | webhook.serviceMonitor.labels | object | `{}` |  |
 | webhook.serviceMonitor.scrapeTimeout | string | `"10s"` |  |
 | webhook.timeoutSeconds | int | `10` | timeoutSeconds for admission requests (1..30). |
-| webhook.tls.secretName | string | `"kopiur-webhook-tls"` | Name of the Secret holding tls.crt / tls.key (and optionally ca.crt). When certManager.enabled is true this is the Secret cert-manager writes. Otherwise YOU must create this Secret before install (kubernetes.io/tls). |
+| webhook.tls.mode | string | `"self"` | How the webhook serving certificate is provisioned and trusted. One of:   self         — the operator mints its own CA + serving cert, writes the                  Secret, and injects caBundle into the webhook                  configurations itself. No cert-manager, no manual steps,                  and the leaf is auto-rotated before expiry. (default)   cert-manager — cert-manager issues the serving cert and its ca-injector                  populates caBundle (requires cert-manager installed;                  configure certManager.issuerRef below).   manual       — you pre-create the tls.secretName Secret (kubernetes.io/tls)                  and set webhook.caBundle (base64 PEM) yourself. |
+| webhook.tls.secretName | string | `"kopiur-webhook-tls"` | Name of the Secret holding tls.crt / tls.key (and, in self mode, ca.crt). In self mode the operator creates and owns it; in cert-manager mode cert-manager writes it; in manual mode YOU create it before install. |
 | webhook.tolerations | list | `[]` |  |
 
 ### Observability
@@ -164,7 +167,7 @@ Metrics are always available on the controller's `/metrics` (also `/healthz`, `/
 
 ```bash
 helm lint deploy/helm/kopiur
-helm template kopiur deploy/helm/kopiur --set installScope=cluster --set webhook.certManager.enabled=true
+helm template kopiur deploy/helm/kopiur --set installScope=cluster --set webhook.tls.mode=cert-manager
 ```
 
 ## Maintainers

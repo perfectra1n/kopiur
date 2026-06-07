@@ -77,6 +77,14 @@ url = "2"
 croner = "2"
 tera = "1"
 
+# Self-managed webhook TLS (the `tls.mode: self` chart path): the controller
+# mints its own CA + serving leaf instead of depending on cert-manager. MSRV
+# 1.88 (< our 1.95 pin); `x509-parser` enables `Issuer::from_ca_cert_pem` so a
+# persisted CA can re-sign rotated leaves. `time` supplies the OffsetDateTime
+# rcgen uses for cert validity windows.
+rcgen = { version = "0.14", features = ["x509-parser"] }
+time = { version = "0.3", default-features = false, features = ["std"] }
+
 # Errors / utilities
 thiserror = "2"
 anyhow = "1"

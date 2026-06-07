@@ -127,6 +127,19 @@ Whether RBAC should be cluster-scoped.
 {{- end }}
 
 {{/*
+Whether the operator self-manages the webhook serving certificate
+(webhook.tls.mode: self) — the controller mints the cert + injects the caBundle,
+so cert-manager is not required. Renders "true" only when the webhook is enabled
+AND in self mode. Used to gate the extra controller RBAC and the chart's
+cert-management templates.
+*/}}
+{{- define "kopiur.webhook.selfManaged" -}}
+{{- if and .Values.webhook.enabled (eq (.Values.webhook.tls.mode | default "self") "self") -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
 OTLP environment for the controller + webhook (and, via the controller, mover
 Jobs). Emits the standard OTEL_EXPORTER_OTLP_* vars only when
 observability.otlp.enabled. The env var NAMES match crates/telemetry/src/env.rs.

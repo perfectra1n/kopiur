@@ -1,4 +1,4 @@
-{{- if and .Values.webhook.enabled .Values.webhook.certManager.enabled -}}
+{{- if and .Values.webhook.enabled (eq .Values.webhook.tls.mode "cert-manager") -}}
 {{- if not .Values.webhook.certManager.issuerRef.name }}
 # Self-signed Issuer — only created when no external issuerRef is supplied.
 apiVersion: cert-manager.io/v1

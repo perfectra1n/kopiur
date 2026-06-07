@@ -51,6 +51,36 @@ pub const KOPIA_CACHE_DIR_ENV: &str = "KOPIUR_KOPIA_CACHE_DIR";
 /// binds to. Matches the chart's `controller.probePort` (8080).
 pub const HTTP_ADDR: &str = "0.0.0.0:8080";
 
+// --- Self-managed webhook TLS (`webhook.tls.mode: self`) --------------------
+//
+// In `self` mode the controller — not cert-manager — owns the webhook serving
+// certificate: it mints a CA + leaf into the serving Secret and injects the CA
+// into each webhook configuration's `caBundle` (see [`crate::webhook_tls`]). The
+// chart sets these only in `self` mode; absent/false, the controller does no
+// webhook-TLS work (cert-manager or a manually-supplied cert is in charge).
+
+/// Gate: when truthy (`"true"`), the controller manages the webhook serving cert.
+pub const WEBHOOK_TLS_MANAGED_ENV: &str = "KOPIUR_WEBHOOK_TLS_MANAGED";
+/// Name of the `kubernetes.io/tls` Secret the controller mints and the webhook
+/// pod mounts. Defaults to [`DEFAULT_WEBHOOK_SECRET_NAME`].
+pub const WEBHOOK_SECRET_NAME_ENV: &str = "KOPIUR_WEBHOOK_SECRET_NAME";
+/// Name of the webhook `Service` — its DNS name is the leaf cert's SAN.
+pub const WEBHOOK_SERVICE_NAME_ENV: &str = "KOPIUR_WEBHOOK_SERVICE_NAME";
+/// Name of the `ValidatingWebhookConfiguration` to inject `caBundle` into.
+pub const WEBHOOK_VALIDATING_CONFIG_ENV: &str = "KOPIUR_WEBHOOK_VALIDATING_CONFIG";
+/// Name of the `MutatingWebhookConfiguration` to inject `caBundle` into.
+pub const WEBHOOK_MUTATING_CONFIG_ENV: &str = "KOPIUR_WEBHOOK_MUTATING_CONFIG";
+
+/// Fallback Secret name when [`WEBHOOK_SECRET_NAME_ENV`] is unset; matches the
+/// chart's `webhook.tls.secretName` default.
+pub const DEFAULT_WEBHOOK_SECRET_NAME: &str = "kopiur-webhook-tls";
+
+/// How often the controller re-checks the webhook cert for rotation and re-asserts
+/// the `caBundle` after the initial boot-time mint. The leaf is long-lived and
+/// renewed well before expiry, so a slow cadence is ample.
+pub const WEBHOOK_TLS_RECONCILE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(12 * 60 * 60);
+
 /// The OTLP + logging env vars the controller passes through to mover `Job`s,
 /// owned by the telemetry crate so the name lists have a single definition.
 /// OTLP vars are only forwarded when a collector endpoint is set; the logging

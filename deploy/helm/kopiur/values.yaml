@@ -180,27 +180,35 @@ webhook:
   podLabels: {}
   podAnnotations: {}
   # TLS for the webhook server. The webhook ALWAYS serves TLS (k8s requires
-  # HTTPS for admission). Two ways to provide the serving cert:
+  # HTTPS for admission). How the serving cert is provisioned is chosen by
+  # tls.mode below.
   tls:
-    # -- Name of the Secret holding tls.crt / tls.key (and optionally ca.crt).
-    # When certManager.enabled is true this is the Secret cert-manager writes.
-    # Otherwise YOU must create this Secret before install (kubernetes.io/tls).
+    # -- How the webhook serving certificate is provisioned and trusted. One of:
+    #   self         — the operator mints its own CA + serving cert, writes the
+    #                  Secret, and injects caBundle into the webhook
+    #                  configurations itself. No cert-manager, no manual steps,
+    #                  and the leaf is auto-rotated before expiry. (default)
+    #   cert-manager — cert-manager issues the serving cert and its ca-injector
+    #                  populates caBundle (requires cert-manager installed;
+    #                  configure certManager.issuerRef below).
+    #   manual       — you pre-create the tls.secretName Secret (kubernetes.io/tls)
+    #                  and set webhook.caBundle (base64 PEM) yourself.
+    mode: self
+    # -- Name of the Secret holding tls.crt / tls.key (and, in self mode, ca.crt).
+    # In self mode the operator creates and owns it; in cert-manager mode
+    # cert-manager writes it; in manual mode YOU create it before install.
     secretName: kopiur-webhook-tls
   certManager:
-    # -- Provision a cert-manager Certificate + self-signed Issuer for the
-    # webhook, and let cert-manager's ca-injector populate caBundle on the
-    # webhook configurations (via the cert-manager.io/inject-ca-from annotation).
-    # When false you must supply webhook.tls.secretName yourself and set
-    # webhook.caBundle (base64 PEM) so the API server trusts the webhook.
-    enabled: false
     # -- Use an existing Issuer/ClusterIssuer instead of the self-signed Issuer
-    # this chart creates. Leave name empty to use the chart-managed Issuer.
+    # this chart creates. Only used when tls.mode is cert-manager. Leave name
+    # empty to use the chart-managed self-signed Issuer.
     issuerRef:
       name: ""
       kind: Issuer # Issuer | ClusterIssuer
-  # -- Base64-encoded PEM CA bundle injected into the webhook configurations
-  # when certManager.enabled is false. Required for the API server to trust a
-  # self-managed serving cert. Ignored when certManager.enabled is true.
+  # -- Base64-encoded PEM CA bundle injected into the webhook configurations.
+  # Only used when tls.mode is manual; required there so the API server trusts
+  # the serving cert. Ignored in self and cert-manager modes (caBundle is
+  # populated by the operator or cert-manager's ca-injector respectively).
   caBundle: ""
 
 # =============================================================================

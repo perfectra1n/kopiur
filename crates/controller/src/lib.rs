@@ -15,6 +15,7 @@ pub mod maintenance;
 pub mod metrics;
 pub mod repository;
 pub mod restore;
+pub mod webhook_tls;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -171,6 +172,22 @@ pub async fn run() -> anyhow::Result<()> {
         operator_namespace,
     ));
 
+    // Self-managed webhook TLS (`webhook.tls.mode: self`): mint the serving cert
+    // and inject the caBundle so the API server trusts the webhook — no
+    // cert-manager. Best-effort at boot (the webhook configs may not exist yet on
+    // a first apply); a slow background task then handles drift + leaf rotation.
+    // Absent the managed-mode env, this is a no-op (cert-manager / manual mode).
+    if let Some(webhook_tls) = webhook_tls_config() {
+        let ns = webhook_tls.namespace.clone();
+        match webhook_tls::ensure(&client, &webhook_tls).await {
+            Ok(()) => tracing::info!(namespace = %ns, "self-managed webhook TLS ready"),
+            Err(e) => {
+                tracing::warn!(error = %e, "initial webhook TLS setup failed; the background task will retry")
+            }
+        }
+        spawn_webhook_tls_reconcile(client.clone(), webhook_tls);
+    }
+
     tracing::info!("starting kopiur controllers");
 
     let http_srv = tokio::spawn(serve_http(metrics.clone()));
@@ -213,6 +230,74 @@ fn collect_mover_env_passthrough() -> Vec<(String, String)> {
     );
 
     env
+}
+
+/// Assemble the [`webhook_tls::WebhookTlsConfig`] from env, or `None` when the
+/// chart did not enable self-managed webhook TLS (cert-manager / manual mode, or
+/// off-chart). Requires the managed gate plus a known operator namespace and both
+/// webhook-configuration names; a partial config is treated as not-managed and
+/// logged, rather than guessed.
+fn webhook_tls_config() -> Option<webhook_tls::WebhookTlsConfig> {
+    let managed = std::env::var(config::WEBHOOK_TLS_MANAGED_ENV)
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    if !managed {
+        return None;
+    }
+    let env = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
+
+    let namespace = match env(config::OPERATOR_NAMESPACE_ENV) {
+        Some(ns) => ns,
+        None => {
+            tracing::warn!(
+                "{} is set but {} is unset; cannot place the webhook TLS Secret — skipping \
+                 self-managed webhook TLS",
+                config::WEBHOOK_TLS_MANAGED_ENV,
+                config::OPERATOR_NAMESPACE_ENV
+            );
+            return None;
+        }
+    };
+    let (Some(validating_config), Some(mutating_config)) = (
+        env(config::WEBHOOK_VALIDATING_CONFIG_ENV),
+        env(config::WEBHOOK_MUTATING_CONFIG_ENV),
+    ) else {
+        tracing::warn!(
+            "self-managed webhook TLS requested but {}/{} are unset — skipping",
+            config::WEBHOOK_VALIDATING_CONFIG_ENV,
+            config::WEBHOOK_MUTATING_CONFIG_ENV
+        );
+        return None;
+    };
+    let secret_name = env(config::WEBHOOK_SECRET_NAME_ENV)
+        .unwrap_or_else(|| config::DEFAULT_WEBHOOK_SECRET_NAME.to_string());
+    let service_name = env(config::WEBHOOK_SERVICE_NAME_ENV).unwrap_or_else(|| secret_name.clone());
+
+    Some(webhook_tls::WebhookTlsConfig {
+        namespace,
+        secret_name,
+        service_name,
+        validating_config,
+        mutating_config,
+    })
+}
+
+/// Drive [`webhook_tls::ensure`] on a slow interval so the serving leaf rotates
+/// before expiry and the `caBundle` self-heals if anything overwrites it. Errors
+/// are logged and retried next tick — webhook-TLS upkeep never crashes the
+/// controller (degrade-not-crash).
+fn spawn_webhook_tls_reconcile(client: Client, cfg: webhook_tls::WebhookTlsConfig) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(config::WEBHOOK_TLS_RECONCILE_INTERVAL);
+        // The first tick fires immediately; skip it (boot already ran `ensure`).
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            if let Err(e) = webhook_tls::ensure(&client, &cfg).await {
+                tracing::warn!(error = %e, "periodic webhook TLS reconcile failed; will retry");
+            }
+        }
+    });
 }
 
 /// Spawn all seven controllers and join them. Split out so it can be driven

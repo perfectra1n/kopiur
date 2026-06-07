@@ -55,6 +55,15 @@ const MOVER_STATUS_CRDS: &[&str] = &[
 
 const KOPIA_GROUP: &str = "kopiur.home-operations.com";
 
+/// Default names of the webhook configurations and serving Secret for the
+/// self-managed-TLS RBAC (`webhook.tls.mode: self`). These match the chart's
+/// helpers for the default release: `{fullname}-validating`/`-mutating` and the
+/// `webhook.tls.secretName` default. The Helm templates re-derive them from the
+/// release; the shipped static artifacts use the default-release names.
+const WEBHOOK_VALIDATING_CONFIG: &str = "kopiur-validating";
+const WEBHOOK_MUTATING_CONFIG: &str = "kopiur-mutating";
+const WEBHOOK_TLS_SECRET: &str = "kopiur-webhook-tls";
+
 /// All 7 CRD plurals in `kopiur.home-operations.com`. `clusterrepositories` is cluster-scoped.
 const NAMESPACED_CRDS: &[&str] = &[
     "repositories",
@@ -75,6 +84,24 @@ fn rule(api_groups: &[&str], resources: &[String], vs: &[&str]) -> PolicyRule {
         api_groups: Some(api_groups.iter().map(|s| s.to_string()).collect()),
         resources: Some(resources.to_vec()),
         verbs: verbs(vs),
+        ..Default::default()
+    }
+}
+
+/// Like [`rule`] but scoped to specific `resourceNames` (least privilege). Use
+/// only with verbs that honor names (`get`/`update`/`patch`/`delete`) — `create`,
+/// `list`, and `watch` are NOT name-scopable and would be denied.
+fn rule_named(
+    api_groups: &[&str],
+    resources: &[String],
+    vs: &[&str],
+    names: &[String],
+) -> PolicyRule {
+    PolicyRule {
+        api_groups: Some(api_groups.iter().map(|s| s.to_string()).collect()),
+        resources: Some(resources.to_vec()),
+        verbs: verbs(vs),
+        resource_names: Some(names.to_vec()),
         ..Default::default()
     }
 }
@@ -179,6 +206,50 @@ fn workload_rules() -> Vec<PolicyRule> {
     ]
 }
 
+/// RBAC for self-managed webhook TLS (`webhook.tls.mode: self`): the controller
+/// mints its own serving certificate and injects the `caBundle` into its webhook
+/// configurations, removing the cert-manager dependency. Carried by both install
+/// flavours (admission configs are cluster-scoped; the Secret is namespace-local);
+/// the chart only grants these in `self` mode.
+///
+/// The **cluster-scoped** half: `get`+`patch` on the two webhook configurations,
+/// scoped by `resourceName`. The controller GETs each by name and patches its
+/// `caBundle` (no `list`/`watch` needed — and those can't be name-scoped anyway).
+/// Webhook configurations are cluster-scoped, so this only belongs in a
+/// `ClusterRole`; a namespaced install pairs its Role with a small ClusterRole
+/// the chart renders for `self` mode.
+fn webhook_cert_cluster_rules() -> Vec<PolicyRule> {
+    vec![rule_named(
+        &["admissionregistration.k8s.io"],
+        &[
+            "validatingwebhookconfigurations".into(),
+            "mutatingwebhookconfigurations".into(),
+        ],
+        &["get", "patch"],
+        &[
+            WEBHOOK_VALIDATING_CONFIG.into(),
+            WEBHOOK_MUTATING_CONFIG.into(),
+        ],
+    )]
+}
+
+/// The **namespace-local** half: writing the serving Secret. `create` is unscoped
+/// because the authorizer cannot match a `resourceName` at create time; the
+/// rotation re-apply (`update`/`patch`) is scoped to the serving Secret by name.
+/// Reads come from the existing `secrets` `get`/`list`/`watch` rule. Valid in
+/// both a Role and a ClusterRole.
+fn webhook_cert_secret_rules() -> Vec<PolicyRule> {
+    vec![
+        rule(&[""], &["secrets".into()], &["create"]),
+        rule_named(
+            &[""],
+            &["secrets".into()],
+            &["update", "patch"],
+            &[WEBHOOK_TLS_SECRET.into()],
+        ),
+    ]
+}
+
 /// The minimal RBAC a mover Job actually uses, verified against `crates/mover/src/`:
 /// it PATCHes the owning CR's `.status` subresource (the target kind is dynamic —
 /// `backups`, `restores`, `repositories`, `clusterrepositories`, `maintenances`)
@@ -240,6 +311,10 @@ fn cluster_artifact() -> Result<Artifact> {
     // §4.11/§G16). Cluster-scoped resource → cluster install only; a namespaced
     // install can't grant it and the controller fails the check open there.
     rules.push(rule(&[""], &["namespaces".into()], READ_VERBS));
+    // Self-managed webhook TLS (`webhook.tls.mode: self`): both halves fit a
+    // ClusterRole.
+    rules.extend(webhook_cert_cluster_rules());
+    rules.extend(webhook_cert_secret_rules());
 
     let clusterrole = ClusterRole {
         metadata: metadata(CLUSTERROLE_NAME, None),
@@ -281,6 +356,11 @@ fn namespaced_artifact() -> Result<Artifact> {
     // minting rules are retained.
     let mut rules = kopia_crd_rules(false);
     rules.extend(workload_rules());
+    // Self-managed webhook TLS (`webhook.tls.mode: self`): only the Secret write
+    // is namespace-local and fits a Role. The cluster-scoped webhook-config patch
+    // cannot live in a Role — a self-mode namespaced install pairs this Role with
+    // the small ClusterRole the chart renders.
+    rules.extend(webhook_cert_secret_rules());
 
     let role = Role {
         metadata: metadata(ROLE_NAME, Some(DEFAULT_NAMESPACE)),
