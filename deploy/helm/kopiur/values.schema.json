@@ -1,0 +1,786 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "controller": {
+      "description": "=============================================================================\nController deployment\n=============================================================================",
+      "properties": {
+        "affinity": {
+          "required": [],
+          "title": "affinity",
+          "type": "object"
+        },
+        "extraArgs": {
+          "description": "Extra CLI args appended to the controller container.",
+          "items": {
+            "required": []
+          },
+          "title": "extraArgs",
+          "type": "array"
+        },
+        "extraEnv": {
+          "description": "Extra environment variables for the controller container.",
+          "items": {
+            "required": []
+          },
+          "title": "extraEnv",
+          "type": "array"
+        },
+        "extraVolumeMounts": {
+          "description": "Extra volume mounts on the controller container (pairs with extraVolumes).",
+          "items": {
+            "required": []
+          },
+          "title": "extraVolumeMounts",
+          "type": "array"
+        },
+        "extraVolumes": {
+          "description": "Extra volumes on the controller pod. Use this to make a filesystem-backend\nrepository reachable in-process (hostPath/NFS/PVC) so the controller can run\nshort idempotent kopia ops (ADR §5.4). The e2e harness uses a hostPath here.",
+          "items": {
+            "required": []
+          },
+          "title": "extraVolumes",
+          "type": "array"
+        },
+        "leaderElection": {
+          "description": "Enable leader election. Required when replicaCount \u003e 1; harmless at 1.",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "title": "enabled",
+              "type": "boolean"
+            }
+          },
+          "required": [],
+          "title": "leaderElection",
+          "type": "object"
+        },
+        "logLevel": {
+          "default": "info",
+          "description": "DEPRECATED: use the top-level `logging.level` instead. Kept as a fallback\nfor existing values files — `logging.level` wins when both are set. Applies to\nthe controller and webhook (RUST_LOG style: error|warn|info|debug|trace).",
+          "title": "logLevel",
+          "type": "string"
+        },
+        "nodeSelector": {
+          "description": "Scheduling controls.",
+          "required": [],
+          "title": "nodeSelector",
+          "type": "object"
+        },
+        "podAnnotations": {
+          "required": [],
+          "title": "podAnnotations",
+          "type": "object"
+        },
+        "podLabels": {
+          "description": "Extra pod labels / annotations.",
+          "required": [],
+          "title": "podLabels",
+          "type": "object"
+        },
+        "priorityClassName": {
+          "default": "",
+          "description": "Pod-level priority class.",
+          "title": "priorityClassName",
+          "type": "string"
+        },
+        "probePort": {
+          "default": 8080,
+          "description": "Liveness/readiness HTTP probe port on the controller (serves /healthz, /readyz, /metrics).",
+          "title": "probePort",
+          "type": "integer"
+        },
+        "replicaCount": {
+          "default": 1,
+          "description": "Number of controller replicas. \u003e1 enables HA via leader election;\nonly the elected leader reconciles, so deterministic jitter (ADR §4.1)\nkeeps schedules identical across replicas and across failover.",
+          "title": "replicaCount",
+          "type": "integer"
+        },
+        "resources": {
+          "description": "Resource requests/limits for the controller pod.\nNo CPU limit (CPU throttling on an operator only adds reconcile latency; the\nrequest reserves a fair share). The memory limit must cover the *burst* on\nstartup/restart, not just steady state (~120Mi): on (re)start the controller\nreconciles every existing resource at once, spawning concurrent in-process\n`kopia` subprocesses (whose RSS counts against this container's cgroup) to\nlist/connect a repository that may hold many snapshots. With the\nOpenTelemetry/OTLP stack linked in, 256Mi was too tight — the burst OOMKilled\nthe controller, which then crash-looped (OOM -\u003e restart -\u003e re-reconcile burst\n-\u003e OOM). 1Gi gives ample headroom. See crates/e2e/tests/lifecycle.rs.",
+          "properties": {
+            "limits": {
+              "properties": {
+                "memory": {
+                  "default": "1Gi",
+                  "title": "memory",
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "title": "limits",
+              "type": "object"
+            },
+            "requests": {
+              "properties": {
+                "cpu": {
+                  "default": "50m",
+                  "title": "cpu",
+                  "type": "string"
+                },
+                "memory": {
+                  "default": "128Mi",
+                  "title": "memory",
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "title": "requests",
+              "type": "object"
+            }
+          },
+          "required": [],
+          "title": "resources",
+          "type": "object"
+        },
+        "tolerations": {
+          "items": {
+            "required": []
+          },
+          "title": "tolerations",
+          "type": "array"
+        }
+      },
+      "required": [],
+      "title": "controller",
+      "type": "object"
+    },
+    "fullnameOverride": {
+      "default": "",
+      "description": "Override the full release-qualified name (defaults to \"\u003crelease\u003e-kopiur\").",
+      "title": "fullnameOverride",
+      "type": "string"
+    },
+    "global": {
+      "description": "Global values are values that can be accessed from any chart or subchart by exactly the same name.",
+      "required": [],
+      "title": "global",
+      "type": "object"
+    },
+    "grafanaDashboard": {
+      "description": "Grafana dashboard for the kopiur fleet. Shipped as a ConfigMap labeled for\nthe Grafana sidecar to auto-discover; the same JSON also lives in\ndeploy/dashboards/kopiur.json for manual import.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Create the dashboard ConfigMap.",
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "folder": {
+          "default": "",
+          "title": "folder",
+          "type": "string"
+        },
+        "folderAnnotation": {
+          "default": "",
+          "description": "Annotation setting the Grafana folder for the dashboard (optional).",
+          "title": "folderAnnotation",
+          "type": "string"
+        },
+        "label": {
+          "default": "grafana_dashboard",
+          "description": "Label the Grafana sidecar watches for (key: value). Adjust to your stack.",
+          "title": "label",
+          "type": "string"
+        },
+        "labelValue": {
+          "default": "1",
+          "title": "labelValue",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "title": "grafanaDashboard",
+      "type": "object"
+    },
+    "image": {
+      "description": "=============================================================================\nImages\n=============================================================================\nThree images ship with kopiur:\n  * controller — the operator (reconcilers); exposes /metrics.\n  * webhook    — the axum admission server (validating + mutating).\n  * mover      — the per-Job image (one Job per Backup/Restore/Maintenance run).\n\nPer ADR §G15 the mover image MUST be reproducibly pinned: prefer `digest`\nover a floating tag in production so a re-pulled `:latest` can never change\nwhat runs in a data-protection Job. When `digest` is set it wins over `tag`.",
+      "properties": {
+        "controller": {
+          "description": "Controller (operator) image.",
+          "properties": {
+            "digest": {
+              "default": "",
+              "description": "Pin by digest (e.g. \"sha256:...\"); takes precedence over tag.",
+              "title": "digest",
+              "type": "string"
+            },
+            "repository": {
+              "default": "home-operations/kopiur-controller",
+              "title": "repository",
+              "type": "string"
+            },
+            "tag": {
+              "default": "",
+              "description": "Defaults to .Chart.AppVersion when empty.",
+              "title": "tag",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "controller",
+          "type": "object"
+        },
+        "mover": {
+          "description": "Mover (per-Job) image. The controller reads this reference and stamps it\ninto every Job it creates. Digest-pinned recommended (ADR §G15).",
+          "properties": {
+            "digest": {
+              "default": "",
+              "description": "STRONGLY RECOMMENDED in production. Digest pin for the mover Job image.",
+              "title": "digest",
+              "type": "string"
+            },
+            "pullPolicy": {
+              "default": "IfNotPresent",
+              "description": "Pull policy used on the mover Job pods.",
+              "title": "pullPolicy",
+              "type": "string"
+            },
+            "repository": {
+              "default": "home-operations/kopiur-mover",
+              "title": "repository",
+              "type": "string"
+            },
+            "tag": {
+              "default": "",
+              "title": "tag",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "mover",
+          "type": "object"
+        },
+        "pullPolicy": {
+          "default": "IfNotPresent",
+          "description": "Default image pull policy for controller and webhook.",
+          "title": "pullPolicy",
+          "type": "string"
+        },
+        "registry": {
+          "default": "ghcr.io",
+          "description": "Container registry shared by all three images unless overridden per-image.",
+          "title": "registry",
+          "type": "string"
+        },
+        "webhook": {
+          "description": "Admission webhook image.",
+          "properties": {
+            "digest": {
+              "default": "",
+              "title": "digest",
+              "type": "string"
+            },
+            "repository": {
+              "default": "home-operations/kopiur-webhook",
+              "title": "repository",
+              "type": "string"
+            },
+            "tag": {
+              "default": "",
+              "title": "tag",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "webhook",
+          "type": "object"
+        }
+      },
+      "required": [],
+      "title": "image",
+      "type": "object"
+    },
+    "imagePullSecrets": {
+      "description": "Image pull secrets applied to controller/webhook pods and mover Jobs.",
+      "items": {
+        "required": []
+      },
+      "title": "imagePullSecrets",
+      "type": "array"
+    },
+    "installCRDs": {
+      "default": true,
+      "description": "Install the 7 kopiur.home-operations.com CRDs as part of this release.\nWhen true the CRDs are rendered under templates/ (guarded by this flag) so\n`helm uninstall` removes them and `installCRDs: false` actually omits them.\nTrade-off: templated CRDs are subject to Helm's normal apply ordering and\n(unlike the special `crds/` directory) are NOT skipped on `helm upgrade`.\nThat is the behavior we want for an alpha API. If you manage CRDs out of band\n(GitOps applies deploy/crds/*.yaml directly), set this to false.",
+      "title": "installCRDs",
+      "type": "boolean"
+    },
+    "installScope": {
+      "default": "namespaced",
+      "description": "\"namespaced\" (default) or \"cluster\".\n  namespaced — RBAC is a namespace-scoped Role/RoleBinding. The operator\n    manages kopiur.home-operations.com resources only in its own namespace. ClusterRepository\n    is NOT reconciled (it is a cluster-scoped kind and out of a Role's reach).\n  cluster    — RBAC is a ClusterRole/ClusterRoleBinding. The operator manages\n    kopiur.home-operations.com resources cluster-wide AND reconciles ClusterRepository.\nPer ADR §4.11 namespaced is the safer default; cluster scope is an explicit\nopt-in for platform teams running a shared backup tier.",
+      "title": "installScope",
+      "type": "string"
+    },
+    "logging": {
+      "description": "=============================================================================\nLogging (stdout / `kubectl logs`)\n=============================================================================\nControls the fmt logging that every component writes to stdout. The controller\npasses RUST_LOG + KOPIUR_LOG_FORMAT through to mover Jobs, so a mover honors the\nsame level and format. Env var names match crates/telemetry/src/env.rs.",
+      "properties": {
+        "format": {
+          "default": "text",
+          "description": "Console format: \"text\" (human-readable, default) or \"json\" (one structured\nobject per line for Loki/ELK/Datadog). Unknown values degrade to text.",
+          "title": "format",
+          "type": "string"
+        },
+        "level": {
+          "default": "",
+          "description": "Log level / filter directive (RUST_LOG style: error|warn|info|debug|trace;\nper-target works too, e.g. \"info,kopia=debug\" to see kopia's own progress in\nmover logs). When empty, falls back to the deprecated `controller.logLevel`.",
+          "title": "level",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "title": "logging",
+      "type": "object"
+    },
+    "metrics": {
+      "description": "=============================================================================\nMetrics \u0026 observability\n=============================================================================",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Expose a Service for the controller's /metrics endpoint.",
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "port": {
+          "default": 8080,
+          "description": "Service port for /metrics.",
+          "title": "port",
+          "type": "integer"
+        },
+        "prometheusRule": {
+          "properties": {
+            "backupStaleAfterSeconds": {
+              "default": 172800,
+              "description": "Age (seconds) after which a BackupConfig's last success is \"stale\".",
+              "title": "backupStaleAfterSeconds",
+              "type": "integer"
+            },
+            "enabled": {
+              "default": false,
+              "description": "Create a Prometheus-Operator PrometheusRule with kopiur alerts.",
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "labels": {
+              "description": "Extra labels (e.g. to match your Prometheus ruleSelector).",
+              "required": [],
+              "title": "labels",
+              "type": "object"
+            }
+          },
+          "required": [],
+          "title": "prometheusRule",
+          "type": "object"
+        },
+        "serviceMonitor": {
+          "properties": {
+            "enabled": {
+              "default": false,
+              "description": "Create a Prometheus-Operator ServiceMonitor. Requires the CRD to exist.",
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "interval": {
+              "default": "30s",
+              "description": "Scrape interval.",
+              "title": "interval",
+              "type": "string"
+            },
+            "labels": {
+              "description": "Extra labels (e.g. to match your Prometheus serviceMonitorSelector).",
+              "required": [],
+              "title": "labels",
+              "type": "object"
+            },
+            "metricRelabelings": {
+              "items": {
+                "required": []
+              },
+              "title": "metricRelabelings",
+              "type": "array"
+            },
+            "relabelings": {
+              "description": "Relabelings / metricRelabelings passed through verbatim.",
+              "items": {
+                "required": []
+              },
+              "title": "relabelings",
+              "type": "array"
+            },
+            "scrapeTimeout": {
+              "default": "10s",
+              "description": "Scrape timeout.",
+              "title": "scrapeTimeout",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "serviceMonitor",
+          "type": "object"
+        }
+      },
+      "required": [],
+      "title": "metrics",
+      "type": "object"
+    },
+    "nameOverride": {
+      "default": "",
+      "description": "Override the chart name used in resource names (defaults to .Chart.Name = \"kopiur\").",
+      "title": "nameOverride",
+      "type": "string"
+    },
+    "observability": {
+      "description": "=============================================================================\nOpenTelemetry (OTLP) — traces, logs, and a metrics push, off by default\n=============================================================================\nWhen enabled, the controller, webhook, and mover Jobs export OTLP to the\nconfigured collector (the controller passes the same OTEL_* env to movers).\nMetrics are ALSO always available via the Prometheus /metrics pull endpoint;\nOTLP just adds a push path plus traces and logs. Env var names match\ncrates/telemetry/src/env.rs.",
+      "properties": {
+        "otlp": {
+          "properties": {
+            "enabled": {
+              "default": false,
+              "description": "Enable OTLP export (sets OTEL_EXPORTER_OTLP_ENDPOINT on all components).",
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "endpoint": {
+              "default": "http://otel-collector.observability.svc:4317",
+              "description": "Collector gRPC endpoint. Required when enabled. Only gRPC is compiled in.",
+              "title": "endpoint",
+              "type": "string"
+            },
+            "extraEnv": {
+              "description": "Extra raw env (e.g. OTEL_TRACES_SAMPLER) added to every component.",
+              "items": {
+                "required": []
+              },
+              "title": "extraEnv",
+              "type": "array"
+            },
+            "headers": {
+              "default": "",
+              "description": "OTEL_EXPORTER_OTLP_HEADERS, e.g. \"authorization=Bearer xyz\". Empty to omit.",
+              "title": "headers",
+              "type": "string"
+            },
+            "protocol": {
+              "default": "grpc",
+              "description": "OTEL_EXPORTER_OTLP_PROTOCOL (only \"grpc\" is supported by this build).",
+              "title": "protocol",
+              "type": "string"
+            },
+            "strict": {
+              "default": false,
+              "description": "Fail-fast on telemetry misconfiguration instead of degrading to fmt+pull.",
+              "title": "strict",
+              "type": "boolean"
+            }
+          },
+          "required": [],
+          "title": "otlp",
+          "type": "object"
+        }
+      },
+      "required": [],
+      "title": "observability",
+      "type": "object"
+    },
+    "podSecurityContext": {
+      "description": "=============================================================================\nPod security (shared defaults; per-component sections may override)\n=============================================================================\nNon-root uid 65534 (nobody) default, per ADR §4.9/§4.11 — distroless:nonroot.",
+      "properties": {
+        "fsGroup": {
+          "default": 65534,
+          "title": "fsGroup",
+          "type": "integer"
+        },
+        "runAsGroup": {
+          "default": 65534,
+          "title": "runAsGroup",
+          "type": "integer"
+        },
+        "runAsNonRoot": {
+          "default": true,
+          "title": "runAsNonRoot",
+          "type": "boolean"
+        },
+        "runAsUser": {
+          "default": 65534,
+          "title": "runAsUser",
+          "type": "integer"
+        },
+        "seccompProfile": {
+          "properties": {
+            "type": {
+              "default": "RuntimeDefault",
+              "title": "type",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "seccompProfile",
+          "type": "object"
+        }
+      },
+      "required": [],
+      "title": "podSecurityContext",
+      "type": "object"
+    },
+    "securityContext": {
+      "properties": {
+        "allowPrivilegeEscalation": {
+          "default": false,
+          "title": "allowPrivilegeEscalation",
+          "type": "boolean"
+        },
+        "capabilities": {
+          "properties": {
+            "drop": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  }
+                ],
+                "required": []
+              },
+              "title": "drop",
+              "type": "array"
+            }
+          },
+          "required": [],
+          "title": "capabilities",
+          "type": "object"
+        },
+        "readOnlyRootFilesystem": {
+          "default": true,
+          "title": "readOnlyRootFilesystem",
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "title": "securityContext",
+      "type": "object"
+    },
+    "serviceAccount": {
+      "description": "=============================================================================\nServiceAccount\n=============================================================================",
+      "properties": {
+        "annotations": {
+          "description": "Extra annotations (e.g. IRSA / Workload Identity role bindings).",
+          "required": [],
+          "title": "annotations",
+          "type": "object"
+        },
+        "create": {
+          "default": true,
+          "description": "Create the ServiceAccount. Disable to bring your own.",
+          "title": "create",
+          "type": "boolean"
+        },
+        "name": {
+          "default": "",
+          "description": "Name to use; defaults to the chart fullname when empty.",
+          "title": "name",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "title": "serviceAccount",
+      "type": "object"
+    },
+    "webhook": {
+      "description": "=============================================================================\nAdmission webhook\n=============================================================================\nImplemented as a SEPARATE Deployment + Service (cleaner than folding it into\nthe controller) per ADR §5.3. The Service maps 443 -\u003e the container's 8443.",
+      "properties": {
+        "affinity": {
+          "required": [],
+          "title": "affinity",
+          "type": "object"
+        },
+        "caBundle": {
+          "default": "",
+          "description": "Base64-encoded PEM CA bundle injected into the webhook configurations\nwhen certManager.enabled is false. Required for the API server to trust a\nself-managed serving cert. Ignored when certManager.enabled is true.",
+          "title": "caBundle",
+          "type": "string"
+        },
+        "certManager": {
+          "properties": {
+            "enabled": {
+              "default": false,
+              "description": "Provision a cert-manager Certificate + self-signed Issuer for the\nwebhook, and let cert-manager's ca-injector populate caBundle on the\nwebhook configurations (via the cert-manager.io/inject-ca-from annotation).\nWhen false you must supply webhook.tls.secretName yourself and set\nwebhook.caBundle (base64 PEM) so the API server trusts the webhook.",
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "issuerRef": {
+              "description": "Use an existing Issuer/ClusterIssuer instead of the self-signed Issuer\nthis chart creates. Leave name empty to use the chart-managed Issuer.",
+              "properties": {
+                "kind": {
+                  "default": "Issuer",
+                  "title": "kind",
+                  "type": "string"
+                },
+                "name": {
+                  "default": "",
+                  "title": "name",
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "title": "issuerRef",
+              "type": "object"
+            }
+          },
+          "required": [],
+          "title": "certManager",
+          "type": "object"
+        },
+        "containerPort": {
+          "default": 8443,
+          "description": "Port the webhook container listens on (must match listenAddr above).",
+          "title": "containerPort",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Deploy the webhook (Deployment + Service + Validating/Mutating configs).\nWhen false, validation falls back to the controller's defensive checks only.",
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "failurePolicy": {
+          "default": "Fail",
+          "description": "failurePolicy for both webhook configurations: Fail (fail-closed,\nrecommended for a backup operator — ADR §7.2) or Ignore.",
+          "title": "failurePolicy",
+          "type": "string"
+        },
+        "listenAddr": {
+          "default": "0.0.0.0:8443",
+          "description": "Address the webhook server binds to (env KOPIUR_WEBHOOK_ADDR).",
+          "title": "listenAddr",
+          "type": "string"
+        },
+        "nodeSelector": {
+          "required": [],
+          "title": "nodeSelector",
+          "type": "object"
+        },
+        "podAnnotations": {
+          "required": [],
+          "title": "podAnnotations",
+          "type": "object"
+        },
+        "podLabels": {
+          "required": [],
+          "title": "podLabels",
+          "type": "object"
+        },
+        "priorityClassName": {
+          "default": "",
+          "title": "priorityClassName",
+          "type": "string"
+        },
+        "replicaCount": {
+          "default": 1,
+          "title": "replicaCount",
+          "type": "integer"
+        },
+        "resources": {
+          "description": "No CPU limit (see controller.resources). The webhook links the same\nOpenTelemetry/OTLP stack but does no kopia work, so it stays light; the\ngenerous memory limit is pure headroom.",
+          "properties": {
+            "limits": {
+              "properties": {
+                "memory": {
+                  "default": "512Mi",
+                  "title": "memory",
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "title": "limits",
+              "type": "object"
+            },
+            "requests": {
+              "properties": {
+                "cpu": {
+                  "default": "25m",
+                  "title": "cpu",
+                  "type": "string"
+                },
+                "memory": {
+                  "default": "64Mi",
+                  "title": "memory",
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "title": "requests",
+              "type": "object"
+            }
+          },
+          "required": [],
+          "title": "resources",
+          "type": "object"
+        },
+        "serviceMonitor": {
+          "description": "The webhook serves /metrics on its TLS port (kopiur_webhook_admission_total).",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "description": "Create a ServiceMonitor scraping the webhook's /metrics over HTTPS.",
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "insecureSkipVerify": {
+              "default": true,
+              "description": "The webhook serves a self-signed cert, so skip verification by default.",
+              "title": "insecureSkipVerify",
+              "type": "boolean"
+            },
+            "interval": {
+              "default": "30s",
+              "title": "interval",
+              "type": "string"
+            },
+            "labels": {
+              "required": [],
+              "title": "labels",
+              "type": "object"
+            },
+            "scrapeTimeout": {
+              "default": "10s",
+              "title": "scrapeTimeout",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "serviceMonitor",
+          "type": "object"
+        },
+        "timeoutSeconds": {
+          "default": 10,
+          "description": "timeoutSeconds for admission requests (1..30).",
+          "title": "timeoutSeconds",
+          "type": "integer"
+        },
+        "tls": {
+          "description": "TLS for the webhook server. The webhook ALWAYS serves TLS (k8s requires\nHTTPS for admission). Two ways to provide the serving cert:",
+          "properties": {
+            "secretName": {
+              "default": "kopiur-webhook-tls",
+              "description": "Name of the Secret holding tls.crt / tls.key (and optionally ca.crt).\nWhen certManager.enabled is true this is the Secret cert-manager writes.\nOtherwise YOU must create this Secret before install (kubernetes.io/tls).",
+              "title": "secretName",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "tls",
+          "type": "object"
+        },
+        "tolerations": {
+          "items": {
+            "required": []
+          },
+          "title": "tolerations",
+          "type": "array"
+        }
+      },
+      "required": [],
+      "title": "webhook",
+      "type": "object"
+    }
+  },
+  "required": [],
+  "type": "object"
+}
