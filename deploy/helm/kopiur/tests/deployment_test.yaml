@@ -1,0 +1,73 @@
+suite: deployment
+templates:
+  - deployment.yaml
+tests:
+  - it: is the controller Deployment
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-kopiur-controller
+
+  - it: renders the controller image from the chart appVersion
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: ^ghcr\.io/home-operations/kopiur-controller:.+
+
+  - it: pins the controller image by digest when set, overriding the tag
+    set:
+      image.controller.digest: sha256:abc123
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/home-operations/kopiur-controller@sha256:abc123
+
+  - it: stamps the digest-pinned mover image into the controller env
+    set:
+      image.mover.digest: sha256:def456
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KOPIUR_MOVER_IMAGE
+            value: ghcr.io/home-operations/kopiur-mover@sha256:def456
+
+  - it: sets replicas from controller.replicaCount
+    set:
+      controller.replicaCount: 3
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 3
+
+  - it: runs non-root with a read-only root filesystem
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+
+  - it: defaults to namespaced scope (mover RoleKind = Role)
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KOPIUR_MOVER_ROLE_KIND
+            value: Role
+
+  - it: passes cluster-scope args when installScope is cluster
+    set:
+      installScope: cluster
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --cluster-scope
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KOPIUR_MOVER_ROLE_KIND
+            value: ClusterRole

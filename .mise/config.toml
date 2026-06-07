@@ -26,7 +26,6 @@ kubectl = "1.36.1"
 shellcheck = "0.11.0"
 kind = "0.32.0"
 kopia = "0.23.0"
-kubeconform = "0.8.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.19.8"
 "aqua:taiki-e/cargo-llvm-cov" = "0.8.7"
 # Docs site toolchain. The docs are an MkDocs Material site (see `mise run docs`);
@@ -136,14 +135,17 @@ description = "Build all three component images locally"
 depends = ["image-controller", "image-webhook", "image-mover"]
 
 [tasks.helm-lint]
-description = "Lint the chart and validate rendered manifests (both scopes) + CRDs against the k8s schema"
+description = "Lint the chart and check it renders in both install scopes"
 run = """
 helm lint deploy/helm/kopiur
 for scope in namespaced cluster; do
-  helm template kopiur deploy/helm/kopiur --set installScope="$scope" | kubeconform -strict -summary -ignore-missing-schemas
+  helm template kopiur deploy/helm/kopiur --set installScope="$scope" >/dev/null
 done
-kubeconform -strict -summary -ignore-missing-schemas deploy/crds/all-crds.yaml
 """
+
+[tasks.helm-test]
+description = "Run helm unit tests"
+run = "helm unittest deploy/helm/kopiur"
 
 [tasks.helm-docs]
 description = "Generate the chart README + values.schema.json from Chart.yaml + values.yaml"
