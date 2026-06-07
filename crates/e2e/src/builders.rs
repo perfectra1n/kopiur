@@ -296,11 +296,18 @@ pub fn webdav_service(ns: &str) -> Service {
     }))
 }
 
-/// The in-cluster NFS server `Deployment` (the canonical Kubernetes `volume-nfs`
-/// image, kernel `nfsd`). Runs **privileged** — it loads `nfsd` and binds the RPC
-/// ports — and exports `/exports` read-write. The export is backed by an
-/// `emptyDir` so each fresh server starts clean (a reused server keeps prior
-/// repo/snapshot state, which the tests tolerate). The mover mounts this export
+/// The in-cluster NFS server `Deployment` (`obeone/docker-nfs-server`, kernel
+/// `nfsd`). Runs **privileged** — it loads `nfsd` and mounts the nfsd/rpc_pipefs
+/// filesystems inside the container — and exports [`consts::NFS_EXPORT_PATH`]
+/// read-write with `fsid=0` (the NFSv4 root). We serve **NFSv4 only**
+/// (`NFS_DISABLE_VERSION_3=1`), so a client mounts the export at `/`
+/// ([`consts::NFS_MOUNT_PATH`]) and only port 2049 is needed.
+///
+/// The export is backed by an `emptyDir` so each fresh server starts clean (a
+/// reused server keeps prior repo/snapshot state, which the tests tolerate). An
+/// init container `chmod 0777`s it so the non-root mover (uid
+/// [`consts::MOVER_UID`]) can write the repo — `no_root_squash` alone is not
+/// enough because the mover does not run as root. The mover mounts this export
 /// inline (no PVC) as the filesystem repo volume or as an NFS backup source.
 pub fn nfs_deployment(ns: &str) -> Deployment {
     from_json(json!({
@@ -313,20 +320,33 @@ pub fn nfs_deployment(ns: &str) -> Deployment {
             "template": {
                 "metadata": { "labels": { "app": "nfs" } },
                 "spec": {
+                    // Make the exported emptyDir world-writable before nfsd starts
+                    // so the non-root mover can create the kopia repo under it.
+                    "initContainers": [{
+                        "name": "chmod-export",
+                        "image": consts::NFS_IMAGE,
+                        "imagePullPolicy": "IfNotPresent",
+                        "command": ["sh", "-c", format!("chmod 0777 {}", consts::NFS_EXPORT_PATH)],
+                        "volumeMounts": [{ "name": "export", "mountPath": consts::NFS_EXPORT_PATH }],
+                    }],
                     "containers": [{
                         "name": "nfs",
                         "image": consts::NFS_IMAGE,
                         "imagePullPolicy": "IfNotPresent",
-                        // The volume-nfs image needs to load nfsd and bind RPC ports.
+                        // Needs to load nfsd and mount nfsd/rpc_pipefs in-container.
                         "securityContext": { "privileged": true },
-                        "ports": [
-                            { "name": "nfs", "containerPort": 2049 },
-                            { "name": "mountd", "containerPort": 20048 },
-                            { "name": "rpcbind", "containerPort": 111 },
+                        "env": [
+                            // Single export = the NFSv4 root (fsid=0). `insecure`
+                            // allows the mover's high source port; `no_root_squash`
+                            // pairs with the init-container chmod for writes.
+                            { "name": "NFS_EXPORT_0", "value": format!(
+                                "{} *(rw,fsid=0,no_subtree_check,insecure,no_root_squash)",
+                                consts::NFS_EXPORT_PATH) },
+                            // NFSv4 only: drops rpcbind/mountd, leaving just 2049.
+                            { "name": "NFS_DISABLE_VERSION_3", "value": "1" },
                         ],
-                        // /exports is the image's exported path; back it with an
-                        // emptyDir so the export directory exists and is writable.
-                        "volumeMounts": [{ "name": "export", "mountPath": "/exports" }],
+                        "ports": [{ "name": "nfs", "containerPort": 2049 }],
+                        "volumeMounts": [{ "name": "export", "mountPath": consts::NFS_EXPORT_PATH }],
                         "readinessProbe": {
                             "tcpSocket": { "port": 2049 },
                             "periodSeconds": 3,
@@ -339,7 +359,8 @@ pub fn nfs_deployment(ns: &str) -> Deployment {
     }))
 }
 
-/// The `Service` fronting the NFS server (nfsd 2049 + mountd 20048 + rpcbind 111).
+/// The `Service` fronting the NFSv4 server (nfsd on 2049 only — v3 is disabled,
+/// so there is no rpcbind/mountd to expose).
 pub fn nfs_service(ns: &str) -> Service {
     from_json(json!({
         "apiVersion": "v1",
@@ -347,11 +368,7 @@ pub fn nfs_service(ns: &str) -> Service {
         "metadata": { "name": "nfs", "namespace": ns },
         "spec": {
             "selector": { "app": "nfs" },
-            "ports": [
-                { "name": "nfs", "port": 2049, "targetPort": 2049 },
-                { "name": "mountd", "port": 20048, "targetPort": 20048 },
-                { "name": "rpcbind", "port": 111, "targetPort": 111 },
-            ],
+            "ports": [{ "name": "nfs", "port": 2049, "targetPort": 2049 }],
         },
     }))
 }
@@ -539,14 +556,14 @@ mod tests {
     }
 
     #[test]
-    fn nfs_deployment_is_privileged_and_exports_with_nfsd_probe() {
+    fn nfs_deployment_is_privileged_and_exports_v4_with_nfsd_probe() {
         let d = nfs_deployment(consts::OPERATOR_NS);
         let v = val(&d);
         let c = v
             .pointer("/spec/template/spec/containers/0")
             .expect("container");
         assert_eq!(c.pointer("/image").unwrap(), consts::NFS_IMAGE);
-        // Privileged: the volume-nfs image loads nfsd and binds RPC ports.
+        // Privileged: the image loads nfsd and mounts nfsd/rpc_pipefs in-container.
         assert_eq!(c.pointer("/securityContext/privileged").unwrap(), true);
         // Readiness gates on nfsd (2049), so the server is up before a mover mounts.
         assert_eq!(c.pointer("/readinessProbe/tcpSocket/port").unwrap(), 2049);
@@ -559,10 +576,41 @@ mod tests {
             v.pointer("/spec/template/spec/volumes/0/emptyDir")
                 .is_some()
         );
+        // The export is configured via env (fsid=0 root) and NFSv3 is disabled.
+        let env: Vec<(String, String)> = c
+            .pointer("/env")
+            .and_then(|e| e.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| {
+                        Some((
+                            e.get("name")?.as_str()?.into(),
+                            e.get("value")?.as_str()?.into(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let export = env
+            .iter()
+            .find(|(k, _)| k == "NFS_EXPORT_0")
+            .expect("NFS_EXPORT_0");
+        assert!(export.1.starts_with(consts::NFS_EXPORT_PATH) && export.1.contains("fsid=0"));
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "NFS_DISABLE_VERSION_3")
+                .map(|(_, val)| val.as_str()),
+            Some("1")
+        );
+        // An init container makes the export world-writable for the non-root mover.
+        assert!(
+            v.pointer("/spec/template/spec/initContainers/0/command")
+                .is_some()
+        );
     }
 
     #[test]
-    fn nfs_service_exposes_nfsd_mountd_and_rpcbind() {
+    fn nfs_service_exposes_only_nfsd_2049() {
         let s = nfs_service(consts::OPERATOR_NS);
         let v = val(&s);
         let ports: Vec<i64> = v
@@ -573,7 +621,8 @@ mod tests {
             .iter()
             .filter_map(|p| p.get("port").and_then(|n| n.as_i64()))
             .collect();
-        assert!(ports.contains(&2049) && ports.contains(&20048) && ports.contains(&111));
+        // NFSv4-only: just 2049, no mountd/rpcbind.
+        assert_eq!(ports, vec![2049]);
     }
 
     #[test]

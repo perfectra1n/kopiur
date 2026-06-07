@@ -301,7 +301,7 @@ async fn nfs_repo_bootstrap_backup_restore() {
         "spec": {
             "backend": { "filesystem": {
                 "path": "/repo",
-                "volume": { "nfs": { "server": consts::NFS_HOST, "path": consts::NFS_EXPORT_PATH } }
+                "volume": { "nfs": { "server": consts::NFS_HOST, "path": consts::NFS_MOUNT_PATH } }
             }},
             "encryption": { "passwordSecretRef": { "name": consts::SECRET_NFS_CREDS, "key": consts::KEY_KOPIA_PASSWORD } },
             "create": { "enabled": true }
@@ -363,7 +363,7 @@ async fn nfs_source_backup() {
         "metadata": { "name": "e2e-nfssrc-cfg", "namespace": E2E_NAMESPACE },
         "spec": {
             "repository": { "kind": "Repository", "name": "e2e-nfssrc-repo" },
-            "sources": [ { "nfs": { "server": consts::NFS_HOST, "path": consts::NFS_EXPORT_PATH } } ],
+            "sources": [ { "nfs": { "server": consts::NFS_HOST, "path": consts::NFS_MOUNT_PATH } } ],
             "retention": { "keepLatest": 5 }
         }
     });
