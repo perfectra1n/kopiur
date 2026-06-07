@@ -112,19 +112,42 @@ jobs:
       - name: Check generated manifests
         run: cargo xtask gen-all --check
 
-      - name: Package Helm chart
-        run: |
-          VERSION="${VERSION#v}"
-          helm package deploy/helm/kopiur \
-            --version "${VERSION}" \
-            --app-version "${VERSION}"
-
       - name: Log in to Container Registry
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pin all three component images to the exact digests the build just
+      # published, so the released chart references immutable images (not floating
+      # tags). The release job builds controller/webhook/mover in a matrix, so a
+      # single needs.release.outputs.digest can't carry all three — resolve each
+      # multi-arch index digest from the registry instead. Fail closed rather than
+      # ship a chart that silently falls back to tags. Only the packaged copy is
+      # rewritten; the repo keeps empty digests (floating tags for dev).
+      - name: Pin the released image digests into the chart
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          V="${VERSION#v}"
+          for comp in controller webhook mover; do
+            ref="ghcr.io/${{ github.repository }}-${comp}:${V}"
+            digest="$(docker buildx imagetools inspect "${ref}" --format '{{ .Manifest.Digest }}')"
+            case "${digest}" in
+              sha256:*) ;;
+              *) echo "no digest resolved for ${ref} (got: '${digest}')"; exit 1 ;;
+            esac
+            yq -i ".image.${comp}.digest = \"${digest}\"" deploy/helm/kopiur/values.yaml
+            echo "pinned ${comp} -> ${digest}"
+          done
+
+      - name: Package Helm chart
+        run: |
+          VERSION="${VERSION#v}"
+          helm package deploy/helm/kopiur \
+            --version "${VERSION}" \
+            --app-version "${VERSION}"
 
       - name: Publish Helm chart to GHCR
         run: |-

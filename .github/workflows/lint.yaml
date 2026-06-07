@@ -73,6 +73,9 @@ jobs:
       - name: Run helm lint
         run: mise run helm-lint
 
+      - name: Check chart docs are current
+        run: mise run helm-docs-check
+
   cargo-audit:
     name: Cargo Audit
     runs-on: ubuntu-24.04
