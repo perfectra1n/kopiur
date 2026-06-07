@@ -1,0 +1,18 @@
+suite: metrics-service
+templates:
+  - metrics-service.yaml
+tests:
+  - it: renders the controller metrics Service by default
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-kopiur-controller-metrics
+
+  - it: omits the Service when metrics.enabled is false
+    set:
+      metrics.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0

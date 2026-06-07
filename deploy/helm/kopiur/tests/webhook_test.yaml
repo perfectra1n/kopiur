@@ -1,0 +1,17 @@
+suite: webhook
+templates:
+  - webhook-deployment.yaml
+tests:
+  - it: renders the webhook Deployment by default
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Deployment
+
+  - it: omits the webhook Deployment when webhook.enabled is false
+    set:
+      webhook.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0

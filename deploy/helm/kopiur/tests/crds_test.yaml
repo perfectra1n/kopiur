@@ -1,0 +1,16 @@
+suite: crds
+templates:
+  - crds.yaml
+tests:
+  - it: renders the CRDs as templates by default
+    asserts:
+      - isKind:
+          of: CustomResourceDefinition
+        documentIndex: 0
+
+  - it: omits the CRDs when installCRDs is false
+    set:
+      installCRDs: false
+    asserts:
+      - hasDocuments:
+          count: 0

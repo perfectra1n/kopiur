@@ -1,0 +1,32 @@
+suite: rbac
+templates:
+  - role.yaml
+  - clusterrole.yaml
+tests:
+  - it: namespaced scope renders a Role and no ClusterRole
+    set:
+      installScope: namespaced
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: role.yaml
+      - isKind:
+          of: Role
+        template: role.yaml
+      - hasDocuments:
+          count: 0
+        template: clusterrole.yaml
+
+  - it: cluster scope renders a ClusterRole and no Role
+    set:
+      installScope: cluster
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: clusterrole.yaml
+      - isKind:
+          of: ClusterRole
+        template: clusterrole.yaml
+      - hasDocuments:
+          count: 0
+        template: role.yaml
