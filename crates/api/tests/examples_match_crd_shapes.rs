@@ -54,15 +54,16 @@ fn all_examples_match_crd_field_shapes() {
     // under `backends/` — both must deserialize into the real CRD types.
     let ladder = yaml_files(&dir);
     let backends = yaml_files(&dir.join("backends"));
-    assert_eq!(
-        ladder.len(),
-        9,
-        "expected 9 numbered example files, found {ladder:?}"
+    // Floors, not exact counts — both sets grow as examples/variants are added,
+    // and every file found below is validated regardless. The point is to catch
+    // an empty/missing dir, not to pin a number.
+    assert!(
+        ladder.len() >= 9,
+        "expected >=9 numbered example files, found {ladder:?}"
     );
-    assert_eq!(
-        backends.len(),
-        8,
-        "expected 8 per-backend example files, found {backends:?}"
+    assert!(
+        backends.len() >= 8,
+        "expected >=8 per-backend example files (one per backend kind), found {backends:?}"
     );
     let files: Vec<PathBuf> = ladder.into_iter().chain(backends).collect();
 
