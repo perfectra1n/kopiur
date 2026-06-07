@@ -3,12 +3,13 @@
 deploy/helm/kopiur/README.md
 deploy/helm/kopiur/values.schema.json
 
-# Generated CRDs (`cargo xtask gen-all`), verified byte-for-byte by `gen-check`
-# and the xtask drift test. They MUST stay identical to the raw serde_yaml
-# generator output — letting oxfmt reformat them (e.g. re-indenting block
-# sequences) diverges from the generator and breaks the drift guard.
+# Generated CRDs + RBAC (`cargo xtask gen-all`), verified byte-for-byte by
+# `gen-check` and the xtask drift test. They MUST stay identical to the raw
+# serde_yaml generator output — letting oxfmt reformat them (e.g. re-indenting
+# block sequences) diverges from the generator and breaks the drift guard.
 deploy/crds/
 deploy/helm/kopiur/files/crds/
+deploy/rbac/
 
 # Helm chart templates are Go-templated YAML (a `{{- if -}}` guard isn't valid
 # standalone YAML), so oxfmt can't parse them — exclude the whole templates/ dir.

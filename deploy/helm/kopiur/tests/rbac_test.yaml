@@ -1,4 +1,7 @@
 suite: rbac
+release:
+  name: kopiur
+  namespace: kopiur-system
 templates:
   - role.yaml
   - clusterrole.yaml
@@ -6,6 +9,9 @@ tests:
   - it: namespaced scope renders a Role and no ClusterRole
     set:
       installScope: namespaced
+      # Isolate base scope behavior from the self-mode webhook-cert RBAC (which
+      # adds a small ClusterRole from role.yaml — covered separately below).
+      webhook.enabled: false
     asserts:
       - hasDocuments:
           count: 1
@@ -16,6 +22,69 @@ tests:
       - hasDocuments:
           count: 0
         template: clusterrole.yaml
+
+  # --- self-managed webhook TLS RBAC (webhook.tls.mode: self) ----------------
+
+  - it: "self mode (cluster) grants webhook-config patch + secret writes in the ClusterRole"
+    set:
+      installScope: cluster
+      webhook.tls.mode: self
+    template: clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["admissionregistration.k8s.io"]
+            resources: [validatingwebhookconfigurations, mutatingwebhookconfigurations]
+            resourceNames: [kopiur-validating, kopiur-mutating]
+            verbs: [get, patch]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [secrets]
+            verbs: [create]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [secrets]
+            resourceNames: [kopiur-webhook-tls]
+            verbs: [update, patch]
+
+  - it: "cert-manager mode does NOT grant the webhook-cert RBAC"
+    set:
+      installScope: cluster
+      webhook.tls.mode: cert-manager
+    template: clusterrole.yaml
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups: ["admissionregistration.k8s.io"]
+            resources: [validatingwebhookconfigurations, mutatingwebhookconfigurations]
+            resourceNames: [kopiur-validating, kopiur-mutating]
+            verbs: [get, patch]
+
+  - it: "self mode (namespaced) adds a tightly-scoped ClusterRole + binding for the webhook-config patch"
+    set:
+      installScope: namespaced
+      webhook.tls.mode: self
+    template: role.yaml
+    asserts:
+      # Role + ClusterRole + ClusterRoleBinding.
+      - hasDocuments:
+          count: 3
+      - isKind:
+          of: ClusterRole
+        documentIndex: 1
+      - equal:
+          path: metadata.name
+          value: kopiur-webhook-cert
+        documentIndex: 1
+      - isKind:
+          of: ClusterRoleBinding
+        documentIndex: 2
 
   - it: cluster scope renders a ClusterRole and no Role
     set:

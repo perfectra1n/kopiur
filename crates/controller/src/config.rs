@@ -75,11 +75,16 @@ pub const WEBHOOK_MUTATING_CONFIG_ENV: &str = "KOPIUR_WEBHOOK_MUTATING_CONFIG";
 /// chart's `webhook.tls.secretName` default.
 pub const DEFAULT_WEBHOOK_SECRET_NAME: &str = "kopiur-webhook-tls";
 
-/// How often the controller re-checks the webhook cert for rotation and re-asserts
-/// the `caBundle` after the initial boot-time mint. The leaf is long-lived and
-/// renewed well before expiry, so a slow cadence is ample.
+/// Steady-state cadence for re-checking the webhook cert for rotation and
+/// re-asserting the `caBundle`. The leaf is long-lived and renewed well before
+/// expiry, so a slow cadence is ample once the cert is established.
 pub const WEBHOOK_TLS_RECONCILE_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(12 * 60 * 60);
+
+/// Retry cadence while webhook TLS setup is still failing (e.g. the webhook
+/// configurations aren't registered yet at boot). Fast enough that admission
+/// becomes trusted within seconds of the configs appearing, without busy-looping.
+pub const WEBHOOK_TLS_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The OTLP + logging env vars the controller passes through to mover `Job`s,
 /// owned by the telemetry crate so the name lists have a single definition.

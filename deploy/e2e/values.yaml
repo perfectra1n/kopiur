@@ -5,9 +5,10 @@
 # running as the distroless-nonroot uid the mover image uses (65532) so a shared
 # hostPath kopia repo — written 0700 by kopia — is readable by both the controller's
 # in-process ops and the mover Jobs, with the locally-built `:e2e` images loaded
-# into kind (pullPolicy: Never). The webhook is disabled: its admission logic is
-# covered by the unit + integration tiers and needs TLS/cert-manager we don't want
-# in the harness.
+# into kind (pullPolicy: Never). The webhook is ENABLED with self-managed TLS
+# (webhook.tls.mode: self, the default): the controller mints its own serving cert
+# and injects the caBundle — no cert-manager needed in the harness. crates/e2e
+# tests/webhook.rs asserts the whole bootstrap chain end to end.
 #
 # The hostPath dirs below are seeded on the node by the mise `e2e-node-seed` task;
 # the in-cluster objects (PVCs, Secrets, MinIO) are provisioned from Rust
@@ -24,7 +25,11 @@ podSecurityContext:
     type: RuntimeDefault
 
 webhook:
-  enabled: false
+  enabled: true
+  # tls.mode defaults to self — the controller mints + injects the cert. Kept
+  # explicit here so the harness intent is obvious.
+  tls:
+    mode: self
 
 image:
   registry: docker.io

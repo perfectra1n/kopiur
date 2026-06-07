@@ -14,172 +14,172 @@ metadata:
     app.kubernetes.io/name: kopiur
   name: kopiur-controller
 rules:
-  - apiGroups:
-      - kopiur.home-operations.com
-    resources:
-      - repositories
-      - backupconfigs
-      - backups
-      - backupschedules
-      - restores
-      - maintenances
-      - clusterrepositories
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - update
-      - patch
-      - delete
-  - apiGroups:
-      - kopiur.home-operations.com
-    resources:
-      - repositories/status
-      - repositories/finalizers
-      - backupconfigs/status
-      - backupconfigs/finalizers
-      - backups/status
-      - backups/finalizers
-      - backupschedules/status
-      - backupschedules/finalizers
-      - restores/status
-      - restores/finalizers
-      - maintenances/status
-      - maintenances/finalizers
-      - clusterrepositories/status
-      - clusterrepositories/finalizers
-    verbs:
-      - get
-      - update
-      - patch
-  - apiGroups:
-      - ""
-    resources:
-      - pods
-      - persistentvolumeclaims
-      - configmaps
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - update
-      - patch
-      - delete
-  - apiGroups:
-      - ""
-    resources:
-      - pods/exec
-    verbs:
-      - create
-      - get
-  - apiGroups:
-      - ""
-    resources:
-      - events
-    verbs:
-      - create
-      - patch
-  - apiGroups:
-      - events.k8s.io
-    resources:
-      - events
-    verbs:
-      - create
-      - patch
-  - apiGroups:
-      - ""
-    resources:
-      - secrets
-    verbs:
-      - get
-      - list
-      - watch
-  - apiGroups:
-      - batch
-    resources:
-      - jobs
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - update
-      - patch
-      - delete
-  - apiGroups:
-      - snapshot.storage.k8s.io
-    resources:
-      - volumesnapshots
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - delete
-  - apiGroups:
-      - groupsnapshot.storage.k8s.io
-    resources:
-      - volumegroupsnapshots
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - delete
-  - apiGroups:
-      - ""
-    resources:
-      - serviceaccounts
-    verbs:
-      - get
-      - create
-      - update
-      - patch
-  - apiGroups:
-      - rbac.authorization.k8s.io
-    resources:
-      - rolebindings
-    verbs:
-      - get
-      - create
-      - update
-      - patch
-  - apiGroups:
-      - ""
-    resources:
-      - namespaces
-    verbs:
-      - get
-      - list
-      - watch
-  - apiGroups:
-      - admissionregistration.k8s.io
-    resourceNames:
-      - kopiur-validating
-      - kopiur-mutating
-    resources:
-      - validatingwebhookconfigurations
-      - mutatingwebhookconfigurations
-    verbs:
-      - get
-      - patch
-  - apiGroups:
-      - ""
-    resources:
-      - secrets
-    verbs:
-      - create
-  - apiGroups:
-      - ""
-    resourceNames:
-      - kopiur-webhook-tls
-    resources:
-      - secrets
-    verbs:
-      - update
-      - patch
+- apiGroups:
+  - kopiur.home-operations.com
+  resources:
+  - repositories
+  - backupconfigs
+  - backups
+  - backupschedules
+  - restores
+  - maintenances
+  - clusterrepositories
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - kopiur.home-operations.com
+  resources:
+  - repositories/status
+  - repositories/finalizers
+  - backupconfigs/status
+  - backupconfigs/finalizers
+  - backups/status
+  - backups/finalizers
+  - backupschedules/status
+  - backupschedules/finalizers
+  - restores/status
+  - restores/finalizers
+  - maintenances/status
+  - maintenances/finalizers
+  - clusterrepositories/status
+  - clusterrepositories/finalizers
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  - persistentvolumeclaims
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - pods/exec
+  verbs:
+  - create
+  - get
+- apiGroups:
+  - ''
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - snapshot.storage.k8s.io
+  resources:
+  - volumesnapshots
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - delete
+- apiGroups:
+  - groupsnapshot.storage.k8s.io
+  resources:
+  - volumegroupsnapshots
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - serviceaccounts
+  verbs:
+  - get
+  - create
+  - update
+  - patch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  verbs:
+  - get
+  - create
+  - update
+  - patch
+- apiGroups:
+  - ''
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - admissionregistration.k8s.io
+  resourceNames:
+  - kopiur-validating
+  - kopiur-mutating
+  resources:
+  - validatingwebhookconfigurations
+  - mutatingwebhookconfigurations
+  verbs:
+  - get
+  - patch
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  verbs:
+  - create
+- apiGroups:
+  - ''
+  resourceNames:
+  - kopiur-webhook-tls
+  resources:
+  - secrets
+  verbs:
+  - update
+  - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -192,6 +192,6 @@ roleRef:
   kind: ClusterRole
   name: kopiur-controller
 subjects:
-  - kind: ServiceAccount
-    name: kopiur-controller
-    namespace: kopiur-system
+- kind: ServiceAccount
+  name: kopiur-controller
+  namespace: kopiur-system

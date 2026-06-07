@@ -179,13 +179,17 @@ pub async fn run() -> anyhow::Result<()> {
     // Absent the managed-mode env, this is a no-op (cert-manager / manual mode).
     if let Some(webhook_tls) = webhook_tls_config() {
         let ns = webhook_tls.namespace.clone();
-        match webhook_tls::ensure(&client, &webhook_tls).await {
-            Ok(()) => tracing::info!(namespace = %ns, "self-managed webhook TLS ready"),
-            Err(e) => {
-                tracing::warn!(error = %e, "initial webhook TLS setup failed; the background task will retry")
+        let boot_ok = match webhook_tls::ensure(&client, &webhook_tls).await {
+            Ok(()) => {
+                tracing::info!(namespace = %ns, "self-managed webhook TLS ready");
+                true
             }
-        }
-        spawn_webhook_tls_reconcile(client.clone(), webhook_tls);
+            Err(e) => {
+                tracing::warn!(error = %e, "initial webhook TLS setup failed; retrying shortly");
+                false
+            }
+        };
+        spawn_webhook_tls_reconcile(client.clone(), webhook_tls, boot_ok);
     }
 
     tracing::info!("starting kopiur controllers");
@@ -282,20 +286,33 @@ fn webhook_tls_config() -> Option<webhook_tls::WebhookTlsConfig> {
     })
 }
 
-/// Drive [`webhook_tls::ensure`] on a slow interval so the serving leaf rotates
-/// before expiry and the `caBundle` self-heals if anything overwrites it. Errors
-/// are logged and retried next tick — webhook-TLS upkeep never crashes the
-/// controller (degrade-not-crash).
-fn spawn_webhook_tls_reconcile(client: Client, cfg: webhook_tls::WebhookTlsConfig) {
+/// Drive [`webhook_tls::ensure`] in the background so the serving leaf rotates
+/// before expiry and the `caBundle` self-heals if anything overwrites it.
+///
+/// The cadence is adaptive: after a success it waits the slow steady-state
+/// interval ([`config::WEBHOOK_TLS_RECONCILE_INTERVAL`]); after a failure it
+/// retries soon ([`config::WEBHOOK_TLS_RETRY_INTERVAL`]). This matters at boot —
+/// if the webhook configurations aren't registered yet when the controller
+/// starts, the first inject fails, and a fixed slow tick would leave admission
+/// untrusted for hours. `boot_ok` seeds the first wait from the boot attempt's
+/// result. Errors are logged, never fatal (degrade-not-crash).
+fn spawn_webhook_tls_reconcile(client: Client, cfg: webhook_tls::WebhookTlsConfig, boot_ok: bool) {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(config::WEBHOOK_TLS_RECONCILE_INTERVAL);
-        // The first tick fires immediately; skip it (boot already ran `ensure`).
-        ticker.tick().await;
+        let mut ok = boot_ok;
         loop {
-            ticker.tick().await;
-            if let Err(e) = webhook_tls::ensure(&client, &cfg).await {
-                tracing::warn!(error = %e, "periodic webhook TLS reconcile failed; will retry");
-            }
+            let delay = if ok {
+                config::WEBHOOK_TLS_RECONCILE_INTERVAL
+            } else {
+                config::WEBHOOK_TLS_RETRY_INTERVAL
+            };
+            tokio::time::sleep(delay).await;
+            ok = match webhook_tls::ensure(&client, &cfg).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(error = %e, "webhook TLS reconcile failed; will retry soon");
+                    false
+                }
+            };
         }
     });
 }

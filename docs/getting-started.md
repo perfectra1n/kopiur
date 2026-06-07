@@ -48,13 +48,12 @@ Mount it in a throwaway pod and write a file if you want to see real data move.
 
 ## Step 1 — Install the operator
 
-Install the chart into its own namespace. The simplest path lets **cert-manager** mint the webhook's serving certificate; if you don't run cert-manager, see [Installation → Without cert-manager](install.md#without-cert-manager).
+Install the chart into its own namespace. By default the operator manages the webhook's serving certificate itself — **no cert-manager required**. (Prefer cert-manager or a hand-supplied cert? See [Installation → Webhook TLS](install.md#webhook-tls).)
 
 ```console
 $ kubectl create namespace kopiur-system
 $ helm install kopiur deploy/helm/kopiur \
-    --namespace kopiur-system \
-    --set webhook.certManager.enabled=true
+    --namespace kopiur-system
 ```
 
 **Verify** the operator is up and the 7 CRDs are registered:

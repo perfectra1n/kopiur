@@ -1,0 +1,99 @@
+suite: webhook tls modes
+release:
+  name: kopiur
+  namespace: kopiur-system
+templates:
+  - validatingwebhookconfiguration.yaml
+  - mutatingwebhookconfiguration.yaml
+  - certificate.yaml
+  - webhook-deployment.yaml
+  - deployment.yaml
+tests:
+  # --- self mode (default) ---------------------------------------------------
+  - it: "self mode omits caBundle and the cert-manager annotation on both configs"
+    asserts:
+      - notExists:
+          path: webhooks[0].clientConfig.caBundle
+        template: validatingwebhookconfiguration.yaml
+      - notExists:
+          path: metadata.annotations["cert-manager.io/inject-ca-from"]
+        template: validatingwebhookconfiguration.yaml
+      - notExists:
+          path: webhooks[0].clientConfig.caBundle
+        template: mutatingwebhookconfiguration.yaml
+      - notExists:
+          path: metadata.annotations["cert-manager.io/inject-ca-from"]
+        template: mutatingwebhookconfiguration.yaml
+
+  - it: "self mode renders no cert-manager Certificate"
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: certificate.yaml
+
+  - it: "self mode tells the controller to manage webhook TLS"
+    template: deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KOPIUR_WEBHOOK_TLS_MANAGED
+            value: "true"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KOPIUR_WEBHOOK_VALIDATING_CONFIG
+            value: kopiur-validating
+
+  # --- cert-manager mode -----------------------------------------------------
+  - it: "cert-manager mode adds the inject-ca-from annotation and a Certificate"
+    set:
+      webhook.tls.mode: cert-manager
+      # Use an external issuer so certificate.yaml renders only the Certificate.
+      webhook.certManager.issuerRef.name: my-issuer
+    asserts:
+      - exists:
+          path: metadata.annotations["cert-manager.io/inject-ca-from"]
+        template: validatingwebhookconfiguration.yaml
+      - notExists:
+          path: webhooks[0].clientConfig.caBundle
+        template: validatingwebhookconfiguration.yaml
+      - hasDocuments:
+          count: 1
+        template: certificate.yaml
+      - isKind:
+          of: Certificate
+        template: certificate.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KOPIUR_WEBHOOK_TLS_MANAGED
+            value: "true"
+        template: deployment.yaml
+
+  # --- manual mode -----------------------------------------------------------
+  - it: "manual mode writes the supplied caBundle and renders no Certificate"
+    set:
+      webhook.tls.mode: manual
+      webhook.caBundle: TEST_CA_BUNDLE
+    asserts:
+      - equal:
+          path: webhooks[0].clientConfig.caBundle
+          value: TEST_CA_BUNDLE
+        template: validatingwebhookconfiguration.yaml
+      - equal:
+          path: webhooks[0].clientConfig.caBundle
+          value: TEST_CA_BUNDLE
+        template: mutatingwebhookconfiguration.yaml
+      - hasDocuments:
+          count: 0
+        template: certificate.yaml
+
+  # --- guard -----------------------------------------------------------------
+  - it: "an invalid tls.mode fails the render"
+    set:
+      webhook.tls.mode: bogus
+    asserts:
+      - failedTemplate:
+          errorMessage: webhook.tls.mode must be one of self|cert-manager|manual, got "bogus"
+        template: webhook-deployment.yaml

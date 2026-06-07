@@ -9,7 +9,7 @@ Kopiur is a Kopia-native Kubernetes backup operator (Rust / kube-rs). This guide
 - **Kubernetes >= 1.24.** The deploy-or-restore volume-populator path (`Restore` + `PVC.spec.dataSourceRef`) relies on the `AnyVolumeDataSource` feature, available from 1.24 (ADR §4.7).
 - **Helm 3 or 4.**
 - A **kopia repository backend** you can reach: S3/MinIO, Azure Blob, GCS, B2, filesystem (PVC), SFTP, WebDAV, or rclone.
-- _(Optional)_ **cert-manager** — the simplest way to provision the admission webhook's serving certificate. Without it you provide the cert yourself.
+- _(Optional)_ **cert-manager** — only if you prefer it to manage the admission webhook's certificate. **It is not required**: by default the operator manages the webhook cert itself (see [Webhook TLS](#webhook-tls)).
 - _(Optional)_ **volume-data-source-validator** — recommended alongside CSI populators so a malformed `dataSourceRef` is surfaced as an event rather than a silently-stuck PVC (ADR §4.7).
 - _(Optional)_ **Prometheus Operator** — if you want the chart's `ServiceMonitor`.
 
@@ -19,12 +19,14 @@ Kopiur is a Kopia-native Kubernetes backup operator (Rust / kube-rs). This guide
 # 1. Create the operator namespace.
 kubectl create namespace kopiur-system
 
-# 2. Install the chart. Easiest path: let cert-manager mint the webhook cert.
+# 2. Install the chart. No extra flags needed — the webhook cert is
+#    self-managed by default (no cert-manager required).
 helm install kopiur deploy/helm/kopiur \
-  --namespace kopiur-system \
-  --set webhook.certManager.enabled=true
+  --namespace kopiur-system
 
-# 3. Wait for rollout.
+# 3. Wait for rollout. (The webhook pod stays in ContainerCreating until the
+#    controller mints its serving Secret — a few seconds after the controller
+#    becomes ready.)
 kubectl -n kopiur-system rollout status deploy/kopiur-controller
 kubectl -n kopiur-system rollout status deploy/kopiur-webhook
 
@@ -32,15 +34,37 @@ kubectl -n kopiur-system rollout status deploy/kopiur-webhook
 kubectl get crd -l app.kubernetes.io/part-of=kopiur
 ```
 
-### Without cert-manager
+## Webhook TLS
 
-The webhook serves TLS and the API server must trust it. If you are not using cert-manager, create the serving Secret and pass the CA bundle:
+The admission webhook always serves TLS, and the API server must trust it. `webhook.tls.mode` chooses how the serving certificate is provisioned:
+
+| `webhook.tls.mode` | What happens | Needs cert-manager? |
+| ------------------ | ------------ | ------------------- |
+| `self` (default)   | The operator mints its own CA + serving cert, writes the Secret, injects the `caBundle`, and auto-rotates the cert (zero-downtime hot-reload). | No |
+| `cert-manager`     | cert-manager issues the cert; its `ca-injector` populates the `caBundle`. | Yes |
+| `manual`           | You pre-create the Secret and supply `webhook.caBundle`. | No |
+
+### `self` (default)
+
+Nothing to configure — this is the `helm install` above. The operator grants itself the minimal extra RBAC to write its one serving Secret and `patch` the `caBundle` of its two webhook configurations (resourceName-scoped).
+
+### `cert-manager`
+
+```bash
+helm install kopiur deploy/helm/kopiur \
+  --namespace kopiur-system \
+  --set webhook.tls.mode=cert-manager
+# Optionally point at your own Issuer/ClusterIssuer instead of the chart's
+# self-signed one: --set webhook.certManager.issuerRef.name=my-issuer
+```
+
+### `manual`
 
 ```bash
 # create a kubernetes.io/tls Secret named per webhook.tls.secretName, then:
 helm install kopiur deploy/helm/kopiur \
   --namespace kopiur-system \
-  --set webhook.certManager.enabled=false \
+  --set webhook.tls.mode=manual \
   --set webhook.tls.secretName=kopiur-webhook-tls \
   --set webhook.caBundle="$(base64 -w0 ca.crt)"
 ```

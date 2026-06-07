@@ -126,6 +126,36 @@ $ kubectl describe maintenance <name> -n <ns>
 
 `status.full.lastRunAt` shows the last full pass. See the [Maintenance guide](maintenance.md) for ownership and the schedule model.
 
+## Webhook admission fails or the webhook won't start
+
+The admission webhook validates `kopiur.home-operations.com` objects and serves
+TLS. With the default `webhook.tls.mode: self`, the **controller** mints the
+serving certificate into the `webhook.tls.secretName` Secret and injects the CA
+into the two webhook configurations' `caBundle`. The most common symptoms:
+
+| Symptom | Cause | Fix |
+| ------- | ----- | --- |
+| `kopiur-webhook` pod stuck `ContainerCreating` | The serving Secret doesn't exist yet — the controller mints it shortly after it becomes ready. | Wait a few seconds. If it persists, check the controller is `Ready` and its logs for `webhook TLS`; confirm `KOPIUR_NAMESPACE` is set (the chart sets it). |
+| Creating any kopiur CR fails: `failed calling webhook ... no endpoints available` / `connection refused` | The webhook pod isn't `Ready` (e.g. still waiting on the Secret), and `failurePolicy: Fail`. | Wait for the webhook rollout; `kubectl -n kopiur-system rollout status deploy/<release>-webhook`. |
+| Creating a CR fails: `x509: certificate signed by unknown authority` | The `caBundle` on the webhook config doesn't match the served cert. | In `self` mode the controller self-heals this within ~30s; check the controller logs for `webhook TLS reconcile failed`. Verify the operator has the `admissionregistration … patch` RBAC (`tls.mode: self` grants it). |
+| `caBundle` empty on the webhook config | The controller couldn't patch it (RBAC, or the config didn't exist at boot). | Confirm `tls.mode: self` (so the chart grants the RBAC and sets the controller env); the controller retries injection every ~30s until it succeeds. |
+
+Inspect the moving parts:
+
+```console
+# the serving Secret the controller mints (self mode):
+$ kubectl -n kopiur-system get secret <webhook.tls.secretName> -o jsonpath='{.data.tls\.crt}' | head -c 20
+
+# the caBundle the controller injected (should be non-empty in self mode):
+$ kubectl get validatingwebhookconfiguration <release>-validating \
+    -o jsonpath='{.webhooks[0].clientConfig.caBundle}' | head -c 20
+```
+
+Using cert-manager instead (`tls.mode: cert-manager`)? Then cert-manager issues
+the cert and its ca-injector populates `caBundle` — check the `Certificate`
+resource and the cert-manager logs, not the controller. See
+[Installation → Webhook TLS](install.md#webhook-tls).
+
 ## Where to look — quick reference
 
 ```console
