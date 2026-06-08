@@ -804,4 +804,50 @@ mod tests {
         };
         assert!(pod_nonroot_false.requires_privilege());
     }
+
+    #[test]
+    fn requires_privilege_resolved_covers_the_gate_inputs() {
+        use k8s_openapi::api::core::v1::PodSecurityContext;
+        let root = SecurityContext {
+            run_as_user: Some(0),
+            ..Default::default()
+        };
+        let benign = SecurityContext {
+            run_as_user: Some(1000),
+            run_as_non_root: Some(true),
+            ..Default::default()
+        };
+        let fsgroup = PodSecurityContext {
+            fs_group: Some(1000),
+            ..Default::default()
+        };
+        let pod_root = PodSecurityContext {
+            run_as_user: Some(0),
+            ..Default::default()
+        };
+
+        // Nothing set → not privileged.
+        assert!(!requires_privilege_resolved(None, None, None));
+        // Benign container + fsGroup pod context → still not privileged.
+        assert!(!requires_privilege_resolved(
+            Some(&benign),
+            Some(&fsgroup),
+            None
+        ));
+        // An (e.g. inherited) root CONTAINER context → privileged.
+        assert!(requires_privilege_resolved(Some(&root), None, None));
+        // A root POD context with a benign container → privileged (can't slip past).
+        assert!(requires_privilege_resolved(
+            Some(&benign),
+            Some(&pod_root),
+            None
+        ));
+        // privilegedMode alone → privileged.
+        assert!(requires_privilege_resolved(None, None, Some(true)));
+        // The pure helpers agree.
+        assert!(security_context_is_elevated(&root));
+        assert!(!security_context_is_elevated(&benign));
+        assert!(pod_security_context_is_elevated(&pod_root));
+        assert!(!pod_security_context_is_elevated(&fsgroup));
+    }
 }

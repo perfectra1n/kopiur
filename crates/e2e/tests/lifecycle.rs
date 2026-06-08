@@ -687,6 +687,9 @@ async fn mover_inherits_security_context_from_workload_pod() {
             "labels": { "app": "e2e-inherit-workload" }
         },
         "spec": {
+            // Pod-level securityContext (fsGroup) AND a container-level one — the mover
+            // must inherit BOTH levels, not just the container.
+            "securityContext": { "fsGroup": 2000 },
             "containers": [{
                 "name": "app",
                 "image": "registry.k8s.io/pause:3.9",
@@ -787,16 +790,27 @@ async fn mover_inherits_security_context_from_workload_pod() {
     )
     .await
     .expect("mover Job should be created carrying an inherited securityContext");
-    let uid = job
-        .spec
-        .and_then(|s| s.template.spec)
-        .and_then(|p| p.containers.into_iter().next())
-        .and_then(|c| c.security_context)
+    let pod_spec = job.spec.and_then(|s| s.template.spec).expect("pod spec");
+    // CONTAINER-level: inherited runAsUser.
+    let uid = pod_spec
+        .containers
+        .first()
+        .and_then(|c| c.security_context.as_ref())
         .and_then(|sc| sc.run_as_user);
     assert_eq!(
         uid,
         Some(2000),
-        "mover must inherit the workload pod's runAsUser (2000), got {uid:?}"
+        "mover must inherit the workload's container runAsUser (2000), got {uid:?}"
+    );
+    // POD-level: inherited fsGroup (the part container-level inheritance can't carry).
+    let fs_group = pod_spec
+        .security_context
+        .as_ref()
+        .and_then(|sc| sc.fs_group);
+    assert_eq!(
+        fs_group,
+        Some(2000),
+        "mover must inherit the workload's pod-level fsGroup (2000), got {fs_group:?}"
     );
 
     // Cleanup (E2E_NAMESPACE persists across tests).
@@ -811,6 +825,98 @@ async fn mover_inherits_security_context_from_workload_pod() {
         .await;
     let _ = pods
         .delete("e2e-inherit-workload", &DeleteParams::default())
+        .await;
+}
+
+/// Explicit `BackupConfig.spec.mover.securityContext` (container) AND
+/// `podSecurityContext` (pod, e.g. fsGroup) both reach the backup mover pod — the
+/// non-inherit counterpart of the test above, proving the explicit knobs thread through.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
+async fn backup_mover_applies_explicit_security_and_pod_context() {
+    use k8s_openapi::api::batch::v1::Job;
+
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
+
+    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    repos
+        .create(
+            &PostParams::default(),
+            &cr(repository_json("e2e-scctx-repo")),
+        )
+        .await
+        .expect("create Repository");
+    wait_phase(&repos, "e2e-scctx-repo", "Ready")
+        .await
+        .expect("Repository Ready");
+
+    let cfg = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "BackupConfig",
+        "metadata": { "name": "e2e-scctx-cfg", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "repository": { "kind": "Repository", "name": "e2e-scctx-repo" },
+            "sources": [ { "pvc": { "name": "e2e-src" } } ],
+            "retention": { "keepLatest": 5 },
+            "mover": {
+                "securityContext": { "runAsUser": 3000, "runAsGroup": 3000, "runAsNonRoot": true },
+                "podSecurityContext": { "fsGroup": 3000 }
+            }
+        }
+    });
+    configs
+        .create(&PostParams::default(), &cr(cfg))
+        .await
+        .expect("create BackupConfig with explicit mover security contexts");
+    backups
+        .create(
+            &PostParams::default(),
+            &cr(backup_json("e2e-scctx-backup", "e2e-scctx-cfg", "Retain")),
+        )
+        .await
+        .expect("create Backup");
+
+    let jobs: Api<Job> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let job = wait_until(
+        "backup mover Job created",
+        default_timeout(),
+        poll_interval(),
+        || async { jobs.get_opt("e2e-scctx-backup").await },
+    )
+    .await
+    .expect("backup mover Job should be created");
+    let pod = job.spec.and_then(|s| s.template.spec).expect("pod spec");
+    assert_eq!(
+        pod.containers
+            .first()
+            .and_then(|c| c.security_context.as_ref())
+            .and_then(|sc| sc.run_as_user),
+        Some(3000),
+        "container securityContext.runAsUser must reach the backup mover"
+    );
+    assert_eq!(
+        pod.security_context.as_ref().and_then(|sc| sc.fs_group),
+        Some(3000),
+        "podSecurityContext.fsGroup must reach the backup mover pod"
+    );
+
+    let _ = repos
+        .delete("e2e-scctx-repo", &DeleteParams::default())
+        .await;
+    let _ = configs
+        .delete("e2e-scctx-cfg", &DeleteParams::default())
+        .await;
+    let _ = backups
+        .delete("e2e-scctx-backup", &DeleteParams::default())
         .await;
 }
 

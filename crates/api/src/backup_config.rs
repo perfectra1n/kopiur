@@ -514,6 +514,16 @@ mover:
   cache:
     capacity: 16Gi
     storageClassName: fast-ssd
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    capabilities: { drop: ["ALL"] }
+    seccompProfile: { type: RuntimeDefault }
+  podSecurityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
 "#;
         let spec: BackupConfigSpec = from_yaml(yaml);
         assert_eq!(spec.repository.kind, RepositoryKind::Repository);
@@ -532,6 +542,18 @@ mover:
         let hooks = spec.hooks.as_ref().unwrap();
         assert_eq!(hooks.before_snapshot.len(), 1);
         assert_eq!(hooks.before_snapshot[0].kind_str(), "WorkloadExec");
+        // Both the container- and pod-level security contexts round-trip on the mover.
+        let mover = spec.mover.as_ref().expect("mover");
+        assert_eq!(
+            mover.security_context.as_ref().and_then(|s| s.run_as_user),
+            Some(1000)
+        );
+        assert_eq!(
+            mover.pod_security_context.as_ref().and_then(|p| p.fs_group),
+            Some(1000)
+        );
+        // Container UID/GID match + fsGroup is unprivileged (no namespace opt-in).
+        assert!(!mover.requires_privilege());
 
         let json = serde_json::to_value(&spec).expect("serialize");
         let reparsed: BackupConfigSpec = serde_json::from_value(json).expect("reparse");

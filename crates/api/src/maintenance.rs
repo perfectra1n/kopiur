@@ -313,12 +313,24 @@ ownership:
   takeoverPolicy: PromptCondition
 mover:
   resources: { requests: { cpu: 250m, memory: 1Gi }, limits: { cpu: "2", memory: 4Gi } }
+  securityContext: { runAsUser: 1000, runAsNonRoot: true }
+  podSecurityContext: { fsGroup: 1000 }
 failurePolicy:
   backoffLimit: 1
   activeDeadlineSeconds: 14400
 "#;
         let spec: MaintenanceSpec = from_yaml(yaml);
         assert_eq!(spec.repository.kind, RepositoryKind::Repository);
+        // The mover security contexts (container + pod) round-trip on Maintenance too.
+        let mover = spec.mover.as_ref().expect("mover");
+        assert_eq!(
+            mover.security_context.as_ref().and_then(|s| s.run_as_user),
+            Some(1000)
+        );
+        assert_eq!(
+            mover.pod_security_context.as_ref().and_then(|p| p.fs_group),
+            Some(1000)
+        );
         assert_eq!(spec.schedule.quick.cron, "0 */6 * * *");
         assert_eq!(spec.schedule.quick.jitter.as_deref(), Some("30m"));
         assert_eq!(spec.schedule.full.cron, "0 3 * * 0");

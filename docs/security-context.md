@@ -101,7 +101,7 @@ Full, apply-ready example:
 
 ### 2. Inherit it from the workload
 
-If you'd rather "run as **whatever the app runs as**" than track a UID, `inheritSecurityContextFrom` copies the security context from a live workload pod onto the mover. This is the answer to *"back up / restore as the pod that mounts this PVC."*
+If you'd rather "run as **whatever the app runs as**" than track a UID, `inheritSecurityContextFrom` copies the security context from a live workload pod onto the mover — **both** the container `securityContext` (UID/GID) **and** the pod-level `securityContext` (e.g. `fsGroup`). This is the answer to *"back up / restore as the pod that mounts this PVC,"* at both levels.
 
 ```yaml
 spec:
@@ -129,12 +129,12 @@ $ kubectl get pod app-7c9d8f5b6-h2k4p -n app --show-labels
 
 ///
 
-How it resolves: the controller lists pods matching the selector, prefers a **Running** one, picks the named container (or the pod's first), and copies that container's `securityContext`. If no pod matches, the selector is empty, or the chosen container sets no `securityContext`, the Backup/Restore is held with an actionable `MissingDependency`-style condition telling you exactly what to fix. The matched workload must be **running** so its identity can be read.
+How it resolves: the controller lists pods matching the selector, prefers a **Running** one, picks the named container (or the pod's first), and copies **that container's `securityContext` and the pod's pod-level `securityContext`** onto the mover. If no pod matches, the selector is empty, the named container is absent, or the pod sets *neither* a container nor a pod-level `securityContext`, the Backup/Restore is held with an actionable `MissingDependency`-style condition telling you exactly what to fix. The matched workload must be **running** so its identity can be read.
 
 Two constraints to remember:
 
-- **Mutually exclusive with `securityContext`.** Setting both is rejected by the admission webhook.
-- **Inheriting a *root* workload is still elevated.** The *resolved* context is what's evaluated, so inheriting from a pod that runs as root (or with added capabilities) trips the [privileged-mover gate](#privileged-and-root-movers) exactly like an explicit root context would.
+- **Mutually exclusive with both `securityContext` and `podSecurityContext`.** Because inherit copies both levels, combining it with either explicit context is rejected by the admission webhook.
+- **Inheriting a *root* workload is still elevated.** The *resolved* contexts are what's evaluated — container **and** pod — so inheriting from a pod that runs as root (or with `runAsUser: 0` at either level, or added capabilities) trips the [privileged-mover gate](#privileged-and-root-movers) exactly like an explicit root context would.
 
 Full, apply-ready example (BackupConfig + the same knob on a `Restore`):
 
@@ -251,7 +251,7 @@ A backup that reports **`Succeeded` but zero files/bytes** is the classic sign t
 | `fsGroup` | `spec.mover.podSecurityContext.fsGroup` — make a fresh restore volume writable by an unprivileged mover |
 | Default | UID `65532`, `runAsNonRoot: true`, drop ALL caps, seccomp `RuntimeDefault`, no escalation |
 | Set the UID/GID | `securityContext.runAsUser` / `runAsGroup` (match the data owner) |
-| Inherit from a workload | `inheritSecurityContextFrom.podSelector` (+ optional `container`); mutually exclusive with `securityContext` |
+| Inherit from a workload | `inheritSecurityContextFrom.podSelector` (+ optional `container`) — copies container **and** pod context (UID + fsGroup); mutually exclusive with `securityContext` **and** `podSecurityContext` |
 | Root / preserve ownership | `runAsUser: 0` + `runAsNonRoot: false` (+ `privilegedMode: true` for restore ownership) |
 | Privileged-mover opt-in | `kubectl annotate namespace <ns> kopiur.home-operations.com/privileged-movers=true` |
 | Find the owning UID | [Permissions → Find the UID/GID](permissions.md#step-1--find-the-uidgid-that-owns-your-data) |

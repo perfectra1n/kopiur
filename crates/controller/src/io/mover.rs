@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{
-    ConfigMap, PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, SecurityContext,
-    ServiceAccount, VolumeResourceRequirements,
+    ConfigMap, PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSecurityContext,
+    SecurityContext, ServiceAccount, VolumeResourceRequirements,
 };
 use k8s_openapi::api::rbac::v1::{RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -197,17 +197,23 @@ pub fn label_selector_to_string(sel: &LabelSelector) -> String {
     terms.join(",")
 }
 
-/// Resolve `inheritSecurityContextFrom` to a concrete container [`SecurityContext`]:
-/// find a workload pod in `ns` matching the selector, pick the named container (or the
-/// pod's first), and return its `securityContext`. A `Running` pod is preferred so a
+/// The container- and pod-level security contexts inherited from a workload pod.
+/// At least one is `Some` (a fully context-less workload is an error to inherit from).
+pub type InheritedContexts = (Option<SecurityContext>, Option<PodSecurityContext>);
+
+/// Resolve `inheritSecurityContextFrom` to the workload's **container** AND **pod**
+/// security contexts: find a pod in `ns` matching the selector, pick the named
+/// container (or the pod's first), and return that container's `securityContext`
+/// together with the pod's `spec.securityContext` (so the mover inherits the app's
+/// `fsGroup` too, not just its UID). A `Running` pod is preferred so a
 /// terminating/pending replica isn't read. Returns `Err(MissingDependency)` — a
-/// transient, requeue-on-the-fast-cadence condition — when no pod matches or the chosen
-/// container has no `securityContext` to inherit, with an actionable message.
+/// transient, requeue-on-the-fast-cadence condition — when no pod matches, the named
+/// container is absent, or the pod has neither context to inherit.
 pub async fn resolve_inherited_security_context(
     client: &kube::Client,
     ns: &str,
     selector: &PodSelector,
-) -> Result<SecurityContext> {
+) -> Result<InheritedContexts> {
     let query = label_selector_to_string(&selector.pod_selector);
     if query.is_empty() {
         return Err(Error::MissingDependency(format!(
@@ -218,6 +224,22 @@ pub async fn resolve_inherited_security_context(
     }
     let api: Api<Pod> = Api::namespaced(client.clone(), ns);
     let pods = api.list(&ListParams::default().labels(&query)).await?.items;
+    inherited_security_context_from_pods(&pods, selector.container.as_deref(), ns, &query)
+}
+
+/// Pure core of [`resolve_inherited_security_context`]: from the pods matching the
+/// selector, pick a workload pod (a `Running` one preferred, else the first), then
+/// return its chosen container's `securityContext` and the pod-level
+/// `spec.securityContext`. Returns an actionable `Err(MissingDependency)` when no pod
+/// matches, the named container is absent, or the pod sets **neither** a container nor
+/// a pod securityContext to inherit. Pure (the `list` IO is the caller's) so the
+/// pick/extract logic is unit-tested directly.
+pub fn inherited_security_context_from_pods(
+    pods: &[Pod],
+    container: Option<&str>,
+    ns: &str,
+    query: &str,
+) -> Result<InheritedContexts> {
     if pods.is_empty() {
         return Err(Error::MissingDependency(format!(
             "no pod matches mover.inheritSecurityContextFrom (`{query}`) in namespace `{ns}` — the \
@@ -241,31 +263,31 @@ pub async fn resolve_inherited_security_context(
         .as_ref()
         .map(|s| s.containers.as_slice())
         .unwrap_or(&[]);
-    let container = match &selector.container {
-        Some(name) => containers.iter().find(|c| &c.name == name).ok_or_else(|| {
-            Error::MissingDependency(format!(
-                "pod `{}` (matched by mover.inheritSecurityContextFrom in `{ns}`) has no container \
-                 `{name}` — fix `inheritSecurityContextFrom.container`",
-                pod.name_any()
-            ))
-        })?,
-        None => containers.first().ok_or_else(|| {
-            Error::MissingDependency(format!(
-                "pod `{}` (matched by mover.inheritSecurityContextFrom in `{ns}`) has no containers \
-                 to inherit a securityContext from",
-                pod.name_any()
-            ))
-        })?,
+    // The chosen container's context: a NAMED container must exist (config error
+    // otherwise); without a name, the first container's (None if there are none).
+    let container_sc = match container {
+        Some(name) => {
+            let c = containers.iter().find(|c| c.name == name).ok_or_else(|| {
+                Error::MissingDependency(format!(
+                    "pod `{}` (matched by mover.inheritSecurityContextFrom in `{ns}`) has no \
+                     container `{name}` — fix `inheritSecurityContextFrom.container`",
+                    pod.name_any()
+                ))
+            })?;
+            c.security_context.clone()
+        }
+        None => containers.first().and_then(|c| c.security_context.clone()),
     };
-    container.security_context.clone().ok_or_else(|| {
-        Error::MissingDependency(format!(
-            "container `{}` of pod `{}` (mover.inheritSecurityContextFrom, `{ns}`) sets no \
-             securityContext to inherit — set one on the workload, or use an explicit \
-             mover.securityContext instead",
-            container.name,
+    let pod_sc = pod.spec.as_ref().and_then(|s| s.security_context.clone());
+    if container_sc.is_none() && pod_sc.is_none() {
+        return Err(Error::MissingDependency(format!(
+            "pod `{}` (mover.inheritSecurityContextFrom, `{ns}`) sets no securityContext — neither \
+             a container nor a pod-level one — to inherit; set one on the workload, or use an \
+             explicit mover.securityContext / mover.podSecurityContext instead",
             pod.name_any()
-        ))
-    })
+        )));
+    }
+    Ok((container_sc, pod_sc))
 }
 
 /// Ensure a controller-owned **persistent** kopia cache PVC named `name` exists in
@@ -319,24 +341,23 @@ pub async fn ensure_cache_pvc(
     }
 }
 
-/// The mover's **effective** container security context: the one resolved from
-/// `inheritSecurityContextFrom` when set, else the explicit `securityContext`
-/// (the two are mutually exclusive — webhook/`validate_mover`-enforced). `None`
-/// when the mover sets neither (the Job builder then applies the hardened default).
-/// The result feeds BOTH the privileged-mover gate and the mover `Job`, so an
-/// inherited root context is gated exactly like an explicit one.
-pub async fn resolve_mover_security_context(
+/// The mover's **effective** container AND pod security contexts: resolved from
+/// `inheritSecurityContextFrom` when set (the workload's container + pod contexts),
+/// else the explicit `securityContext` / `podSecurityContext` (inherit is mutually
+/// exclusive with both — webhook/`validate_mover`-enforced). Each is `None` when
+/// unset (the Job builder then applies the hardened container default and no pod
+/// context). The result feeds BOTH the privileged-mover gate and the mover `Job`, so
+/// an inherited root context — container or pod — is gated exactly like an explicit one.
+pub async fn resolve_mover_security_contexts(
     client: &kube::Client,
     ns: &str,
     mover: Option<&MoverSpec>,
-) -> Result<Option<SecurityContext>> {
+) -> Result<InheritedContexts> {
     match mover {
         Some(m) => match &m.inherit_security_context_from {
-            Some(sel) => Ok(Some(
-                resolve_inherited_security_context(client, ns, sel).await?,
-            )),
-            None => Ok(m.security_context.clone()),
+            Some(sel) => resolve_inherited_security_context(client, ns, sel).await,
+            None => Ok((m.security_context.clone(), m.pod_security_context.clone())),
         },
-        None => Ok(None),
+        None => Ok((None, None)),
     }
 }

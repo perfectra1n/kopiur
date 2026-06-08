@@ -68,6 +68,28 @@ fn invalid_backup_config(name: &str) -> BackupConfig {
     .expect("BackupConfig JSON deserializes")
 }
 
+/// A BackupConfig whose mover sets BOTH `securityContext` and
+/// `inheritSecurityContextFrom` — structurally valid, but the shared `validate_mover`
+/// rejects it (they're mutually exclusive). Exercises the mover-validation path
+/// through admission.
+fn mover_mutually_exclusive_backup_config(name: &str) -> BackupConfig {
+    serde_json::from_value(serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "BackupConfig",
+        "metadata": { "name": name, "namespace": E2E_NAMESPACE },
+        "spec": {
+            "repository": { "kind": "Repository", "name": "any" },
+            "sources": [ { "pvc": { "name": "data" } } ],
+            "retention": { "keepLatest": 5 },
+            "mover": {
+                "securityContext": { "runAsUser": 1000 },
+                "inheritSecurityContextFrom": { "podSelector": { "matchLabels": { "app": "x" } } }
+            }
+        }
+    }))
+    .expect("BackupConfig JSON deserializes")
+}
+
 #[tokio::test]
 #[ignore = "requires a kind cluster with the operator installed (mise //crates/e2e:test)"]
 async fn self_managed_webhook_tls_bootstraps_and_gates_admission() {
@@ -134,6 +156,24 @@ async fn self_managed_webhook_tls_bootstraps_and_gates_admission() {
         "rejection should come from the admission webhook, got: {msg}"
     );
     let _ = configs.delete(bad, &DeleteParams::default()).await;
+
+    // 5. A mover that sets BOTH securityContext and inheritSecurityContextFrom is
+    //    rejected by the shared mover validator (mutually exclusive).
+    let bad_mover = "webhook-deny-mover";
+    let _ = configs.delete(bad_mover, &DeleteParams::default()).await;
+    let err = configs
+        .create(
+            &PostParams::default(),
+            &mover_mutually_exclusive_backup_config(bad_mover),
+        )
+        .await
+        .expect_err("securityContext + inheritSecurityContextFrom must be DENIED by the webhook");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("denied the request") || msg.to_lowercase().contains("admission"),
+        "mover mutual-exclusivity rejection should come from the webhook, got: {msg}"
+    );
+    let _ = configs.delete(bad_mover, &DeleteParams::default()).await;
 }
 
 /// True when every webhook in the ValidatingWebhookConfiguration carries a

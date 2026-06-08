@@ -471,10 +471,13 @@ async fn restore_inherits_security_context_from_workload_pod() {
         "apiVersion": "v1", "kind": "Pod",
         "metadata": { "name": "e2e-r-inherit-pod", "namespace": E2E_NAMESPACE,
             "labels": { "app": "e2e-r-inherit" } },
-        "spec": { "containers": [{
-            "name": "app", "image": "registry.k8s.io/pause:3.9",
-            "securityContext": { "runAsUser": 2500, "runAsGroup": 2500, "runAsNonRoot": true }
-        }] }
+        "spec": {
+            "securityContext": { "fsGroup": 2500 }, // pod-level — must be inherited too
+            "containers": [{
+                "name": "app", "image": "registry.k8s.io/pause:3.9",
+                "securityContext": { "runAsUser": 2500, "runAsGroup": 2500, "runAsNonRoot": true }
+            }]
+        }
     });
     let _ = pods.create(&PostParams::default(), &cr(pod)).await;
     wait_until(
@@ -513,15 +516,82 @@ async fn restore_inherits_security_context_from_workload_pod() {
         .expect("create Restore with inheritSecurityContextFrom");
 
     let job = wait_for_job(&jobs, name).await;
+    // CONTAINER-level UID inherited...
     assert_eq!(
         job_run_as_user(&job),
         Some(2500),
-        "restore mover must inherit the workload pod's runAsUser (2500)"
+        "restore mover must inherit the workload pod's container runAsUser (2500)"
+    );
+    // ...and the POD-level fsGroup inherited too (so a fresh restore volume is writable).
+    let fs_group = job
+        .spec
+        .and_then(|s| s.template.spec)
+        .and_then(|p| p.security_context)
+        .and_then(|sc| sc.fs_group);
+    assert_eq!(
+        fs_group,
+        Some(2500),
+        "restore mover must inherit the workload pod's fsGroup (2500)"
     );
     cleanup_restore(&restores, name).await;
     let _ = pods
         .delete("e2e-r-inherit-pod", &DeleteParams::default())
         .await;
+}
+
+/// Create a restore (referencing the seed backup) in `E2E_NAMESPACE` with the given
+/// mover spec and assert it is refused with `MoverPermitted=False`. The op-in
+/// annotation is NOT set, so this asserts refusal only and leaves no namespace state.
+async fn assert_restore_mover_gated(client: &Client, name: &str, mover: serde_json::Value) {
+    ensure_seed_backup(client).await;
+    let restores: Api<Restore> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    restores
+        .create(
+            &PostParams::default(),
+            &cr(restore_json(name, serde_json::json!({ "mover": mover }))),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("create gated Restore {name}: {e}"));
+    wait_condition(&restores, name, "MoverPermitted", "False")
+        .await
+        .unwrap_or_else(|_| panic!("restore {name} must be refused with MoverPermitted=False"));
+    cleanup_restore(&restores, name).await;
+}
+
+/// `privilegedMode: true` alone (no securityContext) trips the restore gate.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
+async fn privileged_mode_flag_alone_gates_restore() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world.ensure(&[Need::Filesystem]).await.expect("fixtures");
+    assert_restore_mover_gated(
+        &world.client().clone(),
+        "e2e-r-privmode",
+        serde_json::json!({ "privilegedMode": true }),
+    )
+    .await;
+}
+
+/// A POD-level `runAsUser: 0` (with a benign container) trips the restore gate — the
+/// pod-level privilege check, not just the container one.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
+async fn pod_level_root_gates_restore() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world.ensure(&[Need::Filesystem]).await.expect("fixtures");
+    assert_restore_mover_gated(
+        &world.client().clone(),
+        "e2e-r-podroot",
+        serde_json::json!({
+            "securityContext": { "runAsUser": 1000, "runAsNonRoot": true },
+            "podSecurityContext": { "runAsUser": 0 }
+        }),
+    )
+    .await;
 }
 
 /// The privileged-mover gate guards restores too: a root restore mover is refused

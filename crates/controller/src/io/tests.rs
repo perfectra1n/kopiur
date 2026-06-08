@@ -1024,3 +1024,112 @@ fn label_selector_to_string_covers_labels_and_expressions() {
     // An empty selector renders to "" (the resolver treats this as a config error).
     assert_eq!(label_selector_to_string(&LabelSelector::default()), "");
 }
+
+// --- inherited_security_context_from_pods: the pure pick/extract core of
+// `inheritSecurityContextFrom` (named-vs-first container, prefer-Running, errors). ---
+
+#[cfg(test)]
+fn pod_with(
+    phase: Option<&str>,
+    containers: &[(&str, Option<i64>)], // (name, container runAsUser)
+    pod_fs_group: Option<i64>,          // pod-level fsGroup, if any
+) -> k8s_openapi::api::core::v1::Pod {
+    use k8s_openapi::api::core::v1::{
+        Container, Pod, PodSecurityContext, PodSpec, PodStatus, SecurityContext,
+    };
+    Pod {
+        spec: Some(PodSpec {
+            containers: containers
+                .iter()
+                .map(|(name, uid)| Container {
+                    name: (*name).to_string(),
+                    security_context: uid.map(|u| SecurityContext {
+                        run_as_user: Some(u),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .collect(),
+            security_context: pod_fs_group.map(|g| PodSecurityContext {
+                fs_group: Some(g),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        status: phase.map(|p| PodStatus {
+            phase: Some(p.to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn inherit_picks_named_container_else_first() {
+    // Named container wins.
+    let pod = pod_with(
+        Some("Running"),
+        &[("sidecar", Some(101)), ("app", Some(1000))],
+        None,
+    );
+    let pods = std::slice::from_ref(&pod);
+    let (csc, _) = inherited_security_context_from_pods(pods, Some("app"), "ns", "app=x").unwrap();
+    assert_eq!(csc.unwrap().run_as_user, Some(1000));
+    // No container named → the pod's FIRST container.
+    let (csc, _) = inherited_security_context_from_pods(pods, None, "ns", "app=x").unwrap();
+    assert_eq!(csc.unwrap().run_as_user, Some(101));
+}
+
+#[test]
+fn inherit_copies_both_container_and_pod_security_context() {
+    // The workload's CONTAINER runAsUser AND its POD fsGroup are both inherited, so an
+    // inheriting mover matches the app at both levels (UID + writable-volume fsGroup).
+    let pod = pod_with(Some("Running"), &[("app", Some(1000))], Some(1000));
+    let (csc, psc) =
+        inherited_security_context_from_pods(&[pod], Some("app"), "ns", "app=x").unwrap();
+    assert_eq!(csc.unwrap().run_as_user, Some(1000));
+    assert_eq!(psc.unwrap().fs_group, Some(1000));
+
+    // A workload with ONLY a pod-level context (no container securityContext) still
+    // inherits successfully — the pod context alone is enough.
+    let pod = pod_with(Some("Running"), &[("app", None)], Some(2000));
+    let (csc, psc) =
+        inherited_security_context_from_pods(&[pod], Some("app"), "ns", "app=x").unwrap();
+    assert!(csc.is_none());
+    assert_eq!(psc.unwrap().fs_group, Some(2000));
+}
+
+#[test]
+fn inherit_prefers_a_running_pod() {
+    // A Pending replica (uid 5) and a Running one (uid 1000) match — Running wins.
+    let pending = pod_with(Some("Pending"), &[("app", Some(5))], None);
+    let running = pod_with(Some("Running"), &[("app", Some(1000))], None);
+    let (csc, _) =
+        inherited_security_context_from_pods(&[pending, running], Some("app"), "ns", "app=x")
+            .unwrap();
+    assert_eq!(csc.unwrap().run_as_user, Some(1000));
+}
+
+#[test]
+fn inherit_errors_are_actionable() {
+    // No pod matches.
+    let err =
+        inherited_security_context_from_pods(&[], Some("app"), "billing", "app=x").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("no pod matches") && msg.contains("billing") && msg.contains("app=x"));
+
+    // Named container absent.
+    let pod = pod_with(Some("Running"), &[("app", Some(1000))], None);
+    let err =
+        inherited_security_context_from_pods(&[pod], Some("nope"), "billing", "app=x").unwrap_err();
+    assert!(err.to_string().contains("no container `nope`"));
+
+    // The pod has NEITHER a container nor a pod-level securityContext to inherit.
+    let bare = pod_with(Some("Running"), &[("app", None)], None);
+    let err =
+        inherited_security_context_from_pods(&[bare], Some("app"), "billing", "app=x").unwrap_err();
+    assert!(
+        err.to_string().contains("sets no securityContext")
+            && err.to_string().contains("to inherit")
+    );
+}

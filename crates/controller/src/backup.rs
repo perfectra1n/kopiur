@@ -264,14 +264,11 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
     // `securityContext`, or the one inherited from a workload pod via
     // `inheritSecurityContextFrom`. Both the privileged-mover gate and the Job use it,
     // so an inherited root context is gated exactly like an explicit one.
-    let effective_sc =
-        io::resolve_mover_security_context(&ctx.client, &namespace, config.spec.mover.as_ref())
+    // The effective container + pod security contexts — explicit, or both inherited
+    // from a workload pod via `inheritSecurityContextFrom`.
+    let (effective_sc, effective_pod_sc) =
+        io::resolve_mover_security_contexts(&ctx.client, &namespace, config.spec.mover.as_ref())
             .await?;
-    let pod_sc = config
-        .spec
-        .mover
-        .as_ref()
-        .and_then(|m| m.pod_security_context.clone());
     let privileged_mode = config.spec.mover.as_ref().and_then(|m| m.privileged_mode);
 
     // Privileged-mover gate (ADR §4.11/§G16, VolSync-parity): an elevated mover
@@ -282,7 +279,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
     // `MoverPermitted=False` condition + Event otherwise.
     if kopiur_api::common::requires_privilege_resolved(
         effective_sc.as_ref(),
-        pod_sc.as_ref(),
+        effective_pod_sc.as_ref(),
         privileged_mode,
     ) && !io::namespace_allows_privileged_movers(&ctx.client, &namespace).await?
     {
@@ -454,10 +451,10 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         image_pull_policy: mover_pull_policy(),
         limits,
         resources: config.spec.mover.as_ref().and_then(|m| m.resources.clone()),
-        // The resolved effective context (explicit or inherited) — same value the
-        // privileged gate above ran on.
+        // The resolved effective contexts (explicit or inherited) — the same values
+        // the privileged gate above ran on.
         security_context: effective_sc,
-        pod_security_context: pod_sc,
+        pod_security_context: effective_pod_sc,
         labels,
         source_volume,
         repo_volume,

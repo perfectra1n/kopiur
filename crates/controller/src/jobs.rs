@@ -679,6 +679,60 @@ mod tests {
     }
 
     #[test]
+    fn job_applies_container_security_context_override() {
+        // A per-recipe container securityContext REPLACES the hardened default
+        // verbatim (build_job uses it as-is, not merged) — the resolved effective
+        // context the controller passes is what the mover container runs with.
+        let ws = sample_work_spec();
+        let mut i = inputs(&ws, JobLimits::default());
+        i.security_context = Some(SecurityContext {
+            run_as_user: Some(1000),
+            run_as_group: Some(1000),
+            run_as_non_root: Some(true),
+            ..Default::default()
+        });
+        let job = build_job(&i);
+        let sc = job.spec.unwrap().template.spec.unwrap().containers[0]
+            .security_context
+            .clone()
+            .unwrap();
+        assert_eq!(sc.run_as_user, Some(1000));
+        assert_eq!(sc.run_as_group, Some(1000));
+    }
+
+    #[test]
+    fn job_applies_container_and_pod_security_contexts_together() {
+        // Container securityContext (who runs) AND pod securityContext (fsGroup, so a
+        // fresh volume is writable) both land on the mover pod, independently.
+        let ws = sample_work_spec();
+        let mut i = inputs(&ws, JobLimits::default());
+        i.security_context = Some(SecurityContext {
+            run_as_user: Some(1000),
+            ..Default::default()
+        });
+        i.pod_security_context = Some(PodSecurityContext {
+            fs_group: Some(1000),
+            fs_group_change_policy: Some("OnRootMismatch".to_string()),
+            ..Default::default()
+        });
+        let pod = build_job(&i).spec.unwrap().template.spec.unwrap();
+        assert_eq!(
+            pod.containers[0]
+                .security_context
+                .as_ref()
+                .unwrap()
+                .run_as_user,
+            Some(1000)
+        );
+        let psc = pod.security_context.unwrap();
+        assert_eq!(psc.fs_group, Some(1000));
+        assert_eq!(
+            psc.fs_group_change_policy.as_deref(),
+            Some("OnRootMismatch")
+        );
+    }
+
+    #[test]
     fn default_backoff_limit_is_two() {
         assert_eq!(JobLimits::default().backoff_limit, 2);
         assert_eq!(JobLimits::default().active_deadline_seconds, None);
