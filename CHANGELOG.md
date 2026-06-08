@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.13](https://github.com/home-operations/kopiur/compare/0.1.12...0.1.13) (2026-06-08)
+
+
+### Features
+
+* **docs:** add way more docs for restore ([533a54c](https://github.com/home-operations/kopiur/commit/533a54ceb4e1d3e368e3d8c168804bf726c651f3))
+* **restore:** completely ship caching and Restore CRDs ([53a2bbe](https://github.com/home-operations/kopiur/commit/53a2bbea85243b2de9a154248dd5b9af507c0f81))
+
 ## [0.1.12](https://github.com/home-operations/kopiur/compare/0.1.11...0.1.12) (2026-06-08)
 
 
