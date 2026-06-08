@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.12](https://github.com/home-operations/kopiur/compare/0.1.11...0.1.12) (2026-06-08)
+
+
+### Features
+
+* **helm:** oops, secretProjection should be required opt-in ([9e2c849](https://github.com/home-operations/kopiur/commit/9e2c849bdbd9015cf1e5d8cb5b1552c3592293ce))
+
 ## [0.1.11](https://github.com/home-operations/kopiur/compare/0.1.10...0.1.11) (2026-06-08)
 
 
