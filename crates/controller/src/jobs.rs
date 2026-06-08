@@ -14,9 +14,9 @@ use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, EmptyDirVolumeSource, EnvFromSource,
     EphemeralVolumeSource, NFSVolumeSource, PersistentVolumeClaimSpec,
-    PersistentVolumeClaimTemplate, PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec,
-    ResourceRequirements, SeccompProfile, SecretEnvSource, SecurityContext, Volume, VolumeMount,
-    VolumeResourceRequirements,
+    PersistentVolumeClaimTemplate, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec,
+    PodTemplateSpec, ResourceRequirements, SeccompProfile, SecretEnvSource, SecurityContext,
+    Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
@@ -208,6 +208,10 @@ pub struct MoverJobInputs<'a> {
     /// Optional per-recipe security-context override; merged over the
     /// hardened defaults.
     pub security_context: Option<SecurityContext>,
+    /// Optional pod-level security context for the mover pod (notably `fsGroup`, so an
+    /// unprivileged mover can write a freshly-provisioned restore volume). `None`
+    /// leaves the pod without a pod-level securityContext.
+    pub pod_security_context: Option<PodSecurityContext>,
     /// Extra labels applied to both objects (origin/config/snapshot keys).
     pub labels: BTreeMap<String, String>,
     /// The source volume to back up (PVC or inline NFS), mounted read-only at the
@@ -465,6 +469,9 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
         containers: vec![container],
         volumes: Some(volumes),
         service_account_name: inputs.service_account.map(str::to_string),
+        // Pod-level securityContext (e.g. fsGroup) so an unprivileged mover can write
+        // a freshly-provisioned restore volume. `None` leaves the pod spec minimal.
+        security_context: inputs.pod_security_context.clone(),
         ..Default::default()
     };
 
@@ -557,6 +564,7 @@ mod tests {
             limits,
             resources: None,
             security_context: None,
+            pod_security_context: None,
             labels,
             source_volume: None,
             repo_volume: None,
@@ -862,6 +870,38 @@ mod tests {
             get(kopiur_kopia::env::CONFIG_PATH_ENV),
             format!("{base}/repository.config")
         );
+    }
+
+    #[test]
+    fn pod_security_context_flows_to_the_mover_pod() {
+        // Default: no pod-level securityContext on the mover pod (minimal spec).
+        let ws = sample_work_spec();
+        let job = build_job(&inputs(&ws, JobLimits::default()));
+        assert!(
+            job.spec
+                .as_ref()
+                .and_then(|s| s.template.spec.as_ref())
+                .and_then(|p| p.security_context.as_ref())
+                .is_none(),
+            "no pod_security_context input → no pod-level securityContext"
+        );
+
+        // Set: fsGroup reaches the pod template's PodSecurityContext.
+        let mut i = inputs(&ws, JobLimits::default());
+        i.pod_security_context = Some(PodSecurityContext {
+            fs_group: Some(1000),
+            ..Default::default()
+        });
+        let job = build_job(&i);
+        let psc = job
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap()
+            .security_context
+            .expect("pod securityContext");
+        assert_eq!(psc.fs_group, Some(1000));
     }
 
     #[test]

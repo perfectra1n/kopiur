@@ -161,13 +161,16 @@ mover:
     resources: # standard core/v1 ResourceRequirements for the mover container
         requests: { cpu: 250m, memory: 512Mi }
         limits: { cpu: "2", memory: 4Gi }
-    securityContext: # standard core/v1 (container) SecurityContext — UID/GID match
+    securityContext: # standard core/v1 (CONTAINER) SecurityContext — UID/GID match
         runAsUser: 1000
         runAsGroup: 1000
         runAsNonRoot: true
         allowPrivilegeEscalation: false
         capabilities: { drop: ["ALL"] }
         seccompProfile: { type: RuntimeDefault }
+    podSecurityContext: # standard core/v1 (POD) PodSecurityContext — notably fsGroup
+        fsGroup: 1000 # make a fresh restore volume writable by an unprivileged mover
+        fsGroupChangePolicy: OnRootMismatch
     # inheritSecurityContextFrom:   # ...OR copy the securityContext from a live pod
     #   podSelector: { matchLabels: { app: postgres } }
     #   container: postgres          # optional; defaults to the pod's first container
@@ -184,6 +187,7 @@ mover:
 | --- | --- | --- |
 | `resources` | CPU/memory requests & limits on the mover container. | Large or many-file sources — give the mover memory headroom; or cap it so a backup doesn't starve the node. |
 | `securityContext.runAsUser` / `runAsGroup` | The UID/GID the mover runs as. Default UID `65532` reads only world-readable or `65532`-owned files. | **Set it to the UID/GID that owns your data** so the mover can read it — the single most common knob (see [example 09](examples.md#example-09--mover-uidgid--permissions) and [Permissions](permissions.md)). |
+| `podSecurityContext.fsGroup` | A **pod**-level `fsGroup` (and `fsGroupChangePolicy`). On mount the kubelet makes the volume group-writable by that GID. | Let an **unprivileged** mover populate a **freshly-provisioned restore volume** (root-owned `0755`) without a root mover. A pod-level `runAsUser: 0` here is still gated as privileged. See [Security context → fsGroup](security-context.md). |
 | `inheritSecurityContextFrom` | Copy the `securityContext` from a live workload pod (by label selector) instead of hard-coding a UID. **Mutually exclusive** with `securityContext`. | When you'd rather "run as whatever the app runs as" than track a UID — webhook-rejected if both are set. See [Security context](security-context.md#2-inherit-it-from-the-workload) and [example 18](examples.md#example-18--inherit-the-mover-security-context-from-a-workload). |
 | `cache.capacity` / `storageClassName` | Back the kopia cache with a sized volume instead of an `emptyDir`. | Large repositories — a sized cache avoids re-downloading metadata each run. |
 | `cache.mode` | `Ephemeral` (fresh per run, GC'd with the Job) or `Persistent` (a controller-owned PVC reused across runs for a **warm** cache). | `Persistent` for big recurring backups where a warm cache speeds each run. It's `ReadWriteOnce`, so it assumes runs don't overlap. |

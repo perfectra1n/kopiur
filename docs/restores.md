@@ -131,15 +131,17 @@ A restore writes data **into** a PVC, so the mover that does the writing has the
 ```yaml
 spec:
     mover:
-        securityContext: { runAsUser: 1000, runAsGroup: 1000, ... } # own the restored files correctly
-        # inheritSecurityContextFrom: { podSelector: {...} }        # ...or copy it from a live pod
+        securityContext: { runAsUser: 1000, runAsGroup: 1000, ... } # CONTAINER: own the restored files
+        podSecurityContext: { fsGroup: 1000 } # POD: make a fresh volume writable
+        # inheritSecurityContextFrom: { podSelector: {...} }        # ...or copy securityContext from a live pod
         cache: { capacity: 16Gi, mode: Persistent, contentCacheSizeMb: 10000 }
     failurePolicy:
         backoffLimit: 4
         activeDeadlineSeconds: 7200
 ```
 
-- **`mover.securityContext`** — run the restore mover as the UID/GID that should own the restored files. Without it the mover runs as the hardened default (UID 65532), which may write files the app can't read. This is the fix for "the restore mover had no UID control".
+- **`mover.securityContext`** — run the restore mover (its **container**) as the UID/GID that should own the restored files. Without it the mover runs as the hardened default (UID 65532), which may write files the app can't read. This is the fix for "the restore mover had no UID control".
+- **`mover.podSecurityContext.fsGroup`** — a **pod**-level `fsGroup` that makes a freshly-provisioned target volume group-writable, so an **unprivileged** `runAsUser: 1000` mover can populate it on restore (instead of needing a root mover just to write the new volume). The headline case for restoring into a brand-new PVC as non-root. See [Security context → fsGroup](security-context.md).
 - **`mover.inheritSecurityContextFrom`** — instead of hard-coding a UID, copy the `securityContext` from a live workload pod (by label selector). Mutually exclusive with `securityContext` (setting both is webhook-rejected). See [Security context → Inherit it from the workload](security-context.md#2-inherit-it-from-the-workload) and [example 18](examples.md#example-18--inherit-the-mover-security-context-from-a-workload).
 - **`mover.cache`** — size the kopia cache for a large restore. `mode: Ephemeral` (default) gives a fresh per-run volume sized by `capacity` (or an `emptyDir` when unset); `mode: Persistent` keeps a controller-owned cache PVC and reuses it across runs for a warm cache. `contentCacheSizeMb` / `metadataCacheSizeMb` pass kopia's `--content/metadata-cache-size-mb` budgets. A repository's `cacheDefaults` are inherited and overlaid by `mover.cache`.
 - **`failurePolicy`** — the restore Job's `backoffLimit` and `activeDeadlineSeconds`. Absent uses the defaults (2 retries, no deadline).
@@ -222,7 +224,8 @@ The full `Restore` surface, with the examples that exercise each. `source` is th
 | `options.writeFilesAtomically` | Write via a temp file + rename. Default `true`. | Rarely changed. |
 | `policy.onMissingSnapshot` | `Fail` (explicit sources) vs `Continue` (fromConfig default). | `Fail` for deliberate recoveries; `Continue` for deploy-or-restore. |
 | `policy.waitTimeout` | How long to wait for the source snapshot to appear. | Sources that may lag behind the Restore being applied. |
-| `mover` | Mover UID/GID, cache, resources, inherit — see [Mover, cache & failure policy](#mover-cache--failure-policy). | UID/GID match, large-restore cache, run-as-the-app. ([12](examples.md#example-12--restore-mover-cache--failure-policy)) |
+| `mover.securityContext` / `podSecurityContext` | Container UID/GID, and the pod-level `fsGroup` that makes a fresh target volume writable. | Own restored files as the app's UID; populate a fresh PVC as non-root (`fsGroup`). See [Mover, cache & failure policy](#mover-cache--failure-policy). ([12](examples.md#example-12--restore-mover-cache--failure-policy)) |
+| `mover.cache` / `resources` / `inheritSecurityContextFrom` | Cache sizing/mode, mover resources, inherit-from-pod. | Large-restore cache, resource limits, run-as-the-app. ([12](examples.md#example-12--restore-mover-cache--failure-policy)) |
 | `failurePolicy` | Restore Job `backoffLimit` / `activeDeadlineSeconds`. | Retry/deadline control for big or flaky restores. ([12](examples.md#example-12--restore-mover-cache--failure-policy)) |
 | `credentialProjection` | Project the repo Secret into the mover's namespace. | Restoring into a fresh namespace from a shared repo. ([17](examples.md#example-17--restore-from-a-shared-repo-projection)) |
 

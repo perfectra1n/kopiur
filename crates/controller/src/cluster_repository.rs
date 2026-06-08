@@ -353,6 +353,7 @@ async fn bootstrap_cluster_object_store(
         },
         resources: None,
         security_context: None,
+        pod_security_context: None,
         labels,
         source_volume: None,
         repo_volume: None,

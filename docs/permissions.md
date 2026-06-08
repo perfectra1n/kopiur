@@ -90,9 +90,9 @@ spec:
 
 A complete, apply-ready example (Repository + BackupConfig with this block, plus the root-mover variant commented out) is [Example 09](examples.md#example-09--mover-uidgid--permissions):
 
-/// warning | `fsGroup` is not a knob here
+/// tip | `fsGroup` lives on `mover.podSecurityContext`
 
-Kopiur does **not** set a pod-level `securityContext`, so `fsGroup` (which would `chgrp` the volume on mount) is **not** available on the mover. Make permissions line up with `runAsUser`/`runAsGroup` instead: match the owning UID, or match a GID the files are group-readable by, or use a root mover. (This keeps the mover pod spec minimal and its security context auditable in one place.)
+`runAsUser`/`runAsGroup` above are **container**-level (`spec.mover.securityContext`). `fsGroup` is **pod**-level, so it has its own sibling field — `spec.mover.podSecurityContext.fsGroup`. It's the right tool when an unprivileged mover must **write a freshly-provisioned restore volume** (the kubelet makes the mount group-writable by that GID). For *reading* source data, prefer matching the owning `runAsUser`/`runAsGroup`. See [The mover security context → fsGroup](security-context.md).
 
 ///
 
@@ -188,7 +188,7 @@ See [Restores → Mover, cache & failure policy](restores.md#mover-cache--failur
 | Set the mover UID/GID            | `BackupConfig.spec.mover.securityContext.runAsUser` / `runAsGroup` (same on `Restore.spec.mover` / `Maintenance.spec.mover`) |
 | Inherit UID/GID from a workload  | `spec.mover.inheritSecurityContextFrom.podSelector` (mutually exclusive with `securityContext`) — see [Security context](security-context.md#2-inherit-it-from-the-workload) |
 | Mover cache size / warm cache    | `spec.mover.cache` (`capacity`, `storageClassName`, `mode: Ephemeral`/`Persistent`, `content`/`metadataCacheSizeMb`); inherits `Repository.spec.cacheDefaults` |
-| `fsGroup`                        | **not** supported (no pod-level securityContext) — match UID/GID instead            |
+| `fsGroup`                        | `spec.mover.podSecurityContext.fsGroup` — make a fresh restore volume writable by an unprivileged mover |
 | Root / preserve-ownership        | `runAsUser: 0` + `privilegedMode: true` (needs the namespace opt-in)                |
 | Privileged-mover opt-in          | `kubectl annotate namespace <ns> kopiur.home-operations.com/privileged-movers=true` |
 | Filesystem repo not writable     | Event prints `chown -R <uid> <path>` with the real operator UID                     |

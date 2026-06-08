@@ -252,6 +252,52 @@ async fn restore_mover_runs_as_configured_uid() {
     cleanup_restore(&restores, name).await;
 }
 
+/// `Restore.spec.mover.podSecurityContext.fsGroup` reaches the restore mover **pod**
+/// — the pod-level knob that lets an unprivileged mover populate a freshly-provisioned
+/// volume (the gap container-level `securityContext` alone can't close).
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
+async fn restore_mover_pod_security_context_fsgroup_is_applied() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world.ensure(&[Need::Filesystem]).await.expect("fixtures");
+    let client = world.client().clone();
+    ensure_seed_backup(&client).await;
+
+    let restores: Api<Restore> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let jobs: Api<Job> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let name = "e2e-r-fsgroup";
+    restores
+        .create(
+            &PostParams::default(),
+            &cr(restore_json(
+                name,
+                serde_json::json!({
+                    "mover": {
+                        "securityContext": { "runAsUser": 2000, "runAsNonRoot": true },
+                        "podSecurityContext": { "fsGroup": 2000, "fsGroupChangePolicy": "OnRootMismatch" }
+                    }
+                }),
+            )),
+        )
+        .await
+        .expect("create Restore with mover.podSecurityContext");
+
+    let job = wait_for_job(&jobs, name).await;
+    let fs_group = job
+        .spec
+        .and_then(|s| s.template.spec)
+        .and_then(|p| p.security_context)
+        .and_then(|sc| sc.fs_group);
+    assert_eq!(
+        fs_group,
+        Some(2000),
+        "restore mover pod must carry the configured fsGroup (2000)"
+    );
+    cleanup_restore(&restores, name).await;
+}
+
 /// `Restore.spec.failurePolicy` drives the restore Job's backoff/deadline (parity
 /// with `Backup.spec.failurePolicy`).
 #[tokio::test]

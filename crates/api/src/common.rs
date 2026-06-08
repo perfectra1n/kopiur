@@ -372,9 +372,17 @@ pub struct MoverSpec {
     /// Override the repository's [`CacheDefaults`] for this recipe's movers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<CacheDefaults>,
-    /// Security context applied to the mover container.
+    /// Security context applied to the mover **container** (`runAsUser`/`runAsGroup`,
+    /// capabilities, seccomp, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_context: Option<k8s_openapi::api::core::v1::SecurityContext>,
+    /// Security context applied to the mover **pod** — notably `fsGroup`, which makes
+    /// a freshly-provisioned volume group-writable so an unprivileged
+    /// (`runAsUser != 0`) mover can populate it on **restore** without root. Distinct
+    /// from the container-level [`MoverSpec::security_context`]; a pod-level
+    /// `runAsUser: 0` / `runAsNonRoot: false` here is still gated as privileged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_security_context: Option<k8s_openapi::api::core::v1::PodSecurityContext>,
     /// Opt-in, namespace-gated; preserves UID/GID on restore. ADR §4.11/§G16.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privileged_mode: Option<bool>,
@@ -396,22 +404,30 @@ impl MoverSpec {
     /// by a namespace annotation rather than allowed implicitly. Pure + exhaustive
     /// so the definition of "privileged" lives in one tested place.
     pub fn requires_privilege(&self) -> bool {
-        requires_privilege_resolved(self.security_context.as_ref(), self.privileged_mode)
+        requires_privilege_resolved(
+            self.security_context.as_ref(),
+            self.pod_security_context.as_ref(),
+            self.privileged_mode,
+        )
     }
 }
 
-/// Whether a mover with the given **effective** security context (the explicit
-/// `securityContext`, or the one resolved from `inheritSecurityContextFrom`) and
-/// `privilegedMode` is privileged. The controller resolves an inherited context to a
-/// concrete `SecurityContext` and gates on *that* — so an inherited root context is
-/// caught exactly like an explicit one. Pure + exhaustive: the single definition of
-/// "privileged" for both the spec-only ([`MoverSpec::requires_privilege`]) and the
-/// resolved paths.
+/// Whether a mover with the given **effective** container security context (the
+/// explicit `securityContext`, or the one resolved from `inheritSecurityContextFrom`),
+/// **pod** security context, and `privilegedMode` is privileged. The controller
+/// resolves an inherited context to a concrete `SecurityContext` and gates on *that* —
+/// so an inherited root context is caught exactly like an explicit one — and inspects
+/// the pod-level context too so a pod-level `runAsUser: 0` can't slip past. Pure +
+/// exhaustive: the single definition of "privileged" for both the spec-only
+/// ([`MoverSpec::requires_privilege`]) and the resolved paths.
 pub fn requires_privilege_resolved(
     security_context: Option<&k8s_openapi::api::core::v1::SecurityContext>,
+    pod_security_context: Option<&k8s_openapi::api::core::v1::PodSecurityContext>,
     privileged_mode: Option<bool>,
 ) -> bool {
-    privileged_mode == Some(true) || security_context.is_some_and(security_context_is_elevated)
+    privileged_mode == Some(true)
+        || security_context.is_some_and(security_context_is_elevated)
+        || pod_security_context.is_some_and(pod_security_context_is_elevated)
 }
 
 /// Whether a container `SecurityContext` requests privileges beyond a normal
@@ -427,6 +443,16 @@ pub fn security_context_is_elevated(sc: &k8s_openapi::api::core::v1::SecurityCon
             .as_ref()
             .and_then(|c| c.add.as_ref())
             .is_some_and(|add| !add.is_empty())
+}
+
+/// Whether a **pod** `PodSecurityContext` requests root. Pod-level only carries a
+/// subset of the container knobs — `runAsUser` / `runAsNonRoot` are the ones that can
+/// make the mover root (capabilities/privileged are container-only). `fsGroup` and
+/// friends are NOT elevation. Pure helper for [`requires_privilege_resolved`].
+pub fn pod_security_context_is_elevated(
+    psc: &k8s_openapi::api::core::v1::PodSecurityContext,
+) -> bool {
+    psc.run_as_user == Some(0) || psc.run_as_non_root == Some(false)
 }
 
 /// Selects workload pods by label. Reuses k8s-openapi `LabelSelector`. ADR §3.3 hooks.
@@ -743,5 +769,39 @@ mod tests {
             ..Default::default()
         };
         assert!(!mover_with(Some(caps), None).requires_privilege());
+    }
+
+    #[test]
+    fn pod_level_fsgroup_is_not_privileged_but_pod_level_root_is() {
+        use k8s_openapi::api::core::v1::PodSecurityContext;
+        // fsGroup (the headline use) is NOT elevation — an unprivileged mover with
+        // fsGroup must run without a namespace opt-in.
+        let fsgroup = MoverSpec {
+            pod_security_context: Some(PodSecurityContext {
+                fs_group: Some(1000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!fsgroup.requires_privilege());
+
+        // ...but a pod-level runAsUser: 0 / runAsNonRoot: false IS gated, so it can't
+        // slip past the container-only check.
+        let pod_root = MoverSpec {
+            pod_security_context: Some(PodSecurityContext {
+                run_as_user: Some(0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(pod_root.requires_privilege());
+        let pod_nonroot_false = MoverSpec {
+            pod_security_context: Some(PodSecurityContext {
+                run_as_non_root: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(pod_nonroot_false.requires_privilege());
     }
 }

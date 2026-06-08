@@ -316,6 +316,11 @@ async fn spawn_maintenance_job(
             .mover
             .as_ref()
             .and_then(|m| m.security_context.clone()),
+        pod_security_context: maint
+            .spec
+            .mover
+            .as_ref()
+            .and_then(|m| m.pod_security_context.clone()),
         labels,
         source_volume: None,
         repo_volume,

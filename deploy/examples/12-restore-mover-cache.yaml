@@ -34,8 +34,8 @@ spec:
         - ReadWriteOnce
   # ── The mover knobs ─────────────────────────────────────────────────────────
   mover:
-    # Run as the SAME UID/GID that owns the restored files so they land with the
-    # right ownership (and the mover can write them).
+    # CONTAINER securityContext: run as the SAME UID/GID that owns the restored
+    # files so they land with the right ownership (and the mover can write them).
     securityContext:
       runAsUser: 1000 # match the UID the app runs as
       runAsGroup: 1000 # match the GID the app runs as
@@ -45,6 +45,12 @@ spec:
         drop: ["ALL"]
       seccompProfile:
         type: RuntimeDefault
+    # POD securityContext: fsGroup makes a freshly-provisioned target volume
+    # group-writable, so this UNPRIVILEGED (runAsUser: 1000) mover can populate a
+    # brand-new PVC on restore — no root mover needed just to write the new volume.
+    podSecurityContext:
+      fsGroup: 1000
+      fsGroupChangePolicy: OnRootMismatch # skip the recursive chown when already correct
     # Alternative to securityContext (set ONE, not both): copy the securityContext
     # from a live workload pod, so the restore always matches the app it feeds.
     # inheritSecurityContextFrom:

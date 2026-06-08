@@ -502,6 +502,9 @@ mover:
     allowPrivilegeEscalation: false
     capabilities: { drop: ["ALL"] }
     seccompProfile: { type: RuntimeDefault }
+  podSecurityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
 failurePolicy:
   backoffLimit: 4
   activeDeadlineSeconds: 3600
@@ -517,7 +520,13 @@ failurePolicy:
             mover.security_context.as_ref().and_then(|s| s.run_as_user),
             Some(1000)
         );
-        // A hardened non-root context is NOT privileged: the namespace gate lets it run.
+        // fsGroup is carried on the pod-level securityContext (makes a fresh restore
+        // volume group-writable for an unprivileged mover).
+        assert_eq!(
+            mover.pod_security_context.as_ref().and_then(|p| p.fs_group),
+            Some(1000)
+        );
+        // A hardened non-root container + fsGroup is NOT privileged: the gate lets it run.
         assert!(!mover.requires_privilege());
         let fp = spec.failure_policy.as_ref().expect("failurePolicy");
         assert_eq!(fp.backoff_limit, Some(4));

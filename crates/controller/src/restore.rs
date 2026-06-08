@@ -335,15 +335,24 @@ async fn drive_direct_restore(
     let effective_sc =
         io::resolve_mover_security_context(&ctx.client, namespace, restore.spec.mover.as_ref())
             .await?;
+    let pod_sc = restore
+        .spec
+        .mover
+        .as_ref()
+        .and_then(|m| m.pod_security_context.clone());
     let privileged_mode = restore.spec.mover.as_ref().and_then(|m| m.privileged_mode);
 
     // Privileged-mover gate (ADR §4.11/§G16, VolSync-parity): an elevated restore mover
-    // (root/privileged/added caps/`privilegedMode`) requires the target namespace to opt
-    // in via the `kopiur.home-operations.com/privileged-movers` annotation — a tenant
-    // there could otherwise reuse the minted mover SA at that privilege. Refuse with a
-    // clear `MoverPermitted=False` condition + Event otherwise. Mirrors the Backup gate.
-    if kopiur_api::common::requires_privilege_resolved(effective_sc.as_ref(), privileged_mode)
-        && !io::namespace_allows_privileged_movers(&ctx.client, namespace).await?
+    // (root/privileged/added caps/`privilegedMode`, container- OR pod-level) requires the
+    // target namespace to opt in via the `kopiur.home-operations.com/privileged-movers`
+    // annotation — a tenant there could otherwise reuse the minted mover SA at that
+    // privilege. Refuse with a clear `MoverPermitted=False` condition + Event otherwise.
+    // Mirrors the Backup gate.
+    if kopiur_api::common::requires_privilege_resolved(
+        effective_sc.as_ref(),
+        pod_sc.as_ref(),
+        privileged_mode,
+    ) && !io::namespace_allows_privileged_movers(&ctx.client, namespace).await?
     {
         let sa = ctx
             .mover_service_account
@@ -550,6 +559,7 @@ async fn drive_direct_restore(
         // The resolved effective context (explicit or inherited) — same value the
         // privileged gate above ran on.
         security_context: effective_sc,
+        pod_security_context: pod_sc,
         labels: io::child_labels(&[("kopiur.home-operations.com/op", "restore")]),
         // Restore writes INTO the target PVC, mounted read-write at /restore.
         source_volume: Some(VolumeMountSpec::pvc(target_pvc, target_path, false)),

@@ -267,15 +267,24 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
     let effective_sc =
         io::resolve_mover_security_context(&ctx.client, &namespace, config.spec.mover.as_ref())
             .await?;
+    let pod_sc = config
+        .spec
+        .mover
+        .as_ref()
+        .and_then(|m| m.pod_security_context.clone());
     let privileged_mode = config.spec.mover.as_ref().and_then(|m| m.privileged_mode);
 
     // Privileged-mover gate (ADR §4.11/§G16, VolSync-parity): an elevated mover
-    // (root/privileged/added caps/`privilegedMode`) requires the workload namespace
-    // to opt in via the `kopiur.home-operations.com/privileged-movers` annotation —
-    // a tenant there could otherwise reuse the minted mover SA at that privilege.
-    // Refuse with a clear `MoverPermitted=False` condition + Event otherwise.
-    if kopiur_api::common::requires_privilege_resolved(effective_sc.as_ref(), privileged_mode)
-        && !io::namespace_allows_privileged_movers(&ctx.client, &namespace).await?
+    // (root/privileged/added caps/`privilegedMode`, container- OR pod-level) requires
+    // the workload namespace to opt in via the
+    // `kopiur.home-operations.com/privileged-movers` annotation — a tenant there could
+    // otherwise reuse the minted mover SA at that privilege. Refuse with a clear
+    // `MoverPermitted=False` condition + Event otherwise.
+    if kopiur_api::common::requires_privilege_resolved(
+        effective_sc.as_ref(),
+        pod_sc.as_ref(),
+        privileged_mode,
+    ) && !io::namespace_allows_privileged_movers(&ctx.client, &namespace).await?
     {
         let sa = ctx
             .mover_service_account
@@ -448,6 +457,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         // The resolved effective context (explicit or inherited) — same value the
         // privileged gate above ran on.
         security_context: effective_sc,
+        pod_security_context: pod_sc,
         labels,
         source_volume,
         repo_volume,
@@ -638,6 +648,7 @@ async fn delete_snapshot_via_job(
         limits: JobLimits::default(),
         resources: None,
         security_context: None,
+        pod_security_context: None,
         labels,
         source_volume: None,
         repo_volume,

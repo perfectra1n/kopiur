@@ -455,6 +455,7 @@ async fn bootstrap_via_mover(
         },
         resources: None,
         security_context: None,
+        pod_security_context: None,
         labels,
         source_volume: None,
         repo_volume,

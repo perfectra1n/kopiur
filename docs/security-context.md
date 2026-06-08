@@ -21,11 +21,28 @@ A Kubernetes [`SecurityContext`](https://kubernetes.io/docs/tasks/configure-pod-
 | `Restore` | `spec.mover.securityContext` |
 | `Maintenance` | `spec.mover.securityContext` |
 
-Kopiur applies it at the **container** level (on the mover container), not the pod level. That single design choice has one important consequence:
+`spec.mover.securityContext` is applied at the **container** level (on the mover container). For pod-level settings — most importantly **`fsGroup`** — there's a separate sibling field:
 
-/// warning | `fsGroup` is not available
+| Kind | Container-level | Pod-level |
+| --- | --- | --- |
+| `BackupConfig` | `spec.mover.securityContext` | `spec.mover.podSecurityContext` |
+| `Restore` | `spec.mover.securityContext` | `spec.mover.podSecurityContext` |
+| `Maintenance` | `spec.mover.securityContext` | `spec.mover.podSecurityContext` |
 
-`fsGroup` is a **pod-level** setting (`PodSecurityContext`), and Kopiur deliberately does not set a pod-level security context — so `fsGroup` (which would recursively `chgrp` the volume on mount) has no effect on the mover. Make ownership line up with `runAsUser`/`runAsGroup` instead: match the owning UID, match a GID the files are group-readable by, or use a root mover. This keeps the mover's privileges auditable in exactly one place.
+/// tip | `fsGroup` for a freshly-provisioned restore volume
+
+`fsGroup` is a **pod-level** setting (`PodSecurityContext`). Set it via `spec.mover.podSecurityContext.fsGroup` (the same `PodSecurityContext` you'd put on any pod). On mount, the kubelet makes the volume group-owned by that GID and group-writable, and adds it to the mover's supplementary groups — so an **unprivileged** mover (`runAsUser: 1000`) can populate a **freshly-provisioned** volume on restore (whose mount point is otherwise root-owned `0755`) **without** a root mover.
+
+```yaml
+spec:
+    mover:
+        securityContext: { runAsUser: 1000, runAsNonRoot: true } # container: who writes
+        podSecurityContext: # pod: make the volume writable
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch # skip the recursive chown when already correct
+```
+
+A pod-level `runAsUser: 0` / `runAsNonRoot: false` here is still treated as a **privileged** mover (it needs the namespace opt-in); `fsGroup` itself is not elevation.
 
 ///
 
@@ -180,7 +197,7 @@ This is the same elevation the gate covers, so the restore namespace must opt in
 
 ### ReadWriteMany / multi-writer volumes
 
-On an RWX volume you can't lean on `fsGroup` ownership-remapping (Kopiur doesn't set it, and it doesn't apply to RWX the way it does to RWO anyway). Match the owning UID/GID directly, or — if the volume holds files from several UIDs — use a root mover to read/write regardless of owner.
+`fsGroup` ownership-remapping (`spec.mover.podSecurityContext.fsGroup`) is most effective on `ReadWriteOnce` volumes; on `ReadWriteMany` it may be a no-op or ignored depending on the CSI driver. For RWX, match the owning UID/GID directly via the container `securityContext`, or — if the volume holds files from several UIDs — use a root mover to read/write regardless of owner.
 
 ### Mixed ownership, `lost+found`, root-written data
 
@@ -230,8 +247,8 @@ A backup that reports **`Succeeded` but zero files/bytes** is the classic sign t
 
 | Thing | Value |
 | --- | --- |
-| Where to set it | `spec.mover.securityContext` on `BackupConfig` / `Restore` / `Maintenance` |
-| Level applied | **container** (no pod-level context → no `fsGroup`) |
+| Where to set it | `spec.mover.securityContext` (container) + `spec.mover.podSecurityContext` (pod) on `BackupConfig` / `Restore` / `Maintenance` |
+| `fsGroup` | `spec.mover.podSecurityContext.fsGroup` — make a fresh restore volume writable by an unprivileged mover |
 | Default | UID `65532`, `runAsNonRoot: true`, drop ALL caps, seccomp `RuntimeDefault`, no escalation |
 | Set the UID/GID | `securityContext.runAsUser` / `runAsGroup` (match the data owner) |
 | Inherit from a workload | `inheritSecurityContextFrom.podSelector` (+ optional `container`); mutually exclusive with `securityContext` |
