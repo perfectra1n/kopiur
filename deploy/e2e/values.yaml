@@ -16,6 +16,14 @@
 # (HOSTPATH_REPO / HOSTPATH_RO_REPO) and the uid with consts::MOVER_UID.
 installScope: cluster
 
+# Grant the operator cluster-wide `secrets` create/patch so per-resource
+# `spec.credentialProjection` works — exercised by crates/e2e tests/credential_projection.rs
+# (backup/restore/maintenance projection). The chart defaults this OFF (projection is
+# opt-in per resource), so the harness must opt in explicitly; without it those tests
+# see the actionable 403 instead of a projected Secret.
+secretProjection:
+  enabled: true
+
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 65532
