@@ -39,6 +39,7 @@ Kopiur separates the backup **recipe** (`BackupConfig`) from its **invocation** 
 | 15  | [In-place mirror restore](#example-15--in-place-mirror-restore) | Restore into an existing PVC and make it an exact mirror. |
 | 16  | [Cross-namespace clone restore](#example-16--cross-namespace-clone-restore) | Clone one namespace's snapshot into another (prod → staging). |
 | 17  | [Restore from a shared repo (projection)](#example-17--restore-from-a-shared-repo-projection) | Restore from a `ClusterRepository` into a fresh namespace, creds projected. |
+| 18  | [Inherit the mover security context](#example-18--inherit-the-mover-security-context-from-a-workload) | Run the mover as "whatever the app runs as" by selecting the workload. |
 
 /// tip | Looking for a specific storage backend?
 
@@ -236,4 +237,12 @@ Restoring from a shared `ClusterRepository` into a namespace that has never run 
 
 ```yaml
 --8<-- "deploy/examples/17-restore-shared-repo-projection.yaml"
+```
+
+## Example 18 — Inherit the mover security context from a workload
+
+Instead of hard-coding the mover's UID/GID (example 09), `spec.mover.inheritSecurityContextFrom` copies the `securityContext` from a live workload pod onto the mover, so it runs as "whatever the app runs as." You select the workload by **label** (Kubernetes can't look up which pod mounts a PVC), and the same knob works on a `Restore`. Mutually exclusive with `securityContext`; an inherited *root* context is still gated by the `privileged-movers` opt-in. See [Security context → Inherit it from the workload](security-context.md#2-inherit-it-from-the-workload).
+
+```yaml
+--8<-- "deploy/examples/18-inherit-security-context.yaml"
 ```

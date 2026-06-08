@@ -160,6 +160,7 @@ nav:
       - Restores: restores.md
       - Movers, RBAC & credentials: movers.md
       - Permissions, UID & GID: permissions.md
+      - Security context: security-context.md
       - Maintenance: maintenance.md
       - Examples: examples.md
       - Troubleshooting: troubleshooting.md

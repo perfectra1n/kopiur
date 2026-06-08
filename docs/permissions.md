@@ -13,6 +13,12 @@ Get the numbers to line up and permissions stop being a problem.
 
 ///
 
+/// info | Looking for the field reference?
+
+This page is the **task** guide — how to find the owning UID and make a stuck backup/restore work. For the full `securityContext` reference (every field, the hardened default, inheriting from a workload, root/privileged movers, and the awkward cases like RWX volumes and preserving ownership on restore), see [**The mover security context**](security-context.md).
+
+///
+
 ## What the mover runs as by default
 
 Out of the box the mover runs **unprivileged** as the mover image's user — **UID `65532`** (distroless `nonroot`) — with a hardened security context: `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, all Linux capabilities dropped, seccomp `RuntimeDefault`.
@@ -157,7 +163,7 @@ The UID in that message is the operator's real effective UID (it varies with the
 A restore writes files into the **target** PVC, so the same rules apply in reverse — and a `Restore` has the **same `spec.mover`** surface a `BackupConfig` does:
 
 - **`Restore.spec.mover.securityContext`** — set the UID/GID the restore mover writes as, so the restored files land owned correctly and the mover can write the target. (Before this existed the restore mover always ran as UID `65532`.) For a freshly created target PVC (`target.pvc`) the default is usually fine; for an existing PVC (`target.pvcRef`) match the UID that owns it.
-- **`Restore.spec.mover.inheritSecurityContextFrom`** — copy the `securityContext` from a live workload pod by label selector instead of hard-coding it (mutually exclusive with `securityContext`). Handy for "restore as whatever the app runs as".
+- **`Restore.spec.mover.inheritSecurityContextFrom`** — copy the `securityContext` from a live workload pod by label selector instead of hard-coding it (mutually exclusive with `securityContext`). Handy for "restore as whatever the app runs as" — full treatment in [Security context → Inherit it from the workload](security-context.md#2-inherit-it-from-the-workload).
 - **Preserving original ownership** — kopia restores files with the UID/GID they had when snapshotted. Reproducing that ownership requires a privileged (root) mover with `privilegedMode: true`; an unprivileged mover writes files owned by its own UID instead. An elevated restore mover (root / `privilegedMode`, or one inherited from a root pod) is gated by the same `privileged-movers` namespace opt-in a backup uses.
 - **`spec.options.ignorePermissionErrors`** (default `true`) lets a restore complete and _report_ permission problems via a condition rather than failing hard. Set it `false` to fail-closed when exact permissions matter.
 
@@ -180,7 +186,7 @@ See [Restores → Mover, cache & failure policy](restores.md#mover-cache--failur
 | -------------------------------- | ----------------------------------------------------------------------------------- |
 | Default mover UID                | `65532` (distroless `nonroot`), `runAsNonRoot: true`                                |
 | Set the mover UID/GID            | `BackupConfig.spec.mover.securityContext.runAsUser` / `runAsGroup` (same on `Restore.spec.mover` / `Maintenance.spec.mover`) |
-| Inherit UID/GID from a workload  | `spec.mover.inheritSecurityContextFrom.podSelector` (mutually exclusive with `securityContext`) |
+| Inherit UID/GID from a workload  | `spec.mover.inheritSecurityContextFrom.podSelector` (mutually exclusive with `securityContext`) — see [Security context](security-context.md#2-inherit-it-from-the-workload) |
 | Mover cache size / warm cache    | `spec.mover.cache` (`capacity`, `storageClassName`, `mode: Ephemeral`/`Persistent`, `content`/`metadataCacheSizeMb`); inherits `Repository.spec.cacheDefaults` |
 | `fsGroup`                        | **not** supported (no pod-level securityContext) — match UID/GID instead            |
 | Root / preserve-ownership        | `runAsUser: 0` + `privilegedMode: true` (needs the namespace opt-in)                |

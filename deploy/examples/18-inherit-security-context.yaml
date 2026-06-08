@@ -1,0 +1,98 @@
+# Example 18 — Inherit the mover's UID/GID from the workload (ADR-0003 §4.11)
+#
+# Instead of hard-coding `spec.mover.securityContext.runAsUser/runAsGroup` to
+# match the data owner (example 09), let the mover "run as whatever the app runs
+# as": `inheritSecurityContextFrom` copies the securityContext from a live
+# workload pod onto the mover. This is the answer to "back up / restore as the pod
+# that mounts this PVC" — you point a LABEL SELECTOR at that workload (Kubernetes
+# has no way to look up which pod mounts a given PVC, so you select it by the
+# labels it already carries; see the recipe in the Permissions guide).
+#
+# Mutually exclusive with `securityContext` — setting BOTH is webhook-rejected.
+# A pod matching the selector must be Running so its UID/GID can be read. An
+# inherited *root* context is still elevated and needs the namespace opt-in.
+#
+# Field shapes verified against crates/api:
+#   spec.mover.inheritSecurityContextFrom : { podSelector: LabelSelector, container? }
+#   (externally-tagged backend: the bucket lives under `backend.s3`)
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-repo-creds
+  namespace: app
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: app-primary
+  namespace: app
+spec:
+  backend:
+    s3:
+      bucket: my-backups
+      region: us-east-1
+      auth:
+        secretRef:
+          name: app-repo-creds
+  encryption:
+    passwordSecretRef:
+      name: app-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: BackupConfig
+metadata:
+  name: app-data
+  namespace: app
+spec:
+  repository:
+    name: app-primary
+  sources:
+    - pvc:
+        name: app-data
+  retention:
+    keepDaily: 14
+    keepWeekly: 4
+  # ── Inherit the mover's UID/GID from the workload ──────────────────────────
+  # Copy the securityContext from the live pod that runs (and mounts) this PVC,
+  # selected by the labels the workload already carries. The mover then reads the
+  # data as the same UID/GID the app writes it as — no hard-coded UID to track.
+  # Do NOT also set `securityContext` here; the two are mutually exclusive.
+  mover:
+    inheritSecurityContextFrom:
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: app # the workload that owns `app-data`
+      container: app # optional; defaults to the pod's first container
+---
+# ── The SAME knob works on a Restore ──────────────────────────────────────────
+# A Restore writes INTO a PVC, so it has the identical mover surface. Inheriting
+# from the app pod makes the restored files land owned exactly as the app expects.
+# Uncomment and adjust to restore as the workload's UID/GID:
+#
+# apiVersion: kopiur.home-operations.com/v1alpha1
+# kind: Restore
+# metadata:
+#   name: app-data-restore
+#   namespace: app
+# spec:
+#   source:
+#     backupRef:
+#       name: app-data-20260601-020000
+#   target:
+#     pvcRef:
+#       name: app-data            # write back into the existing PVC
+#   mover:
+#     inheritSecurityContextFrom:
+#       podSelector:
+#         matchLabels:
+#           app.kubernetes.io/name: app
+#       container: app

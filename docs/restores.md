@@ -140,7 +140,7 @@ spec:
 ```
 
 - **`mover.securityContext`** — run the restore mover as the UID/GID that should own the restored files. Without it the mover runs as the hardened default (UID 65532), which may write files the app can't read. This is the fix for "the restore mover had no UID control".
-- **`mover.inheritSecurityContextFrom`** — instead of hard-coding a UID, copy the `securityContext` from a live workload pod (by label selector). Mutually exclusive with `securityContext` (setting both is webhook-rejected).
+- **`mover.inheritSecurityContextFrom`** — instead of hard-coding a UID, copy the `securityContext` from a live workload pod (by label selector). Mutually exclusive with `securityContext` (setting both is webhook-rejected). See [Security context → Inherit it from the workload](security-context.md#2-inherit-it-from-the-workload) and [example 18](examples.md#example-18--inherit-the-mover-security-context-from-a-workload).
 - **`mover.cache`** — size the kopia cache for a large restore. `mode: Ephemeral` (default) gives a fresh per-run volume sized by `capacity` (or an `emptyDir` when unset); `mode: Persistent` keeps a controller-owned cache PVC and reuses it across runs for a warm cache. `contentCacheSizeMb` / `metadataCacheSizeMb` pass kopia's `--content/metadata-cache-size-mb` budgets. A repository's `cacheDefaults` are inherited and overlaid by `mover.cache`.
 - **`failurePolicy`** — the restore Job's `backoffLimit` and `activeDeadlineSeconds`. Absent uses the defaults (2 retries, no deadline).
 

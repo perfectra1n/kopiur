@@ -121,6 +121,8 @@ Place the Secret and the condition clears to `CredentialsAvailable=True` on the 
 
 By default movers run unprivileged. Some workloads need an elevated mover — most commonly a **root** mover (`spec.mover.securityContext.runAsUser: 0`) to read files an unprivileged user can't. Because the controller mints a ServiceAccount in the workload namespace, a tenant with access there could reuse it to run pods at the mover's privilege. Granting that is therefore a **per-namespace admin decision**, gated by an annotation — exactly like VolSync's `volsync.backube/privileged-movers`.
 
+For the full mover `securityContext` surface — the hardened default, setting or inheriting the UID/GID, and the complex cases — see [The mover security context](security-context.md).
+
 The gate applies to **every** kind that runs a mover — a `BackupConfig`'s `spec.mover`, a `Restore`'s `spec.mover`, and a `Maintenance`'s `spec.mover` alike — including a context **inherited** from a workload pod via `inheritSecurityContextFrom` (the resolved context is what's checked, so an inherited-root mover is gated too). If `spec.mover` requests privilege (any of `runAsUser: 0`, `privileged: true`, `allowPrivilegeEscalation: true`, added Linux capabilities, `runAsNonRoot: false`, or `privilegedMode: true`) and the namespace has **not** opted in, the `Backup`/`Restore`/`Maintenance` is refused with a clear condition:
 
 ```console
