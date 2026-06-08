@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.1.11](https://github.com/home-operations/kopiur/compare/0.1.10...0.1.11) (2026-06-08)
+
+
+### Features
+
+* **certs:** allow for self-signed certs instead of cert-manager as an option ([bb9cc5d](https://github.com/home-operations/kopiur/commit/bb9cc5d25e401b083bc95a9c04fbba5597b3d463))
+* **certs:** implement tests and rbac for self-managed certs ([b91638a](https://github.com/home-operations/kopiur/commit/b91638a6b691d0a1d792baaee1efd40b5b0b34cc))
+* **chart:** helm-docs README + values schema, release-time digest pinning ([#63](https://github.com/home-operations/kopiur/issues/63)) ([0cc4d3c](https://github.com/home-operations/kopiur/commit/0cc4d3c0aaf0602e3de6c6e07a2178f7cdaa7088))
+* **dashboards:** support grafana operator dashboard thingy ([eb3b394](https://github.com/home-operations/kopiur/commit/eb3b394360198f3110c7b4e0f67cd4f761e80fd8))
+* **docs:** add more useful docs ([93921db](https://github.com/home-operations/kopiur/commit/93921dbe158beb18072935f420487bc8855e6f73))
+* **e2e:** preload the nfs image ([811fe3f](https://github.com/home-operations/kopiur/commit/811fe3f1565a359a3f3e92f65a36dfe25ed29ef6))
+* **e2e:** update e2e for even more tests ([6a07512](https://github.com/home-operations/kopiur/commit/6a07512101fef353ac6e27f3e9135a71e7c618b1))
+* **nfs:** I love e2e tests finding issues ([3488f52](https://github.com/home-operations/kopiur/commit/3488f52f8b66e16834254aaf5c98a18a50b6e8a4))
+* **nfs:** support inline nfs to support onedr0p lol ([7c92884](https://github.com/home-operations/kopiur/commit/7c92884c4ef0a7bf200384623ff36703464c29e0))
+* **secrets:** default-on secrets projection ([9896667](https://github.com/home-operations/kopiur/commit/9896667dd93268b851c6d5e6705943fceb5b9db7))
+* **secrets:** implement secrets projection by default ([1921526](https://github.com/home-operations/kopiur/commit/1921526d1662cb76249559da7cb84ce2e1e9778c))
+* **secrets:** jk secret projection is default opt-in ([cf69f61](https://github.com/home-operations/kopiur/commit/cf69f6113e2d16df19c7aa01d720a20ae8df1447))
+* **secrets:** move projection into more granular CRDs ([e30f24f](https://github.com/home-operations/kopiur/commit/e30f24f5380a4d68d5394d817f521b5ec59fdbb3))
+* **tests:** use a different nfs container for e2e testing ([e4b2816](https://github.com/home-operations/kopiur/commit/e4b28168ca8407617a9849982b17f8cd00491b26))
+
+
+### Bug Fixes
+
+* **prettier:** please stop messing with the CRDs oxfmt ([6c06aa9](https://github.com/home-operations/kopiur/commit/6c06aa9f2761674d9604c7d0f4973ee78a56066f))
+
 ## [0.1.10](https://github.com/home-operations/kopiur/compare/0.1.9...0.1.10) (2026-06-07)
 
 
