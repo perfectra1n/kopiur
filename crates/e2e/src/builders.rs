@@ -303,12 +303,19 @@ pub fn webdav_service(ns: &str) -> Service {
 /// (`NFS_DISABLE_VERSION_3=1`), so a client mounts the export at `/`
 /// ([`consts::NFS_MOUNT_PATH`]) and only port 2049 is needed.
 ///
-/// The export is backed by an `emptyDir` so each fresh server starts clean (a
-/// reused server keeps prior repo/snapshot state, which the tests tolerate). An
-/// init container `chmod 0777`s it so the non-root mover (uid
-/// [`consts::MOVER_UID`]) can write the repo — `no_root_squash` alone is not
-/// enough because the mover does not run as root. The mover mounts this export
-/// inline (no PVC) as the filesystem repo volume or as an NFS backup source.
+/// The export is backed by a **memory-medium** `emptyDir` (tmpfs) so each fresh
+/// server starts clean (a reused server keeps prior repo/snapshot state, which
+/// the tests tolerate). tmpfs is load-bearing, not an optimization: Ganesha's
+/// VFS FSAL resolves the export root with `name_to_handle_at(2)`, which a default
+/// (disk-backed) `emptyDir` cannot service when the node's backing store is
+/// overlayfs — Ganesha then logs `init_export_root ... FSAL_ERROR=(Operation not
+/// supported,95)`, never binds 2049, and every mover NFS mount fails with
+/// `exit status 32`. tmpfs implements the exportfs file-handle ops, so the
+/// export root resolves and the server listens. An init container `chmod 0777`s
+/// it so the non-root mover (uid [`consts::MOVER_UID`]) can write the repo —
+/// `no_root_squash` alone is not enough because the mover does not run as root.
+/// The mover mounts this export inline (no PVC) as the filesystem repo volume or
+/// as an NFS backup source.
 pub fn nfs_deployment(ns: &str) -> Deployment {
     from_json(json!({
         "apiVersion": "apps/v1",
@@ -356,7 +363,11 @@ pub fn nfs_deployment(ns: &str) -> Deployment {
                             "periodSeconds": 3,
                         },
                     }],
-                    "volumes": [{ "name": "export", "emptyDir": {} }],
+                    // tmpfs (memory medium): the VFS FSAL needs file-handle
+                    // support (`name_to_handle_at`) on the export root, which an
+                    // overlayfs-backed emptyDir does not provide — see the doc
+                    // comment above. sizeLimit bounds the throwaway repo.
+                    "volumes": [{ "name": "export", "emptyDir": { "medium": "Memory", "sizeLimit": "512Mi" } }],
                 },
             },
         },
@@ -592,9 +603,15 @@ mod tests {
             c.pointer("/volumeMounts/0/mountPath").unwrap(),
             consts::NFS_EXPORT_PATH
         );
-        assert!(
-            v.pointer("/spec/template/spec/volumes/0/emptyDir")
-                .is_some()
+        // The export MUST be a memory-medium emptyDir (tmpfs): the VFS FSAL
+        // resolves the export root with name_to_handle_at, which an overlayfs
+        // emptyDir cannot service (Ganesha then never binds 2049 and every NFS
+        // mount fails with `exit status 32`). Regression guard for that bug.
+        assert_eq!(
+            v.pointer("/spec/template/spec/volumes/0/emptyDir/medium")
+                .and_then(|m| m.as_str()),
+            Some("Memory"),
+            "NFS export must be tmpfs-backed so Ganesha's VFS FSAL can resolve the export root"
         );
         // Ganesha export config via env: export the dir at the NFSv4 pseudo-root.
         let env: Vec<(String, String)> = c

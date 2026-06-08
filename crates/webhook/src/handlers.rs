@@ -116,7 +116,16 @@ fn ptr(path: &str) -> PointerBuf {
 
 /// `metadata.finalizers` may be absent. Build a patch op that appends the snapshot
 /// finalizer without clobbering existing finalizers.
+///
+/// Never (re-)add the finalizer to an object already being deleted
+/// (`deletionTimestamp` set): the controller's deletion path PATCHes the object to
+/// REMOVE this finalizer, and that PATCH is itself an UPDATE admission — re-adding
+/// here would immediately undo the removal, so the snapshot-cleanup finalizer
+/// could never clear and the `Backup` CR would never be garbage-collected.
 fn ensure_finalizer_ops(meta: &ObjectMeta, ops: &mut Vec<PatchOperation>) {
+    if meta.deletion_timestamp.is_some() {
+        return;
+    }
     match &meta.finalizers {
         None => {
             // No finalizers array at all: create it with our finalizer.

@@ -295,6 +295,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleting_backup_is_not_refinalized() {
+        // Regression: the mutating webhook re-added the snapshot-cleanup finalizer
+        // on EVERY admission, including the UPDATE the controller issues to REMOVE
+        // it during deletion. That made removal a no-op, so the finalizer never
+        // cleared and the Backup CR was never garbage-collected. An object already
+        // being deleted (deletionTimestamp set) must NOT get the finalizer re-added.
+        let mut body = review_body(
+            "Backup",
+            "billing",
+            "u",
+            json!({ "configRef": { "name": "c" }, "deletionPolicy": "Delete" }),
+        );
+        body["request"]["operation"] = json!("UPDATE");
+        body["request"]["object"]["metadata"]["deletionTimestamp"] = json!("2026-06-08T00:00:00Z");
+        body["request"]["object"]["metadata"]["finalizers"] =
+            json!(["kopiur.home-operations.com/snapshot-cleanup"]);
+        let (_s, v) = post_review(body).await;
+        assert_eq!(v["response"]["allowed"], true);
+        // deletionPolicy is already set, so the only op the webhook could emit is the
+        // finalizer re-add — which must NOT happen. No patch at all is the expected
+        // outcome; if a patch is present it must not touch finalizers.
+        if v["response"]["patch"].is_array() {
+            let patch = decode_patch(&v);
+            let touches_finalizers = patch.iter().any(|op| {
+                op["path"]
+                    .as_str()
+                    .is_some_and(|p| p.starts_with("/metadata/finalizers"))
+            });
+            assert!(
+                !touches_finalizers,
+                "a deleting Backup must not have its finalizer re-added: {patch:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn discovered_backup_with_delete_is_denied() {
         let mut body = review_body(
             "Backup",

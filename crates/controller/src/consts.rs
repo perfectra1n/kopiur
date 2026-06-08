@@ -23,6 +23,14 @@ pub const CONFIG_LABEL: &str = "kopiur.home-operations.com/config";
 /// The API version string for kopiur CRDs (used in mover `TargetRef`s).
 pub const API_VERSION: &str = "kopiur.home-operations.com/v1alpha1";
 
+/// In-container mount path for an inline-NFS backup *source* whose server-side
+/// export is the NFSv4 pseudo-root (`/`). The export's server path and the
+/// container mount path are independent; reusing `/` as the mount path would
+/// mount the volume over the container rootfs and the pod fails to start
+/// (`error mounting ... to rootfs at "/": mountpoint ... is on the top of
+/// rootfs`). kopia snapshots whatever is mounted here.
+pub const NFS_SOURCE_MOUNT_PATH: &str = "/nfs";
+
 /// Standard component label. `maintenance` marks the mover Jobs the `Maintenance`
 /// reconciler spawns, so it can enforce single-flight (at most one maintenance
 /// Job per repository at a time, G3) via a label selector.

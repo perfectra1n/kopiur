@@ -12,7 +12,7 @@
 //! install — is owned by the mise `e2e-*` tasks, NOT this module.
 
 use anyhow::{Context, Result};
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Pod, Service};
 use kube::api::{DeleteParams, PostParams};
 use kube::{Api, Client};
 use tokio::sync::OnceCell;
@@ -64,7 +64,10 @@ pub struct World {
     sftp: OnceCell<()>,
     webdav: OnceCell<()>,
     rclone: OnceCell<()>,
-    nfs: OnceCell<()>,
+    /// Holds the nfs `Service` ClusterIP once provisioned — the in-tree NFS
+    /// volume is mounted by the kubelet in the node's host netns, which cannot
+    /// resolve cluster Service DNS, so scenarios address the server by IP.
+    nfs: OnceCell<String>,
 }
 
 impl World {
@@ -88,6 +91,20 @@ impl World {
     /// The underlying kube client (for the scenario's own CR operations).
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// The address scenarios must use for the NFS server's `volume.nfs.server` /
+    /// `source.nfs.server`: the nfs `Service` ClusterIP, resolved when
+    /// [`Need::Nfs`] was provisioned. The in-tree NFS volume is mounted by the
+    /// kubelet in the node's host network namespace, which has no cluster DNS, so
+    /// the FQDN ([`consts::NFS_HOST`]) fails with `Failed to resolve server` —
+    /// the ClusterIP is routable from the node via kube-proxy.
+    ///
+    /// Panics if called before `ensure(&[Need::Nfs])`.
+    pub fn nfs_host(&self) -> &str {
+        self.nfs
+            .get()
+            .expect("nfs_host() called before ensure(&[Need::Nfs]) provisioned the NFS server")
     }
 
     /// Ensure every declared prerequisite exists (idempotent, deduped).
@@ -322,7 +339,7 @@ impl World {
     /// Stand up the in-cluster NFS server (exports `/exports`) and seed the NFS
     /// repo credentials Secret (just the repo password — NFS, like the filesystem
     /// backend, needs no backend `auth`). Implies a backup source/dest PVC.
-    async fn ensure_nfs(&self) -> Result<()> {
+    async fn ensure_nfs(&self) -> Result<String> {
         self.fs.get_or_try_init(|| self.ensure_filesystem()).await?;
         let fixtures: Vec<Fixture> = vec![
             builders::opaque_secret(
@@ -335,7 +352,20 @@ impl World {
             builders::nfs_service(consts::OPERATOR_NS).into(),
         ];
         apply_all(&self.client, &fixtures).await?;
-        wait::deployment_ready(&self.client, consts::OPERATOR_NS, "nfs").await
+        wait::deployment_ready(&self.client, consts::OPERATOR_NS, "nfs").await?;
+        // Resolve the Service ClusterIP scenarios mount by — the FQDN is not
+        // resolvable in the node netns where the kubelet mounts the NFS volume.
+        let svcs: Api<Service> = Api::namespaced(self.client.clone(), consts::OPERATOR_NS);
+        let svc = svcs
+            .get("nfs")
+            .await
+            .context("read nfs Service to resolve its ClusterIP")?;
+        let cluster_ip = svc
+            .spec
+            .and_then(|s| s.cluster_ip)
+            .filter(|ip| !ip.is_empty() && ip != "None")
+            .context("nfs Service has no usable ClusterIP")?;
+        Ok(cluster_ip)
     }
 }
 

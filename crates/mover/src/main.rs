@@ -189,7 +189,9 @@ async fn run_operation(
             client
                 .snapshot_restore_with(&op.snapshot_id, &op.target_path, &op.restore_options())
                 .await?;
-            Ok(StatusUpdate::succeeded(chrono::Utc::now()))
+            // Restore's terminal success phase is `Completed`, not `Succeeded`
+            // (the Backup phase) — the Restore CRD enum rejects `Succeeded`.
+            Ok(StatusUpdate::completed(chrono::Utc::now()))
         }
         Operation::SnapshotDelete(op) => {
             // Just delete the snapshot. Space reclamation (maintenance) is a

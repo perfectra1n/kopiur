@@ -238,6 +238,27 @@ async fn spawn_maintenance_job(
             read_only: false,
         });
     let owner = io::owner_ref_for(maint, "Maintenance")?;
+
+    // The maintenance mover Job runs in this namespace as the dedicated mover SA
+    // (not the operator SA, which does not exist here). Mint the least-privilege
+    // mover SA + RoleBinding FIRST — before resolving credentials, which can fail
+    // (e.g. a ClusterRepository's Secret is absent here and projection is off).
+    // The SA is a prerequisite independent of creds; minting it first means a
+    // missing-creds retry still leaves the RBAC in place, and every other mover
+    // path (Backup/Restore/bootstrap) establishes this too. Without it the Job
+    // FailedCreates with `serviceaccount ... not found` and never schedules a pod
+    // (ADR §4.12).
+    if let Some(sa) = ctx.mover_service_account.as_deref() {
+        io::ensure_mover_rbac(
+            &ctx.client,
+            namespace,
+            sa,
+            &ctx.mover_role_kind,
+            &ctx.mover_clusterrole,
+        )
+        .await?;
+    }
+
     // Resolve the credential Secret(s) the mover loads via envFrom. A maintenance
     // Job for a ClusterRepository lands in a namespace that often lacks the source
     // Secret, so projection (`spec.credentialProjection`) is especially useful here:
@@ -287,21 +308,6 @@ async fn spawn_maintenance_job(
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations,
     };
-    // The maintenance mover Job runs in this namespace as the dedicated mover SA
-    // (not the operator SA, which does not exist here). Mint the least-privilege
-    // mover SA + RoleBinding first — every other mover path (Backup/Restore/
-    // bootstrap) does the same, and without it the Job FailedCreates with
-    // `serviceaccount ... not found` and never schedules a pod (ADR §4.12).
-    if let Some(sa) = ctx.mover_service_account.as_deref() {
-        io::ensure_mover_rbac(
-            &ctx.client,
-            namespace,
-            sa,
-            &ctx.mover_role_kind,
-            &ctx.mover_clusterrole,
-        )
-        .await?;
-    }
 
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);

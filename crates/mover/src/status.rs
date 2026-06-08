@@ -12,7 +12,8 @@
 use chrono::{DateTime, Utc};
 use kopiur_api::backup::SnapshotInfo;
 use kopiur_api::common::ResolvedIdentity;
-use kopiur_api::{BackupStats, BackupTiming};
+use kopiur_api::restore::RestorePhase;
+use kopiur_api::{BackupStats, BackupTiming, PhaseLabel};
 use kopiur_kopia::{KopiaError, SnapshotCreateResult};
 use serde::{Deserialize, Serialize};
 
@@ -213,10 +214,27 @@ impl StatusUpdate {
         }
     }
 
-    /// A successful non-backup update (restore / delete) with no stats.
+    /// A successful snapshot-delete update (Backup finalizer path) with no stats.
+    /// The Backup CRD's terminal success phase is `Succeeded`.
     pub fn succeeded(observed_at: DateTime<Utc>) -> Self {
         StatusUpdate {
             phase: MoverPhase::Succeeded.as_str().to_string(),
+            observed_at,
+            snapshot: None,
+            timing: None,
+            stats: None,
+            failure: None,
+        }
+    }
+
+    /// A successful restore update with no stats. The Restore CRD's terminal
+    /// success phase is `Completed` — NOT `Succeeded` (the Backup phase). Writing
+    /// `Succeeded` here is rejected by the apiserver with a 422 (the enum forbids
+    /// it), so the phase string is sourced from [`RestorePhase::Completed`] to
+    /// stay locked to the CRD.
+    pub fn completed(observed_at: DateTime<Utc>) -> Self {
+        StatusUpdate {
+            phase: RestorePhase::Completed.label().to_string(),
             observed_at,
             snapshot: None,
             timing: None,
@@ -366,6 +384,21 @@ mod tests {
         assert_eq!(u.stats.as_ref().unwrap().files_new, Some(3));
         assert!(u.timing.is_some());
         assert!(u.failure.is_none());
+    }
+
+    #[test]
+    fn restore_terminal_phase_is_completed_not_succeeded() {
+        // Regression: the mover used `succeeded()` ("Succeeded") for restores,
+        // but the Restore CRD enum only allows "Completed", so the status PATCH
+        // was rejected 422 and every restore flooded the controller logs. The
+        // restore terminal phase MUST match RestorePhase::Completed.
+        let u = StatusUpdate::completed(ts());
+        assert_eq!(u.phase, "Completed");
+        assert_eq!(u.phase, RestorePhase::Completed.label());
+        assert_ne!(u.phase, MoverPhase::Succeeded.as_str());
+        assert!(u.failure.is_none());
+        assert!(u.snapshot.is_none());
+        assert_eq!(u.as_patch_body()["status"]["phase"], "Completed");
     }
 
     #[test]

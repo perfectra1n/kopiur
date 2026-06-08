@@ -789,13 +789,23 @@ fn build_backup_run(
             )
         }
         (None, Some(nfs)) => {
-            let path = source
+            // The export's server-side path (`nfs.path`) is what the volume is
+            // mounted FROM; it is NOT necessarily a valid in-container mount
+            // path. An NFSv4 pseudo-root export ("/") must not be mounted at "/"
+            // in the container — that mounts over the rootfs and the pod fails to
+            // start. Remap a "/" target to a safe path; kopia snapshots there.
+            let requested = source
                 .source_path_override
                 .clone()
                 .unwrap_or_else(|| nfs.path.clone());
+            let mount_path = if requested == "/" {
+                crate::consts::NFS_SOURCE_MOUNT_PATH.to_string()
+            } else {
+                requested
+            };
             (
-                path.clone(),
-                VolumeMountSpec::nfs(nfs.server.clone(), nfs.path.clone(), path, true),
+                mount_path.clone(),
+                VolumeMountSpec::nfs(nfs.server.clone(), nfs.path.clone(), mount_path, true),
             )
         }
         // `pvcSelector` (multi-PVC) and the mutually-exclusive cases are rejected
@@ -1215,6 +1225,55 @@ mod tests {
         assert_eq!(source_volume.unwrap().mount_path, "/data");
         match ws.operation {
             Operation::Backup(op) => assert_eq!(op.source_path, "/data"),
+            other => panic!("expected a Backup operation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_backup_run_remaps_nfs_pseudo_root_source_off_container_rootfs() {
+        // Regression: an NFSv4 pseudo-root export (`path: "/"`) was mounted at
+        // the container "/" — the mover pod then failed to start with
+        // `error mounting ... to rootfs at "/": mountpoint ... is on the top of
+        // rootfs`. The server-side export path stays "/", but the in-container
+        // mount path (and kopia source path) must be a safe non-root path.
+        use crate::jobs::MountSource;
+        use kopiur_api::backend::NfsVolume;
+        use kopiur_api::backup_config::Source;
+        let cfg = config_with_source(
+            "media",
+            Source {
+                pvc: None,
+                pvc_selector: None,
+                nfs: Some(NfsVolume {
+                    server: "10.0.0.5".into(),
+                    path: "/".into(),
+                }),
+                source_path_override: None,
+                source_path_strategy: None,
+            },
+        );
+        let repo = resolved_s3_repo();
+        let (ws, source_volume, _repo, _creds) =
+            build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "media").unwrap();
+        let src = source_volume.expect("an NFS source mount");
+        // The NFS volume still exports the server-side pseudo-root.
+        assert_eq!(
+            src.source,
+            MountSource::Nfs {
+                server: "10.0.0.5".into(),
+                path: "/".into(),
+            }
+        );
+        // ...but it is NOT mounted at the container rootfs.
+        assert_ne!(
+            src.mount_path, "/",
+            "must not mount over the container rootfs"
+        );
+        assert_eq!(src.mount_path, crate::consts::NFS_SOURCE_MOUNT_PATH);
+        match ws.operation {
+            Operation::Backup(op) => {
+                assert_eq!(op.source_path, crate::consts::NFS_SOURCE_MOUNT_PATH)
+            }
             other => panic!("expected a Backup operation, got {other:?}"),
         }
     }

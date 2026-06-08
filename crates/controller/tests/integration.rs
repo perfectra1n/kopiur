@@ -15,7 +15,9 @@
 use std::time::Duration;
 
 use k8s_openapi::api::batch::v1::Job;
-use kube::api::{DeleteParams, PostParams};
+use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
+use kube::api::{DeleteParams, Patch, PatchParams, PostParams};
+use kube::core::CustomResourceExt;
 use kube::runtime::wait::{await_condition, conditions};
 use kube::{Api, Client, ResourceExt};
 
@@ -23,6 +25,26 @@ use kopiur_api::backend::{Backend, FilesystemBackend};
 use kopiur_api::common::{Encryption, RepositoryKind, RepositoryRef, SecretKeyRef};
 use kopiur_api::{Backup, BackupConfig, BackupConfigSpec, BackupSpec, Repository, RepositorySpec};
 use kopiur_controller::consts::SNAPSHOT_CLEANUP_FINALIZER;
+
+/// Install the CRDs these tests exercise and wait for each to become
+/// `Established`. The ephemeral kind cluster starts bare, so the CRDs must be
+/// applied before any custom resource can be created (otherwise the apiserver
+/// 404s). Provisioning stays in Rust (the repo convention) and uses
+/// server-side apply so a reused cluster is idempotent.
+async fn ensure_crds(client: &Client) {
+    let api: Api<CustomResourceDefinition> = Api::all(client.clone());
+    let pp = PatchParams::apply("kopiur-integration-test").force();
+    let crds = [Repository::crd(), BackupConfig::crd(), Backup::crd()];
+    for crd in crds {
+        let name = crd.name_any();
+        api.patch(&name, &pp, &Patch::Apply(&crd))
+            .await
+            .unwrap_or_else(|e| panic!("apply CRD {name}: {e}"));
+        await_condition(api.clone(), &name, conditions::is_crd_established())
+            .await
+            .unwrap_or_else(|e| panic!("CRD {name} never became Established: {e}"));
+    }
+}
 
 /// Try to connect to a cluster; return `None` (and print a skip notice) if none
 /// is reachable, so the test passes as a no-op off-cluster.
@@ -64,7 +86,6 @@ fn sample_repository(name: &str) -> Repository {
             cache_defaults: None,
             catalog: None,
             maintenance: None,
-            credential_projection: None,
         },
     )
 }
@@ -97,6 +118,7 @@ fn sample_backup_config(name: &str) -> BackupConfig {
             policy: None,
             hooks: None,
             mover: None,
+            credential_projection: None,
         },
     )
 }
@@ -107,6 +129,7 @@ async fn repository_and_backup_config_apply_cleanly() {
     let Some(client) = try_client().await else {
         return;
     };
+    ensure_crds(&client).await;
     let ns = "default";
     let repos: Api<Repository> = Api::namespaced(client.clone(), ns);
     let configs: Api<BackupConfig> = Api::namespaced(client.clone(), ns);
@@ -134,6 +157,7 @@ async fn backup_gets_finalizer_and_delete_path_removes_cr() {
     let Some(client) = try_client().await else {
         return;
     };
+    ensure_crds(&client).await;
     let ns = "default";
     let backups: Api<Backup> = Api::namespaced(client.clone(), ns);
 

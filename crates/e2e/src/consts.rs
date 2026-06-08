@@ -221,8 +221,12 @@ pub const RCLONE_REMOTE_PATH: &str = "miniors3:kopiur-rclone/repo";
 /// preloaded by the `minio-preload` mise task so CI doesn't pull it in-cluster.
 pub const NFS_IMAGE: &str =
     "janeczku/nfs-ganesha@sha256:17fe1813fd20d9fdfa497a26c8a2e39dd49748cd39dbb0559df7627d9bcf4c53";
-/// In-cluster NFS host the Repository's `volume.nfs.server` (and an NFS *source*)
-/// point at. Resolves to the `nfs` Service in [`OPERATOR_NS`].
+/// The nfs `Service` FQDN, kept for documentation/reference only. Scenarios do
+/// **not** mount by this name: the in-tree NFS volume is mounted by the kubelet
+/// in the node's host network namespace, which has no cluster DNS, so a mount by
+/// FQDN fails with `mount.nfs: Failed to resolve server`. Use
+/// [`crate::world::World::nfs_host`] (the Service ClusterIP, routable from the
+/// node via kube-proxy) for `volume.nfs.server` / `source.nfs.server` instead.
 pub const NFS_HOST: &str = "nfs.kopiur-e2e.svc.cluster.local";
 /// Directory the server exports (backed by an `emptyDir` mounted here in the NFS
 /// pod, passed to Ganesha as `EXPORT_PATH`). This is the **server-side** path;
