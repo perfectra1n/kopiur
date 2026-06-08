@@ -334,6 +334,11 @@ async fn drive_direct_restore(
         name,
         &owner,
         &repo,
+        restore
+            .spec
+            .credential_projection
+            .as_ref()
+            .is_some_and(|p| p.enabled),
         repo_ref
             .map(|r| io::repo_kind_str(r.kind))
             .unwrap_or("Repository"),

@@ -48,31 +48,37 @@ The names above assume the default Helm release. The chart passes the real names
 
 The mover reads the repository password (and any object-store keys) from a Secret, mounted into the Job with `envFrom`. **`envFrom` is namespace-local** — it can only reference a Secret in the Job's own namespace. So the credential Secret must exist in the **workload** namespace. You have two ways to get it there:
 
-| Repository kind                      | Self-managed (default)                                                                       | Projection (recommended for shared repos)                                                                 |
-| ------------------------------------ | -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `Repository` (namespaced)            | Nothing extra — the repo and its Secret are already in the workload namespace.               | Not needed (no-op): the Secret is already where the mover runs.                                           |
-| `ClusterRepository` (cluster-scoped) | Place a Secret of the same name in **each** workload namespace that backs up to it.          | Set `credentialProjection.enabled: true` once on the repo — Kopiur copies it into every mover namespace.  |
+| Repository kind                      | Self-managed (default)                                                                       | Projection (recommended for shared repos)                                                                       |
+| ------------------------------------ | -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `Repository` (namespaced)            | Nothing extra — the repo and its Secret are already in the workload namespace.               | Not needed (no-op): the Secret is already where the mover runs.                                                 |
+| `ClusterRepository` (cluster-scoped) | Place a Secret of the same name in **each** workload namespace that backs up to it.          | Set `credentialProjection.enabled: true` on the `BackupConfig`/`Restore`/`Maintenance` that uses it.            |
 
 /// tip | Don't hand-copy Secrets — turn on projection
 
-If you run a shared `ClusterRepository` across more than a namespace or two, **use credential projection** instead of replicating the Secret by hand. It's one field on the repository and you never touch the credential Secret in a workload namespace again. It's **off by default** (a namespace is a trust boundary, so cross-namespace copying is opt-in), but for the multi-namespace shared-repo case it's the intended path — see [below](#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos).
+If you run a shared `ClusterRepository` across more than a namespace or two, **use credential projection** instead of replicating the Secret by hand. It's one field on the consumer (`BackupConfig`/`Restore`/`Maintenance`) and you never touch the credential Secret in a workload namespace again. It's **off by default** (a namespace is a trust boundary, so cross-namespace copying is opt-in), but for the multi-namespace shared-repo case it's the intended path — see [below](#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos).
 
 ///
 
 ### Let Kopiur project the credentials Secret (recommended for shared repos)
 
-Set `spec.credentialProjection.enabled: true` on the `Repository`/`ClusterRepository`. Before each mover run, Kopiur reads the repository's credential Secret(s) from their source namespace and writes a copy into the mover Job's namespace — so the `envFrom` resolves without you placing anything there:
+Set `spec.credentialProjection.enabled: true` on the **consumer** — the `BackupConfig` (also on `Restore` and `Maintenance`), not the repository. The namespace owner opts in, rather than the shared repository pushing its creds everywhere. Before each mover run, Kopiur reads the referenced repository's credential Secret(s) from their source namespace and writes a copy into the mover Job's namespace — so the `envFrom` resolves without you placing anything there:
 
 ```yaml
+# on the BackupConfig in your workload namespace (Restore/Maintenance take the same field)
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: BackupConfig
+metadata:
+  name: my-data
+  namespace: media
 spec:
-  backend: { s3: { ... } }
-  encryption:
-    passwordSecretRef:
-      name: kopia-rustfs-creds
-      namespace: kopiur-system # source — for a ClusterRepository this is required
+  repository: { kind: ClusterRepository, name: shared-primary }
+  sources:
+    - pvc: { name: my-data }
   credentialProjection:
     enabled: true # off by default; flip this on to stop hand-copying Secrets
 ```
+
+`Backup`s produced from this config (manual, scheduled, or discovered) inherit the setting.
 
 How the projected copies behave:
 
@@ -83,7 +89,7 @@ How the projected copies behave:
 
 /// warning | Projection needs the operator's `secrets` create/patch RBAC
 
-To write Secrets into workload namespaces, the operator needs cluster-wide `secrets` `create`/`patch`. The Helm value `secretProjection.enabled` (default **on**) grants it, so a repo can opt in without an RBAC change. The trade-off: `create` cannot be scoped to a Secret name, so the operator can write a Secret in any namespace it manages. To keep `secrets` access read-only, set `secretProjection.enabled: false` — then a projection-enabled repo surfaces an actionable `403` telling you to re-enable it. A projected copy in namespace `X` is readable by anything that can read Secrets in `X` — exactly as it would be if you placed it there yourself.
+To write Secrets into workload namespaces, the operator needs cluster-wide `secrets` `create`/`patch`. The Helm value `secretProjection.enabled` (default **on**) grants it, so a consumer can opt in without an RBAC change. The trade-off: `create` cannot be scoped to a Secret name, so the operator can write a Secret in any namespace it manages. To keep `secrets` access read-only, set `secretProjection.enabled: false` — then a projection-enabled `BackupConfig`/`Restore`/`Maintenance` surfaces an actionable `403` telling you to re-enable it. A projected copy in namespace `X` is readable by anything that can read Secrets in `X` — exactly as it would be if you placed it there yourself.
 
 ///
 

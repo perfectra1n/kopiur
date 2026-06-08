@@ -635,23 +635,6 @@ spec:
                     nullable: true
                     type: string
                 type: object
-              credentialProjection:
-                description: |-
-                  Credential-Secret projection. **Opt-in** (default off) and the primary
-                  beneficiary: this CR's `encryption.passwordSecretRef` is pinned to one
-                  namespace (webhook-enforced), yet movers run in many workload namespaces —
-                  so `enabled: true` makes the operator copy the credential Secret(s) into
-                  each mover Job's namespace instead of you placing one in each. Strongly
-                  recommended for shared repositories. ADR §3.2/§4.11.
-                nullable: true
-                properties:
-                  enabled:
-                    default: false
-                    description: |-
-                      When true, the operator copies the repository's credential Secret(s) into
-                      the namespace of each mover Job that uses this repository. Off by default.
-                    type: boolean
-                type: object
               encryption:
                 description: |-
                   Repository password, always a Secret reference. As this CR is cluster-scoped,

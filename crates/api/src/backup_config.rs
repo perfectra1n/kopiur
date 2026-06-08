@@ -3,7 +3,8 @@
 
 use crate::backend::NfsVolume;
 use crate::common::{
-    DeletionPolicy, Identity, MoverSpec, PodSelector, RepositoryRef, ResolvedIdentity, Retention,
+    CredentialProjection, DeletionPolicy, Identity, MoverSpec, PodSelector, RepositoryRef,
+    ResolvedIdentity, Retention,
 };
 use k8s_openapi::api::batch::v1::JobSpec;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector};
@@ -62,6 +63,14 @@ pub struct BackupConfigSpec {
     /// Per-recipe mover overrides (resources, cache, security context). ADR §3.3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mover: Option<MoverSpec>,
+    /// Opt-in credential-Secret projection for this recipe's backup movers
+    /// (default off). When `enabled: true`, the operator copies the referenced
+    /// repository's credential Secret(s) into the namespace where each backup
+    /// mover runs (a no-op when they already live there) — so a workload backing
+    /// up to a shared `ClusterRepository` need not pre-create the Secret in its
+    /// own namespace. Inherited by `Backup`s produced from this config. ADR §4.11.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_projection: Option<CredentialProjection>,
 }
 
 /// A single backup source. `pvc`, `pvcSelector`, and `nfs` are mutually exclusive
@@ -527,6 +536,46 @@ mover:
         let json = serde_json::to_value(&spec).expect("serialize");
         let reparsed: BackupConfigSpec = serde_json::from_value(json).expect("reparse");
         assert_eq!(spec, reparsed);
+    }
+
+    #[test]
+    fn credential_projection_roundtrip() {
+        // Opt-in projection now lives on the recipe (BackupConfig), parses the
+        // cluster's way, and round-trips.
+        let yaml = r#"
+repository: { kind: ClusterRepository, name: shared }
+sources:
+  - pvc: { name: data }
+retention: { keepLatest: 5 }
+credentialProjection:
+  enabled: true
+"#;
+        let spec: BackupConfigSpec = from_yaml(yaml);
+        assert_eq!(
+            spec.credential_projection.as_ref().map(|p| p.enabled),
+            Some(true)
+        );
+        let json = serde_json::to_value(&spec).expect("serialize");
+        assert_eq!(json["credentialProjection"]["enabled"], true);
+        let reparsed: BackupConfigSpec = serde_json::from_value(json).expect("reparse");
+        assert_eq!(spec, reparsed);
+
+        // Absent ⇒ None (self-managed default); not serialized.
+        let bare: BackupConfigSpec = from_yaml(
+            "repository: { kind: Repository, name: r }\nsources: [ { pvc: { name: d } } ]\n",
+        );
+        assert!(bare.credential_projection.is_none());
+        assert!(
+            serde_json::to_value(&bare)
+                .unwrap()
+                .get("credentialProjection")
+                .is_none()
+        );
+        // Empty `{}` defaults enabled=false (opt-in).
+        let empty: BackupConfigSpec = from_yaml(
+            "repository: { kind: Repository, name: r }\nsources: [ { pvc: { name: d } } ]\ncredentialProjection: {}\n",
+        );
+        assert_eq!(empty.credential_projection.map(|p| p.enabled), Some(false));
     }
 
     #[test]

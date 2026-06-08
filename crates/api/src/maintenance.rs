@@ -1,7 +1,7 @@
 //! The `Maintenance` CRD — schedules `kopia maintenance run` quick + full and
 //! manages the ownership lease. At most one per repository. ADR-0001 §3.7.
 
-use crate::common::{CronSpec, FailurePolicy, MoverSpec, RepositoryRef};
+use crate::common::{CredentialProjection, CronSpec, FailurePolicy, MoverSpec, RepositoryRef};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -70,6 +70,13 @@ pub struct MaintenanceSpec {
     /// How a failed maintenance run is retried/bounded (backoff, deadline). ADR §3.7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_policy: Option<FailurePolicy>,
+    /// Opt-in credential-Secret projection for this maintenance run's mover
+    /// (default off). When `enabled: true`, the operator copies the referenced
+    /// repository's credential Secret(s) into the namespace this `Maintenance`
+    /// runs in (a no-op when they already live there) — useful when maintaining a
+    /// shared `ClusterRepository` from a namespace that lacks the Secret. ADR §4.11.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_projection: Option<CredentialProjection>,
 }
 
 /// Quick + full cron schedules plus a shared timezone. ADR §3.7.

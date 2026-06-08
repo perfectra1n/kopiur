@@ -52,6 +52,23 @@ spec:
                 - Direct
                 nullable: true
                 type: string
+              credentialProjection:
+                description: |-
+                  Opt-in credential-Secret projection for this recipe's backup movers
+                  (default off). When `enabled: true`, the operator copies the referenced
+                  repository's credential Secret(s) into the namespace where each backup
+                  mover runs (a no-op when they already live there) — so a workload backing
+                  up to a shared `ClusterRepository` need not pre-create the Secret in its
+                  own namespace. Inherited by `Backup`s produced from this config. ADR §4.11.
+                nullable: true
+                properties:
+                  enabled:
+                    default: false
+                    description: |-
+                      When true, the operator copies the repository's credential Secret(s) into
+                      the namespace of each mover Job that uses this repository. Off by default.
+                    type: boolean
+                type: object
               defaultDeletionPolicy:
                 description: |-
                   Lifecycle of the underlying kopia snapshot when its `Backup` CR is deleted.

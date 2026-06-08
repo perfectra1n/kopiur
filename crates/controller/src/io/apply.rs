@@ -65,7 +65,7 @@ pub fn status_patch_is_noop(
 /// re-trigger. For this to hold, the `desired` status must be byte-stable across
 /// repeated identical failures — hence the condition message comes from
 /// [`kopiur_kopia::KopiaErrorClass::summary`] (volatile-free) and
-/// [`upsert_condition`] preserves `lastTransitionTime` while the status is
+/// [`crate::io::upsert_condition`] preserves `lastTransitionTime` while the status is
 /// unchanged. The returned bool lets the caller fire its Warning Event only on a
 /// real transition.
 pub async fn patch_status_if_changed<K>(

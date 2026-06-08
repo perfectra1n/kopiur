@@ -581,21 +581,6 @@ spec:
                     nullable: true
                     type: string
                 type: object
-              credentialProjection:
-                description: |-
-                  Credential-Secret projection. **Opt-in** (default off): when
-                  `enabled: true`, the operator copies the credential Secret(s) into each
-                  mover Job's namespace as needed (a no-op when they already live there).
-                  Absent/`enabled: false` keeps the self-managed default. ADR §3.1/§4.11.
-                nullable: true
-                properties:
-                  enabled:
-                    default: false
-                    description: |-
-                      When true, the operator copies the repository's credential Secret(s) into
-                      the namespace of each mover Job that uses this repository. Off by default.
-                    type: boolean
-                type: object
               encryption:
                 description: |-
                   Repository password, always a Secret reference. A sub-object so future

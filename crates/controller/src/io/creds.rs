@@ -250,15 +250,20 @@ pub async fn resolve_mover_creds(
 /// [`resolve_mover_creds`] that derives the credential references (with their
 /// source namespaces) and the [`CredsContext`] from the repository. `owner` is the
 /// consuming CR's owner reference, applied to any projected Secret so GC reaps it
-/// with that CR. `repo_kind`/`repo_name` only label the actionable messages (a
-/// `Restore` may infer its repository from the source config, so they are plain
-/// strings rather than a `RepositoryRef`).
+/// with that CR. `project` is the consumer's opt-in
+/// (`spec.credentialProjection.enabled` on the `BackupConfig`/`Restore`/
+/// `Maintenance`) — projection is a consumer-side decision, not a repository one.
+/// `repo_kind`/`repo_name` only label the actionable messages (a `Restore` may
+/// infer its repository from the source config, so they are plain strings rather
+/// than a `RepositoryRef`).
+#[allow(clippy::too_many_arguments)]
 pub async fn resolve_mover_creds_for(
     client: &kube::Client,
     job_ns: &str,
     job_name: &str,
     owner: &OwnerReference,
     repo: &ResolvedRepository,
+    project: bool,
     repo_kind: &str,
     repo_name: &str,
 ) -> Result<MoverCreds> {
@@ -274,16 +279,7 @@ pub async fn resolve_mover_creds_for(
         repo_name,
         repo_secret_namespace: repo.encryption.password_secret_ref.namespace.as_deref(),
     };
-    resolve_mover_creds(
-        client,
-        job_ns,
-        job_name,
-        owner,
-        &refs,
-        repo.project_credentials,
-        &ctx,
-    )
-    .await
+    resolve_mover_creds(client, job_ns, job_name, owner, &refs, project, &ctx).await
 }
 
 /// Actionable message when projection cannot read a source Secret because its

@@ -241,7 +241,7 @@ impl BootstrapFailure {
 
     /// The stable, actionable condition message (what failed / why / how to find
     /// the cause). Volatile-free so the guarded status write stays a no-op across
-    /// repeated identical failures (no hot-loop — see [`patch_status_if_changed`]).
+    /// repeated identical failures (no hot-loop — see [`crate::io::patch_status_if_changed`]).
     pub fn condition_message(&self) -> String {
         match self {
             BootstrapFailure::Backend { message, .. } => message.clone(),
@@ -253,8 +253,8 @@ impl BootstrapFailure {
 
     /// Publish this failure as a Warning Event on `regarding`. The `Backend`
     /// variant reuses the kopia-class remediation machinery
-    /// ([`backend_failure_event`]); the result-less variant carries its own
-    /// actionable note. Both are clamped to [`EVENT_NOTE_MAX_BYTES`].
+    /// (`backend_failure_event`); the result-less variant carries its own
+    /// actionable note. Both are clamped to `EVENT_NOTE_MAX_BYTES`.
     pub async fn publish(&self, ctx: &Context, regarding: &ObjectReference, name: &str) {
         match self {
             BootstrapFailure::Backend { class, message } => {

@@ -749,6 +749,7 @@ fn maint_referencing(
             },
             mover: None,
             failure_policy: None,
+            credential_projection: None,
         },
     );
     m.metadata.namespace = Some(ns.into());

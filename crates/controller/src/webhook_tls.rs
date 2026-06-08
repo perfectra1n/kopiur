@@ -19,7 +19,7 @@
 //!
 //! This module splits the **pure** crypto (CA/leaf minting, the renewal
 //! predicate — all unit-tested without a cluster) from the thin Kubernetes IO in
-//! [`crate::io::ensure_webhook_tls`].
+//! [`ensure`].
 
 use time::{Duration, OffsetDateTime};
 

@@ -776,6 +776,7 @@ mod tests {
             target: None,
             options: None,
             policy: None,
+            credential_projection: None,
         }
     }
 
@@ -903,7 +904,6 @@ mod tests {
             cache_defaults: None,
             catalog: None,
             maintenance: None,
-            credential_projection: None,
         };
         assert!(validate_repository_no_inline_retention(&spec).is_ok());
     }
@@ -924,6 +924,7 @@ mod tests {
             policy: None,
             hooks: None,
             mover: None,
+            credential_projection: None,
         };
         let errs = validate_backup_config(&spec);
         // Both: ClusterRepo namespace forbidden + missing sources.
@@ -961,6 +962,7 @@ mod tests {
             policy: None,
             hooks: None,
             mover: None,
+            credential_projection: None,
         };
         assert!(validate_backup_config(&spec).is_empty());
     }
@@ -1029,7 +1031,6 @@ mod tests {
             cache_defaults: None,
             catalog: None,
             maintenance: m,
-            credential_projection: None,
         }
     }
 
@@ -1117,7 +1118,6 @@ mod tests {
             allowed_namespaces: AllowedNamespaces::All(false),
             identity_defaults: None,
             maintenance: None,
-            credential_projection: None,
         };
         assert!(!validate_cluster_repository(&spec).is_empty());
     }

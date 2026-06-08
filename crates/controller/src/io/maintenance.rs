@@ -168,6 +168,9 @@ pub fn build_managed_maintenance(
             },
             mover: spec.mover.clone(),
             failure_policy: spec.failure_policy.clone(),
+            // Repo-managed maintenance runs where the repository's Secret already
+            // lives (its own / the operator namespace), so it never needs projection.
+            credential_projection: None,
         },
     );
     m.metadata = child_meta(name, placement_namespace, BTreeMap::new(), Some(owner));

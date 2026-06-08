@@ -170,7 +170,7 @@ For namespace `billing` + config `postgres-data`, that resolves to `billing-post
 /// warning | Two requirements for ClusterRepository backups
 
 1. Install the operator with **`installScope=cluster`** (otherwise `ClusterRepository` is never reconciled — see [Installation → scope](install.md#install-scope)).
-2. Get the credential Secret into each **workload** namespace a mover runs in. The easy way: set [`credentialProjection.enabled: true`](movers.md#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos) on the `ClusterRepository` and Kopiur copies it for you (off by default, recommended for shared repos). Otherwise replicate it yourself.
+2. Get the credential Secret into each **workload** namespace a mover runs in. The easy way: set [`credentialProjection.enabled: true`](movers.md#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos) on the `BackupConfig`/`Restore`/`Maintenance` that uses this repository, and Kopiur copies it for you (off by default, recommended for shared repos). Otherwise replicate it yourself.
 
 ///
 

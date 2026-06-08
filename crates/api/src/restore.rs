@@ -1,7 +1,7 @@
 //! The `Restore` CRD — a restore from a snapshot/identity to a PVC, or a passive
 //! populator source. ADR-0001 §3.6, ADR-0003 §4.6.
 
-use crate::common::{ObjectRef, RepositoryRef, ResolvedIdentity};
+use crate::common::{CredentialProjection, ObjectRef, RepositoryRef, ResolvedIdentity};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -39,6 +39,13 @@ pub struct RestoreSpec {
     /// Missing-snapshot handling and wait timeout. ADR §4.6 (G7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<RestorePolicy>,
+    /// Opt-in credential-Secret projection for this restore's mover (default off).
+    /// When `enabled: true`, the operator copies the referenced repository's
+    /// credential Secret(s) into the restore mover's namespace (a no-op when they
+    /// already live there) — so restoring from a shared `ClusterRepository` into a
+    /// fresh namespace need not pre-create the Secret there. ADR §4.11.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_projection: Option<CredentialProjection>,
 }
 
 /// Where to restore from. Externally-tagged; exactly one variant. ADR §3.6/§4.6.

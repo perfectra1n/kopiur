@@ -343,6 +343,11 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         &name,
         &owner,
         &repo,
+        config
+            .spec
+            .credential_projection
+            .as_ref()
+            .is_some_and(|p| p.enabled),
         io::repo_kind_str(config.spec.repository.kind),
         &config.spec.repository.name,
     )
@@ -560,6 +565,11 @@ async fn delete_snapshot_via_job(
         &job_name,
         &owner,
         &repo,
+        config
+            .spec
+            .credential_projection
+            .as_ref()
+            .is_some_and(|p| p.enabled),
         io::repo_kind_str(config.spec.repository.kind),
         &config.spec.repository.name,
     )
@@ -1096,7 +1106,6 @@ mod tests {
                     key: Some("KOPIA_PASSWORD".into()),
                 },
             },
-            project_credentials: false,
             repo_namespace: Some("media-ns".into()),
         }
     }
@@ -1122,6 +1131,7 @@ mod tests {
                 policy: None,
                 hooks: None,
                 mover: None,
+                credential_projection: None,
             },
         )
     }

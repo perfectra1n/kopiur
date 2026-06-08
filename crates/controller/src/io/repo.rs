@@ -38,12 +38,6 @@ pub struct ResolvedRepository {
     pub backend: Backend,
     /// The repository's encryption/password configuration.
     pub encryption: Encryption,
-    /// Whether the operator should project this repository's credential Secret(s)
-    /// into each mover Job's namespace. Resolved from `spec.credentialProjection`,
-    /// which is **opt-in** (absent ⇒ `false`); `enabled: true` turns it on.
-    /// Projection is a no-op when the source Secret already lives in the Job's
-    /// namespace.
-    pub project_credentials: bool,
     /// The repository's own namespace (`Some` for a namespaced [`Repository`],
     /// `None` for a cluster-scoped [`ClusterRepository`]). Used as the *source*
     /// namespace fallback when a credential Secret reference omits one.
@@ -133,11 +127,6 @@ pub async fn resolve_repository_ref(
                 Error::MissingDependency(format!("Repository {namespace}/{name}"))
             })?;
             Ok(ResolvedRepository {
-                project_credentials: repo
-                    .spec
-                    .credential_projection
-                    .as_ref()
-                    .is_some_and(|p| p.enabled),
                 repo_namespace: Some(namespace),
                 backend: repo.spec.backend,
                 encryption: repo.spec.encryption,
@@ -150,11 +139,6 @@ pub async fn resolve_repository_ref(
                 .await?
                 .ok_or_else(|| Error::MissingDependency(format!("ClusterRepository {name}")))?;
             Ok(ResolvedRepository {
-                project_credentials: repo
-                    .spec
-                    .credential_projection
-                    .as_ref()
-                    .is_some_and(|p| p.enabled),
                 repo_namespace: None,
                 backend: repo.spec.backend,
                 encryption: repo.spec.encryption,

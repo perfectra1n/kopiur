@@ -249,6 +249,11 @@ async fn spawn_maintenance_job(
         job_name,
         &owner,
         repo,
+        maint
+            .spec
+            .credential_projection
+            .as_ref()
+            .is_some_and(|p| p.enabled),
         io::repo_kind_str(maint.spec.repository.kind),
         &maint.spec.repository.name,
     )
@@ -541,6 +546,7 @@ mod tests {
                 },
                 mover: None,
                 failure_policy: None,
+                credential_projection: None,
             },
         );
         m.metadata.uid = Some("uid-maint-1".into());

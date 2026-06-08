@@ -232,6 +232,9 @@ impl World {
                 "1Gi",
             )
             .into(),
+            // A dynamically-provisioned restore destination (the projection Restore
+            // scenario restores a snapshot into it).
+            builders::dynamic_pvc(consts::PROJECTION_NS, consts::PVC_DST, "1Gi").into(),
         ];
         apply_all(&self.client, &fixtures).await
     }

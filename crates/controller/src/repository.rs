@@ -387,14 +387,11 @@ async fn bootstrap_via_mover(
         .await?;
     }
     // Resolve the credential Secret(s) the bootstrap mover loads via envFrom:
-    // verify the user-managed Secret is present, or (with `spec.credentialProjection`)
-    // project the repository's Secret(s) into this namespace owned by the Repository.
+    // verify the user-managed credential Secret is present. The bootstrap Job runs
+    // in the Repository's own namespace, where its Secret already lives — so it
+    // never needs projection (projection is a consumer-side opt-in on
+    // BackupConfig/Restore/Maintenance, not on the repository).
     let owner = io::owner_ref_for(repo, "Repository")?;
-    let project = repo
-        .spec
-        .credential_projection
-        .as_ref()
-        .is_some_and(|p| p.enabled);
     let refs = io::mover_creds_secret_refs(backend, &repo.spec.encryption, Some(namespace));
     let creds_names: Vec<String> = refs.iter().map(|r| r.name.clone()).collect();
     let creds = io::resolve_mover_creds(
@@ -403,7 +400,7 @@ async fn bootstrap_via_mover(
         &job_name,
         &owner,
         &refs,
-        project,
+        false, // never project on the bootstrap path
         &io::CredsContext {
             secret_names: &creds_names,
             repo_kind: "Repository",
@@ -417,10 +414,6 @@ async fn bootstrap_via_mover(
         },
     )
     .await?;
-    if creds.projected > 0 {
-        ctx.metrics
-            .inc_secrets_projected(namespace, creds.projected);
-    }
     let creds_secrets = creds.names;
     let mut labels = BTreeMap::new();
     labels.insert(
