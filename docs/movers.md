@@ -89,7 +89,7 @@ How the projected copies behave:
 
 /// warning | Projection needs the operator's `secrets` create/patch RBAC
 
-To write Secrets into workload namespaces, the operator needs cluster-wide `secrets` `create`/`patch`. The Helm value `secretProjection.enabled` (default **on**) grants it, so a consumer can opt in without an RBAC change. The trade-off: `create` cannot be scoped to a Secret name, so the operator can write a Secret in any namespace it manages. To keep `secrets` access read-only, set `secretProjection.enabled: false` — then a projection-enabled `BackupConfig`/`Restore`/`Maintenance` surfaces an actionable `403` telling you to re-enable it. A projected copy in namespace `X` is readable by anything that can read Secrets in `X` — exactly as it would be if you placed it there yourself.
+To write Secrets into workload namespaces, the operator needs cluster-wide `secrets` `create`/`patch`. The Helm value `secretProjection.enabled` (**off by default**) grants it. Projection is itself opt-in per-consumer, so the chart withholds this broader RBAC until you set `secretProjection.enabled: true`. The trade-off: `create` cannot be scoped to a Secret name, so the operator can write a Secret in any namespace it manages. While it stays at the default `false`, `secrets` access is read-only — and a projection-enabled `BackupConfig`/`Restore`/`Maintenance` surfaces an actionable `403` telling you to enable it. A projected copy in namespace `X` is readable by anything that can read Secrets in `X` — exactly as it would be if you placed it there yourself.
 
 ///
 

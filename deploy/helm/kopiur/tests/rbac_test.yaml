@@ -102,9 +102,10 @@ tests:
 
   # --- credential projection RBAC (secretProjection.enabled) -----------------
 
-  - it: "secretProjection enabled (default) grants secrets create+patch in the ClusterRole"
+  - it: "secretProjection enabled grants secrets create+patch in the ClusterRole"
     set:
       installScope: cluster
+      secretProjection.enabled: true
     template: clusterrole.yaml
     asserts:
       - contains:
@@ -114,10 +115,9 @@ tests:
             resources: [secrets]
             verbs: [get, list, watch, create, patch]
 
-  - it: "secretProjection disabled keeps secrets read-only in the ClusterRole"
+  - it: "secretProjection disabled (default) keeps secrets read-only in the ClusterRole"
     set:
       installScope: cluster
-      secretProjection.enabled: false
     template: clusterrole.yaml
     asserts:
       - contains:
@@ -137,6 +137,7 @@ tests:
     set:
       installScope: namespaced
       webhook.enabled: false
+      secretProjection.enabled: true
     template: role.yaml
     asserts:
       - contains:
@@ -146,11 +147,10 @@ tests:
             resources: [secrets]
             verbs: [get, list, watch, create, patch]
 
-  - it: "secretProjection disabled keeps secrets read-only in the namespaced Role"
+  - it: "secretProjection disabled (default) keeps secrets read-only in the namespaced Role"
     set:
       installScope: namespaced
       webhook.enabled: false
-      secretProjection.enabled: false
     template: role.yaml
     asserts:
       - contains:

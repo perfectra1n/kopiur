@@ -82,13 +82,15 @@ installScope: namespaced
 # requires the operator to hold cluster-wide `secrets` create/patch.
 secretProjection:
   # -- Grant the operator `secrets` create+patch in its RBAC so per-repository
-  # `spec.credentialProjection` works. Default on so opt-in repositories function
-  # without a separate RBAC change. SECURITY TRADE-OFF: this is a broader blast
-  # radius — `create` cannot be scoped to a Secret name, so the operator can write
-  # a Secret in any namespace it manages. Set false to keep `secrets` RBAC
-  # read-only (then projection-enabled repositories surface an actionable 403 and
-  # you manage credential Secrets yourself).
-  enabled: true
+  # `spec.credentialProjection` works. Default off — projection is itself opt-in
+  # per-repository (`spec.credentialProjection.enabled` defaults to false), so the
+  # chart does not hand out the broader RBAC until you actually use the feature.
+  # SECURITY TRADE-OFF: enabling this is a broader blast radius — `create` cannot
+  # be scoped to a Secret name, so the operator can write a Secret in any namespace
+  # it manages. Leave false to keep `secrets` RBAC read-only (then any
+  # projection-enabled repository surfaces an actionable 403 and you manage
+  # credential Secrets yourself); set true once you opt a repository into projection.
+  enabled: false
 
 # =============================================================================
 # ServiceAccount

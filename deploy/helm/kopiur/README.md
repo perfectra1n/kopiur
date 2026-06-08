@@ -128,7 +128,7 @@ Disable the webhook entirely with `webhook.enabled=false` (validation then falls
 | podSecurityContext.runAsNonRoot | bool | `true` |  |
 | podSecurityContext.runAsUser | int | `65534` |  |
 | podSecurityContext.seccompProfile.type | string | `"RuntimeDefault"` |  |
-| secretProjection.enabled | bool | `true` | Grant the operator `secrets` create+patch in its RBAC so per-repository `spec.credentialProjection` works. Default on so opt-in repositories function without a separate RBAC change. SECURITY TRADE-OFF: this is a broader blast radius — `create` cannot be scoped to a Secret name, so the operator can write a Secret in any namespace it manages. Set false to keep `secrets` RBAC read-only (then projection-enabled repositories surface an actionable 403 and you manage credential Secrets yourself). |
+| secretProjection.enabled | bool | `false` | Grant the operator `secrets` create+patch in its RBAC so per-repository `spec.credentialProjection` works. Default off — projection is itself opt-in per-repository (`spec.credentialProjection.enabled` defaults to false), so the chart does not hand out the broader RBAC until you actually use the feature. SECURITY TRADE-OFF: enabling this is a broader blast radius — `create` cannot be scoped to a Secret name, so the operator can write a Secret in any namespace it manages. Leave false to keep `secrets` RBAC read-only (then any projection-enabled repository surfaces an actionable 403 and you manage credential Secrets yourself); set true once you opt a repository into projection. |
 | securityContext.allowPrivilegeEscalation | bool | `false` |  |
 | securityContext.capabilities.drop[0] | string | `"ALL"` |  |
 | securityContext.readOnlyRootFilesystem | bool | `true` |  |
