@@ -1,0 +1,61 @@
+# Scenario 08 — Clone an app's data into another namespace (prod → staging)
+#
+# Reproduce a production bug against REAL data, or seed a staging/preview
+# environment, by cloning prod's latest snapshot into another namespace. The
+# `backupRef` carries the SOURCE namespace (billing); the Restore and its target PVC
+# live in the DESTINATION namespace (staging). The restore mover runs in the
+# destination, so the repo credentials must be readable there — a shared
+# `ClusterRepository` + `credentialProjection` does that without hand-placing
+# Secrets.
+#
+# Field shapes verified against crates/api: source.backupRef = { name, namespace? };
+# credentialProjection = { enabled }; mover.securityContext is a core/v1
+# SecurityContext.
+---
+# The clone target namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Restore
+metadata:
+  name: clone-prod-postgres
+  namespace: staging # DESTINATION
+spec:
+  repository:
+    kind: ClusterRepository # shared, cluster-scoped — reachable from any namespace
+    name: platform-shared
+  source:
+    fromConfig:
+      name: postgres-data
+      namespace: billing # SOURCE — resolve prod's latest snapshot by identity
+  target:
+    pvc:
+      name: postgres-data-clone
+      storageClassName: standard # staging can use cheaper storage than prod
+      capacity: 100Gi
+      accessModes:
+        - ReadWriteOnce
+  # Copy the ClusterRepository's credential Secret into `staging` for this run
+  # (owned by this Restore, GC'd with it). Needs Helm secretProjection.enabled.
+  credentialProjection:
+    enabled: true
+  # Run as the staging app's UID so the cloned data is usable.
+  mover:
+    securityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+      seccompProfile:
+        type: RuntimeDefault
+  policy:
+    onMissingSnapshot: Fail
+    waitTimeout: 5m
+#
+# Then mount postgres-data-clone in your staging Postgres Deployment/StatefulSet and
+# you have prod data in staging. The prod namespace and volume are never touched.

@@ -36,6 +36,8 @@ snapshot means matching that identity. See [How Kopia works](../concepts/how-kop
 | 04  | [Migrate an app across clusters / namespaces](migrate-across-clusters.md) | Move a stateful app to a new namespace or cluster, data and all.| Advanced   |
 | 05  | [Adopt an existing kopia repository](adopt-existing-repo.md)       | You already have a kopia repo; take it over without re-uploading.     | Advanced   |
 | 06  | [Backup verification / restore drills](verification-drills.md)     | Prove backups are restorable on a schedule, and alert when one isn't. | Advanced   |
+| 07  | [Point-in-time rollback](point-in-time-rollback.md)                | Roll a volume back to a specific known-good moment (`asOf`/`offset`).  | Simple     |
+| 08  | [Clone an app into another namespace](clone-app-to-namespace.md)   | Copy prod data into staging/preview to reproduce a bug or seed an env.| Advanced   |
 
 /// warning | Alpha
 

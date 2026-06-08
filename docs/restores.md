@@ -43,19 +43,22 @@ $ kubectl get backup -n billing \
 
 ### `fromConfig` — resolve via a BackupConfig's identity
 
-Restore the latest (or an offset/point-in-time) snapshot for a `BackupConfig`'s identity — **even when no `Backup` CR exists yet**. This is what powers deploy-or-restore (see below). Defaults to `onMissingSnapshot: Continue`.
+Restore the latest (or an offset/point-in-time) snapshot for a `BackupConfig`'s identity — **even when no `Backup` CR exists yet**. This is what powers deploy-or-restore (see below) and point-in-time rollback ([example 14](examples.md#example-14--point-in-time--offset-restore), [scenario 07](scenarios/point-in-time-rollback.md)). Defaults to `onMissingSnapshot: Continue`.
 
 ```yaml
 source:
     fromConfig:
         name: postgres-data
+        namespace: billing # optional; defaults to the Restore's namespace
         offset: 0 # 0 = latest, 1 = previous, ...
         # asOf: 2026-05-01T00:00:00Z   # or: newest snapshot at/before this instant
 ```
 
+`asOf` (newest snapshot at/before an RFC3339 instant) and `offset` (count back from latest) are alternatives — set one. `asOf` is the "roll back to a known-good time" knob; `offset` is "the previous one."
+
 ### `identity` — a raw kopia identity
 
-For snapshots written by a foreign kopia client, or ones that have aged out of the catalog. You give the raw `username@hostname:path`. This mode **requires** an explicit `spec.repository` (there's no `Backup`/`BackupConfig` to infer it from).
+For snapshots written by a foreign kopia client, or ones that have aged out of the catalog ([example 13](examples.md#example-13--restore-by-raw-kopia-identity)). You give the raw `username@hostname:path`. This mode **requires** an explicit `spec.repository` (there's no `Backup`/`BackupConfig` to infer it from).
 
 ```yaml
 repository: { kind: Repository, name: primary, namespace: backups }
@@ -188,9 +191,45 @@ postgres-verify   Completed    41s
 
 Phases: `Pending` → `Resolving` (pinning the source snapshot) → `Restoring` (mover writing data) → `Completed` / `Failed`. Live byte/file progress is in `status.progress`; the resolved snapshot and target PVC are in `status.resolved` / `status.target`. If it won't progress, `kubectl describe restore <name>` shows the reason on the conditions and as an Event — see [Troubleshooting](troubleshooting.md).
 
+## Credentials in a fresh namespace — `credentialProjection`
+
+A restore mover loads the repository credentials via `envFrom` from a Secret **in its own namespace**. Restoring into a namespace that has never run a backup (disaster recovery, a clone target) won't have one. Set `credentialProjection.enabled: true` and the operator copies the referenced repository's Secret into the mover's namespace for the run — owned by the `Restore`, garbage-collected with it ([example 17](examples.md#example-17--restore-from-a-shared-repo-projection)):
+
+```yaml
+spec:
+    repository: { kind: ClusterRepository, name: platform-shared }
+    credentialProjection:
+        enabled: true # off by default; needs Helm secretProjection.enabled
+```
+
+It's **off by default** (cross-namespace Secret copying is opt-in) and needs the operator's Secret-projection RBAC (Helm `secretProjection.enabled`). The alternative is placing the Secret in the namespace yourself. See [Movers → credential projection](movers.md#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos).
+
+## Field reference — every value, and when to change it
+
+The full `Restore` surface, with the examples that exercise each. `source` is the only required field.
+
+| Field | What it does | When to set it |
+| --- | --- | --- |
+| `repository` | The repository to read from (`{ kind, name, namespace? }`). Inferred from `source` for `backupRef`/`fromConfig`; **required** for `identity`. | Cross-namespace / cluster restores, or any `identity` source. ([13](examples.md#example-13--restore-by-raw-kopia-identity), [16](examples.md#example-16--cross-namespace-clone-restore)) |
+| `source.backupRef` | Restore a specific `Backup` CR (`{ name, namespace? }`). | The common case — you picked a row from the catalog. ([03](examples.md#example-03--restore-by-picking-a-backup), [16](examples.md#example-16--cross-namespace-clone-restore)) |
+| `source.fromConfig` | Resolve via a `BackupConfig`'s identity (`{ name, namespace?, asOf?, offset? }`). | No `Backup` CR (deploy-or-restore), or point-in-time (`asOf`) / positional (`offset`) recovery. ([05](examples.md#example-05--deploy-or-restore-gitops), [14](examples.md#example-14--point-in-time--offset-restore)) |
+| `source.identity` | Raw kopia identity (`{ username, hostname, sourcePath?, snapshotID?, asOf?, offset? }`). | Foreign / aged-out snapshots; needs `repository`. ([13](examples.md#example-13--restore-by-raw-kopia-identity)) |
+| `target.pvc` | Create a new PVC and restore into it (`{ name, storageClassName?, capacity?, accessModes? }`). | The safe default — restore beside the original, verify, cut over. ([03](examples.md#example-03--restore-by-picking-a-backup)) |
+| `target.pvcRef` | Restore into an **existing** PVC (`{ name }`). | In-place restore (scale the app down first). ([15](examples.md#example-15--in-place-mirror-restore)) |
+| _(no `target`)_ | Passive volume-populator source. | GitOps deploy-or-restore via a PVC `dataSourceRef`. ([05](examples.md#example-05--deploy-or-restore-gitops)) |
+| `options.enableFileDeletion` | Delete target files not in the snapshot (exact **mirror**). Default `false` (additive). | A faithful in-place restore — destructive, use deliberately. ([15](examples.md#example-15--in-place-mirror-restore)) |
+| `options.ignorePermissionErrors` | Complete and _report_ permission problems vs. fail hard. Default `true`. | `false` to fail-closed when exact permissions matter. |
+| `options.writeFilesAtomically` | Write via a temp file + rename. Default `true`. | Rarely changed. |
+| `policy.onMissingSnapshot` | `Fail` (explicit sources) vs `Continue` (fromConfig default). | `Fail` for deliberate recoveries; `Continue` for deploy-or-restore. |
+| `policy.waitTimeout` | How long to wait for the source snapshot to appear. | Sources that may lag behind the Restore being applied. |
+| `mover` | Mover UID/GID, cache, resources, inherit — see [Mover, cache & failure policy](#mover-cache--failure-policy). | UID/GID match, large-restore cache, run-as-the-app. ([12](examples.md#example-12--restore-mover-cache--failure-policy)) |
+| `failurePolicy` | Restore Job `backoffLimit` / `activeDeadlineSeconds`. | Retry/deadline control for big or flaky restores. ([12](examples.md#example-12--restore-mover-cache--failure-policy)) |
+| `credentialProjection` | Project the repo Secret into the mover's namespace. | Restoring into a fresh namespace from a shared repo. ([17](examples.md#example-17--restore-from-a-shared-repo-projection)) |
+
 ## See also
 
 - [Backups & schedules](backups.md) — producing the snapshots you restore.
 - [Repositories & backends](repositories.md) — where the snapshots live.
 - [Permissions](permissions.md) — choosing the mover's UID/GID and the privileged-movers opt-in (applies to restores too).
-- [Examples](examples.md) — [03 restore by Backup](examples.md#example-03--restore-by-picking-a-backup), [05 deploy-or-restore](examples.md#example-05--deploy-or-restore-gitops), [07 discovered](examples.md#example-07--restore-a-discovered-backup), [12 restore mover/cache/failure policy](examples.md#example-12--restore-mover-cache--failure-policy).
+- [Scenarios](scenarios/index.md) — [02 recover lost data](scenarios/recover-lost-data.md), [07 point-in-time rollback](scenarios/point-in-time-rollback.md), [08 clone to another namespace](scenarios/clone-app-to-namespace.md).
+- [Examples](examples.md) — [03 by Backup](examples.md#example-03--restore-by-picking-a-backup), [05 deploy-or-restore](examples.md#example-05--deploy-or-restore-gitops), [07 discovered](examples.md#example-07--restore-a-discovered-backup), [12 mover/cache/failure policy](examples.md#example-12--restore-mover-cache--failure-policy), [13 by identity](examples.md#example-13--restore-by-raw-kopia-identity), [14 point-in-time](examples.md#example-14--point-in-time--offset-restore), [15 in-place mirror](examples.md#example-15--in-place-mirror-restore), [16 cross-namespace](examples.md#example-16--cross-namespace-clone-restore), [17 shared-repo projection](examples.md#example-17--restore-from-a-shared-repo-projection).

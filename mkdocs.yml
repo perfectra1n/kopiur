@@ -175,6 +175,8 @@ nav:
       - Migrate across clusters or namespaces: scenarios/migrate-across-clusters.md
       - Adopt an existing kopia repository: scenarios/adopt-existing-repo.md
       - Backup verification / restore drills: scenarios/verification-drills.md
+      - Point-in-time rollback: scenarios/point-in-time-rollback.md
+      - Clone an app into another namespace: scenarios/clone-app-to-namespace.md
   - Reference:
       - API reference (rustdoc): api-reference.md
   # Top-level entry → its own top-level item in the left sidebar, so the Rust API

@@ -403,7 +403,7 @@ impl MoverSpec {
 /// Whether a mover with the given **effective** security context (the explicit
 /// `securityContext`, or the one resolved from `inheritSecurityContextFrom`) and
 /// `privilegedMode` is privileged. The controller resolves an inherited context to a
-/// concrete [`SecurityContext`] and gates on *that* — so an inherited root context is
+/// concrete `SecurityContext` and gates on *that* — so an inherited root context is
 /// caught exactly like an explicit one. Pure + exhaustive: the single definition of
 /// "privileged" for both the spec-only ([`MoverSpec::requires_privilege`]) and the
 /// resolved paths.

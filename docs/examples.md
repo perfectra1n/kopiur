@@ -34,6 +34,11 @@ Kopiur separates the backup **recipe** (`BackupConfig`) from its **invocation** 
 | 10  | [NFS source (no PVC)](#example-10--nfs-source-no-pvc)                   | Back up a NAS export directly — no PersistentVolumeClaim.               |
 | 11  | [Credential projection](#example-11--credential-projection)             | Let the operator copy the repo Secret into each mover namespace.        |
 | 12  | [Restore mover, cache & failure policy](#example-12--restore-mover-cache--failure-policy) | Give a `Restore` the same UID/GID, cache, and retry knobs a backup has. |
+| 13  | [Restore by raw kopia identity](#example-13--restore-by-raw-kopia-identity) | Restore a foreign / aged-out snapshot by `username@hostname:path`. |
+| 14  | [Point-in-time / offset restore](#example-14--point-in-time--offset-restore) | "Roll back to Tuesday 2am" — restore via `asOf` / `offset`. |
+| 15  | [In-place mirror restore](#example-15--in-place-mirror-restore) | Restore into an existing PVC and make it an exact mirror. |
+| 16  | [Cross-namespace clone restore](#example-16--cross-namespace-clone-restore) | Clone one namespace's snapshot into another (prod → staging). |
+| 17  | [Restore from a shared repo (projection)](#example-17--restore-from-a-shared-repo-projection) | Restore from a `ClusterRepository` into a fresh namespace, creds projected. |
 
 /// tip | Looking for a specific storage backend?
 
@@ -185,4 +190,50 @@ A `Restore` writes data **into** a PVC, so it has the same mover concerns a back
 
 ```yaml
 --8<-- "deploy/examples/12-restore-mover-cache.yaml"
+```
+
+## Example 13 — Restore by raw kopia identity
+
+No `Backup` CR to point at — a snapshot written by a foreign kopia client, or one that aged out of the catalog? Restore by the raw kopia identity (`username@hostname:path`). This mode **requires** an explicit `spec.repository` (there's nothing to infer it from). Pin an exact `snapshotID`, or select with `asOf` / `offset`.
+
+```yaml
+--8<-- "deploy/examples/13-restore-by-identity.yaml"
+```
+
+## Example 14 — Point-in-time / offset restore
+
+"Roll back to Tuesday 2am" without hunting for the exact `Backup` CR. `source.fromConfig` resolves through the `BackupConfig`'s identity and takes `asOf` (newest snapshot at/before an instant) or `offset` (0 = latest, 1 = previous, …) — so it works even when the matching `Backup` CR has aged out. Restore into a side-by-side PVC and compare; see [scenario 07](scenarios/point-in-time-rollback.md).
+
+```yaml
+--8<-- "deploy/examples/14-restore-point-in-time.yaml"
+```
+
+## Example 15 — In-place mirror restore
+
+Restore straight into an **existing** PVC (`target.pvcRef`) and make it an **exact mirror** of the snapshot with `options.enableFileDeletion: true` (files not in the snapshot are deleted). The faithful "put it back exactly how it was" restore — use it deliberately, and scale the app down first.
+
+/// warning | `enableFileDeletion` is destructive
+
+By default a restore is additive. `enableFileDeletion: true` deletes target files that aren't in the snapshot — point it at the wrong PVC and it wipes the extras. Scale the workload to zero so nothing writes the target mid-restore.
+
+///
+
+```yaml
+--8<-- "deploy/examples/15-restore-in-place-mirror.yaml"
+```
+
+## Example 16 — Cross-namespace clone restore
+
+Restore a snapshot taken in one namespace **into another** — e.g. clone production data into `staging` to reproduce a bug against real data. The `backupRef` carries the **source** namespace; the `Restore` and its target PVC live in the **destination**. The mover runs in the destination, so the repo credentials must be readable there (a shared `ClusterRepository` + `credentialProjection` handles that — example 17). See [scenario 08](scenarios/clone-app-to-namespace.md).
+
+```yaml
+--8<-- "deploy/examples/16-restore-cross-namespace.yaml"
+```
+
+## Example 17 — Restore from a shared repo (projection)
+
+Restoring from a shared `ClusterRepository` into a namespace that has never run a backup hits a chicken-and-egg: the mover loads the repo creds from a Secret in **its** namespace, which isn't there yet. `credentialProjection.enabled: true` has the operator copy the repository's Secret into the mover's namespace for the run (owned by the `Restore`, GC'd with it). Needs the operator's Secret-projection RBAC (Helm `secretProjection.enabled`).
+
+```yaml
+--8<-- "deploy/examples/17-restore-shared-repo-projection.yaml"
 ```

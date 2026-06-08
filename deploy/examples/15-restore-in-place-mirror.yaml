@@ -1,0 +1,46 @@
+# Example 15 — In-place mirror restore into an existing PVC (ADR-0003 §4.6)
+#
+# Restore directly into an EXISTING PVC (`target.pvcRef`) and make it an EXACT mirror
+# of the snapshot with `options.enableFileDeletion: true` — files in the target that
+# aren't in the snapshot are DELETED. This is the faithful "put it back exactly how
+# it was" restore.
+#
+# !! Use deliberately. By default a restore is ADDITIVE (writes the snapshot's files,
+#    leaves everything else). enableFileDeletion makes it destructive — point it at
+#    the wrong PVC and it wipes the extra files. Scale the app DOWN first so nothing
+#    is writing the target during the restore.
+#
+# Field shapes verified against crates/api: target.pvcRef = { name }; options =
+# { enableFileDeletion, ignorePermissionErrors?, writeFilesAtomically? }.
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Restore
+metadata:
+  name: postgres-restore-in-place
+  namespace: billing
+spec:
+  source:
+    backupRef:
+      name: postgres-data-20260523-021300
+  target:
+    # Write into an EXISTING PVC (the live one, ideally with the app scaled to 0).
+    pvcRef:
+      name: postgres-data
+  options:
+    enableFileDeletion: true # EXACT mirror — delete target files not in the snapshot
+    ignorePermissionErrors: true
+    writeFilesAtomically: true
+  # Match the UID/GID that owns the data so the rewritten files land correctly.
+  mover:
+    securityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+      seccompProfile:
+        type: RuntimeDefault
+  policy:
+    onMissingSnapshot: Fail
+    waitTimeout: 5m

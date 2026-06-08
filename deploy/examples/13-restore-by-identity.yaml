@@ -1,0 +1,47 @@
+# Example 13 — Restore by raw kopia identity (ADR-0003 §4.6)
+#
+# When there is no `Backup` CR to point at — a snapshot written by a foreign kopia
+# client, or one that aged out of the catalog — restore by the raw kopia identity
+# (`username@hostname:path`). This mode REQUIRES an explicit `spec.repository`
+# (there's no Backup/BackupConfig to infer it from).
+#
+#   # find identities/snapshots in a repo with the kopia CLI (or `kubectl get backup`
+#   # for catalogued ones):
+#   kopia snapshot list --all
+#
+# Default identity is `<backupConfigName>@<namespace>:/pvc/<pvcName>` — see
+# docs/concepts/how-kopia-works.md.
+#
+# Field shapes verified against crates/api: source.identity is
+# { username, hostname, sourcePath?, snapshotID?, asOf?, offset? }; `snapshotID`
+# has a capital ID on the wire.
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Restore
+metadata:
+  name: postgres-restore-foreign
+  namespace: billing
+spec:
+  # Identity restores can't infer the repo — name it explicitly.
+  repository:
+    kind: Repository
+    name: nas-primary
+    namespace: backups
+  source:
+    identity:
+      username: postgres-data # kopia username to match
+      hostname: billing # kopia hostname to match
+      sourcePath: /data # optional; omit to match any path for this identity
+      snapshotID: k1f1ec0a8 # pin an exact snapshot (or use asOf / offset below)
+      # asOf: 2026-05-01T00:00:00Z   # newest snapshot at/before this instant
+      # offset: 0                    # 0 = latest, 1 = previous, ...
+  target:
+    pvc:
+      name: postgres-data-restored
+      storageClassName: fast-ssd
+      capacity: 100Gi
+      accessModes:
+        - ReadWriteOnce
+  policy:
+    onMissingSnapshot: Fail # explicit sources fail-closed
+    waitTimeout: 5m

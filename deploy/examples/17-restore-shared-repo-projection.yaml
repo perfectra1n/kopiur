@@ -1,0 +1,39 @@
+# Example 17 — Restore from a shared ClusterRepository, into a fresh namespace (ADR-0003 §4.6/§4.11)
+#
+# Restoring from a shared `ClusterRepository` into a namespace that has never run a
+# backup hits a chicken-and-egg: the restore mover loads the repo credentials via
+# `envFrom` from a Secret in ITS namespace, which isn't there yet. Set
+# `credentialProjection.enabled: true` and the operator copies the repository's
+# Secret into the mover's namespace for the run (owned by this Restore, GC'd with it)
+# — so you don't hand-place credentials in every recovery namespace.
+#
+# Requires the operator's Secret-projection RBAC: Helm `secretProjection.enabled`
+# (off by default). See docs/movers.md.
+#
+# Field shapes verified against crates/api: credentialProjection = { enabled }.
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Restore
+metadata:
+  name: app-restore-fresh-ns
+  namespace: recovered # a brand-new namespace with no creds Secret of its own
+spec:
+  repository:
+    kind: ClusterRepository # cluster-scoped, shared across namespaces
+    name: platform-shared
+  source:
+    fromConfig:
+      name: app-data
+      namespace: apps # the BackupConfig's namespace (its identity selects the snapshot)
+  target:
+    pvc:
+      name: app-data-restored
+      capacity: 50Gi
+      accessModes:
+        - ReadWriteOnce
+  # Copy the ClusterRepository's credential Secret into `recovered` for this run.
+  credentialProjection:
+    enabled: true
+  policy:
+    onMissingSnapshot: Fail
+    waitTimeout: 5m

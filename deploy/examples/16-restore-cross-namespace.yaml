@@ -1,0 +1,49 @@
+# Example 16 — Cross-namespace clone restore (ADR-0003 §4.6)
+#
+# Restore a snapshot taken in one namespace INTO another — e.g. clone production data
+# into a `staging` namespace to reproduce a bug against real data. The `backupRef`
+# carries the SOURCE namespace; the Restore (and its target PVC) live in the
+# DESTINATION namespace.
+#
+# The mover runs in the DESTINATION namespace, so the repository's credential Secret
+# must be readable there. With a shared `ClusterRepository`, set
+# `credentialProjection.enabled: true` to have the operator copy it in for you
+# (see example 17 / example 11).
+#
+# Field shapes verified against crates/api: source.backupRef = { name, namespace? }.
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Restore
+metadata:
+  name: clone-prod-into-staging
+  namespace: staging # DESTINATION — where the clone lands
+spec:
+  repository:
+    kind: Repository
+    name: postgres-primary
+    namespace: billing # the prod repository (cross-namespace read)
+  source:
+    backupRef:
+      name: postgres-data-20260523-021300
+      namespace: billing # SOURCE — the prod namespace the Backup lives in
+  target:
+    pvc:
+      name: postgres-data-clone
+      storageClassName: standard # staging can use cheaper storage
+      capacity: 100Gi
+      accessModes:
+        - ReadWriteOnce
+  # Run the restore mover as the staging app's UID so it can use the data.
+  mover:
+    securityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+      seccompProfile:
+        type: RuntimeDefault
+  policy:
+    onMissingSnapshot: Fail
+    waitTimeout: 5m

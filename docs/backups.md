@@ -154,11 +154,47 @@ The other two forms are `runJob` (run a full one-shot `Job` — the k8up `PreBac
 
 ### mover — resources, cache, security context
 
-`spec.mover` overrides the mover Job for this recipe: `resources`, `cache` (overrides the repository's `cacheDefaults`), and `securityContext`.
+`spec.mover` tunes the **mover Job** that actually reads your data for this recipe — the pod that runs `kopia`. The exact same `mover` block is available on a `Restore` and a `Maintenance` ([Restores → mover](restores.md#mover-cache--failure-policy)). Every field is optional; omit the block entirely and you get an unprivileged mover (UID `65532`) with an `emptyDir` cache and no resource limits. The fields, and when to set each:
+
+```yaml
+mover:
+    resources: # standard core/v1 ResourceRequirements for the mover container
+        requests: { cpu: 250m, memory: 512Mi }
+        limits: { cpu: "2", memory: 4Gi }
+    securityContext: # standard core/v1 (container) SecurityContext — UID/GID match
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+        seccompProfile: { type: RuntimeDefault }
+    # inheritSecurityContextFrom:   # ...OR copy the securityContext from a live pod
+    #   podSelector: { matchLabels: { app: postgres } }
+    #   container: postgres          # optional; defaults to the pod's first container
+    cache: # kopia cache for this recipe (overrides the repository's cacheDefaults)
+        capacity: 16Gi # size of the cache volume
+        storageClassName: fast-ssd # cache volume's StorageClass (omit = cluster default)
+        mode: Ephemeral # Ephemeral (default) | Persistent (warm cache across runs)
+        contentCacheSizeMb: 10000 # kopia --content-cache-size-mb budget
+        metadataCacheSizeMb: 2000 # kopia --metadata-cache-size-mb budget
+    # privilegedMode: true           # opt-in, namespace-gated; preserve UID/GID on restore
+```
+
+| Value | What it does | When to change it |
+| --- | --- | --- |
+| `resources` | CPU/memory requests & limits on the mover container. | Large or many-file sources — give the mover memory headroom; or cap it so a backup doesn't starve the node. |
+| `securityContext.runAsUser` / `runAsGroup` | The UID/GID the mover runs as. Default UID `65532` reads only world-readable or `65532`-owned files. | **Set it to the UID/GID that owns your data** so the mover can read it — the single most common knob (see [example 09](examples.md#example-09--mover-uidgid--permissions) and [Permissions](permissions.md)). |
+| `inheritSecurityContextFrom` | Copy the `securityContext` from a live workload pod (by label selector) instead of hard-coding a UID. **Mutually exclusive** with `securityContext`. | When you'd rather "run as whatever the app runs as" than track a UID — webhook-rejected if both are set. |
+| `cache.capacity` / `storageClassName` | Back the kopia cache with a sized volume instead of an `emptyDir`. | Large repositories — a sized cache avoids re-downloading metadata each run. |
+| `cache.mode` | `Ephemeral` (fresh per run, GC'd with the Job) or `Persistent` (a controller-owned PVC reused across runs for a **warm** cache). | `Persistent` for big recurring backups where a warm cache speeds each run. It's `ReadWriteOnce`, so it assumes runs don't overlap. |
+| `cache.contentCacheSizeMb` / `metadataCacheSizeMb` | kopia's content/metadata cache budgets (MiB). | Tune kopia's memory/disk cache footprint independently of the volume size. |
+| `privilegedMode` | An opt-in elevation that also preserves original UID/GID ownership on **restore**. | Only when matching a single UID isn't enough (mixed ownership, `lost+found`). Namespace-gated — see below. |
+
+A repository can set `cacheDefaults` that every mover inherits; `mover.cache` overlays them field-by-field (so you can, e.g., bump only `capacity` per recipe). See [Repositories → cacheDefaults](repositories.md).
 
 /// warning | A privileged mover needs namespace opt-in
 
-If `mover.securityContext` runs as root (`runAsUser: 0`), sets `privileged: true`, allows escalation, adds capabilities, or sets `privilegedMode: true`, the namespace must opt in with an annotation or the `Backup` is refused. See [Movers → Privileged movers](movers.md#privileged-movers).
+If the mover's **effective** securityContext runs as root (`runAsUser: 0`), sets `privileged: true`, allows escalation, adds capabilities, sets `runAsNonRoot: false`, or sets `privilegedMode: true` — **including a context inherited from a root workload pod** — the namespace must opt in with the `kopiur.home-operations.com/privileged-movers` annotation or the `Backup`/`Restore` is refused with a `MoverPermitted=False` condition. See [Movers → Privileged movers](movers.md#privileged-movers).
 
 ///
 
@@ -202,6 +238,25 @@ A `Backup` CR **owns** its kopia snapshot via a finalizer. What happens to the s
 | `Orphan` | CR is removed **without contacting the repository** — escape hatch for "the bucket is already gone". | —                                                                          |
 
 Set it per-`Backup` (`spec.deletionPolicy`) or set the recipe-wide default with `BackupConfig.spec.defaultDeletionPolicy`. This is also how retention pruning reclaims space: pruned `Backup` CRs use `Delete`, so the snapshots go with them.
+
+### `failurePolicy` — retry & deadline for the mover Job
+
+`Backup.spec.failurePolicy` controls the mover `Job`'s retry and wall-clock limits (the same surface a [`Restore`](restores.md#mover-cache--failure-policy) has):
+
+```yaml
+spec:
+    configRef: { name: postgres-data }
+    failurePolicy:
+        backoffLimit: 2 # retry the mover Job this many times before marking it failed (default 2)
+        activeDeadlineSeconds: 3600 # kill a still-running backup after this many seconds (default: none)
+```
+
+| Value | What it does | When to change it |
+| --- | --- | --- |
+| `backoffLimit` | `Job.spec.backoffLimit` — retries before the run is marked failed. | Lower to fail fast on a flaky source; raise to ride out transient backend blips. |
+| `activeDeadlineSeconds` | `Job.spec.activeDeadlineSeconds` — a hard wall-clock cap. | Set a ceiling so a wedged backup doesn't run forever; size it above your largest expected run. |
+
+Failed `Backup` CRs from a schedule are bounded by `failedJobsHistoryLimit` (below); successful ones are pruned by GFS retention.
 
 ## BackupSchedule — the cron
 
