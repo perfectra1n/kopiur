@@ -144,6 +144,23 @@ echo "================ END DIAGNOSTICS ================" >&2
 true
 '''
 
+[tasks.run]
+description = "Run the Rust e2e tests against an already-provisioned cluster (KOPIUR_E2E_BINS selects test binaries; KOPIUR_E2E_TESTFILTER filters by name)"
+dir = "{{config_root}}/../.."
+env = { KUBECONFIG = "{{config_root}}/../../target/e2e/kubeconfig" }
+run = '''
+set -eu
+# KOPIUR_E2E_BINS — space-separated test-binary (file) names, expanded to repeated
+# `--test <name>` flags BEFORE `--`, so a CI shard runs only its files. Empty ⇒ all.
+# KOPIUR_E2E_TESTFILTER — libtest name-substring filter, kept AFTER `--`.
+BINS=""
+for b in ${KOPIUR_E2E_BINS:-}; do BINS="$BINS --test $b"; done
+echo "==> running e2e tests${KOPIUR_E2E_BINS:+ (binaries:$KOPIUR_E2E_BINS)}"
+cargo test -p kopiur-e2e --features e2e $BINS -- \
+  --include-ignored --test-threads=1 --nocapture ${KOPIUR_E2E_TESTFILTER:-}
+echo "==> e2e tests passed"
+'''
+
 [tasks.test]
 description = "Full end-to-end: build+load images, kind up, helm install, run Rust e2e, tear down"
 dir = "{{config_root}}/../.."
@@ -174,7 +191,5 @@ mise run //crates/e2e:minio-preload
 mise run //crates/e2e:node-seed
 mise run //crates/e2e:helm
 
-echo "==> running e2e tests"
-cargo test -p kopiur-e2e --features e2e -- --include-ignored --test-threads=1 --nocapture ${KOPIUR_E2E_TESTFILTER:-}
-echo "==> e2e tests passed"
+mise run //crates/e2e:run
 '''

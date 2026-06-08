@@ -2,11 +2,13 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
 name: E2E
 
-# End-to-end tests: build the three component images, load them into an
-# ephemeral kind cluster, install the Helm chart, and drive real CRD lifecycles
-# (Repository → Backup → Restore → Delete, schedule, maintenance) via the
-# kopiur-e2e crate. Heavy (image builds + kind), so it runs on every PR as a
-# focused single-arch suite, plus a nightly run and on-demand dispatch.
+# End-to-end tests: build the three component images once, then fan out across a
+# matrix of test shards. Each shard loads the prebuilt images into its own
+# ephemeral kind cluster, installs the Helm chart, and drives a slice of the real
+# CRD lifecycle (Repository → Backup → Restore → Delete, schedule, maintenance,
+# backends) via the kopiur-e2e crate. Sharding keeps wall-clock down, gives a
+# per-scenario failure signal, and lets a single flaky shard be re-run on its own.
+# Runs on every PR, on push to main, nightly, and on-demand.
 
 on:
   pull_request:
@@ -32,11 +34,13 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  e2e:
-    name: E2E
+  # Compile the three component images once and hand them to the test shards as an
+  # artifact, so the expensive Rust release build is paid a single time (not once
+  # per matrix leg, which would also contend on the shared Rust cache).
+  build:
+    name: Build images
     runs-on: ubuntu-24.04
-    # Don't let a hung wait burn the whole budget.
-    timeout-minutes: 40
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -45,7 +49,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # kind, kubectl, and helm come from .mise/config.toml [tools].
       - name: Setup Mise
         uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
         with:
@@ -55,12 +58,107 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: e2e
+          shared-key: e2e-build
 
-      # The harness builds the images, creates its own kind cluster, loads the
-      # images, installs the chart, runs the e2e crate, and tears down. It uses
-      # an isolated kubeconfig and only ever touches the throwaway cluster.
-      # The e2e tasks are a mise monorepo subproject (crates/e2e/mise.toml);
-      # `settings.experimental` in .mise/config.toml enables that mode.
+      - name: Build component images
+        run: mise run //crates/e2e:images
+
+      # Save all three :e2e images into one tarball for the test shards to load.
+      - name: Save images
+        run: docker save kopiur/controller:e2e kopiur/webhook:e2e kopiur/mover:e2e -o images.tar
+
+      - name: Upload images
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-images
+          path: images.tar
+          retention-days: 1
+
+  # One leg per shard. Each leg owns its own kind cluster (separate runner, so the
+  # shared cluster name `kopiur-e2e` never collides) and runs only its test
+  # binaries via KOPIUR_E2E_BINS. The discrete mise tasks are individual steps, so
+  # the CI UI shows per-phase timing and a failure points straight at the shard.
+  test:
+    name: E2E (${{ matrix.shard }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false # one shard's failure shouldn't cancel the others
+      matrix:
+        include:
+          - shard: lifecycle
+            bins: "lifecycle"
+            backends: false # Filesystem only — skip the backend-image preload
+          - shard: backends
+            bins: "backends"
+            backends: true
+          - shard: cross-ns
+            bins: "cross_namespace credential_projection"
+            backends: true
+          - shard: misc
+            bins: "object_store cache_and_events terminal_failure webhook observability"
+            backends: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      # kind, kubectl, helm, and the Rust toolchain come from .mise/config.toml.
+      - name: Setup Mise
+        uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+        with:
+          experimental: true
+          install_args: --locked
+
+      # Separate key from the build job: the shards compile the e2e *test* crate
+      # (debug), not the release images, so they shouldn't thrash that cache.
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: e2e-test
+
+      - name: Download images
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: e2e-images
+
+      - name: Load images into docker
+        run: docker load -i images.tar
+
+      - name: Create kind cluster
+        run: mise run //crates/e2e:cluster-create
+
+      - name: Load images into kind
+        run: mise run //crates/e2e:images-load
+
+      # Backend-server images (MinIO/mc, SFTP, WebDAV). The lifecycle shard is
+      # Filesystem-only, so it skips this pull entirely.
+      - name: Preload backend images
+        if: matrix.backends
+        run: mise run //crates/e2e:minio-preload
+
+      - name: Seed node fixtures
+        run: mise run //crates/e2e:node-seed
+
+      - name: Install chart
+        run: mise run //crates/e2e:helm
+
       - name: Run e2e tests
-        run: mise run //crates/e2e:test
+        env:
+          KOPIUR_E2E_BINS: ${{ matrix.bins }}
+          KOPIUR_E2E_SKIP_BUILD: "1"
+        run: mise run //crates/e2e:run
+
+      # Dump cluster state for this shard before teardown so a failure is
+      # debuggable (the cluster is gone after the next step).
+      - name: Diagnostics
+        if: failure()
+        run: mise run //crates/e2e:diagnostics
+
+      - name: Tear down
+        if: always()
+        run: mise run //crates/e2e:down
