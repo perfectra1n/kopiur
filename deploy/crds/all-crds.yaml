@@ -511,6 +511,13 @@ spec:
                     format: int64
                     nullable: true
                     type: integer
+                  mode:
+                    description: How a mover's kopia cache volume is provisioned. ADR §3.1.
+                    enum:
+                    - Ephemeral
+                    - Persistent
+                    nullable: true
+                    type: string
                   storageClassName:
                     description: StorageClass for the cache PVC; absent uses the cluster default.
                     nullable: true
@@ -666,6 +673,13 @@ spec:
                             format: int64
                             nullable: true
                             type: integer
+                          mode:
+                            description: How a mover's kopia cache volume is provisioned. ADR §3.1.
+                            enum:
+                            - Ephemeral
+                            - Persistent
+                            nullable: true
+                            type: string
                           storageClassName:
                             description: StorageClass for the cache PVC; absent uses the cluster default.
                             nullable: true
@@ -1624,6 +1638,13 @@ spec:
                     format: int64
                     nullable: true
                     type: integer
+                  mode:
+                    description: How a mover's kopia cache volume is provisioned. ADR §3.1.
+                    enum:
+                    - Ephemeral
+                    - Persistent
+                    nullable: true
+                    type: string
                   storageClassName:
                     description: StorageClass for the cache PVC; absent uses the cluster default.
                     nullable: true
@@ -1797,6 +1818,13 @@ spec:
                             format: int64
                             nullable: true
                             type: integer
+                          mode:
+                            description: How a mover's kopia cache volume is provisioned. ADR §3.1.
+                            enum:
+                            - Ephemeral
+                            - Persistent
+                            nullable: true
+                            type: string
                           storageClassName:
                             description: StorageClass for the cache PVC; absent uses the cluster default.
                             nullable: true
@@ -12646,6 +12674,13 @@ spec:
                         format: int64
                         nullable: true
                         type: integer
+                      mode:
+                        description: How a mover's kopia cache volume is provisioned. ADR §3.1.
+                        enum:
+                        - Ephemeral
+                        - Persistent
+                        nullable: true
+                        type: string
                       storageClassName:
                         description: StorageClass for the cache PVC; absent uses the cluster default.
                         nullable: true
@@ -13810,6 +13845,255 @@ spec:
                       the namespace of each mover Job that uses this repository. Off by default.
                     type: boolean
                 type: object
+              failurePolicy:
+                description: |-
+                  Mover `Job` retry/deadline limits (`backoffLimit`, `activeDeadlineSeconds`),
+                  mirroring `Backup.spec.failurePolicy`. Absent uses the ADR defaults.
+                nullable: true
+                properties:
+                  activeDeadlineSeconds:
+                    description: |-
+                      Passed through to the mover `Job.spec.activeDeadlineSeconds` — wall-clock cap
+                      after which a still-running run is killed.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  backoffLimit:
+                    description: |-
+                      Passed through to the mover `Job.spec.backoffLimit` — how many times a failed
+                      run is retried before the Job is marked failed.
+                    format: int32
+                    nullable: true
+                    type: integer
+                type: object
+              mover:
+                description: |-
+                  Per-run mover overrides for this restore's Job — resource requests/limits,
+                  kopia cache sizing, container `securityContext` (UID/GID match), `privilegedMode`,
+                  and `inheritSecurityContextFrom`. The same surface `BackupConfig.spec.mover`
+                  gives a backup. An elevated context is namespace-gated exactly like a backup's
+                  (ADR §4.11/§G16); `securityContext` and `inheritSecurityContextFrom` are
+                  mutually exclusive.
+                nullable: true
+                properties:
+                  cache:
+                    description: Override the repository's [`CacheDefaults`] for this recipe's movers.
+                    nullable: true
+                    properties:
+                      capacity:
+                        description: Size of the PVC backing the mover's kopia cache (e.g. `10Gi`).
+                        nullable: true
+                        type: string
+                      contentCacheSizeMb:
+                        description: kopia content cache budget in MiB (`--content-cache-size-mb`).
+                        format: int64
+                        nullable: true
+                        type: integer
+                      metadataCacheSizeMb:
+                        description: kopia metadata cache budget in MiB (`--metadata-cache-size-mb`).
+                        format: int64
+                        nullable: true
+                        type: integer
+                      mode:
+                        description: How a mover's kopia cache volume is provisioned. ADR §3.1.
+                        enum:
+                        - Ephemeral
+                        - Persistent
+                        nullable: true
+                        type: string
+                      storageClassName:
+                        description: StorageClass for the cache PVC; absent uses the cluster default.
+                        nullable: true
+                        type: string
+                    type: object
+                  inheritSecurityContextFrom:
+                    description: 'Opt-in: copy security context from a live workload pod. ADR §4.11.'
+                    nullable: true
+                    properties:
+                      container:
+                        description: Which container within the matched pod; absent uses the first/only container.
+                        nullable: true
+                        type: string
+                      podSelector:
+                        description: Label selector matching the workload pod(s) to read context/hooks from.
+                        properties:
+                          matchExpressions:
+                            description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
+                            items:
+                              description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
+                              properties:
+                                key:
+                                  description: key is the label key that the selector applies to.
+                                  type: string
+                                operator:
+                                  description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
+                                  type: string
+                                values:
+                                  description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
+                                  items:
+                                    type: string
+                                  type: array
+                              required:
+                              - key
+                              - operator
+                              type: object
+                            type: array
+                          matchLabels:
+                            additionalProperties:
+                              type: string
+                            description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
+                            type: object
+                        type: object
+                    required:
+                    - podSelector
+                    type: object
+                  privilegedMode:
+                    description: Opt-in, namespace-gated; preserves UID/GID on restore. ADR §4.11/§G16.
+                    nullable: true
+                    type: boolean
+                  resources:
+                    description: Resource requests/limits for the mover container.
+                    nullable: true
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims, that are used by this container.
+
+                          This is an alpha field and requires enabling the DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: Name must match the name of one entry in pod.spec.resourceClaims of the Pod where this field is used. It makes that resource available inside a container.
+                              type: string
+                            request:
+                              description: Request is the name chosen for a request in the referenced claim. If empty, everything from the claim is made available, otherwise only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      limits:
+                        additionalProperties:
+                          description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
+                          x-kubernetes-int-or-string: true
+                        description: 'Limits describes the maximum amount of compute resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                        type: object
+                      requests:
+                        additionalProperties:
+                          description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
+                          x-kubernetes-int-or-string: true
+                        description: 'Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. Requests cannot exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                        type: object
+                    type: object
+                  securityContext:
+                    description: Security context applied to the mover container.
+                    nullable: true
+                    properties:
+                      allowPrivilegeEscalation:
+                        description: 'AllowPrivilegeEscalation controls whether a process can gain more privileges than its parent process. This bool directly controls if the no_new_privs flag will be set on the container process. AllowPrivilegeEscalation is true always when the container is: 1) run as Privileged 2) has CAP_SYS_ADMIN Note that this field cannot be set when spec.os.name is windows.'
+                        type: boolean
+                      appArmorProfile:
+                        description: appArmorProfile is the AppArmor options to use by this container. If set, this profile overrides the pod's appArmorProfile. Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          localhostProfile:
+                            description: localhostProfile indicates a profile loaded on the node that should be used. The profile must be preconfigured on the node to work. Must match the loaded name of the profile. Must be set if and only if type is "Localhost".
+                            type: string
+                          type:
+                            description: |-
+                              type indicates which kind of AppArmor profile will be applied. Valid options are:
+                                Localhost - a profile pre-loaded on the node.
+                                RuntimeDefault - the container runtime's default profile.
+                                Unconfined - no AppArmor enforcement.
+                            type: string
+                        required:
+                        - type
+                        type: object
+                      capabilities:
+                        description: The capabilities to add/drop when running containers. Defaults to the default set of capabilities granted by the container runtime. Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          add:
+                            description: Added capabilities
+                            items:
+                              type: string
+                            type: array
+                          drop:
+                            description: Removed capabilities
+                            items:
+                              type: string
+                            type: array
+                        type: object
+                      privileged:
+                        description: Run container in privileged mode. Processes in privileged containers are essentially equivalent to root on the host. Defaults to false. Note that this field cannot be set when spec.os.name is windows.
+                        type: boolean
+                      procMount:
+                        description: procMount denotes the type of proc mount to use for the containers. The default value is Default which uses the container runtime defaults for readonly paths and masked paths. This requires the ProcMountType feature flag to be enabled. Note that this field cannot be set when spec.os.name is windows.
+                        type: string
+                      readOnlyRootFilesystem:
+                        description: Whether this container has a read-only root filesystem. Default is false. Note that this field cannot be set when spec.os.name is windows.
+                        type: boolean
+                      runAsGroup:
+                        description: The GID to run the entrypoint of the container process. Uses runtime default if unset. May also be set in PodSecurityContext.  If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence. Note that this field cannot be set when spec.os.name is windows.
+                        format: int64
+                        type: integer
+                      runAsNonRoot:
+                        description: Indicates that the container must run as a non-root user. If true, the Kubelet will validate the image at runtime to ensure that it does not run as UID 0 (root) and fail to start the container if it does. If unset or false, no such validation will be performed. May also be set in PodSecurityContext.  If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.
+                        type: boolean
+                      runAsUser:
+                        description: The UID to run the entrypoint of the container process. Defaults to user specified in image metadata if unspecified. May also be set in PodSecurityContext.  If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence. Note that this field cannot be set when spec.os.name is windows.
+                        format: int64
+                        type: integer
+                      seLinuxOptions:
+                        description: The SELinux context to be applied to the container. If unspecified, the container runtime will allocate a random SELinux context for each container.  May also be set in PodSecurityContext.  If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence. Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          level:
+                            description: Level is SELinux level label that applies to the container.
+                            type: string
+                          role:
+                            description: Role is a SELinux role label that applies to the container.
+                            type: string
+                          type:
+                            description: Type is a SELinux type label that applies to the container.
+                            type: string
+                          user:
+                            description: User is a SELinux user label that applies to the container.
+                            type: string
+                        type: object
+                      seccompProfile:
+                        description: The seccomp options to use by this container. If seccomp options are provided at both the pod & container level, the container options override the pod options. Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          localhostProfile:
+                            description: localhostProfile indicates a profile defined in a file on the node should be used. The profile must be preconfigured on the node to work. Must be a descending path, relative to the kubelet's configured seccomp profile location. Must be set if type is "Localhost". Must NOT be set for any other type.
+                            type: string
+                          type:
+                            description: |-
+                              type indicates which kind of seccomp profile will be applied. Valid options are:
+
+                              Localhost - a profile defined in a file on the node should be used. RuntimeDefault - the container runtime default profile should be used. Unconfined - no profile should be applied.
+                            type: string
+                        required:
+                        - type
+                        type: object
+                      windowsOptions:
+                        description: The Windows specific settings applied to all containers. If unspecified, the options from the PodSecurityContext will be used. If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence. Note that this field cannot be set when spec.os.name is linux.
+                        properties:
+                          gmsaCredentialSpec:
+                            description: GMSACredentialSpec is where the GMSA admission webhook (https://github.com/kubernetes-sigs/windows-gmsa) inlines the contents of the GMSA credential spec named by the GMSACredentialSpecName field.
+                            type: string
+                          gmsaCredentialSpecName:
+                            description: GMSACredentialSpecName is the name of the GMSA credential spec to use.
+                            type: string
+                          hostProcess:
+                            description: HostProcess determines if a container should be run as a 'Host Process' container. All of a Pod's containers must have the same effective HostProcess value (it is not allowed to have a mix of HostProcess containers and non-HostProcess containers). In addition, if HostProcess is true then HostNetwork must also be set to true.
+                            type: boolean
+                          runAsUserName:
+                            description: The UserName in Windows to run the entrypoint of the container process. Defaults to the user specified in image metadata if unspecified. May also be set in PodSecurityContext. If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.
+                            type: string
+                        type: object
+                    type: object
+                type: object
               options:
                 description: kopia restore behavior (file deletion, permission/atomicity handling). ADR §4.6.
                 nullable: true
@@ -14275,6 +14559,13 @@ spec:
                         format: int64
                         nullable: true
                         type: integer
+                      mode:
+                        description: How a mover's kopia cache volume is provisioned. ADR §3.1.
+                        enum:
+                        - Ephemeral
+                        - Persistent
+                        nullable: true
+                        type: string
                       storageClassName:
                         description: StorageClass for the cache PVC; absent uses the cluster default.
                         nullable: true

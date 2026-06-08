@@ -1,7 +1,9 @@
 //! The `Restore` CRD — a restore from a snapshot/identity to a PVC, or a passive
 //! populator source. ADR-0001 §3.6, ADR-0003 §4.6.
 
-use crate::common::{CredentialProjection, ObjectRef, RepositoryRef, ResolvedIdentity};
+use crate::common::{
+    CredentialProjection, FailurePolicy, MoverSpec, ObjectRef, RepositoryRef, ResolvedIdentity,
+};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -46,6 +48,18 @@ pub struct RestoreSpec {
     /// fresh namespace need not pre-create the Secret there. ADR §4.11.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_projection: Option<CredentialProjection>,
+    /// Per-run mover overrides for this restore's Job — resource requests/limits,
+    /// kopia cache sizing, container `securityContext` (UID/GID match), `privilegedMode`,
+    /// and `inheritSecurityContextFrom`. The same surface `BackupConfig.spec.mover`
+    /// gives a backup. An elevated context is namespace-gated exactly like a backup's
+    /// (ADR §4.11/§G16); `securityContext` and `inheritSecurityContextFrom` are
+    /// mutually exclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mover: Option<MoverSpec>,
+    /// Mover `Job` retry/deadline limits (`backoffLimit`, `activeDeadlineSeconds`),
+    /// mirroring `Backup.spec.failurePolicy`. Absent uses the ADR defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_policy: Option<FailurePolicy>,
 }
 
 /// Where to restore from. Externally-tagged; exactly one variant. ADR §3.6/§4.6.
@@ -465,6 +479,69 @@ target:
         let json = serde_json::to_value(&spec).unwrap();
         let reparsed: RestoreSpec = serde_json::from_value(json).unwrap();
         assert_eq!(spec, reparsed);
+    }
+
+    #[test]
+    fn restore_mover_and_failure_policy_roundtrip() {
+        // Restore carries the same mover surface a backup gets (resources +
+        // securityContext for UID/GID match + cache) plus a failurePolicy.
+        let yaml = r#"
+source: { backupRef: { name: app-data-backup } }
+target: { pvcRef: { name: app-data-restored } }
+mover:
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: "2", memory: 4Gi }
+  cache:
+    capacity: 16Gi
+    storageClassName: fast-ssd
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    capabilities: { drop: ["ALL"] }
+    seccompProfile: { type: RuntimeDefault }
+failurePolicy:
+  backoffLimit: 4
+  activeDeadlineSeconds: 3600
+"#;
+        let spec: RestoreSpec = from_yaml(yaml);
+        let mover = spec.mover.as_ref().expect("mover");
+        assert!(mover.resources.is_some());
+        assert_eq!(
+            mover.cache.as_ref().and_then(|c| c.capacity.as_deref()),
+            Some("16Gi")
+        );
+        assert_eq!(
+            mover.security_context.as_ref().and_then(|s| s.run_as_user),
+            Some(1000)
+        );
+        // A hardened non-root context is NOT privileged: the namespace gate lets it run.
+        assert!(!mover.requires_privilege());
+        let fp = spec.failure_policy.as_ref().expect("failurePolicy");
+        assert_eq!(fp.backoff_limit, Some(4));
+        assert_eq!(fp.active_deadline_seconds, Some(3600));
+
+        let json = serde_json::to_value(&spec).expect("serialize");
+        let reparsed: RestoreSpec = serde_json::from_value(json).expect("reparse");
+        assert_eq!(spec, reparsed);
+    }
+
+    #[test]
+    fn restore_mover_root_context_is_privileged() {
+        // `runAsUser: 0` on a restore mover trips the same privileged-mover gate as a
+        // backup — the controller refuses it unless the namespace opts in.
+        let yaml = r#"
+source: { backupRef: { name: app-data-backup } }
+target: { pvcRef: { name: app-data-restored } }
+mover:
+  securityContext:
+    runAsUser: 0
+    runAsNonRoot: false
+"#;
+        let spec: RestoreSpec = from_yaml(yaml);
+        assert!(spec.mover.as_ref().unwrap().requires_privilege());
     }
 
     #[test]

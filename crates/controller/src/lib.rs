@@ -4,6 +4,7 @@
 pub mod backup;
 pub mod backup_config;
 pub mod backup_schedule;
+pub mod cache;
 pub mod cluster_repository;
 pub mod config;
 pub mod consts;

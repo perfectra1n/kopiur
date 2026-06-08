@@ -33,6 +33,7 @@ Kopiur separates the backup **recipe** (`BackupConfig`) from its **invocation** 
 | 09  | [Mover UID/GID & permissions](#example-09--mover-uidgid--permissions)   | Match the mover's UID/GID to the data owner so it can read it.          |
 | 10  | [NFS source (no PVC)](#example-10--nfs-source-no-pvc)                   | Back up a NAS export directly — no PersistentVolumeClaim.               |
 | 11  | [Credential projection](#example-11--credential-projection)             | Let the operator copy the repo Secret into each mover namespace.        |
+| 12  | [Restore mover, cache & failure policy](#example-12--restore-mover-cache--failure-policy) | Give a `Restore` the same UID/GID, cache, and retry knobs a backup has. |
 
 /// tip | Looking for a specific storage backend?
 
@@ -176,4 +177,12 @@ A shared `ClusterRepository` keeps its credential Secret in the operator namespa
 
 ```yaml
 --8<-- "deploy/examples/11-credential-projection.yaml"
+```
+
+## Example 12 — Restore mover, cache & failure policy
+
+A `Restore` writes data **into** a PVC, so it has the same mover concerns a backup does. `spec.mover` matches the UID/GID that should own the restored files (or `inheritSecurityContextFrom` copies it from a live workload pod — the two are mutually exclusive), `spec.mover.cache` sizes the kopia cache (`mode: Persistent` keeps a warm cache PVC across runs), and `spec.failurePolicy` sets the restore Job's `backoffLimit`/`activeDeadlineSeconds`. An elevated restore mover (root / `privilegedMode`) is gated by the same per-namespace `privileged-movers` opt-in a backup uses. See [Restores → Mover, cache & failure policy](restores.md#mover-cache--failure-policy) and [Permissions](permissions.md).
+
+```yaml
+--8<-- "deploy/examples/12-restore-mover-cache.yaml"
 ```

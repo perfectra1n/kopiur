@@ -194,7 +194,10 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
             // Idempotent connect; create on first use when enabled AND the
             // failure does not indicate an existing repo (auth/locked) — the same
             // safe gate the bootstrap mover applies (never recreate over data).
-            if let Err(e) = client.repository_connect(&spec).await {
+            if let Err(e) = client
+                .repository_connect(&spec, kopiur_kopia::CacheTuning::default())
+                .await
+            {
                 let create_enabled = repo
                     .spec
                     .create
@@ -208,8 +211,15 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
                 // Denied") rather than an invisible reconcile error with no status.
                 let outcome =
                     if kopiur_mover::bootstrap::should_attempt_create(create_enabled, e.class()) {
-                        match client.repository_create(&spec).await {
-                            Ok(_) => client.repository_connect(&spec).await,
+                        match client
+                            .repository_create(&spec, kopiur_kopia::CacheTuning::default())
+                            .await
+                        {
+                            Ok(_) => {
+                                client
+                                    .repository_connect(&spec, kopiur_kopia::CacheTuning::default())
+                                    .await
+                            }
                             Err(ce) => Err(ce),
                         }
                     } else {
@@ -453,6 +463,8 @@ async fn bootstrap_via_mover(
         service_account: ctx.mover_service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
+        // Bootstrap is a short connect/create probe: an emptyDir cache suffices.
+        cache_volume: Default::default(),
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -498,6 +510,8 @@ fn bootstrap_work_spec(
         },
         hook_plan: Default::default(),
         options: MoverOptions::default(),
+        // Bootstrap is a connect/create probe, not a data run: kopia defaults.
+        cache: Default::default(),
     }
 }
 

@@ -1,6 +1,6 @@
 # Restores
 
-A `Restore` reads a snapshot back into a PVC. It answers three questions, and its whole spec is just those three: **from where** (`source`), **to where** (`target`), and **how** (`options`/`policy`).
+A `Restore` reads a snapshot back into a PVC. At its core it answers three questions: **from where** (`source`), **to where** (`target`), and **how** (`options`/`policy`). For real-world restores it also exposes the same mover knobs a backup has — UID/GID, kopia cache, and a Job retry/deadline policy — covered in [Mover, cache & failure policy](#mover-cache--failure-policy) below.
 
 /// tip | The shape of a Restore
 
@@ -121,6 +121,38 @@ By default a restore is **additive** — it writes the snapshot's files and leav
 
 The defaults are the point: an _explicit_ restore that finds nothing is an error you want surfaced; a _deploy-or-restore_ that finds nothing should let the app start with a fresh volume.
 
+## Mover, cache & failure policy
+
+A restore writes data **into** a PVC, so the mover that does the writing has the same concerns a backup's does. `Restore.spec.mover` is the same `MoverSpec` a `BackupConfig` exposes, and `Restore.spec.failurePolicy` mirrors `Backup.spec.failurePolicy`. See the full manifest in [example 12](examples.md#example-12--restore-mover-cache--failure-policy).
+
+```yaml
+spec:
+    mover:
+        securityContext: { runAsUser: 1000, runAsGroup: 1000, ... } # own the restored files correctly
+        # inheritSecurityContextFrom: { podSelector: {...} }        # ...or copy it from a live pod
+        cache: { capacity: 16Gi, mode: Persistent, contentCacheSizeMb: 10000 }
+    failurePolicy:
+        backoffLimit: 4
+        activeDeadlineSeconds: 7200
+```
+
+- **`mover.securityContext`** — run the restore mover as the UID/GID that should own the restored files. Without it the mover runs as the hardened default (UID 65532), which may write files the app can't read. This is the fix for "the restore mover had no UID control".
+- **`mover.inheritSecurityContextFrom`** — instead of hard-coding a UID, copy the `securityContext` from a live workload pod (by label selector). Mutually exclusive with `securityContext` (setting both is webhook-rejected).
+- **`mover.cache`** — size the kopia cache for a large restore. `mode: Ephemeral` (default) gives a fresh per-run volume sized by `capacity` (or an `emptyDir` when unset); `mode: Persistent` keeps a controller-owned cache PVC and reuses it across runs for a warm cache. `contentCacheSizeMb` / `metadataCacheSizeMb` pass kopia's `--content/metadata-cache-size-mb` budgets. A repository's `cacheDefaults` are inherited and overlaid by `mover.cache`.
+- **`failurePolicy`** — the restore Job's `backoffLimit` and `activeDeadlineSeconds`. Absent uses the defaults (2 retries, no deadline).
+
+/// warning | An elevated restore mover needs the namespace to opt in
+
+A restore mover that runs as root (`runAsUser: 0`), with added capabilities, or `privilegedMode: true` — including one **inherited** from a root workload pod — is refused with `MoverPermitted=False` until the restore's namespace opts in, exactly like a backup:
+
+```console
+$ kubectl annotate namespace billing kopiur.home-operations.com/privileged-movers=true
+```
+
+See [Permissions](permissions.md) for how to choose the UID/GID and when a privileged mover is warranted.
+
+///
+
 ## Deploy-or-restore (GitOps)
 
 The headline pattern: commit one bundle and apply it to **any** cluster. On a fresh cluster pointed at an existing repository, the PVC restores the latest snapshot before the app starts; on a brand-new repository, the PVC comes up empty and is backed up going forward. No "is this a new install or a recovery?" branching.
@@ -160,4 +192,5 @@ Phases: `Pending` → `Resolving` (pinning the source snapshot) → `Restoring` 
 
 - [Backups & schedules](backups.md) — producing the snapshots you restore.
 - [Repositories & backends](repositories.md) — where the snapshots live.
-- [Examples](examples.md) — [03 restore by Backup](examples.md#example-03--restore-by-picking-a-backup), [05 deploy-or-restore](examples.md#example-05--deploy-or-restore-gitops), [07 discovered](examples.md#example-07--restore-a-discovered-backup).
+- [Permissions](permissions.md) — choosing the mover's UID/GID and the privileged-movers opt-in (applies to restores too).
+- [Examples](examples.md) — [03 restore by Backup](examples.md#example-03--restore-by-picking-a-backup), [05 deploy-or-restore](examples.md#example-05--deploy-or-restore-gitops), [07 discovered](examples.md#example-07--restore-a-discovered-backup), [12 restore mover/cache/failure policy](examples.md#example-12--restore-mover-cache--failure-policy).

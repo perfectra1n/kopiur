@@ -657,6 +657,163 @@ async fn privileged_mover_requires_namespace_optin() {
     let _ = nss.delete(APP_NS, &DeleteParams::default()).await;
 }
 
+/// `inheritSecurityContextFrom` (ADR §4.11): a mover with no explicit
+/// `securityContext` copies one from a live workload pod, so a backup/restore runs as
+/// the same UID/GID as the app it protects. This proves the resolution end-to-end —
+/// the mover Job's pod template must carry the workload pod's `runAsUser`.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
+async fn mover_inherits_security_context_from_workload_pod() {
+    use k8s_openapi::api::batch::v1::Job;
+    use k8s_openapi::api::core::v1::Pod;
+
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
+
+    // A labeled workload pod running as a specific non-root UID/GID.
+    let pods: Api<Pod> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let workload = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "e2e-inherit-workload",
+            "namespace": E2E_NAMESPACE,
+            "labels": { "app": "e2e-inherit-workload" }
+        },
+        "spec": {
+            "containers": [{
+                "name": "app",
+                "image": "registry.k8s.io/pause:3.9",
+                "securityContext": {
+                    "runAsUser": 2000,
+                    "runAsGroup": 2000,
+                    "runAsNonRoot": true
+                }
+            }]
+        }
+    });
+    pods.create(&PostParams::default(), &cr(workload))
+        .await
+        .expect("create labeled workload pod");
+    wait_until(
+        "workload pod Running",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            Ok(pods.get_opt("e2e-inherit-workload").await?.filter(|p| {
+                p.status
+                    .as_ref()
+                    .and_then(|s| s.phase.as_deref())
+                    .map(|ph| ph == "Running")
+                    .unwrap_or(false)
+            }))
+        },
+    )
+    .await
+    .expect("workload pod should reach Running so its securityContext can be read");
+
+    // A Repository + a BackupConfig whose mover INHERITS the pod's securityContext.
+    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    repos
+        .create(
+            &PostParams::default(),
+            &cr(repository_json("e2e-inherit-repo")),
+        )
+        .await
+        .expect("create Repository");
+    wait_phase(&repos, "e2e-inherit-repo", "Ready")
+        .await
+        .expect("Repository should reach Ready");
+
+    let cfg = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "BackupConfig",
+        "metadata": { "name": "e2e-inherit-cfg", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "repository": { "kind": "Repository", "name": "e2e-inherit-repo" },
+            "sources": [ { "pvc": { "name": "e2e-src" } } ],
+            "retention": { "keepLatest": 5 },
+            "mover": {
+                "inheritSecurityContextFrom": {
+                    "podSelector": { "matchLabels": { "app": "e2e-inherit-workload" } }
+                }
+            }
+        }
+    });
+    configs
+        .create(&PostParams::default(), &cr(cfg))
+        .await
+        .expect("create BackupConfig with inheritSecurityContextFrom");
+    backups
+        .create(
+            &PostParams::default(),
+            &cr(backup_json(
+                "e2e-inherit-backup",
+                "e2e-inherit-cfg",
+                "Retain",
+            )),
+        )
+        .await
+        .expect("create Backup");
+
+    // The mover Job's pod template must carry the inherited UID (2000), proving the
+    // controller resolved the workload pod's securityContext into the run.
+    let jobs: Api<Job> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let job = wait_until(
+        "mover Job created with inherited securityContext",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let Some(job) = jobs.get_opt("e2e-inherit-backup").await? else {
+                return Ok(None);
+            };
+            let uid = job
+                .spec
+                .as_ref()
+                .and_then(|s| s.template.spec.as_ref())
+                .and_then(|p| p.containers.first())
+                .and_then(|c| c.security_context.as_ref())
+                .and_then(|sc| sc.run_as_user);
+            Ok(uid.map(|_| job))
+        },
+    )
+    .await
+    .expect("mover Job should be created carrying an inherited securityContext");
+    let uid = job
+        .spec
+        .and_then(|s| s.template.spec)
+        .and_then(|p| p.containers.into_iter().next())
+        .and_then(|c| c.security_context)
+        .and_then(|sc| sc.run_as_user);
+    assert_eq!(
+        uid,
+        Some(2000),
+        "mover must inherit the workload pod's runAsUser (2000), got {uid:?}"
+    );
+
+    // Cleanup (E2E_NAMESPACE persists across tests).
+    let _ = repos
+        .delete("e2e-inherit-repo", &DeleteParams::default())
+        .await;
+    let _ = configs
+        .delete("e2e-inherit-cfg", &DeleteParams::default())
+        .await;
+    let _ = backups
+        .delete("e2e-inherit-backup", &DeleteParams::default())
+        .await;
+    let _ = pods
+        .delete("e2e-inherit-workload", &DeleteParams::default())
+        .await;
+}
+
 /// A `Backup` JSON in an explicit namespace (cross-namespace scenarios).
 fn backup_json_ns(name: &str, config: &str, ns: &str) -> serde_json::Value {
     serde_json::json!({

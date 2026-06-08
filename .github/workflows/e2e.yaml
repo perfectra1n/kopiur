@@ -92,6 +92,9 @@ jobs:
           - shard: lifecycle
             bins: "lifecycle"
             backends: false # Filesystem only — skip the backend-image preload
+          - shard: restore
+            bins: "restore"
+            backends: false # Filesystem only — the restore class needs no object store
           - shard: backends
             bins: "backends"
             backends: true

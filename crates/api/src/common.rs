@@ -196,6 +196,19 @@ pub struct CreateBehavior {
     pub hash: Option<String>,
 }
 
+/// How a mover's kopia cache volume is provisioned. ADR §3.1.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
+pub enum CacheVolumeMode {
+    /// Cache lives only for the run: an inline generic ephemeral volume (when
+    /// `capacity` is set) or an `emptyDir`, provisioned and garbage-collected with
+    /// the mover `Job`. Fresh each run. The default.
+    #[default]
+    Ephemeral,
+    /// Cache persists across runs in a controller-owned PVC (a warm kopia cache).
+    /// `ReadWriteOnce`, so it assumes non-overlapping runs for a given owner.
+    Persistent,
+}
+
 /// Cache defaults inherited by `Backup`/`Restore` movers unless overridden. ADR §3.1.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -212,6 +225,42 @@ pub struct CacheDefaults {
     /// kopia content cache budget in MiB (`--content-cache-size-mb`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_cache_size_mb: Option<i64>,
+    /// How the cache volume is provisioned (`Ephemeral` default, or `Persistent`
+    /// for a warm cache reused across runs). ADR §3.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<CacheVolumeMode>,
+}
+
+impl CacheDefaults {
+    /// Overlay `over` onto `base` field-by-field — a value set in `over` wins,
+    /// otherwise `base`'s is kept. Resolves a mover's effective cache config from the
+    /// repository's `cacheDefaults` (base) and the run's `mover.cache` (override).
+    /// Returns `None` only when both are absent.
+    pub fn merge(
+        base: Option<&CacheDefaults>,
+        over: Option<&CacheDefaults>,
+    ) -> Option<CacheDefaults> {
+        match (base, over) {
+            (None, None) => None,
+            (Some(b), None) => Some(b.clone()),
+            (None, Some(o)) => Some(o.clone()),
+            (Some(b), Some(o)) => Some(CacheDefaults {
+                capacity: o.capacity.clone().or_else(|| b.capacity.clone()),
+                storage_class_name: o
+                    .storage_class_name
+                    .clone()
+                    .or_else(|| b.storage_class_name.clone()),
+                metadata_cache_size_mb: o.metadata_cache_size_mb.or(b.metadata_cache_size_mb),
+                content_cache_size_mb: o.content_cache_size_mb.or(b.content_cache_size_mb),
+                mode: o.mode.or(b.mode),
+            }),
+        }
+    }
+
+    /// The provisioning mode, defaulting to `Ephemeral` when unset.
+    pub fn effective_mode(&self) -> CacheVolumeMode {
+        self.mode.unwrap_or_default()
+    }
 }
 
 /// Bounds on materialization of `origin: discovered` `Backup` CRs. ADR §3.1 `catalog`.
@@ -347,12 +396,22 @@ impl MoverSpec {
     /// by a namespace annotation rather than allowed implicitly. Pure + exhaustive
     /// so the definition of "privileged" lives in one tested place.
     pub fn requires_privilege(&self) -> bool {
-        self.privileged_mode == Some(true)
-            || self
-                .security_context
-                .as_ref()
-                .is_some_and(security_context_is_elevated)
+        requires_privilege_resolved(self.security_context.as_ref(), self.privileged_mode)
     }
+}
+
+/// Whether a mover with the given **effective** security context (the explicit
+/// `securityContext`, or the one resolved from `inheritSecurityContextFrom`) and
+/// `privilegedMode` is privileged. The controller resolves an inherited context to a
+/// concrete [`SecurityContext`] and gates on *that* — so an inherited root context is
+/// caught exactly like an explicit one. Pure + exhaustive: the single definition of
+/// "privileged" for both the spec-only ([`MoverSpec::requires_privilege`]) and the
+/// resolved paths.
+pub fn requires_privilege_resolved(
+    security_context: Option<&k8s_openapi::api::core::v1::SecurityContext>,
+    privileged_mode: Option<bool>,
+) -> bool {
+    privileged_mode == Some(true) || security_context.is_some_and(security_context_is_elevated)
 }
 
 /// Whether a container `SecurityContext` requests privileges beyond a normal
@@ -561,6 +620,46 @@ mod tests {
         // resolves cluster-scoped.
         let stray = ref_of(RepositoryKind::ClusterRepository, "hetzner", Some("oops"));
         assert!(stray.resolves_to("apps", RepositoryKind::ClusterRepository, "hetzner", None));
+    }
+
+    // --- cache-defaults merge (repository cacheDefaults ← mover.cache) ---
+
+    #[test]
+    fn cache_defaults_merge_overlays_field_by_field() {
+        // Neither side → nothing to apply.
+        assert_eq!(CacheDefaults::merge(None, None), None);
+
+        let repo = CacheDefaults {
+            capacity: Some("8Gi".into()),
+            storage_class_name: Some("standard".into()),
+            metadata_cache_size_mb: Some(1024),
+            content_cache_size_mb: Some(4096),
+            mode: Some(CacheVolumeMode::Ephemeral),
+        };
+        // Only base → base verbatim.
+        assert_eq!(CacheDefaults::merge(Some(&repo), None), Some(repo.clone()));
+
+        // Override wins per-field; unset override fields fall back to base.
+        let mover = CacheDefaults {
+            capacity: Some("32Gi".into()),
+            storage_class_name: None,
+            metadata_cache_size_mb: None,
+            content_cache_size_mb: Some(16384),
+            mode: Some(CacheVolumeMode::Persistent),
+        };
+        let merged = CacheDefaults::merge(Some(&repo), Some(&mover)).unwrap();
+        assert_eq!(merged.capacity.as_deref(), Some("32Gi")); // override
+        assert_eq!(merged.storage_class_name.as_deref(), Some("standard")); // base
+        assert_eq!(merged.metadata_cache_size_mb, Some(1024)); // base
+        assert_eq!(merged.content_cache_size_mb, Some(16384)); // override
+        assert_eq!(merged.mode, Some(CacheVolumeMode::Persistent)); // override
+        assert_eq!(merged.effective_mode(), CacheVolumeMode::Persistent);
+
+        // Unset mode defaults to Ephemeral.
+        assert_eq!(
+            CacheDefaults::default().effective_mode(),
+            CacheVolumeMode::Ephemeral
+        );
     }
 
     // --- privileged-mover detection (ADR §4.11/§G16, namespace-gated). ---

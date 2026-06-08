@@ -148,7 +148,10 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
             let spec = ConnectSpec::Filesystem {
                 path: fs.path.clone().into(),
             };
-            if let Err(e) = client.repository_connect(&spec).await {
+            if let Err(e) = client
+                .repository_connect(&spec, kopiur_kopia::CacheTuning::default())
+                .await
+            {
                 let create_enabled = repo
                     .spec
                     .create
@@ -162,8 +165,15 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
                 // Denied") rather than an invisible reconcile error with no status.
                 let outcome =
                     if kopiur_mover::bootstrap::should_attempt_create(create_enabled, e.class()) {
-                        match client.repository_create(&spec).await {
-                            Ok(_) => client.repository_connect(&spec).await,
+                        match client
+                            .repository_create(&spec, kopiur_kopia::CacheTuning::default())
+                            .await
+                        {
+                            Ok(_) => {
+                                client
+                                    .repository_connect(&spec, kopiur_kopia::CacheTuning::default())
+                                    .await
+                            }
                             Err(ce) => Err(ce),
                         }
                     } else {
@@ -351,6 +361,8 @@ async fn bootstrap_cluster_object_store(
         service_account: ctx.mover_service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
+        // Bootstrap is a short connect/create probe: an emptyDir cache suffices.
+        cache_volume: Default::default(),
     };
     // The bootstrap Job runs in the credentials Secret's namespace (`job_ns`), where
     // the Secret is present by construction — but the mover SA must still be minted
@@ -406,6 +418,8 @@ fn cluster_bootstrap_work_spec(
         },
         hook_plan: Default::default(),
         options: MoverOptions::default(),
+        // Bootstrap is a connect/create probe, not a data run: kopia defaults.
+        cache: Default::default(),
     }
 }
 

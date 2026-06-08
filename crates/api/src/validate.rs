@@ -19,7 +19,7 @@ use crate::backup::{BackupSpec, Origin};
 use crate::backup_config::{BackupConfigSpec, Source};
 use crate::backup_schedule::BackupScheduleSpec;
 use crate::cluster_repository::{AllowedNamespaces, ClusterRepositorySpec};
-use crate::common::{DeletionPolicy, RepositoryKind, RepositoryRef};
+use crate::common::{DeletionPolicy, MoverSpec, RepositoryKind, RepositoryRef};
 use crate::error::{ValidationError, ValidationResult};
 use crate::maintenance::{MaintenanceSpec, RepositoryMaintenanceSpec};
 use crate::repository::RepositorySpec;
@@ -214,6 +214,24 @@ pub fn validate_restore(spec: &RestoreSpec) -> ValidationResult {
             field: "restore.target.pvc.name".to_string(),
         });
     }
+    if let Some(m) = &spec.mover {
+        validate_mover(m, "Restore mover")?;
+    }
+    Ok(())
+}
+
+/// Validate a `MoverSpec`. `securityContext` and `inheritSecurityContextFrom` are
+/// **mutually exclusive**: the mover's effective container context must have a single,
+/// unambiguous source so the privileged-mover gate runs on exactly one. `context`
+/// names the owning resource for the message (e.g. `"Restore mover"`).
+pub fn validate_mover(mover: &MoverSpec, context: &str) -> ValidationResult {
+    if mover.security_context.is_some() && mover.inherit_security_context_from.is_some() {
+        return Err(ValidationError::MutuallyExclusive {
+            a: "mover.securityContext".to_string(),
+            b: "mover.inheritSecurityContextFrom".to_string(),
+            context: context.to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -316,6 +334,11 @@ pub fn validate_backup_config(spec: &BackupConfigSpec) -> Vec<ValidationError> {
             errs.push(e);
         }
     }
+    if let Some(m) = &spec.mover
+        && let Err(e) = validate_mover(m, "BackupConfig mover")
+    {
+        errs.push(e);
+    }
     errs
 }
 
@@ -386,6 +409,11 @@ pub fn validate_maintenance(spec: &MaintenanceSpec) -> Vec<ValidationError> {
         errs.push(e);
     }
     if let Err(e) = validate_cron(&spec.schedule.full.cron) {
+        errs.push(e);
+    }
+    if let Some(m) = &spec.mover
+        && let Err(e) = validate_mover(m, "Maintenance mover")
+    {
         errs.push(e);
     }
     errs
@@ -777,6 +805,8 @@ mod tests {
             options: None,
             policy: None,
             credential_projection: None,
+            mover: None,
+            failure_policy: None,
         }
     }
 
@@ -851,6 +881,56 @@ mod tests {
             validate_restore(&spec),
             Err(ValidationError::MissingRequiredField { .. })
         ));
+    }
+
+    // --- validate_mover (securityContext XOR inheritSecurityContextFrom) ---
+
+    #[test]
+    fn mover_security_context_and_inherit_are_mutually_exclusive() {
+        use crate::common::ObjectRef;
+        use crate::common::{MoverSpec, PodSelector};
+        use k8s_openapi::api::core::v1::SecurityContext;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+
+        let both = MoverSpec {
+            security_context: Some(SecurityContext {
+                run_as_user: Some(1000),
+                ..Default::default()
+            }),
+            inherit_security_context_from: Some(PodSelector {
+                pod_selector: LabelSelector::default(),
+                container: None,
+            }),
+            ..Default::default()
+        };
+        // Direct helper.
+        assert!(matches!(
+            validate_mover(&both, "Restore mover"),
+            Err(ValidationError::MutuallyExclusive { .. })
+        ));
+        // And surfaced through the Restore validator.
+        let mut spec = restore_with(
+            RestoreSource::BackupRef(ObjectRef {
+                name: "b".into(),
+                namespace: None,
+            }),
+            None,
+        );
+        spec.mover = Some(both);
+        assert!(matches!(
+            validate_restore(&spec),
+            Err(ValidationError::MutuallyExclusive { .. })
+        ));
+
+        // Either one alone is fine.
+        let inherit_only = MoverSpec {
+            inherit_security_context_from: Some(PodSelector {
+                pod_selector: LabelSelector::default(),
+                container: None,
+            }),
+            ..Default::default()
+        };
+        assert!(validate_mover(&inherit_only, "Restore mover").is_ok());
     }
 
     // --- validate_cron ---

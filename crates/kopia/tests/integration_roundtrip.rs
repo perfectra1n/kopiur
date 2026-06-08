@@ -60,9 +60,12 @@ async fn filesystem_roundtrip() {
 
     // Create the repository.
     client
-        .repository_create(&ConnectSpec::Filesystem {
-            path: repo_dir.path().to_path_buf(),
-        })
+        .repository_create(
+            &ConnectSpec::Filesystem {
+                path: repo_dir.path().to_path_buf(),
+            },
+            Default::default(),
+        )
         .await
         .expect("repository create");
 
@@ -157,9 +160,12 @@ async fn verbs_roundtrip() {
 
     let client = isolated_client(config_dir.path());
     client
-        .repository_create(&ConnectSpec::Filesystem {
-            path: repo_dir.path().to_path_buf(),
-        })
+        .repository_create(
+            &ConnectSpec::Filesystem {
+                path: repo_dir.path().to_path_buf(),
+            },
+            Default::default(),
+        )
         .await
         .expect("repository create");
 

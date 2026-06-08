@@ -30,7 +30,7 @@ subprocess. Only the cluster-free layers are public:
   [`bootstrap::should_attempt_create`]).
 - [`env`](mod@crate::env) — the mover's environment-variable contract.
 
-The kube `PATCH` path lives in `main.rs` and is intentionally *not* part of the
+The kube `PATCH` path lives in `main.rs` and is intentionally _not_ part of the
 library surface.
 
 ## The contract: `MoverWorkSpec`
@@ -41,19 +41,19 @@ exactly what the controller decided. Both the [`workspec::Operation`] selector a
 the [`workspec::RepositoryConnect`] backend selector are **externally-tagged
 enums** (`{ "backup": {...} }`, `{ "filesystem": {...} }`), mirroring the api
 crate's enum discipline: a new operation or backend cannot compile until every
-`match` handles it. Credentials are *not* in the spec — they arrive as env vars
+`match` handles it. Credentials are _not_ in the spec — they arrive as env vars
 from a mounted Secret, so they never land in a ConfigMap.
 
 ## Key types
 
-| Type | What it is |
-| --- | --- |
-| [`workspec::MoverWorkSpec`] | The full controller→mover JSON contract |
-| [`workspec::Operation`] | Backup / Restore / SnapshotDelete / BootstrapRepository |
-| [`workspec::RepositoryConnect`] | Serializable backend selector (mirrors `kopiur_kopia::ConnectSpec`) |
-| [`workspec::ResolvedIdentity`] | The pinned `username@hostname:path` identity |
-| [`status::StatusUpdate`] / [`status::FailureBlock`] / [`status::MoverPhase`] | Pure result → CR-status mapping |
-| [`bootstrap::BootstrapResult`] | Outcome of a repository bootstrap run |
+| Type                                                                         | What it is                                                          |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| [`workspec::MoverWorkSpec`]                                                  | The full controller→mover JSON contract                             |
+| [`workspec::Operation`]                                                      | Backup / Restore / SnapshotDelete / BootstrapRepository             |
+| [`workspec::RepositoryConnect`]                                              | Serializable backend selector (mirrors `kopiur_kopia::ConnectSpec`) |
+| [`workspec::ResolvedIdentity`]                                               | The pinned `username@hostname:path` identity                        |
+| [`status::StatusUpdate`] / [`status::FailureBlock`] / [`status::MoverPhase`] | Pure result → CR-status mapping                                     |
+| [`bootstrap::BootstrapResult`]                                               | Outcome of a repository bootstrap run                               |
 
 ## Example
 
@@ -84,6 +84,7 @@ let spec = MoverWorkSpec {
     },
     hook_plan: HookPlanSummary::default(),
     options: MoverOptions::default(),
+    cache: kopiur_kopia::CacheTuning::default(),
 };
 
 // Round-trips through serde_json unchanged.

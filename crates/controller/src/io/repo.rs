@@ -1,7 +1,7 @@
 use kube::Api;
 
 use kopiur_api::backend::{Backend, RepoVolume};
-use kopiur_api::common::{Encryption, RepositoryKind, RepositoryRef};
+use kopiur_api::common::{CacheDefaults, Encryption, RepositoryKind, RepositoryRef};
 use kopiur_api::{ClusterRepository, Repository};
 
 use crate::error::{Error, Result};
@@ -42,6 +42,9 @@ pub struct ResolvedRepository {
     /// `None` for a cluster-scoped [`ClusterRepository`]). Used as the *source*
     /// namespace fallback when a credential Secret reference omits one.
     pub repo_namespace: Option<String>,
+    /// The repository's `cacheDefaults`, inherited by its movers' kopia cache
+    /// unless a run's `mover.cache` overrides them (ADR §3.1).
+    pub cache_defaults: Option<CacheDefaults>,
 }
 
 /// Which API a [`RepositoryRef`] resolves against, derived purely from `kind`.
@@ -130,6 +133,7 @@ pub async fn resolve_repository_ref(
                 repo_namespace: Some(namespace),
                 backend: repo.spec.backend,
                 encryption: repo.spec.encryption,
+                cache_defaults: repo.spec.cache_defaults,
             })
         }
         RepoLookup::Cluster { name } => {
@@ -142,6 +146,7 @@ pub async fn resolve_repository_ref(
                 repo_namespace: None,
                 backend: repo.spec.backend,
                 encryption: repo.spec.encryption,
+                cache_defaults: repo.spec.cache_defaults,
             })
         }
     }

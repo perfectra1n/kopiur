@@ -154,13 +154,14 @@ The UID in that message is the operator's real effective UID (it varies with the
 
 ## Restore-side permissions
 
-A restore writes files into the **target** PVC, so the same rules apply in reverse:
+A restore writes files into the **target** PVC, so the same rules apply in reverse — and a `Restore` has the **same `spec.mover`** surface a `BackupConfig` does:
 
-- The mover must be able to **write** the target. For a freshly created target PVC (`target.pvc`) this is usually fine; for an existing PVC (`target.pvcRef`) the mover UID must have write access to it.
-- **Preserving original ownership** — kopia restores files with the UID/GID they had when snapshotted. Reproducing that ownership requires a privileged (root) mover with `privilegedMode: true`; an unprivileged mover writes files owned by its own UID instead.
+- **`Restore.spec.mover.securityContext`** — set the UID/GID the restore mover writes as, so the restored files land owned correctly and the mover can write the target. (Before this existed the restore mover always ran as UID `65532`.) For a freshly created target PVC (`target.pvc`) the default is usually fine; for an existing PVC (`target.pvcRef`) match the UID that owns it.
+- **`Restore.spec.mover.inheritSecurityContextFrom`** — copy the `securityContext` from a live workload pod by label selector instead of hard-coding it (mutually exclusive with `securityContext`). Handy for "restore as whatever the app runs as".
+- **Preserving original ownership** — kopia restores files with the UID/GID they had when snapshotted. Reproducing that ownership requires a privileged (root) mover with `privilegedMode: true`; an unprivileged mover writes files owned by its own UID instead. An elevated restore mover (root / `privilegedMode`, or one inherited from a root pod) is gated by the same `privileged-movers` namespace opt-in a backup uses.
 - **`spec.options.ignorePermissionErrors`** (default `true`) lets a restore complete and _report_ permission problems via a condition rather than failing hard. Set it `false` to fail-closed when exact permissions matter.
 
-See [Restores](restores.md) for the full restore surface.
+See [Restores → Mover, cache & failure policy](restores.md#mover-cache--failure-policy) for the full restore mover surface, and [example 12](examples.md#example-12--restore-mover-cache--failure-policy).
 
 ## Troubleshooting
 
@@ -170,14 +171,17 @@ See [Restores](restores.md) for the full restore surface.
 | Mover log: `permission denied` reading source  | Mover pod logs                 | Same as above — partial read.                              | Same as above; or a root mover if UIDs can't be matched.                                                           |
 | Backup stuck `Pending`, `MoverPermitted=False` | `Backup` condition / Event     | Mover requests privilege; namespace not opted in.          | `kubectl annotate namespace <ns> kopiur.home-operations.com/privileged-movers=true`, or drop the elevated context. |
 | `Repository` `Failed`, `PermissionDenied`      | `Repository` Event / condition | Filesystem repo path not writable by the operator UID.     | `chown -R <uid> <path>` (the Event names the UID), then reconcile.                                                 |
-| Restored files unreadable by the app           | After restore                  | Files restored as the mover's UID, not the original owner. | Use a root mover with `privilegedMode: true` to preserve ownership.                                                |
+| Restored files unreadable by the app           | After restore                  | Files restored as the mover's UID, not the original owner. | Set `Restore.spec.mover.securityContext.runAsUser/Group` to the app's UID (or `inheritSecurityContextFrom`); use a root mover with `privilegedMode: true` to preserve the original ownership exactly. |
+| Restore stuck `Pending`, `MoverPermitted=False` | `Restore` condition / Event   | Restore mover requests privilege; namespace not opted in.  | `kubectl annotate namespace <ns> kopiur.home-operations.com/privileged-movers=true`, or drop the elevated context. |
 
 ## Quick reference
 
 | Thing                            | Value                                                                               |
 | -------------------------------- | ----------------------------------------------------------------------------------- |
 | Default mover UID                | `65532` (distroless `nonroot`), `runAsNonRoot: true`                                |
-| Set the mover UID/GID            | `BackupConfig.spec.mover.securityContext.runAsUser` / `runAsGroup`                  |
+| Set the mover UID/GID            | `BackupConfig.spec.mover.securityContext.runAsUser` / `runAsGroup` (same on `Restore.spec.mover` / `Maintenance.spec.mover`) |
+| Inherit UID/GID from a workload  | `spec.mover.inheritSecurityContextFrom.podSelector` (mutually exclusive with `securityContext`) |
+| Mover cache size / warm cache    | `spec.mover.cache` (`capacity`, `storageClassName`, `mode: Ephemeral`/`Persistent`, `content`/`metadataCacheSizeMb`); inherits `Repository.spec.cacheDefaults` |
 | `fsGroup`                        | **not** supported (no pod-level securityContext) — match UID/GID instead            |
 | Root / preserve-ownership        | `runAsUser: 0` + `privilegedMode: true` (needs the namespace opt-in)                |
 | Privileged-mover opt-in          | `kubectl annotate namespace <ns> kopiur.home-operations.com/privileged-movers=true` |

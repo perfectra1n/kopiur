@@ -23,9 +23,11 @@ use kopiur_mover::workspec::{
     RestoreOp, TargetRef,
 };
 
+use crate::config;
 use crate::consts::{
-    API_VERSION, CREDENTIALS_AVAILABLE_CONDITION, CREDENTIALS_PROJECTED_REASON,
-    MISSING_CREDENTIALS_REASON,
+    ALLOW_PRIVILEGED_MOVER_ACTION, API_VERSION, CREDENTIALS_AVAILABLE_CONDITION,
+    CREDENTIALS_PROJECTED_REASON, MISSING_CREDENTIALS_REASON, MOVER_PERMITTED_CONDITION,
+    PRIVILEGED_MOVER_NOT_PERMITTED_REASON,
 };
 use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
@@ -326,6 +328,76 @@ async fn drive_direct_restore(
         )
         .await?;
     }
+
+    // Resolve the restore mover's EFFECTIVE security context once (explicit, or
+    // inherited from a workload pod via `inheritSecurityContextFrom`). Both the gate
+    // and the Job use it, so an inherited root context is gated like an explicit one.
+    let effective_sc =
+        io::resolve_mover_security_context(&ctx.client, namespace, restore.spec.mover.as_ref())
+            .await?;
+    let privileged_mode = restore.spec.mover.as_ref().and_then(|m| m.privileged_mode);
+
+    // Privileged-mover gate (ADR §4.11/§G16, VolSync-parity): an elevated restore mover
+    // (root/privileged/added caps/`privilegedMode`) requires the target namespace to opt
+    // in via the `kopiur.home-operations.com/privileged-movers` annotation — a tenant
+    // there could otherwise reuse the minted mover SA at that privilege. Refuse with a
+    // clear `MoverPermitted=False` condition + Event otherwise. Mirrors the Backup gate.
+    if kopiur_api::common::requires_privilege_resolved(effective_sc.as_ref(), privileged_mode)
+        && !io::namespace_allows_privileged_movers(&ctx.client, namespace).await?
+    {
+        let sa = ctx
+            .mover_service_account
+            .as_deref()
+            .unwrap_or(config::DEFAULT_MOVER_NAME);
+        let msg = io::privileged_mover_message("Restore", name, namespace, sa);
+        let existing = restore
+            .status
+            .as_ref()
+            .map(|s| s.conditions.clone())
+            .unwrap_or_default();
+        let conditions = io::upsert_condition(
+            &existing,
+            MOVER_PERMITTED_CONDITION,
+            false,
+            PRIVILEGED_MOVER_NOT_PERMITTED_REASON,
+            &msg,
+            restore.metadata.generation,
+        );
+        io::patch_status(
+            api,
+            name,
+            serde_json::json!({ "phase": "Pending", "conditions": conditions }),
+        )
+        .await?;
+        io::publish_warning_event(
+            ctx,
+            restore,
+            PRIVILEGED_MOVER_NOT_PERMITTED_REASON,
+            ALLOW_PRIVILEGED_MOVER_ACTION,
+            &msg,
+        )
+        .await;
+        // Like a missing creds Secret, the fix is an out-of-band namespace annotation —
+        // Transient, so the short requeue cadence picks up the opt-in within ~30s.
+        return Err(Error::MissingDependency(msg));
+    }
+    // Permitted: clear any stale `MoverPermitted=False` from a prior reconcile.
+    if let Some(conds) = restore.status.as_ref().map(|s| s.conditions.as_slice())
+        && conds
+            .iter()
+            .any(|c| c.type_ == MOVER_PERMITTED_CONDITION && c.status != "True")
+    {
+        let conditions = io::upsert_condition(
+            conds,
+            MOVER_PERMITTED_CONDITION,
+            true,
+            "Permitted",
+            "the mover is permitted in this namespace",
+            restore.metadata.generation,
+        );
+        io::patch_status(api, name, serde_json::json!({ "conditions": conditions })).await?;
+    }
+
     let owner = io::owner_ref_for(restore, "Restore")?;
     let repo_ref = restore.spec.repository.as_ref();
     let creds = match io::resolve_mover_creds_for(
@@ -420,6 +492,13 @@ async fn drive_direct_restore(
         .as_ref()
         .map(|o| (o.ignore_permission_errors, o.write_files_atomically))
         .unwrap_or((None, None));
+    // Effective cache config (repository cacheDefaults overlaid by this restore's
+    // mover.cache, ADR §3.1) drives both the connect budgets and the cache volume.
+    let effective_cache = crate::cache::effective_cache(
+        &repo,
+        restore.spec.mover.as_ref().and_then(|m| m.cache.as_ref()),
+    );
+    let cache = crate::cache::cache_tuning(effective_cache.as_ref());
     let work_spec = MoverWorkSpec {
         version: 1,
         operation: Operation::Restore(RestoreOp {
@@ -438,6 +517,7 @@ async fn drive_direct_restore(
         },
         hook_plan: Default::default(),
         options: MoverOptions::default(),
+        cache,
     };
     let repo_volume =
         io::filesystem_repo_mount_source(&repo.backend).map(|source| VolumeMountSpec {
@@ -445,6 +525,15 @@ async fn drive_direct_restore(
             mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
             read_only: true,
         });
+    // Resolve the cache VOLUME; a persistent cache PVC is owned by this Restore.
+    let cache_volume = crate::cache::resolve_cache_volume(
+        &ctx.client,
+        namespace,
+        owner.clone(),
+        &format!("kopiur-cache-{name}"),
+        effective_cache.as_ref(),
+    )
+    .await?;
     let inputs = MoverJobInputs {
         name,
         namespace,
@@ -452,9 +541,15 @@ async fn drive_direct_restore(
         work_spec: &work_spec,
         image: &ctx.mover_image,
         image_pull_policy: crate::backup::mover_pull_policy_pub(),
-        limits: JobLimits::default(),
-        resources: None,
-        security_context: None,
+        limits: restore_job_limits(restore),
+        resources: restore
+            .spec
+            .mover
+            .as_ref()
+            .and_then(|m| m.resources.clone()),
+        // The resolved effective context (explicit or inherited) — same value the
+        // privileged gate above ran on.
+        security_context: effective_sc,
         labels: io::child_labels(&[("kopiur.home-operations.com/op", "restore")]),
         // Restore writes INTO the target PVC, mounted read-write at /restore.
         source_volume: Some(VolumeMountSpec::pvc(target_pvc, target_path, false)),
@@ -464,6 +559,7 @@ async fn drive_direct_restore(
         service_account: ctx.mover_service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
+        cache_volume,
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -548,9 +644,12 @@ async fn list_for_identity(
             let password = io::read_repo_password(&ctx.client, namespace, &creds).await?;
             let client = ctx.kopia.build([("KOPIA_PASSWORD".to_string(), password)]);
             client
-                .repository_connect(&kopiur_kopia::ConnectSpec::Filesystem {
-                    path: fs.path.clone().into(),
-                })
+                .repository_connect(
+                    &kopiur_kopia::ConnectSpec::Filesystem {
+                        path: fs.path.clone().into(),
+                    },
+                    kopiur_kopia::CacheTuning::default(),
+                )
                 .await?;
             let filter = kopiur_kopia::SnapshotSource {
                 host: hostname.to_string(),
@@ -605,6 +704,20 @@ async fn resolve_restore_repository(
 /// Map a resolved repository backend to the mover connect spec for a restore.
 fn restore_connect(repo: &ResolvedRepository) -> Result<RepositoryConnect> {
     crate::backup::repository_connect_pub(repo)
+}
+
+/// Mover `Job` limits from the restore's `failurePolicy`, falling back to ADR
+/// defaults. Mirrors `backup::job_limits`; TTL stays unset so the one-Job-per-CR is
+/// reaped by owner-reference GC when the `Restore` is deleted.
+fn restore_job_limits(restore: &Restore) -> JobLimits {
+    match &restore.spec.failure_policy {
+        Some(fp) => JobLimits {
+            backoff_limit: fp.backoff_limit.unwrap_or(2),
+            active_deadline_seconds: fp.active_deadline_seconds,
+            ..JobLimits::default()
+        },
+        None => JobLimits::default(),
+    }
 }
 
 /// Build a Kubernetes condition object.

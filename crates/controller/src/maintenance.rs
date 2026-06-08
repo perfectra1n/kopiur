@@ -194,6 +194,13 @@ async fn spawn_maintenance_job(
     mode: MaintenanceMode,
     slot: DateTime<Utc>,
 ) -> Result<()> {
+    // Effective cache config (repository cacheDefaults overlaid by this Maintenance's
+    // mover.cache, ADR §3.1) drives both the connect budgets and the cache volume.
+    let effective_cache = crate::cache::effective_cache(
+        repo,
+        maint.spec.mover.as_ref().and_then(|m| m.cache.as_ref()),
+    );
+    let cache = crate::cache::cache_tuning(effective_cache.as_ref());
     let work_spec = MoverWorkSpec {
         version: 1,
         operation: Operation::Maintenance(MaintenanceOp {
@@ -217,6 +224,7 @@ async fn spawn_maintenance_job(
         },
         hook_plan: Default::default(),
         options: MoverOptions::default(),
+        cache,
     };
 
     let mut labels = BTreeMap::new();
@@ -285,6 +293,15 @@ async fn spawn_maintenance_job(
     }
     let creds_secrets = creds.names;
 
+    // Resolve the cache VOLUME; a persistent cache PVC is owned by this Maintenance.
+    let cache_volume = crate::cache::resolve_cache_volume(
+        &ctx.client,
+        namespace,
+        owner.clone(),
+        &format!("kopiur-cache-{cr_name}"),
+        effective_cache.as_ref(),
+    )
+    .await?;
     let inputs = MoverJobInputs {
         name: job_name,
         namespace,
@@ -307,6 +324,7 @@ async fn spawn_maintenance_job(
         service_account: ctx.mover_service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations,
+        cache_volume,
     };
 
     let cm = jobs::build_config_map(&inputs)?;

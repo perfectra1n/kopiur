@@ -1,0 +1,76 @@
+# Example 12 — Restore mover controls: UID/GID, cache & failure policy (ADR-0003 §3.1/§4.6/§4.11)
+#
+# A Restore writes data INTO a target PVC, so — exactly like a backup — the mover
+# must run as a UID/GID that can write there, may want a sized/warm kopia cache for
+# a large restore, and may want a retry/deadline policy. The `spec.mover`,
+# `spec.cache` (via the mover), and `spec.failurePolicy` surfaces mirror what a
+# BackupConfig gives a backup.
+#
+# Field shapes verified against crates/api:
+#   - spec.mover.securityContext       : core/v1 SecurityContext (container-level)
+#   - spec.mover.inheritSecurityContextFrom : { podSelector: LabelSelector, container? }
+#       (mutually exclusive with securityContext — webhook-rejected if both are set)
+#   - spec.mover.cache                 : { capacity, storageClassName,
+#                                          metadataCacheSizeMb, contentCacheSizeMb,
+#                                          mode: Ephemeral|Persistent }
+#   - spec.failurePolicy               : { backoffLimit, activeDeadlineSeconds }
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Restore
+metadata:
+  name: postgres-restore-tuned
+  namespace: billing
+spec:
+  source:
+    backupRef:
+      name: postgres-data-20260523-021300
+      namespace: billing
+  target:
+    pvc:
+      name: postgres-data-restored
+      storageClassName: fast-ssd
+      capacity: 100Gi
+      accessModes:
+        - ReadWriteOnce
+  # ── The mover knobs ─────────────────────────────────────────────────────────
+  mover:
+    # Run as the SAME UID/GID that owns the restored files so they land with the
+    # right ownership (and the mover can write them).
+    securityContext:
+      runAsUser: 1000 # match the UID the app runs as
+      runAsGroup: 1000 # match the GID the app runs as
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+      seccompProfile:
+        type: RuntimeDefault
+    # Alternative to securityContext (set ONE, not both): copy the securityContext
+    # from a live workload pod, so the restore always matches the app it feeds.
+    # inheritSecurityContextFrom:
+    #   podSelector:
+    #     matchLabels:
+    #       app.kubernetes.io/name: postgres
+    #   container: postgres        # optional; defaults to the pod's first container
+    #
+    # ── Root mover (LAST RESORT) ──────────────────────────────────────────────
+    # `privilegedMode: true` (or runAsUser: 0) is ELEVATED — the restore namespace
+    # must opt in first or the Restore is refused with MoverPermitted=False:
+    #   kubectl annotate namespace billing kopiur.home-operations.com/privileged-movers=true
+    #
+    # Cache: a large restore benefits from a sized cache. `mode: Persistent` keeps a
+    # warm cache PVC across runs (ReadWriteOnce — assumes non-overlapping runs);
+    # the default `Ephemeral` gives a fresh per-run volume (or emptyDir if unsized).
+    cache:
+      capacity: 16Gi
+      storageClassName: fast-ssd
+      contentCacheSizeMb: 10000 # kopia --content-cache-size-mb
+      metadataCacheSizeMb: 2000 # kopia --metadata-cache-size-mb
+      mode: Ephemeral
+  # ── Retry / deadline for the restore Job (mirrors Backup.spec.failurePolicy) ──
+  failurePolicy:
+    backoffLimit: 4 # retry the restore Job up to 4 times
+    activeDeadlineSeconds: 7200 # hard wall-clock cap (2h) for a big restore
+  policy:
+    onMissingSnapshot: Fail
+    waitTimeout: 5m

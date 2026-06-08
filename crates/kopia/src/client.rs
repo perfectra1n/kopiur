@@ -175,6 +175,43 @@ pub enum ConnectSpec {
     },
 }
 
+/// Per-connection kopia cache budgets, applied at `repository connect`/`create`
+/// time (`--content-cache-size-mb` / `--metadata-cache-size-mb`). Each mover pod
+/// connects fresh, so these size that pod's local cache. `None` leaves kopia's
+/// default. Serializable so it rides the mover work spec from controller to mover.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheTuning {
+    /// `--content-cache-size-mb`: content (data) cache budget in MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_cache_size_mb: Option<i64>,
+    /// `--metadata-cache-size-mb`: metadata cache budget in MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_cache_size_mb: Option<i64>,
+}
+
+impl CacheTuning {
+    /// Whether no budgets are set (so the connect command adds no cache flags).
+    pub fn is_unset(&self) -> bool {
+        self.content_cache_size_mb.is_none() && self.metadata_cache_size_mb.is_none()
+    }
+
+    /// The `--content-cache-size-mb` / `--metadata-cache-size-mb` args for the set
+    /// budgets, in a stable order. Empty when nothing is set.
+    fn args(&self) -> Vec<String> {
+        let mut a = Vec::new();
+        if let Some(mb) = self.content_cache_size_mb {
+            a.push("--content-cache-size-mb".into());
+            a.push(mb.to_string());
+        }
+        if let Some(mb) = self.metadata_cache_size_mb {
+            a.push("--metadata-cache-size-mb".into());
+            a.push(mb.to_string());
+        }
+        a
+    }
+}
+
 impl ConnectSpec {
     /// Stable discriminant string for logging/metrics (mirrors
     /// `kopiur_api::backend::Backend::kind_str`).
@@ -637,16 +674,30 @@ impl KopiaClient {
     }
 
     /// Connect to an existing repository (`kopia repository connect <backend>`).
-    pub async fn repository_connect(&self, spec: &ConnectSpec) -> Result<(), KopiaError> {
+    /// `cache` sizes this connection's local kopia cache; pass
+    /// [`CacheTuning::default`] to leave kopia's defaults.
+    pub async fn repository_connect(
+        &self,
+        spec: &ConnectSpec,
+        cache: CacheTuning,
+    ) -> Result<(), KopiaError> {
         let mut args = vec!["repository".into(), "connect".into()];
         args.extend(spec.backend_args());
+        args.extend(cache.args());
         self.run_ok(&args).await.map(|_| ())
     }
 
-    /// Create a new repository (`kopia repository create <backend>`).
-    pub async fn repository_create(&self, spec: &ConnectSpec) -> Result<(), KopiaError> {
+    /// Create a new repository (`kopia repository create <backend>`). `cache` sizes
+    /// the creating connection's local cache; pass [`CacheTuning::default`] to leave
+    /// kopia's defaults.
+    pub async fn repository_create(
+        &self,
+        spec: &ConnectSpec,
+        cache: CacheTuning,
+    ) -> Result<(), KopiaError> {
         let mut args = vec!["repository".into(), "create".into()];
         args.extend(spec.backend_args());
+        args.extend(cache.args());
         self.run_ok(&args).await.map(|_| ())
     }
 
@@ -1218,6 +1269,47 @@ mod tests {
                 "ab12"
             ]
         );
+    }
+
+    #[test]
+    fn cache_tuning_args_and_serde() {
+        // Unset → no flags (kopia defaults).
+        assert!(CacheTuning::default().is_unset());
+        assert!(CacheTuning::default().args().is_empty());
+        // Set budgets → stable content-then-metadata flag order.
+        let t = CacheTuning {
+            content_cache_size_mb: Some(8192),
+            metadata_cache_size_mb: Some(2048),
+        };
+        assert!(!t.is_unset());
+        assert_eq!(
+            t.args(),
+            vec![
+                "--content-cache-size-mb",
+                "8192",
+                "--metadata-cache-size-mb",
+                "2048",
+            ]
+        );
+        // Only one set → only that flag.
+        assert_eq!(
+            CacheTuning {
+                metadata_cache_size_mb: Some(512),
+                ..Default::default()
+            }
+            .args(),
+            vec!["--metadata-cache-size-mb", "512"]
+        );
+        // camelCase wire shape, round-trips, and omits unset fields.
+        let json = serde_json::to_value(t).unwrap();
+        assert_eq!(json["contentCacheSizeMb"], 8192);
+        assert_eq!(json["metadataCacheSizeMb"], 2048);
+        assert_eq!(
+            serde_json::to_value(CacheTuning::default()).unwrap(),
+            serde_json::json!({})
+        );
+        let back: CacheTuning = serde_json::from_value(json).unwrap();
+        assert_eq!(back, t);
     }
 
     #[test]

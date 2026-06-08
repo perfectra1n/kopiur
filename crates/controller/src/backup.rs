@@ -260,23 +260,28 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         .await?;
     }
 
+    // Resolve the mover's EFFECTIVE security context once: the explicit
+    // `securityContext`, or the one inherited from a workload pod via
+    // `inheritSecurityContextFrom`. Both the privileged-mover gate and the Job use it,
+    // so an inherited root context is gated exactly like an explicit one.
+    let effective_sc =
+        io::resolve_mover_security_context(&ctx.client, &namespace, config.spec.mover.as_ref())
+            .await?;
+    let privileged_mode = config.spec.mover.as_ref().and_then(|m| m.privileged_mode);
+
     // Privileged-mover gate (ADR §4.11/§G16, VolSync-parity): an elevated mover
     // (root/privileged/added caps/`privilegedMode`) requires the workload namespace
     // to opt in via the `kopiur.home-operations.com/privileged-movers` annotation —
     // a tenant there could otherwise reuse the minted mover SA at that privilege.
     // Refuse with a clear `MoverPermitted=False` condition + Event otherwise.
-    if config
-        .spec
-        .mover
-        .as_ref()
-        .is_some_and(|m| m.requires_privilege())
+    if kopiur_api::common::requires_privilege_resolved(effective_sc.as_ref(), privileged_mode)
         && !io::namespace_allows_privileged_movers(&ctx.client, &namespace).await?
     {
         let sa = ctx
             .mover_service_account
             .as_deref()
             .unwrap_or(config::DEFAULT_MOVER_NAME);
-        let msg = io::privileged_mover_message(&config.name_any(), &namespace, sa);
+        let msg = io::privileged_mover_message("BackupConfig", &config.name_any(), &namespace, sa);
         let existing = backup
             .status
             .as_ref()
@@ -416,6 +421,21 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
 
     let labels = run_labels(&config, origin);
     let limits = job_limits(backup);
+    // Resolve the cache VOLUME (emptyDir / sized-ephemeral / persistent PVC). A
+    // persistent cache PVC is owned by the BackupConfig so a warm cache survives
+    // across individual Backup runs (ADR §3.1).
+    let cache_volume = crate::cache::resolve_cache_volume(
+        &ctx.client,
+        &namespace,
+        io::owner_ref_for(&config, "BackupConfig")?,
+        &format!("kopiur-cache-{}", config.name_any()),
+        crate::cache::effective_cache(
+            &repo,
+            config.spec.mover.as_ref().and_then(|m| m.cache.as_ref()),
+        )
+        .as_ref(),
+    )
+    .await?;
     let inputs = MoverJobInputs {
         name: &name,
         namespace: &namespace,
@@ -425,11 +445,9 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         image_pull_policy: mover_pull_policy(),
         limits,
         resources: config.spec.mover.as_ref().and_then(|m| m.resources.clone()),
-        security_context: config
-            .spec
-            .mover
-            .as_ref()
-            .and_then(|m| m.security_context.clone()),
+        // The resolved effective context (explicit or inherited) — same value the
+        // privileged gate above ran on.
+        security_context: effective_sc,
         labels,
         source_volume,
         repo_volume,
@@ -438,6 +456,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         service_account: ctx.mover_service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
+        cache_volume,
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -594,6 +613,8 @@ async fn delete_snapshot_via_job(
         },
         hook_plan: Default::default(),
         options: MoverOptions::default(),
+        // A one-shot finalizer delete: kopia's default cache is fine.
+        cache: Default::default(),
     };
 
     let mut labels = run_labels(&config, resolve_origin(backup));
@@ -625,6 +646,8 @@ async fn delete_snapshot_via_job(
         service_account: ctx.mover_service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
+        // A one-shot finalizer delete: an ephemeral emptyDir cache is fine.
+        cache_volume: Default::default(),
     };
     // The SnapshotDelete Job runs in this namespace too: mint the mover SA before
     // launching it (its credential Secret(s) were resolved/projected above).
@@ -695,9 +718,12 @@ async fn resolve_succeeded_snapshot(
             let password = io::read_repo_password(&ctx.client, namespace, &creds).await?;
             let client = ctx.kopia.build([("KOPIA_PASSWORD".to_string(), password)]);
             client
-                .repository_connect(&kopiur_kopia::ConnectSpec::Filesystem {
-                    path: fs.path.clone().into(),
-                })
+                .repository_connect(
+                    &kopiur_kopia::ConnectSpec::Filesystem {
+                        path: fs.path.clone().into(),
+                    },
+                    kopiur_kopia::CacheTuning::default(),
+                )
                 .await?;
             // Match the snapshot by its source path (the path we snapshotted),
             // newest first. The pod's recorded user/host differ from our
@@ -820,6 +846,15 @@ fn build_backup_run(
 
     let creds_secrets = io::mover_creds_secrets(&repo.backend, &repo.encryption);
 
+    // Effective kopia cache budgets: the repository's cacheDefaults overlaid by this
+    // recipe's mover.cache (ADR §3.1).
+    let cache = crate::cache::cache_tuning(
+        crate::cache::effective_cache(
+            repo,
+            config.spec.mover.as_ref().and_then(|m| m.cache.as_ref()),
+        )
+        .as_ref(),
+    );
     let work_spec = MoverWorkSpec {
         version: 1,
         operation: Operation::Backup(BackupOp {
@@ -836,6 +871,7 @@ fn build_backup_run(
         },
         hook_plan: Default::default(),
         options: MoverOptions::default(),
+        cache,
     };
 
     let source_volume = Some(source_volume);
@@ -1117,6 +1153,7 @@ mod tests {
                 },
             },
             repo_namespace: Some("media-ns".into()),
+            cache_defaults: None,
         }
     }
 

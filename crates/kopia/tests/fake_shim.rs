@@ -182,9 +182,12 @@ exit 1
     );
     let client = client_for(&s);
     let err = client
-        .repository_connect(&ConnectSpec::Filesystem {
-            path: PathBuf::from("/repo"),
-        })
+        .repository_connect(
+            &ConnectSpec::Filesystem {
+                path: PathBuf::from("/repo"),
+            },
+            Default::default(),
+        )
         .await
         .expect_err("should fail");
     assert_eq!(err.class(), KopiaErrorClass::AuthFailure);
@@ -262,11 +265,14 @@ async fn connect_azure_backend_argv() {
     let s = argv_gate_shim("repository connect azure --container backups --prefix k/");
     let client = client_for(&s);
     client
-        .repository_connect(&ConnectSpec::Azure {
-            container: "backups".into(),
-            storage_account: None,
-            prefix: Some("k/".into()),
-        })
+        .repository_connect(
+            &ConnectSpec::Azure {
+                container: "backups".into(),
+                storage_account: None,
+                prefix: Some("k/".into()),
+            },
+            Default::default(),
+        )
         .await
         .expect("azure connect argv must match");
 }
@@ -277,14 +283,17 @@ async fn connect_sftp_backend_argv() {
         argv_gate_shim("repository connect sftp --host h --path /repo --port 2222 --username u");
     let client = client_for(&s);
     client
-        .repository_connect(&ConnectSpec::Sftp {
-            host: "h".into(),
-            path: "/repo".into(),
-            port: Some(2222),
-            username: Some("u".into()),
-            keyfile: None,
-            known_hosts: None,
-        })
+        .repository_connect(
+            &ConnectSpec::Sftp {
+                host: "h".into(),
+                path: "/repo".into(),
+                port: Some(2222),
+                username: Some("u".into()),
+                keyfile: None,
+                known_hosts: None,
+            },
+            Default::default(),
+        )
         .await
         .expect("sftp connect argv must match");
 }

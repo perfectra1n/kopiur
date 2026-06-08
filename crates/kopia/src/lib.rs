@@ -7,8 +7,8 @@ pub mod error;
 pub mod model;
 
 pub use client::{
-    ConnectSpec, KopiaClient, KopiaClientBuilder, MaintenanceMode, PolicyArgs, RestoreOptions,
-    VerifyOptions,
+    CacheTuning, ConnectSpec, KopiaClient, KopiaClientBuilder, MaintenanceMode, PolicyArgs,
+    RestoreOptions, VerifyOptions,
 };
 pub use error::{KopiaError, KopiaErrorClass};
 pub use model::{

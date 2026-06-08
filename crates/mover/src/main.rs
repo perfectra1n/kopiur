@@ -94,7 +94,7 @@ async fn run() -> Result<()> {
                 // A best-effort status reporter. If we cannot build a kube client
                 // (e.g. running outside a cluster), we log instead of failing.
                 let reporter = StatusReporter::try_new(&spec).await;
-                match client.repository_connect(&connect).await {
+                match client.repository_connect(&connect, spec.cache).await {
                     Err(e) => terminal_failure(&reporter, &e).await,
                     Ok(()) => match execute(&client, &spec, &reporter).await {
                         Ok(update) => {
@@ -275,18 +275,21 @@ async fn run_bootstrap(
 ) -> BootstrapResult {
     let connect_spec = connect.clone();
 
+    // Bootstrap (repo adopt/create) is a controller-driven probe, not a data run, so
+    // it connects with kopia's default cache budgets.
+    let cache = kopiur_kopia::CacheTuning::default();
     let mut created = false;
-    if let Err(e) = client.repository_connect(&connect_spec).await {
+    if let Err(e) = client.repository_connect(&connect_spec, cache).await {
         if !should_attempt_create(op.auto_create, e.class()) {
             // Either auto_create is off, or the failure means a repo already
             // exists (auth/locked) — surface it, never recreate.
             return BootstrapResult::failed(&e);
         }
         info!(class = %e.class(), "connect failed; attempting repository create");
-        if let Err(ce) = client.repository_create(&connect_spec).await {
+        if let Err(ce) = client.repository_create(&connect_spec, cache).await {
             return BootstrapResult::failed(&ce);
         }
-        if let Err(ce) = client.repository_connect(&connect_spec).await {
+        if let Err(ce) = client.repository_connect(&connect_spec, cache).await {
             return BootstrapResult::failed(&ce);
         }
         created = true;
@@ -385,7 +388,7 @@ async fn run_maintenance_flow(
     );
     // Connect first: for object stores this pod is the only place with repo
     // access, which is exactly why the lease decision is made here.
-    if let Err(e) = client.repository_connect(connect).await {
+    if let Err(e) = client.repository_connect(connect, spec.cache).await {
         patch_maintenance_status(&spec.target_ref, &maintenance_failed_body(&e)).await;
         error!(class = %e.class(), "maintenance connect failed");
         return Err(maintenance_err("connect", &e));

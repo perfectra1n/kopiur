@@ -514,6 +514,13 @@ spec:
                     format: int64
                     nullable: true
                     type: integer
+                  mode:
+                    description: How a mover's kopia cache volume is provisioned. ADR §3.1.
+                    enum:
+                    - Ephemeral
+                    - Persistent
+                    nullable: true
+                    type: string
                   storageClassName:
                     description: StorageClass for the cache PVC; absent uses the cluster default.
                     nullable: true
@@ -669,6 +676,13 @@ spec:
                             format: int64
                             nullable: true
                             type: integer
+                          mode:
+                            description: How a mover's kopia cache volume is provisioned. ADR §3.1.
+                            enum:
+                            - Ephemeral
+                            - Persistent
+                            nullable: true
+                            type: string
                           storageClassName:
                             description: StorageClass for the cache PVC; absent uses the cluster default.
                             nullable: true

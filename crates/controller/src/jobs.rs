@@ -13,9 +13,12 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, EmptyDirVolumeSource, EnvFromSource,
-    NFSVolumeSource, PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec,
+    EphemeralVolumeSource, NFSVolumeSource, PersistentVolumeClaimSpec,
+    PersistentVolumeClaimTemplate, PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec,
     ResourceRequirements, SeccompProfile, SecretEnvSource, SecurityContext, Volume, VolumeMount,
+    VolumeResourceRequirements,
 };
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use kopiur_mover::workspec::MoverWorkSpec;
 
@@ -77,6 +80,31 @@ pub enum MountSource {
         server: String,
         /// Exported path on the NFS server.
         path: String,
+    },
+}
+
+/// How the mover's writable kopia cache volume is provisioned (ADR §3.1). A new
+/// variant must be handled in [`build_job`]'s cache-volume construction before it
+/// compiles. `Default` = [`CacheVolume::EmptyDir`], the historical behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CacheVolume {
+    /// Ephemeral and unsized: an `emptyDir` (the default; what an unset cache yields).
+    #[default]
+    EmptyDir,
+    /// Ephemeral and sized: an inline generic ephemeral volume — a PVC bound to the
+    /// pod's lifetime, auto-provisioned and auto-GC'd, honoring `capacity` (+ optional
+    /// `storage_class`). Fresh each run.
+    Ephemeral {
+        /// PVC size (e.g. `10Gi`).
+        capacity: String,
+        /// StorageClass; `None` uses the cluster default.
+        storage_class: Option<String>,
+    },
+    /// Persistent: a controller-owned PVC reused across runs (a warm kopia cache).
+    /// The controller provisions/owns it; here we only mount it by name.
+    Pvc {
+        /// Name of the cache PVC to mount.
+        claim_name: String,
     },
 }
 
@@ -214,6 +242,10 @@ pub struct MoverJobInputs<'a> {
     /// slot — an RFC3339 timestamp, which is not a valid *label* value). Usually
     /// empty for backup/restore/bootstrap.
     pub annotations: BTreeMap<String, String>,
+    /// How the writable kopia cache volume is provisioned (`emptyDir`, a sized
+    /// generic ephemeral volume, or a persistent PVC). Resolved from the
+    /// repository's `cacheDefaults` overlaid by the run's `mover.cache` (ADR §3.1).
+    pub cache_volume: CacheVolume,
 }
 
 /// The restricted-PSA-compatible default security context (§4.11/G16):
@@ -256,6 +288,48 @@ pub fn build_config_map(inputs: &MoverJobInputs<'_>) -> Result<ConfigMap, serde_
     })
 }
 
+/// The `Volume` source (the `name` is set by the caller) for the mover's kopia
+/// cache, per the resolved [`CacheVolume`]. Exhaustive `match` so a new variant
+/// must be handled before it compiles.
+fn cache_volume_source(cache: &CacheVolume) -> Volume {
+    match cache {
+        CacheVolume::EmptyDir => Volume {
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Default::default()
+        },
+        CacheVolume::Ephemeral {
+            capacity,
+            storage_class,
+        } => Volume {
+            ephemeral: Some(EphemeralVolumeSource {
+                volume_claim_template: Some(PersistentVolumeClaimTemplate {
+                    metadata: None,
+                    spec: PersistentVolumeClaimSpec {
+                        access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+                        resources: Some(VolumeResourceRequirements {
+                            requests: Some(BTreeMap::from([(
+                                "storage".to_string(),
+                                Quantity(capacity.clone()),
+                            )])),
+                            limits: None,
+                        }),
+                        storage_class_name: storage_class.clone(),
+                        ..Default::default()
+                    },
+                }),
+            }),
+            ..Default::default()
+        },
+        CacheVolume::Pvc { claim_name } => Volume {
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: claim_name.clone(),
+                read_only: Some(false),
+            }),
+            ..Default::default()
+        },
+    }
+}
+
 /// Build the mover `Job` that mounts the work-spec ConfigMap and runs the
 /// kopiur-mover image. `restartPolicy: Never`; backoff/deadline from limits.
 pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
@@ -282,13 +356,14 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
     }];
 
     // Writable cache/logs/config for kopia. kopia defaults these under $HOME,
-    // which is /nonexistent on distroless:nonroot; without this emptyDir (and the
+    // which is /nonexistent on distroless:nonroot; without this volume (and the
     // KOPIA_* env below) every mover kopia call fails to create its cache. Mount
-    // path is the shared default kopiur_kopia::env::DEFAULT_CACHE_DIR.
+    // path is the shared default kopiur_kopia::env::DEFAULT_CACHE_DIR. The volume's
+    // shape is resolved from the run's effective cache config (ADR §3.1) — match
+    // exhaustively so a new `CacheVolume` variant must be handled here.
     volumes.push(Volume {
         name: "kopia-cache".to_string(),
-        empty_dir: Some(EmptyDirVolumeSource::default()),
-        ..Default::default()
+        ..cache_volume_source(&inputs.cache_volume)
     });
     volume_mounts.push(VolumeMount {
         name: "kopia-cache".to_string(),
@@ -462,6 +537,7 @@ mod tests {
             },
             hook_plan: Default::default(),
             options: MoverOptions::default(),
+            cache: Default::default(),
         }
     }
 
@@ -489,6 +565,7 @@ mod tests {
             service_account: Some("kopiur-operator"),
             passthrough_env: Vec::new(),
             annotations: Default::default(),
+            cache_volume: CacheVolume::EmptyDir,
         }
     }
 
@@ -785,6 +862,41 @@ mod tests {
             get(kopiur_kopia::env::CONFIG_PATH_ENV),
             format!("{base}/repository.config")
         );
+    }
+
+    #[test]
+    fn cache_volume_source_renders_each_variant() {
+        // EmptyDir (default): an emptyDir, no PVC.
+        let v = cache_volume_source(&CacheVolume::EmptyDir);
+        assert!(v.empty_dir.is_some());
+        assert!(v.ephemeral.is_none() && v.persistent_volume_claim.is_none());
+
+        // Ephemeral: a sized generic ephemeral volume (volumeClaimTemplate) honoring
+        // capacity + storageClass, ReadWriteOnce.
+        let v = cache_volume_source(&CacheVolume::Ephemeral {
+            capacity: "20Gi".into(),
+            storage_class: Some("fast-ssd".into()),
+        });
+        let tmpl = v
+            .ephemeral
+            .expect("ephemeral")
+            .volume_claim_template
+            .expect("claim template");
+        assert_eq!(tmpl.spec.storage_class_name.as_deref(), Some("fast-ssd"));
+        assert_eq!(
+            tmpl.spec.access_modes.as_deref(),
+            Some(&["ReadWriteOnce".to_string()][..])
+        );
+        let req = tmpl.spec.resources.unwrap().requests.unwrap();
+        assert_eq!(req.get("storage").unwrap().0, "20Gi");
+
+        // Persistent: mount the named controller-owned PVC, read-write.
+        let v = cache_volume_source(&CacheVolume::Pvc {
+            claim_name: "kopiur-cache-pg".into(),
+        });
+        let pvc = v.persistent_volume_claim.expect("pvc source");
+        assert_eq!(pvc.claim_name, "kopiur-cache-pg");
+        assert_eq!(pvc.read_only, Some(false));
     }
 
     #[test]

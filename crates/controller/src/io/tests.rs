@@ -958,9 +958,9 @@ fn repo_kind_str_maps_both_variants() {
 
 #[test]
 fn privileged_mover_message_is_actionable() {
-    let msg = privileged_mover_message("trilium-rain", "trilium", "kopiur-mover");
-    // What: the BackupConfig + namespace.
-    assert!(msg.contains("trilium-rain"));
+    let msg = privileged_mover_message("BackupConfig", "trilium-rain", "trilium", "kopiur-mover");
+    // What: the owning kind + name + namespace.
+    assert!(msg.contains("BackupConfig `trilium-rain`"));
     assert!(msg.contains("`trilium`"));
     // Why: tenant could reuse the minted SA at that privilege.
     assert!(msg.contains("kopiur-mover"));
@@ -969,6 +969,58 @@ fn privileged_mover_message_is_actionable() {
     assert!(msg.contains("kubectl annotate namespace trilium"));
     assert!(msg.contains(PRIVILEGED_MOVERS_ANNOTATION));
     assert!(msg.contains("=true"));
-    // Alternative fix: drop the elevated context.
+    // Alternative fix: drop the elevated context, named for the right object.
     assert!(msg.contains("securityContext"));
+    assert!(msg.contains("from the BackupConfig `spec.mover`"));
+}
+
+#[test]
+fn privileged_mover_message_names_restore_kind() {
+    // The same gate guards restores; the message must name the Restore to fix.
+    let msg = privileged_mover_message("Restore", "pg-restore", "billing", "kopiur-mover");
+    assert!(msg.contains("Restore `pg-restore`"));
+    assert!(msg.contains("from the Restore `spec.mover`"));
+    assert!(msg.contains("kubectl annotate namespace billing"));
+}
+
+#[test]
+fn label_selector_to_string_covers_labels_and_expressions() {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, LabelSelectorRequirement};
+
+    // matchLabels render as comma-joined key=value (BTreeMap → deterministic order).
+    let mut match_labels = BTreeMap::new();
+    match_labels.insert("app".to_string(), "postgres".to_string());
+    match_labels.insert("tier".to_string(), "db".to_string());
+    let sel = LabelSelector {
+        match_labels: Some(match_labels),
+        match_expressions: Some(vec![
+            LabelSelectorRequirement {
+                key: "role".into(),
+                operator: "In".into(),
+                values: Some(vec!["primary".into(), "replica".into()]),
+            },
+            LabelSelectorRequirement {
+                key: "canary".into(),
+                operator: "DoesNotExist".into(),
+                values: None,
+            },
+            LabelSelectorRequirement {
+                key: "env".into(),
+                operator: "NotIn".into(),
+                values: Some(vec!["dev".into()]),
+            },
+            LabelSelectorRequirement {
+                key: "managed".into(),
+                operator: "Exists".into(),
+                values: None,
+            },
+        ]),
+    };
+    assert_eq!(
+        label_selector_to_string(&sel),
+        "app=postgres,tier=db,role in (primary,replica),!canary,env notin (dev),managed"
+    );
+
+    // An empty selector renders to "" (the resolver treats this as a config error).
+    assert_eq!(label_selector_to_string(&LabelSelector::default()), "");
 }

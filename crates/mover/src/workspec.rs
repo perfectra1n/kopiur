@@ -445,6 +445,7 @@ impl Default for MoverOptions {
 ///     },
 ///     hook_plan: HookPlanSummary::default(),
 ///     options: MoverOptions::default(),
+///     cache: kopiur_kopia::CacheTuning::default(),
 /// };
 ///
 /// // Round-trips through serde_json unchanged.
@@ -478,6 +479,12 @@ pub struct MoverWorkSpec {
     /// Run options.
     #[serde(default)]
     pub options: MoverOptions,
+    /// kopia cache budgets applied when this mover connects to the repository
+    /// (`--content-cache-size-mb` / `--metadata-cache-size-mb`). The controller
+    /// resolves these from the repository's `cacheDefaults` overlaid by the run's
+    /// `mover.cache`. Unset leaves kopia's defaults.
+    #[serde(default)]
+    pub cache: kopiur_kopia::CacheTuning,
 }
 
 fn default_spec_version() -> u32 {
@@ -530,6 +537,7 @@ mod tests {
                 post: vec!["fsunfreeze".into()],
             },
             options: MoverOptions::default(),
+            cache: Default::default(),
         };
         assert_eq!(roundtrip(&spec), spec);
         assert_eq!(spec.operation.kind_str(), "Backup");
@@ -563,6 +571,7 @@ mod tests {
                 progress_interval_secs: 10,
                 operation_timeout_secs: Some(3600),
             },
+            cache: Default::default(),
         };
         assert_eq!(roundtrip(&spec), spec);
         assert_eq!(spec.operation.kind_str(), "Restore");
@@ -582,6 +591,7 @@ mod tests {
             target_ref: sample_target(),
             hook_plan: HookPlanSummary::default(),
             options: MoverOptions::default(),
+            cache: Default::default(),
         };
         assert_eq!(roundtrip(&spec), spec);
         assert_eq!(spec.operation.kind_str(), "SnapshotDelete");
@@ -610,6 +620,7 @@ mod tests {
             },
             hook_plan: HookPlanSummary::default(),
             options: MoverOptions::default(),
+            cache: Default::default(),
         };
         assert_eq!(roundtrip(&spec), spec);
         assert_eq!(spec.operation.kind_str(), "BootstrapRepository");
@@ -654,6 +665,7 @@ mod tests {
             },
             hook_plan: HookPlanSummary::default(),
             options: MoverOptions::default(),
+            cache: Default::default(),
         };
         assert_eq!(roundtrip(&spec), spec);
         assert_eq!(spec.operation.kind_str(), "Maintenance");
@@ -683,6 +695,7 @@ mod tests {
             target_ref: sample_target(),
             hook_plan: HookPlanSummary::default(),
             options: MoverOptions::default(),
+            cache: Default::default(),
         };
         let v: serde_json::Value = serde_json::to_value(&spec).unwrap();
         assert!(v["operation"]["backup"].is_object());

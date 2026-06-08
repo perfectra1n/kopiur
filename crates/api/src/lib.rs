@@ -35,7 +35,9 @@ pub use cluster_repository::{
     AllowedNamespaces, ClusterRepository, ClusterRepositorySpec, ClusterRepositoryStatus,
     IdentityTemplate,
 };
-pub use common::{ConfigRef, CronSpec, DeletionPolicy, ObjectRef, PhaseLabel};
+pub use common::{
+    CacheDefaults, CacheVolumeMode, ConfigRef, CronSpec, DeletionPolicy, ObjectRef, PhaseLabel,
+};
 pub use maintenance::{
     LeaseAction, Maintenance, MaintenanceSchedule, MaintenanceSpec, MaintenanceStatus, Ownership,
     RepositoryMaintenanceSpec, TakeoverPolicy, default_maintenance_schedule, lease_action,
