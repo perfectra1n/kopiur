@@ -1,0 +1,138 @@
+# Scenario 06 — Backup verification / restore drills (an untested backup isn't one)
+#
+# A backup you have never restored is a hope, not a guarantee. This scenario runs
+# a periodic DRILL: restore the latest snapshot into a THROWAWAY PVC, assert it
+# completed, then clean up — so a broken backup is caught by you on a schedule,
+# not by a real outage. Kopiur has no RestoreSchedule kind (restores are one-shot
+# operations), so the cadence is a tiny CronJob that creates Restore CRs.
+#
+# This file has two halves:
+#   A) A run-one-now drill Restore you can `kubectl apply` by hand.
+#   B) The automation: a ServiceAccount + RBAC + CronJob that creates a
+#      timestamped drill each night, waits for Completed, and deletes both the
+#      Restore and its throwaway PVC.
+#
+# Pair this with alerting on the operator's metrics (PromQL examples are in the
+# docs page): kopiur_backup_last_success_timestamp_seconds going stale, and the
+# drill CronJob's own failures.
+#
+# Field shapes verified against crates/api (source.fromConfig, target.pvc). The
+# RBAC/CronJob are plain core/k8s objects.
+---
+# ── A) Run a single drill by hand ────────────────────────────────────────────
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Restore
+metadata:
+  name: postgres-drill
+  namespace: billing
+spec:
+  source:
+    fromConfig:
+      name: postgres-data
+      offset: 0 # latest snapshot
+  target:
+    pvc:
+      name: postgres-drill # throwaway — delete it after you've checked it
+      storageClassName: fast-ssd
+      capacity: 100Gi
+      accessModes:
+        - ReadWriteOnce
+  policy:
+    # A drill that finds NO snapshot is a FAILED drill — that's the whole alarm.
+    onMissingSnapshot: Fail
+    waitTimeout: 10m
+---
+# ── B) Automated nightly drill ───────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kopiur-drill-runner
+  namespace: billing
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kopiur-drill-runner
+  namespace: billing
+rules:
+  # Create/observe/clean up Restore CRs in this namespace.
+  - apiGroups: ["kopiur.home-operations.com"]
+    resources: ["restores"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Delete the throwaway PVC the drill created.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kopiur-drill-runner
+  namespace: billing
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kopiur-drill-runner
+subjects:
+  - kind: ServiceAccount
+    name: kopiur-drill-runner
+    namespace: billing
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kopiur-restore-drill
+  namespace: billing
+spec:
+  schedule: "30 4 * * *" # nightly, after the 02:xx backups have landed
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0 # a failed drill should stay failed and alert, not retry-mask
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          serviceAccountName: kopiur-drill-runner
+          restartPolicy: Never
+          containers:
+            - name: drill
+              # Any image with kubectl >= 1.23 (for `wait --for=jsonpath`).
+              image: registry.k8s.io/kubectl:v1.33.0
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  ts="$(date +%Y%m%d-%H%M%S)"
+                  name="postgres-drill-${ts}"
+                  ns="billing"
+                  cleanup() {
+                    kubectl delete restore "$name" -n "$ns" --ignore-not-found
+                    kubectl delete pvc "$name" -n "$ns" --ignore-not-found
+                  }
+                  trap cleanup EXIT
+                  cat <<EOF | kubectl apply -f -
+                  apiVersion: kopiur.home-operations.com/v1alpha1
+                  kind: Restore
+                  metadata:
+                    name: ${name}
+                    namespace: ${ns}
+                  spec:
+                    source:
+                      fromConfig:
+                        name: postgres-data
+                        offset: 0
+                    target:
+                      pvc:
+                        name: ${name}
+                        storageClassName: fast-ssd
+                        capacity: 100Gi
+                        accessModes: [ReadWriteOnce]
+                    policy:
+                      onMissingSnapshot: Fail
+                      waitTimeout: 10m
+                  EOF
+                  # Succeeds only if the restore reaches Completed; a Failed phase
+                  # or a timeout makes the Job (and the drill) fail loudly.
+                  kubectl wait --for=jsonpath='{.status.phase}'=Completed \
+                    "restore/${name}" -n "$ns" --timeout=15m
+                  echo "drill ${name} restored successfully"

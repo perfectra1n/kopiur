@@ -2,6 +2,12 @@
 
 A walkthrough of the manifests in [`deploy/examples/`](https://github.com/home-operations/kopiur/tree/main/deploy/examples). Each is a complete, apply-ready manifest; copy one, replace the `REPLACE_ME` secrets and PVC/bucket names, and `kubectl apply -f`.
 
+/// tip | Looking for a whole workflow, not one capability?
+
+This page is a ladder of **per-capability** manifests. For end-to-end, problem-driven walkthroughs — protect a database, recover deleted data, disaster recovery, cross-cluster migration, adopting an existing repo, verification drills — see [**Scenarios**](scenarios/index.md).
+
+///
+
 /// info | Single source
 
 The YAML below is pulled directly from the manifests in `deploy/examples/` at build time (MkDocs snippets), so the docs never drift from the files you actually apply. Each manifest carries its own inline comments.

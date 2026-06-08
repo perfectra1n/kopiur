@@ -1,0 +1,145 @@
+# Scenario 05 — Adopt an existing kopia repository
+#
+# You already have a kopia repository — created by hand, by k8up, or by a cron
+# job running the kopia CLI — and you want Kopiur to take it over: see the old
+# snapshots, restore from them, run maintenance, and back up going forward
+# WITHOUT re-uploading data or stranding the old snapshots.
+#
+# The bundle:
+#   1. Repository  — CONNECTS to the existing repo (create.enabled: false).
+#   2. (automatic) — Kopiur DISCOVERS the foreign snapshots and materializes them
+#                    as Backup CRs with origin=discovered, forced
+#                    deletionPolicy: Retain (it never deletes data it didn't
+#                    create). List them:
+#                      kubectl get backup -n adopt \
+#                        -l kopiur.home-operations.com/origin=discovered
+#   3. Maintenance — TAKE OVER the maintenance lease from the old tooling, so two
+#                    writers don't both run `kopia maintenance`.
+#   4. Restore     — restore one discovered snapshot (proves adoption worked).
+#   5. BackupConfig+Schedule — back up going forward. Pin `identity` to MATCH the
+#                    foreign writer's username@hostname:path so new snapshots
+#                    dedup against, and extend, the existing timeline.
+#
+# Field shapes verified against crates/api. takeover_policy is a closed enum:
+# Never (default) | PromptCondition | Force.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: legacy-repo-creds
+  namespace: adopt
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+  # The EXISTING repo's password — exactly as the old tooling set it.
+  KOPIA_PASSWORD: "REPLACE_ME_with_the_EXISTING_repo_password"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: legacy-primary
+  namespace: adopt
+spec:
+  backend:
+    s3:
+      bucket: my-existing-kopia-bucket
+      prefix: "" # match wherever the old tooling put the repo (often the root)
+      endpoint: s3.us-east-1.amazonaws.com
+      region: us-east-1
+      auth:
+        secretRef:
+          name: legacy-repo-creds
+  encryption:
+    passwordSecretRef:
+      name: legacy-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: false # adopt: the repo already exists, never re-initialize it
+  # Don't let the default-managed Maintenance auto-claim the lease here — we want
+  # the deliberate, explicit takeover below instead. (An externally-authored
+  # Maintenance like the one in this file is always honored and never duplicated.)
+  maintenance:
+    enabled: false
+---
+# Deliberately take over maintenance from the previous owner.
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Maintenance
+metadata:
+  name: legacy-primary-maintenance
+  namespace: adopt
+spec:
+  repository:
+    kind: Repository
+    name: legacy-primary
+  schedule:
+    quick:
+      cron: "0 */6 * * *"
+      jitter: 30m
+    full:
+      cron: "0 3 * * 0"
+      jitter: 1h
+    timezone: UTC
+  ownership:
+    owner: "kopiur/legacy-primary"
+    # PromptCondition surfaces the conflict on status/conditions and waits for you
+    # to confirm; switch to Force to seize the lease immediately once you've
+    # stopped the old maintenance job. Never (the default) would refuse to take a
+    # lease another writer holds.
+    takeoverPolicy: PromptCondition
+---
+# Prove adoption: restore one discovered snapshot into a throwaway PVC. Replace
+# the name with one from the `origin=discovered` list above.
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Restore
+metadata:
+  name: adopt-smoke-test
+  namespace: adopt
+spec:
+  source:
+    backupRef:
+      name: kopia-disc-9c2a1f # a discovered Backup CR (see the kubectl get above)
+  target:
+    pvc:
+      name: adopt-smoke-test
+      storageClassName: fast-ssd
+      capacity: 10Gi
+      accessModes:
+        - ReadWriteOnce
+  policy:
+    onMissingSnapshot: Fail
+---
+# Back up going forward, CONTINUING the foreign writer's identity so kopia dedups
+# against the existing data instead of re-uploading a fresh copy.
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: BackupConfig
+metadata:
+  name: app-data
+  namespace: adopt
+spec:
+  repository:
+    name: legacy-primary
+  sources:
+    - pvc:
+        name: app-data
+  # Match EXACTLY what the old tooling recorded (inspect a discovered Backup's
+  # status, or `kopia snapshot list`, to read the existing username@hostname:path).
+  identity:
+    username: app-data
+    hostname: legacy-host
+  retention:
+    keepDaily: 14
+    keepWeekly: 6
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: BackupSchedule
+metadata:
+  name: app-data-nightly
+  namespace: adopt
+spec:
+  configRef:
+    name: app-data
+  schedule:
+    cron: "H 2 * * *"
+    jitter: 30m
+    runOnCreate: false

@@ -1,0 +1,112 @@
+# Scenario 01 — Protect a stateful app, consistently (the everyday case)
+#
+# You run a database (here PostgreSQL) on a PVC and want a nightly, application-
+# consistent backup with a retention window — the bread-and-butter reason to
+# install Kopiur. This bundle is the full recipe → schedule chain plus the one
+# thing example 01 leaves out: **hooks** that quiesce the database around the
+# snapshot so the captured bytes are crash-consistent AND application-consistent.
+#
+# The pieces (all in the app's namespace, where the mover runs):
+#   * Secret          — backend creds + the repo encryption password.
+#   * Repository      — a brand-new S3 repo for this app (create.enabled: true).
+#   * BackupConfig    — the recipe: source PVC, copyMethod, hooks, retention.
+#   * BackupSchedule  — nightly cron that creates Backup CRs.
+#
+# Field shapes verified against crates/api: backend is externally tagged
+# (backend.s3); hooks.beforeSnapshot/afterSnapshot entries are exactly one of
+# workloadExec | runJob | httpRequest; copyMethod is Snapshot|Clone|Direct.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-repo-creds
+  namespace: billing
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+  # Lose this and the backups are unrecoverable — kopia cannot decrypt without it.
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: postgres-primary
+  namespace: billing
+spec:
+  backend:
+    s3:
+      bucket: my-backups
+      prefix: billing/postgres/
+      endpoint: s3.us-east-1.amazonaws.com
+      region: us-east-1
+      auth:
+        secretRef:
+          name: postgres-repo-creds
+  encryption:
+    passwordSecretRef:
+      name: postgres-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true # this is a NEW repo — initialize it on first connect
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: BackupConfig
+metadata:
+  name: postgres-data
+  namespace: billing
+spec:
+  repository:
+    name: postgres-primary # kind defaults to Repository (same namespace)
+  sources:
+    - pvc:
+        name: postgres-data
+  # ── How the volume is captured ────────────────────────────────────────────
+  # Snapshot (the default) takes a point-in-time CSI VolumeSnapshot, then kopia
+  # reads THAT — no app downtime, consistent on disk. Combined with the hooks
+  # below you also get application consistency.
+  copyMethod: Snapshot
+  # volumeSnapshotClassName: csi-hostpath-snapclass   # set if not the cluster default
+  # ── Quiesce the database around the snapshot ──────────────────────────────
+  # Hooks run IN THE WORKLOAD (not the mover): tell Postgres a backup is starting
+  # before the snapshot, and that it finished after. A hook failure aborts the
+  # backup unless continueOnFailure: true.
+  hooks:
+    beforeSnapshot:
+      - workloadExec:
+          podSelector:
+            matchLabels:
+              app: postgres
+          container: postgres
+          command: ["/bin/sh", "-c", 'psql -U postgres -c "SELECT pg_backup_start(''kopiur'');"']
+          timeout: 2m
+    afterSnapshot:
+      - workloadExec:
+          podSelector:
+            matchLabels:
+              app: postgres
+          container: postgres
+          command: ["/bin/sh", "-c", 'psql -U postgres -c "SELECT pg_backup_stop();"']
+          # Run even if something upstream failed, so the DB never stays in
+          # backup mode.
+          continueOnFailure: true
+  # ── How long to keep snapshots (GFS — the only successful-retention driver) ──
+  retention:
+    keepDaily: 14
+    keepWeekly: 6
+    keepMonthly: 3
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: BackupSchedule
+metadata:
+  name: postgres-data-nightly
+  namespace: billing
+spec:
+  configRef:
+    name: postgres-data
+  schedule:
+    # Jenkins-style H pins a deterministic per-schedule minute; jitter spreads
+    # load so many schedules don't stampede the repository at once.
+    cron: "H 2 * * *"
+    jitter: 30m
+    runOnCreate: false # GitOps-friendly: don't fire the instant it's applied

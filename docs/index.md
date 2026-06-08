@@ -27,6 +27,7 @@ API group `kopiur.home-operations.com`, version `v1alpha1`. The CRD surface may 
 - **[How Kopia works](concepts/how-kopia-works.md)** — content-addressable dedup, snapshots, the `username@hostname:path` identity model, encryption, maintenance — and why one shared repository is the recommended layout.
 - **[Why Kopiur is designed this way](concepts/why-kopiur.md)** — the recipe/invocation/schedule split, repository-as-resource, the type-safety thesis, and snapshot-lifecycle-tied-to-CR.
 - **[Getting started](getting-started.md)** — the end-to-end walkthrough: install, first backup, and a verified restore in ~15 minutes.
+- **[Scenarios](scenarios/index.md)** — problem-driven, end-to-end walkthroughs: protect a database, recover deleted data, disaster recovery, migration, adopting an existing repo, verification drills.
 - **[Installation](install.md)** — prerequisites, install modes, and the CRD-lifecycle caveat.
 - **[Repositories & backends](repositories.md)** — point Kopiur at S3, Azure, GCS, B2, a NAS, or rclone.
 - **[Backups & schedules](backups.md)** and **[Restores](restores.md)** — the recipe/invocation/schedule model and reading data back.

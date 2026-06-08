@@ -1,0 +1,69 @@
+# Scenario 02 — Recover from accidental data loss (someone deleted the data)
+#
+# A bad migration dropped a table; a `rm -rf` took out a directory. You have
+# nightly backups (scenario 01) and want yesterday's data back. The safe play is
+# NOT to overwrite the live volume — it's to restore the chosen snapshot into a
+# NEW, side-by-side PVC, verify it, then cut the app over. This file is that
+# safe restore; the in-place variant is shown (commented) at the bottom.
+#
+# First, pick the snapshot from BEFORE the incident (restore is "pick a row"):
+#
+#   kubectl get backup -n billing \
+#     -l kopiur.home-operations.com/backup-config=postgres-data \
+#     --sort-by=.status.timing.startTime
+#
+# Field shapes verified against crates/api: source/target are externally tagged
+# (source.backupRef, target.pvc creates a PVC / target.pvcRef writes an existing
+# one). Explicit sources default to onMissingSnapshot: Fail (fail-closed).
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Restore
+metadata:
+  name: postgres-recover-pre-incident
+  namespace: billing
+spec:
+  source:
+    backupRef:
+      # The specific Backup CR you picked from the list above — the last good one.
+      name: postgres-data-20260523-021300
+      namespace: billing
+  target:
+    # Restore BESIDE the original into a fresh PVC; the live volume is untouched.
+    pvc:
+      name: postgres-data-recovered
+      storageClassName: fast-ssd
+      capacity: 100Gi
+      accessModes:
+        - ReadWriteOnce
+  options:
+    # Additive (the default): write the snapshot's files, leave anything already
+    # in the target alone. Into a fresh PVC this is moot, but it's the safe habit.
+    enableFileDeletion: false
+  policy:
+    onMissingSnapshot: Fail # an explicit recovery that finds nothing is an error
+    waitTimeout: 5m
+#
+# Watch it:   kubectl get restore postgres-recover-pre-incident -n billing -w
+# Then point the app at postgres-data-recovered (or copy the rows you need out
+# of it), confirm, and delete the original / the recovered PVC as appropriate.
+#
+# ── In-place variant (overwrites the LIVE volume — scale the app DOWN first) ──
+# Only do this once you've decided the live data is unrecoverable. Restoring into
+# a mounted, running database is a corruption hazard.
+#
+# apiVersion: kopiur.home-operations.com/v1alpha1
+# kind: Restore
+# metadata:
+#   name: postgres-recover-in-place
+#   namespace: billing
+# spec:
+#   source:
+#     backupRef:
+#       name: postgres-data-20260523-021300
+#   target:
+#     pvcRef:
+#       name: postgres-data        # the EXISTING live PVC
+#   options:
+#     enableFileDeletion: true     # make the volume an EXACT mirror of the snapshot
+#   policy:
+#     onMissingSnapshot: Fail

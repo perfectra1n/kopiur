@@ -1,0 +1,129 @@
+# Scenario 03 — Disaster recovery: rebuild an app on a fresh cluster
+#
+# The cluster (or the whole namespace) is gone, but the repository in object
+# storage survives — that's the whole point of off-cluster backups. You stand up
+# a new cluster and apply your GitOps repo; this bundle brings the app's DATA
+# back as part of that apply, with NO "is this a fresh install or a recovery?"
+# branching.
+#
+# Two differences from a normal install make this a DR bundle:
+#   1. The Repository CONNECTS to the existing repo (create.enabled: false) — it
+#      must already exist; we are not initializing a new empty one.
+#   2. A PASSIVE Restore (source.fromConfig, no target, onMissingSnapshot:
+#      Continue) is wired into the PVC's dataSourceRef as a volume populator, so
+#      the PVC restores the latest snapshot BEFORE the app starts. On a truly
+#      empty repo the PVC just comes up blank and is backed up going forward.
+#
+# The load-bearing subtlety — IDENTITY must match the old cluster. kopia finds
+# the old snapshots by `username@hostname:path`. By default username = the
+# BackupConfig name and hostname = the namespace, so re-creating the config with
+# the SAME name in the SAME namespace resolves the same snapshots automatically.
+# We pin `identity` explicitly here so the recovery is robust even if you rebuild
+# into a differently-named namespace.
+#
+# Field shapes verified against crates/api. See also example 05 (deploy-or-
+# restore) and the Restores guide.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-repo-creds
+  namespace: billing
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+  # MUST be the same password the old cluster used — kopia can't decrypt otherwise.
+  KOPIA_PASSWORD: "REPLACE_ME_with_the_ORIGINAL_repo_password"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: postgres-primary
+  namespace: billing
+spec:
+  backend:
+    s3:
+      # Point at the EXISTING bucket/prefix the old cluster wrote to.
+      bucket: my-backups
+      prefix: billing/postgres/
+      endpoint: s3.us-east-1.amazonaws.com
+      region: us-east-1
+      auth:
+        secretRef:
+          name: postgres-repo-creds
+  encryption:
+    passwordSecretRef:
+      name: postgres-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: false # CONNECT to the surviving repo; do NOT initialize a new one
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: BackupConfig
+metadata:
+  name: postgres-data
+  namespace: billing
+spec:
+  repository:
+    name: postgres-primary
+  sources:
+    - pvc:
+        name: postgres-data
+  # Pin the identity to what the OLD cluster recorded, so fromConfig below
+  # resolves the surviving snapshots no matter where you rebuild.
+  identity:
+    username: postgres-data
+    hostname: billing
+  retention:
+    keepDaily: 14
+    keepWeekly: 6
+---
+# PASSIVE Restore — no `target`. It does nothing on its own; the PVC consumes it.
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Restore
+metadata:
+  name: postgres-data-restore
+  namespace: billing
+spec:
+  source:
+    fromConfig:
+      name: postgres-data
+      offset: 0 # 0 = latest surviving snapshot
+  policy:
+    # Default for fromConfig; explicit here. Empty repo ⇒ PVC comes up blank
+    # instead of failing the deploy.
+    onMissingSnapshot: Continue
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: billing
+spec:
+  storageClassName: fast-ssd
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  # The populator handshake — needs k8s >= 1.24 (AnyVolumeDataSource). The PVC is
+  # provisioned by restoring the snapshot the passive Restore above resolves.
+  dataSourceRef:
+    apiGroup: kopiur.home-operations.com
+    kind: Restore
+    name: postgres-data-restore
+---
+# Resume nightly backups on the new cluster, so DR also re-establishes protection.
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: BackupSchedule
+metadata:
+  name: postgres-data-nightly
+  namespace: billing
+spec:
+  configRef:
+    name: postgres-data
+  schedule:
+    cron: "H 2 * * *"
+    jitter: 30m
+    runOnCreate: false

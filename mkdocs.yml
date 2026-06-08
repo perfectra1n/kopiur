@@ -61,7 +61,10 @@ theme:
         icon: material/weather-sunny
         name: Switch to light mode
   features:
-    - navigation.tabs
+    # NOTE: navigation.tabs is deliberately OFF. With it on, the top-level nav
+    # groups (Concepts, User guide, Scenarios, Reference, Developer, ADRs) render
+    # as a horizontal tab bar in the header; off, the whole nav tree lives in the
+    # left sidebar (collapsible sections), which is what we want here.
     - navigation.indexes # a section's first child can be its landing page (backends.md)
     - navigation.instant
     - navigation.tracking
@@ -160,10 +163,22 @@ nav:
       - Maintenance: maintenance.md
       - Examples: examples.md
       - Troubleshooting: troubleshooting.md
+  # Scenarios = end-to-end, problem-driven walkthroughs (one apply-ready bundle
+  # each under deploy/examples/scenarios/), as opposed to the per-capability
+  # manifest ladder in examples.md. navigation.indexes makes scenarios/index.md
+  # the section landing page.
+  - Scenarios:
+      - scenarios/index.md
+      - Protect a stateful app: scenarios/protect-stateful-app.md
+      - Recover from accidental data loss: scenarios/recover-lost-data.md
+      - Disaster recovery on a fresh cluster: scenarios/disaster-recovery.md
+      - Migrate across clusters or namespaces: scenarios/migrate-across-clusters.md
+      - Adopt an existing kopia repository: scenarios/adopt-existing-repo.md
+      - Backup verification / restore drills: scenarios/verification-drills.md
   - Reference:
       - API reference (rustdoc): api-reference.md
-  # Top-level entry → its OWN tab in the header bar (navigation.tabs), so the Rust
-  # API docs are one click from the top of every page. Root-absolute link into the
+  # Top-level entry → its own top-level item in the left sidebar, so the Rust API
+  # docs are one click from the top of every page. Root-absolute link into the
   # rustdoc tree build-docs.sh nests at /rustdoc/; it exists in the assembled site/
   # and in production, not during `mkdocs serve` (the Reference page is the
   # serve-time landing that explains this).

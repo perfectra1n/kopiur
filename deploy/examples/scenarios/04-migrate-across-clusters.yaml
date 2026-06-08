@@ -1,0 +1,121 @@
+# Scenario 04 — Migrate an app to a new cluster or namespace
+#
+# Unlike DR (scenario 03, where the app's name and namespace are unchanged), a
+# migration MOVES the app somewhere with a DIFFERENT coordinate — a new namespace
+# (`payments`) or a new cluster — while reusing the same repository. The catch is
+# kopia's identity model: a snapshot is stored under `username@hostname:path`,
+# and hostname defaults to the SOURCE namespace. So in the destination you cannot
+# resolve the source's snapshots by `fromConfig` (its identity would compute the
+# DESTINATION namespace). You restore by the RAW identity instead.
+#
+# This bundle, applied in the destination namespace, does the move:
+#   1. Repository — connects to the SAME bucket the source wrote to.
+#   2. Restore    — by source.identity (the source's username@hostname:path) into
+#                   a new PVC in the destination. This is the one-time data carry.
+#   3. BackupConfig + BackupSchedule — protect the app going forward.
+#
+# IDENTITY CHOICE for the new BackupConfig (the important decision):
+#   * To CONTINUE the original snapshot lineage (keep dedup history, one logical
+#     timeline), pin `identity` to the ORIGINAL username/hostname — done below.
+#   * To start a FRESH lineage under the new coordinate, delete the `identity`
+#     block and let it default to the destination namespace.
+#
+# WARNING: pin-to-original is for a MOVE — decommission the source first. Two
+# clusters writing the SAME identity concurrently corrupts the snapshot timeline.
+#
+# Field shapes verified against crates/api. source.identity REQUIRES an explicit
+# spec.repository (there's no Backup/BackupConfig to infer it from).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-repo-creds
+  namespace: payments
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+  KOPIA_PASSWORD: "REPLACE_ME_with_the_ORIGINAL_repo_password"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: postgres-primary
+  namespace: payments
+spec:
+  backend:
+    s3:
+      bucket: my-backups
+      prefix: billing/postgres/ # the SAME prefix the source app used
+      endpoint: s3.us-east-1.amazonaws.com
+      region: us-east-1
+      auth:
+        secretRef:
+          name: postgres-repo-creds
+  encryption:
+    passwordSecretRef:
+      name: postgres-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: false # connect to the existing repo; do not initialize
+---
+# One-time data carry: restore the source app's latest snapshot by its RAW
+# identity (username/hostname as recorded by the SOURCE in namespace `billing`).
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Restore
+metadata:
+  name: postgres-migrate-in
+  namespace: payments
+spec:
+  repository:
+    kind: Repository
+    name: postgres-primary
+  source:
+    identity:
+      username: postgres-data # the SOURCE BackupConfig name
+      hostname: billing # the SOURCE namespace (NOT payments)
+      sourcePath: /pvc/postgres-data # PVC sources record /pvc/<pvcName>
+      # snapshotID: k1f1ec0a8        # pin an exact snapshot, or omit for latest
+  target:
+    pvc:
+      name: postgres-data
+      storageClassName: fast-ssd
+      capacity: 100Gi
+      accessModes:
+        - ReadWriteOnce
+  policy:
+    onMissingSnapshot: Fail # the snapshot must be there — this is the migration
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: BackupConfig
+metadata:
+  name: postgres-data
+  namespace: payments
+spec:
+  repository:
+    name: postgres-primary
+  sources:
+    - pvc:
+        name: postgres-data
+  # CONTINUE the original lineage: keep writing under billing/postgres-data so the
+  # new cluster's snapshots dedup against the carried-over history. Remove this
+  # block to fork a fresh timeline under payments/postgres-data instead.
+  identity:
+    username: postgres-data
+    hostname: billing
+  retention:
+    keepDaily: 14
+    keepWeekly: 6
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: BackupSchedule
+metadata:
+  name: postgres-data-nightly
+  namespace: payments
+spec:
+  configRef:
+    name: postgres-data
+  schedule:
+    cron: "H 2 * * *"
+    jitter: 30m
+    runOnCreate: false
