@@ -200,32 +200,35 @@ pub const KEY_RCLONE_CONFIG: &str = "KOPIA_RCLONE_CONFIG";
 pub const RCLONE_REMOTE_PATH: &str = "miniors3:kopiur-rclone/repo";
 
 // --- NFS backend (in-cluster NFS server; inline-NFS filesystem repo + source) --
-/// In-cluster NFS server image — `obeone/docker-nfs-server` (kernel `nfsd`),
-/// configured via `NFS_EXPORT_*` env vars. Serves **NFSv4 only** (we set
-/// `NFS_DISABLE_VERSION_3=1`), so the only port is 2049 — no rpcbind/mountd.
+/// In-cluster NFS server image — `janeczku/nfs-ganesha`, a **userspace**
+/// NFS-Ganesha server. Configured via `EXPORT_PATH`/`PSEUDO_PATH`/`PROTOCOLS`
+/// env (see [`crate::builders::nfs_deployment`]). Serves NFSv4 on port 2049.
 ///
-/// Replaces the long-dead `registry.k8s.io/volume-nfs:0.8`, whose Docker
-/// schema-v1 manifest containerd ≥2.1 refuses to pull (`media type
-/// …manifest.v1+prettyjws is no longer supported`), which is what broke the e2e
-/// NFS tests. This image ships a modern multi-arch OCI manifest.
+/// Crucially userspace: unlike a kernel-`nfsd` image (the old
+/// `obeone/nfs-server`, which loaded the host `nfsd` module and needed
+/// `privileged` + a runner kernel that actually provides `nfsd` — flaky on
+/// GitHub hosted runners, where the deployment never became ready in 180s), this
+/// implements NFS entirely in user space, so it starts anywhere with just the
+/// `SYS_ADMIN` + `DAC_READ_SEARCH` capabilities — no kernel module, no
+/// `privileged`.
 ///
-/// Runs **privileged**: kind nodes share the host kernel, so the host must have
-/// the `nfsd` module available (`modprobe nfsd` on the host if a mover Job hangs
-/// mounting the export). Pinned (never `:latest`) and must be verified on a real
-/// kind cluster before trusting a green run — same hard-won lesson as the SFTP
-/// image (see [`SFTP_IMAGE`]): a server the client can't actually talk to fails
-/// in a slow, confusing way, not a fast one.
-pub const NFS_IMAGE: &str = "ghcr.io/obeone/nfs-server:v2";
+/// Pinned by **digest** (never `:latest`): a community image can't change under
+/// us once pinned. Must still be verified on a real kind cluster before trusting
+/// a green run — same hard-won lesson as the SFTP image (see [`SFTP_IMAGE`]): a
+/// server the client can't actually talk to fails slowly and confusingly. Also
+/// preloaded by the `minio-preload` mise task so CI doesn't pull it in-cluster.
+pub const NFS_IMAGE: &str =
+    "janeczku/nfs-ganesha@sha256:17fe1813fd20d9fdfa497a26c8a2e39dd49748cd39dbb0559df7627d9bcf4c53";
 /// In-cluster NFS host the Repository's `volume.nfs.server` (and an NFS *source*)
 /// point at. Resolves to the `nfs` Service in [`OPERATOR_NS`].
 pub const NFS_HOST: &str = "nfs.kopiur-e2e.svc.cluster.local";
 /// Directory the server exports (backed by an `emptyDir` mounted here in the NFS
-/// pod, and named in `NFS_EXPORT_0`). This is the **server-side** path; clients
-/// mount [`NFS_MOUNT_PATH`], not this — see that const for why they differ.
+/// pod, passed to Ganesha as `EXPORT_PATH`). This is the **server-side** path;
+/// clients mount [`NFS_MOUNT_PATH`], not this — see that const for why they differ.
 pub const NFS_EXPORT_PATH: &str = "/exports";
 /// Path a **client** (the Repository's `volume.nfs.path` / a `source.nfs.path`)
-/// mounts. The export sets `fsid=0`, making [`NFS_EXPORT_PATH`] the NFSv4
-/// pseudo-root, so over NFSv4 the export is reached at `/`, not `/exports`.
+/// mounts. Ganesha is configured with `PSEUDO_PATH=/`, so over NFSv4 the export
+/// ([`NFS_EXPORT_PATH`]) is reached at the pseudo-root `/`, not `/exports`.
 pub const NFS_MOUNT_PATH: &str = "/";
 /// Secret holding just the repo password for the NFS/filesystem repo.
 pub const SECRET_NFS_CREDS: &str = "kopia-nfs-creds";

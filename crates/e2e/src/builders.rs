@@ -320,8 +320,8 @@ pub fn nfs_deployment(ns: &str) -> Deployment {
             "template": {
                 "metadata": { "labels": { "app": "nfs" } },
                 "spec": {
-                    // Make the exported emptyDir world-writable before nfsd starts
-                    // so the non-root mover can create the kopia repo under it.
+                    // Make the exported emptyDir world-writable before Ganesha
+                    // starts so the non-root mover can create the kopia repo under it.
                     "initContainers": [{
                         "name": "chmod-export",
                         "image": consts::NFS_IMAGE,
@@ -333,17 +333,21 @@ pub fn nfs_deployment(ns: &str) -> Deployment {
                         "name": "nfs",
                         "image": consts::NFS_IMAGE,
                         "imagePullPolicy": "IfNotPresent",
-                        // Needs to load nfsd and mount nfsd/rpc_pipefs in-container.
-                        "securityContext": { "privileged": true },
+                        // Userspace NFS-Ganesha: no kernel nfsd module, so no
+                        // `privileged` — just the two capabilities the image needs to
+                        // bind/mount in its own namespace (per its docs).
+                        "securityContext": {
+                            "capabilities": { "add": ["SYS_ADMIN", "DAC_READ_SEARCH"] },
+                        },
                         "env": [
-                            // Single export = the NFSv4 root (fsid=0). `insecure`
-                            // allows the mover's high source port; `no_root_squash`
-                            // pairs with the init-container chmod for writes.
-                            { "name": "NFS_EXPORT_0", "value": format!(
-                                "{} *(rw,fsid=0,no_subtree_check,insecure,no_root_squash)",
-                                consts::NFS_EXPORT_PATH) },
-                            // NFSv4 only: drops rpcbind/mountd, leaving just 2049.
-                            { "name": "NFS_DISABLE_VERSION_3", "value": "1" },
+                            // Export the emptyDir at the NFSv4 pseudo-root `/` (so
+                            // clients mount NFS_MOUNT_PATH = "/"), NFSv4 only.
+                            // No_Root_Squash + the init chmod let the non-root mover
+                            // write under the export.
+                            { "name": "EXPORT_PATH", "value": consts::NFS_EXPORT_PATH },
+                            { "name": "PSEUDO_PATH", "value": "/" },
+                            { "name": "PROTOCOLS", "value": "4" },
+                            { "name": "SQUASH_MODE", "value": "No_Root_Squash" },
                         ],
                         "ports": [{ "name": "nfs", "containerPort": 2049 }],
                         "volumeMounts": [{ "name": "export", "mountPath": consts::NFS_EXPORT_PATH }],
@@ -556,16 +560,32 @@ mod tests {
     }
 
     #[test]
-    fn nfs_deployment_is_privileged_and_exports_v4_with_nfsd_probe() {
+    fn nfs_deployment_is_userspace_ganesha_exporting_v4_with_probe() {
         let d = nfs_deployment(consts::OPERATOR_NS);
         let v = val(&d);
         let c = v
             .pointer("/spec/template/spec/containers/0")
             .expect("container");
         assert_eq!(c.pointer("/image").unwrap(), consts::NFS_IMAGE);
-        // Privileged: the image loads nfsd and mounts nfsd/rpc_pipefs in-container.
-        assert_eq!(c.pointer("/securityContext/privileged").unwrap(), true);
-        // Readiness gates on nfsd (2049), so the server is up before a mover mounts.
+        // Userspace Ganesha: NOT privileged — just SYS_ADMIN + DAC_READ_SEARCH.
+        assert!(
+            c.pointer("/securityContext/privileged").is_none(),
+            "userspace Ganesha must not need privileged"
+        );
+        let caps: Vec<String> = c
+            .pointer("/securityContext/capabilities/add")
+            .and_then(|a| a.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            caps.contains(&"SYS_ADMIN".to_string())
+                && caps.contains(&"DAC_READ_SEARCH".to_string())
+        );
+        // Readiness gates on 2049, so the server is up before a mover mounts.
         assert_eq!(c.pointer("/readinessProbe/tcpSocket/port").unwrap(), 2049);
         // The export dir is mounted (backed by an emptyDir on the pod).
         assert_eq!(
@@ -576,7 +596,7 @@ mod tests {
             v.pointer("/spec/template/spec/volumes/0/emptyDir")
                 .is_some()
         );
-        // The export is configured via env (fsid=0 root) and NFSv3 is disabled.
+        // Ganesha export config via env: export the dir at the NFSv4 pseudo-root.
         let env: Vec<(String, String)> = c
             .pointer("/env")
             .and_then(|e| e.as_array())
@@ -591,17 +611,14 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default();
-        let export = env
-            .iter()
-            .find(|(k, _)| k == "NFS_EXPORT_0")
-            .expect("NFS_EXPORT_0");
-        assert!(export.1.starts_with(consts::NFS_EXPORT_PATH) && export.1.contains("fsid=0"));
-        assert_eq!(
+        let get = |k: &str| {
             env.iter()
-                .find(|(k, _)| k == "NFS_DISABLE_VERSION_3")
-                .map(|(_, val)| val.as_str()),
-            Some("1")
-        );
+                .find(|(n, _)| n == k)
+                .map(|(_, val)| val.as_str())
+        };
+        assert_eq!(get("EXPORT_PATH"), Some(consts::NFS_EXPORT_PATH));
+        assert_eq!(get("PSEUDO_PATH"), Some("/"));
+        assert_eq!(get("PROTOCOLS"), Some("4"));
         // An init container makes the export world-writable for the non-root mover.
         assert!(
             v.pointer("/spec/template/spec/initContainers/0/command")

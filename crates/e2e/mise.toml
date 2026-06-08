@@ -70,6 +70,10 @@ preload minio/mc:latest
 # atmoz/sftp:debian (OpenSSH 9.x) — NOT :alpine (OpenSSH 10.2 hangs kopia's go-ssh).
 preload atmoz/sftp:debian
 preload bytemark/webdav:2.4
+# Userspace NFS-Ganesha (digest-pinned; mirror crates/e2e/src/consts.rs NFS_IMAGE).
+# Preloading avoids an in-cluster pull that previously made the nfs Deployment miss
+# its 180s readiness window on GitHub runners.
+preload janeczku/nfs-ganesha@sha256:17fe1813fd20d9fdfa497a26c8a2e39dd49748cd39dbb0559df7627d9bcf4c53
 """
 
 [tasks.node-seed]
