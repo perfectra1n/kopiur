@@ -2,30 +2,39 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: backupconfigs.kopiur.home-operations.com
+  name: snapshotpolicies.kopiur.home-operations.com
 spec:
   group: kopiur.home-operations.com
   names:
     categories:
     - kopiur
-    kind: BackupConfig
-    plural: backupconfigs
+    kind: SnapshotPolicy
+    plural: snapshotpolicies
     shortNames:
-    - kopiabc
-    singular: backupconfig
+    - kopiasp
+    singular: snapshotpolicy
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .spec.repository.name
       name: Repository
       type: string
+    - jsonPath: .status.lastSuccessfulSnapshot
+      name: Last-Snapshot
+      type: date
+    - jsonPath: .status.lastVerified
+      name: Last-Verified
+      type: date
+    - jsonPath: .spec.suspend
+      name: Suspended
+      type: boolean
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Auto-generated derived type for BackupConfigSpec via `CustomResource`
+        description: Auto-generated derived type for SnapshotPolicySpec via `CustomResource`
         properties:
           spec:
             description: |-
@@ -33,24 +42,34 @@ spec:
 
               Not `Eq`: transitively embeds k8s-openapi types via `mover` and `hooks` (`JobSpec`).
             properties:
+              compression:
+                description: Compression algorithm + per-extension opt-outs. ADR §3.3 (G12).
+                nullable: true
+                properties:
+                  compressor:
+                    description: kopia compressor name (e.g. `zstd`); absent leaves kopia's default. ADR §3.3.
+                    nullable: true
+                    type: string
+                  neverCompress:
+                    description: Filename globs to leave uncompressed (e.g. already-compressed media). ADR §3.3.
+                    items:
+                      type: string
+                    type: array
+                type: object
               copyMethod:
+                default: Snapshot
                 description: |-
-                  Volume snapshot copy method. Closed enum. ADR §3.3.
+                  How the source volume is captured before kopia reads it: `Snapshot`
+                  (point-in-time CSI snapshot, default), `Clone`, or `Direct`. ADR §3.3.
 
-                  ```
-                  use kopiur_api::CopyMethod;
-
-                  // Defaults to a point-in-time CSI snapshot.
-                  assert_eq!(CopyMethod::default(), CopyMethod::Snapshot);
-                  // Serializes as a bare PascalCase string (no external tagging — it has no payload).
-                  assert_eq!(serde_json::to_value(CopyMethod::Snapshot).unwrap(), "Snapshot");
-                  assert_eq!(serde_json::to_value(CopyMethod::Direct).unwrap(), "Direct");
-                  ```
+                  Carries a real OpenAPI `default: Snapshot` (ADR-0005 §1) so it materializes
+                  into the stored object and `kubectl explain`, and GitOps engines stop
+                  diff-thrashing on a controller-set value. A bare value (not `Option`) so the
+                  default is never dropped by `skip_serializing_if`.
                 enum:
                 - Snapshot
                 - Clone
                 - Direct
-                nullable: true
                 type: string
               credentialProjection:
                 description: |-
@@ -59,7 +78,7 @@ spec:
                   repository's credential Secret(s) into the namespace where each backup
                   mover runs (a no-op when they already live there) — so a workload backing
                   up to a shared `ClusterRepository` need not pre-create the Secret in its
-                  own namespace. Inherited by `Backup`s produced from this config. ADR §4.11.
+                  own namespace. Inherited by `Snapshot`s produced from this config. ADR §4.11.
                 nullable: true
                 properties:
                   enabled:
@@ -71,8 +90,8 @@ spec:
                 type: object
               defaultDeletionPolicy:
                 description: |-
-                  Lifecycle of the underlying kopia snapshot when its `Backup` CR is deleted.
-                  Shared by `BackupConfig.spec.defaultDeletionPolicy` and `Backup.spec.deletionPolicy`.
+                  Lifecycle of the underlying kopia snapshot when its `Snapshot` CR is deleted.
+                  Shared by `SnapshotPolicy.spec.defaultDeletionPolicy` and `Snapshot.spec.deletionPolicy`.
                   ADR-0003 §4.5 / ADR-0001 §4.5.
 
                   The reconciler distinguishes the three cases with an exhaustive `match` — Rust
@@ -95,6 +114,47 @@ spec:
                 - Orphan
                 nullable: true
                 type: string
+              errorHandling:
+                description: |-
+                  Backup-side error handling — the missing analog of restore's
+                  `ignorePermissionErrors`. Lets a snapshot complete-with-errors instead of
+                  failing outright (`--ignore-file-errors` / `--ignore-dir-errors` /
+                  `--ignore-unknown-types`). ADR-0005 §13(b).
+                nullable: true
+                properties:
+                  ignoreDirErrors:
+                    description: Continue the snapshot when a directory cannot be read (`--ignore-dir-errors`).
+                    type: boolean
+                  ignoreFileErrors:
+                    description: Continue the snapshot when a file cannot be read (`--ignore-file-errors`).
+                    type: boolean
+                  ignoreUnknownTypes:
+                    description: Continue past entries of unknown type (`--ignore-unknown-types`).
+                    type: boolean
+                type: object
+              extraArgs:
+                description: Escape hatch for kopia flags not yet modeled. ADR §3.3 (G12).
+                items:
+                  type: string
+                type: array
+              files:
+                description: Paths/patterns kopia should skip while snapshotting. ADR §3.3 (G12).
+                nullable: true
+                properties:
+                  ignoreCacheDirs:
+                    description: Honor `CACHEDIR.TAG`.
+                    type: boolean
+                  ignoreIdenticalSnapshots:
+                    description: 'fork issue #13.'
+                    type: boolean
+                  ignoreRules:
+                    description: |-
+                      Filename/path globs to exclude from the snapshot (e.g. `*.tmp`,
+                      `*/cache/*`, `lost+found`). ADR §3.3.
+                    items:
+                      type: string
+                    type: array
+                type: object
               groupBy:
                 description: |-
                   Multi-PVC grouping strategy. Closed enum. ADR §4.9.
@@ -132,7 +192,7 @@ spec:
                         Not `Eq`: `RunJob` embeds `JobSpec` (k8s-openapi, `PartialEq` only).
 
                         ```
-                        use kopiur_api::backup_config::{Hook, HttpRequestHook};
+                        use kopiur_api::snapshot_policy::{Hook, HttpRequestHook};
 
                         // Construct directly — the type system guarantees exactly one variant.
                         let hook = Hook::HttpRequest(HttpRequestHook {
@@ -5279,7 +5339,7 @@ spec:
                         Not `Eq`: `RunJob` embeds `JobSpec` (k8s-openapi, `PartialEq` only).
 
                         ```
-                        use kopiur_api::backup_config::{Hook, HttpRequestHook};
+                        use kopiur_api::snapshot_policy::{Hook, HttpRequestHook};
 
                         // Construct directly — the type system guarantees exactly one variant.
                         let hook = Hook::HttpRequest(HttpRequestHook {
@@ -10684,7 +10744,8 @@ spec:
                   securityContext:
                     description: |-
                       Security context applied to the mover **container** (`runAsUser`/`runAsGroup`,
-                      capabilities, seccomp, …).
+                      capabilities, seccomp, …). Merged field-wise over `moverDefaults.securityContext`
+                      and the hardened base (ADR-0004 §2) — set only the fields you want to change.
                     nullable: true
                     properties:
                       allowPrivilegeEscalation:
@@ -10788,52 +10849,15 @@ spec:
                             type: string
                         type: object
                     type: object
-                type: object
-              policy:
-                description: Typed kopia policy + `extraArgs` escape hatch. ADR §3.3 (G12).
-                nullable: true
-                properties:
-                  compression:
-                    description: Compression algorithm + per-extension opt-outs. ADR §3.3.
+                  ttlSecondsAfterFinished:
+                    description: |-
+                      Per-recipe override of `moverDefaults.ttlSecondsAfterFinished` — the
+                      `Job.spec.ttlSecondsAfterFinished` for this recipe's mover Jobs so finished
+                      backup/restore Jobs self-GC. Recipe wins over the repo default; when neither
+                      is set a built-in default applies ([`DEFAULT_JOB_TTL_SECONDS`]). ADR-0005 §12.
+                    format: int64
                     nullable: true
-                    properties:
-                      compressor:
-                        description: kopia compressor name (e.g. `zstd`); absent leaves kopia's default. ADR §3.3.
-                        nullable: true
-                        type: string
-                      neverCompress:
-                        description: Filename globs to leave uncompressed (e.g. already-compressed media). ADR §3.3.
-                        items:
-                          type: string
-                        type: array
-                    type: object
-                  extraArgs:
-                    description: Escape hatch for kopia flags not yet modeled. ADR §3.3.
-                    items:
-                      type: string
-                    type: array
-                  ignore:
-                    description: Paths/patterns kopia should skip while snapshotting. ADR §3.3.
-                    nullable: true
-                    properties:
-                      cacheDirs:
-                        description: Honor `CACHEDIR.TAG`.
-                        type: boolean
-                      ignoreIdenticalSnapshots:
-                        description: 'fork issue #13.'
-                        type: boolean
-                      paths:
-                        description: |-
-                          Filename/path globs to exclude from the snapshot (e.g. `*.tmp`,
-                          `*/cache/*`, `lost+found`). ADR §3.3.
-                        items:
-                          type: string
-                        type: array
-                    type: object
-                  splitter:
-                    description: kopia object splitter (e.g. `DYNAMIC-4M-BUZHASH`). ADR §3.3.
-                    nullable: true
-                    type: string
+                    type: integer
                 type: object
               repository:
                 description: Discriminated reference to a `Repository` or `ClusterRepository`. ADR §3.2.
@@ -10856,7 +10880,7 @@ spec:
                 - name
                 type: object
               retention:
-                description: GFS retention — enforced by the operator pruning `Backup` CRs. ADR §4.4.
+                description: GFS retention — enforced by the operator pruning `Snapshot` CRs. ADR §4.4.
                 nullable: true
                 properties:
                   keepAnnual:
@@ -10903,6 +10927,9 @@ spec:
                     A single backup source. `pvc`, `pvcSelector`, and `nfs` are mutually exclusive
                     (webhook-enforced — NOT an enum, because the forms share the sibling
                     `sourcePath*` keys and YAML lists them as optional siblings). ADR §3.3.
+
+                    §15: an operator-authored `x-kubernetes-validations` rule enforces exactly-one-of
+                    in the apiserver + CI, complementing `validate_source`.
                   properties:
                     nfs:
                       description: |-
@@ -10927,7 +10954,7 @@ spec:
                       properties:
                         name:
                           description: |-
-                            Name of the `PersistentVolumeClaim` to back up (in the `BackupConfig`'s
+                            Name of the `PersistentVolumeClaim` to back up (in the `SnapshotPolicy`'s
                             namespace). ADR §3.3.
                           type: string
                       required:
@@ -10973,12 +11000,12 @@ spec:
                         namespaceSelector:
                           description: |-
                             Restricts the search to specific namespaces; absent means the
-                            `BackupConfig`'s own namespace. ADR §3.3/§5.4.
+                            `SnapshotPolicy`'s own namespace. ADR §3.3/§5.4.
                           nullable: true
                           properties:
                             matchNames:
                               description: |-
-                                Exact namespace names to search; empty means the `BackupConfig`'s own
+                                Exact namespace names to search; empty means the `SnapshotPolicy`'s own
                                 namespace. ADR §3.3/§5.4.
                               items:
                                 type: string
@@ -11013,7 +11040,117 @@ spec:
                       nullable: true
                       type: string
                   type: object
+                  x-kubernetes-validations:
+                  - message: exactly one of pvc, pvcSelector, nfs
+                    rule: '[has(self.pvc), has(self.pvcSelector), has(self.nfs)].filter(x, x).size() == 1'
                 type: array
+              suspend:
+                description: |-
+                  Pause this recipe declaratively: a suspended `SnapshotPolicy` is skipped by
+                  schedules and by its own reconcile (no retention prune, no backup creation),
+                  surfaced via a condition/column. ADR-0005 §14(e).
+                type: boolean
+              upload:
+                description: |-
+                  Upload parallelism (kopia's upload policy: `--max-parallel-snapshots`,
+                  `--max-parallel-file-reads`). ADR-0005 §13(f).
+                nullable: true
+                properties:
+                  maxParallelFileReads:
+                    description: '`--max-parallel-file-reads`: file-read concurrency within a snapshot.'
+                    format: int64
+                    nullable: true
+                    type: integer
+                  maxParallelSnapshots:
+                    description: '`--max-parallel-snapshots`: how many sources snapshot concurrently.'
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              verification:
+                description: |-
+                  First-class backup verification (ADR-0005 §4). Opt-in: when absent, no
+                  verification runs (no behavior change). When set, the controller schedules
+                  periodic `kopia snapshot verify` (quick) and/or a scratch-restore test (deep),
+                  gated by an optional CEL `successExpr` predicate over the result, and surfaces
+                  `status.lastVerified`.
+                nullable: true
+                properties:
+                  deep:
+                    description: |-
+                      Schedule + knobs for the rarer scratch-restore restorability test. Absent ⇒
+                      no deep verification.
+                    nullable: true
+                    properties:
+                      capacity:
+                        description: |-
+                          Size of the ephemeral scratch PVC (e.g. `10Gi`); absent uses a built-in
+                          default. Should comfortably hold the restored snapshot.
+                        nullable: true
+                        type: string
+                      schedule:
+                        description: Cron + jitter for the deep restore-test (e.g. weekly).
+                        properties:
+                          cron:
+                            description: |-
+                              The cron expression, parsed by `croner`. May contain an `H` placeholder for
+                              deterministic per-schedule jitter (ADR §3.7).
+                            type: string
+                          jitter:
+                            description: |-
+                              Optional deterministic jitter window as a Go-style duration string (e.g.
+                              `30m`), derived from `(scheduleUID, slot)` so it is stable across restarts.
+                            nullable: true
+                            type: string
+                        required:
+                        - cron
+                        type: object
+                      storageClassName:
+                        description: StorageClass for the ephemeral scratch PVC; absent uses the cluster default.
+                        nullable: true
+                        type: string
+                    required:
+                    - schedule
+                    type: object
+                  quick:
+                    description: |-
+                      Schedule for the frequent blob-level `kopia snapshot verify`. Absent ⇒ no
+                      quick verification.
+                    nullable: true
+                    properties:
+                      cron:
+                        description: |-
+                          The cron expression, parsed by `croner`. May contain an `H` placeholder for
+                          deterministic per-schedule jitter (ADR §3.7).
+                        type: string
+                      jitter:
+                        description: |-
+                          Optional deterministic jitter window as a Go-style duration string (e.g.
+                          `30m`), derived from `(scheduleUID, slot)` so it is stable across restarts.
+                        nullable: true
+                        type: string
+                    required:
+                    - cron
+                    type: object
+                  successExpr:
+                    description: |-
+                      A CEL pass/fail predicate over the verify result (ADR-0005 §15). Environment:
+                      `stats{files,bytes,errors}`, `snapshot`, and (deep only) `restored{files,
+                      checksumMatches}`. Returns a bool; when it evaluates `false` the verification
+                      run fails. Validated at admission (`validate_success_expr`). Applies to both
+                      tiers. Example: `"stats.files > 0 && stats.errors == 0"`.
+                    nullable: true
+                    type: string
+                  verifyFilesPercent:
+                    description: |-
+                      How many files `quick` verifies fully (`--verify-files-percent`); absent
+                      leaves kopia's default. Tuning knob for the quick tier.
+                    format: uint8
+                    maximum: 255.0
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
               volumeSnapshotClassName:
                 description: |-
                   `VolumeSnapshotClass` used when `copyMethod` snapshots/clones the source.
@@ -11024,7 +11161,7 @@ spec:
             - repository
             type: object
           status:
-            description: Observed state of a [`BackupConfig`]. ADR §3.3 status.
+            description: Observed state of a [`SnapshotPolicy`]. ADR §3.3 status.
             nullable: true
             properties:
               conditions:
@@ -11062,6 +11199,19 @@ spec:
                   - type
                   type: object
                 type: array
+              lastSuccessfulSnapshot:
+                description: |-
+                  RFC3339 timestamp of the most recent successful child `Snapshot` produced
+                  from this recipe. Backs the `LAST-SNAPSHOT` printer column and the
+                  `prometheusRule` staleness alert (ADR-0005 §3).
+                nullable: true
+                type: string
+              lastVerified:
+                description: |-
+                  RFC3339 timestamp of the most recent successful verification (any tier),
+                  ADR-0005 §4. Backs the `kopiur_snapshot_verified_timestamp` gauge.
+                nullable: true
+                type: string
               observedGeneration:
                 description: '`metadata.generation` last reconciled, for staleness detection. ADR §3.3 status.'
                 format: int64
@@ -11107,11 +11257,11 @@ spec:
                 type: object
               retention:
                 description: |-
-                  Summary of GFS retention pruning against this config's `Backup` CRs.
+                  Summary of GFS retention pruning against this config's `Snapshot` CRs.
                   ADR §3.3 status/§4.4.
                 nullable: true
                 properties:
-                  activeBackupCount:
+                  activeSnapshotCount:
                     description: CRs currently inside the GFS window. ADR §3.3 status.
                     format: int64
                     nullable: true
@@ -11121,7 +11271,7 @@ spec:
                     nullable: true
                     type: string
                   lastPruneDeleted:
-                    description: Number of `Backup` CRs deleted by the last prune pass. ADR §3.3 status/§4.4.
+                    description: Number of `Snapshot` CRs deleted by the last prune pass. ADR §3.3 status/§4.4.
                     format: int64
                     nullable: true
                     type: integer
@@ -11129,7 +11279,7 @@ spec:
             type: object
         required:
         - spec
-        title: BackupConfig
+        title: SnapshotPolicy
         type: object
     served: true
     storage: true

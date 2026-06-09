@@ -25,7 +25,7 @@ use kube::api::PostParams;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use kopiur_api::{Backup, BackupConfig, Repository, Restore};
+use kopiur_api::{Repository, Restore, Snapshot, SnapshotPolicy};
 use kopiur_e2e::{E2E_NAMESPACE, Need, World, consts, default_timeout, poll_interval, wait_until};
 
 /// Deserialize a CR from a JSON literal into its typed kube object.
@@ -79,7 +79,7 @@ where
 fn backup_config_json(name: &str, repo: &str, src_pvc: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupConfig",
+        "kind": "SnapshotPolicy",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
             "repository": { "kind": "Repository", "name": repo },
@@ -92,9 +92,9 @@ fn backup_config_json(name: &str, repo: &str, src_pvc: &str) -> serde_json::Valu
 fn backup_json(name: &str, config: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "Backup",
+        "kind": "Snapshot",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
-        "spec": { "configRef": { "name": config }, "deletionPolicy": "Retain" }
+        "spec": { "policyRef": { "name": config }, "deletionPolicy": "Retain" }
     })
 }
 
@@ -105,7 +105,7 @@ fn restore_json(name: &str, repo: &str, backup: &str) -> serde_json::Value {
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
             "repository": { "kind": "Repository", "name": repo },
-            "source": { "backupRef": { "name": backup } },
+            "source": { "snapshotRef": { "name": backup } },
             // Restore into the pre-provisioned destination PVC (from Need::Filesystem).
             "target": { "pvc": { "name": consts::PVC_DST } }
         }
@@ -120,8 +120,8 @@ fn restore_json(name: &str, repo: &str, backup: &str) -> serde_json::Value {
 async fn run_backend_lifecycle(world: &World, prefix: &str, repository_json: serde_json::Value) {
     let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let restores: Api<Restore> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
     let repo = format!("{prefix}-repo");
@@ -153,14 +153,14 @@ async fn run_backend_lifecycle(world: &World, prefix: &str, repository_json: ser
             &cr(backup_config_json(&cfg, &repo, consts::PVC_SRC)),
         )
         .await
-        .unwrap_or_else(|e| panic!("create {prefix} BackupConfig: {e}"));
+        .unwrap_or_else(|e| panic!("create {prefix} SnapshotPolicy: {e}"));
     backups
         .create(&PostParams::default(), &cr(backup_json(&backup, &cfg)))
         .await
-        .unwrap_or_else(|e| panic!("create {prefix} Backup: {e}"));
+        .unwrap_or_else(|e| panic!("create {prefix} Snapshot: {e}"));
     wait_phase(&backups, &backup, "Succeeded")
         .await
-        .unwrap_or_else(|e| panic!("{prefix} Backup should reach Succeeded: {e}"));
+        .unwrap_or_else(|e| panic!("{prefix} Snapshot should reach Succeeded: {e}"));
     let bstatus = status_json(&backups, &backup).await;
     let snap_id = bstatus
         .get("snapshot")
@@ -169,7 +169,7 @@ async fn run_backend_lifecycle(world: &World, prefix: &str, repository_json: ser
         .unwrap_or("");
     assert!(
         !snap_id.is_empty(),
-        "{prefix} Backup must carry a real kopia snapshot id, got {bstatus}"
+        "{prefix} Snapshot must carry a real kopia snapshot id, got {bstatus}"
     );
 
     // 3. Restore it into the shared destination PVC → Completed.
@@ -311,9 +311,9 @@ async fn nfs_repo_bootstrap_backup_restore() {
 }
 
 /// Inline-NFS **source**, end to end. The repository is S3 (MinIO) — proving an
-/// NFS source is independent of the backend — and the `BackupConfig` source is an
+/// NFS source is independent of the backend — and the `SnapshotPolicy` source is an
 /// inline NFS export with no PVC. The operator mounts the export read-only into
-/// the backup mover and kopia snapshots it. Asserts the Backup reaches
+/// the backup mover and kopia snapshots it. Asserts the Snapshot reaches
 /// `Succeeded` with a real kopia snapshot id (the M2 source-NFS path).
 #[tokio::test]
 #[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + nfs server + MinIO + built images + helm install"]
@@ -328,8 +328,8 @@ async fn nfs_source_backup() {
 
     let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
     // S3 (MinIO) repository — the source-under-test is independent of it.
     let repo_json = serde_json::json!({
@@ -356,10 +356,10 @@ async fn nfs_source_backup() {
         .await
         .expect("S3 Repository should reach Ready");
 
-    // BackupConfig whose SOURCE is an inline NFS export (no PVC).
+    // SnapshotPolicy whose SOURCE is an inline NFS export (no PVC).
     let cfg_json = serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupConfig",
+        "kind": "SnapshotPolicy",
         "metadata": { "name": "e2e-nfssrc-cfg", "namespace": E2E_NAMESPACE },
         "spec": {
             "repository": { "kind": "Repository", "name": "e2e-nfssrc-repo" },
@@ -370,17 +370,17 @@ async fn nfs_source_backup() {
     configs
         .create(&PostParams::default(), &cr(cfg_json))
         .await
-        .expect("create NFS-source BackupConfig");
+        .expect("create NFS-source SnapshotPolicy");
     backups
         .create(
             &PostParams::default(),
             &cr(backup_json("e2e-nfssrc-backup", "e2e-nfssrc-cfg")),
         )
         .await
-        .expect("create NFS-source Backup");
+        .expect("create NFS-source Snapshot");
     wait_phase(&backups, "e2e-nfssrc-backup", "Succeeded")
         .await
-        .expect("NFS-source Backup should reach Succeeded");
+        .expect("NFS-source Snapshot should reach Succeeded");
     let bstatus = status_json(&backups, "e2e-nfssrc-backup").await;
     let snap_id = bstatus
         .get("snapshot")
@@ -389,6 +389,6 @@ async fn nfs_source_backup() {
         .unwrap_or("");
     assert!(
         !snap_id.is_empty(),
-        "NFS-source Backup must carry a real kopia snapshot id, got {bstatus}"
+        "NFS-source Snapshot must carry a real kopia snapshot id, got {bstatus}"
     );
 }

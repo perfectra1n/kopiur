@@ -80,7 +80,7 @@ pub fn poll_interval() -> Duration {
 }
 
 /// Ensure a `Namespace` named `ns` exists (idempotent: a 409 Conflict is treated
-/// as success). Used by the cross-namespace scenarios that run a workload + Backup
+/// as success). Used by the cross-namespace scenarios that run a workload + Snapshot
 /// in a namespace separate from the operator's.
 pub async fn ensure_namespace(client: &Client, ns: &str) -> anyhow::Result<()> {
     use k8s_openapi::api::core::v1::Namespace;

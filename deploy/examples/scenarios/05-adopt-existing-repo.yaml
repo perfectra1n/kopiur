@@ -8,15 +8,15 @@
 # The bundle:
 #   1. Repository  — CONNECTS to the existing repo (create.enabled: false).
 #   2. (automatic) — Kopiur DISCOVERS the foreign snapshots and materializes them
-#                    as Backup CRs with origin=discovered, forced
+#                    as Snapshot CRs with origin=discovered, forced
 #                    deletionPolicy: Retain (it never deletes data it didn't
 #                    create). List them:
-#                      kubectl get backup -n adopt \
+#                      kubectl get snapshots -n adopt \
 #                        -l kopiur.home-operations.com/origin=discovered
 #   3. Maintenance — TAKE OVER the maintenance lease from the old tooling, so two
 #                    writers don't both run `kopia maintenance`.
 #   4. Restore     — restore one discovered snapshot (proves adoption worked).
-#   5. BackupConfig+Schedule — back up going forward. Pin `identity` to MATCH the
+#   5. SnapshotPolicy+Schedule — back up going forward. Pin `identity` to MATCH the
 #                    foreign writer's username@hostname:path so new snapshots
 #                    dedup against, and extend, the existing timeline.
 #
@@ -97,8 +97,8 @@ metadata:
   namespace: adopt
 spec:
   source:
-    backupRef:
-      name: kopia-disc-9c2a1f # a discovered Backup CR (see the kubectl get above)
+    snapshotRef:
+      name: kopia-disc-9c2a1f # a discovered Snapshot CR (see the kubectl get above)
   target:
     pvc:
       name: adopt-smoke-test
@@ -112,7 +112,7 @@ spec:
 # Back up going forward, CONTINUING the foreign writer's identity so kopia dedups
 # against the existing data instead of re-uploading a fresh copy.
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupConfig
+kind: SnapshotPolicy
 metadata:
   name: app-data
   namespace: adopt
@@ -122,7 +122,7 @@ spec:
   sources:
     - pvc:
         name: app-data
-  # Match EXACTLY what the old tooling recorded (inspect a discovered Backup's
+  # Match EXACTLY what the old tooling recorded (inspect a discovered Snapshot's
   # status, or `kopia snapshot list`, to read the existing username@hostname:path).
   identity:
     username: app-data
@@ -132,12 +132,12 @@ spec:
     keepWeekly: 6
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupSchedule
+kind: SnapshotSchedule
 metadata:
   name: app-data-nightly
   namespace: adopt
 spec:
-  configRef:
+  policyRef:
     name: app-data
   schedule:
     cron: "H 2 * * *"

@@ -1,8 +1,8 @@
 # Example 01 — Single PVC, scheduled daily (ADR-0001 §5.1)
 #
-# The canonical first backup: one Repository (S3), one BackupConfig (the recipe,
-# idempotent — runs nothing on its own), one BackupSchedule (the cron that
-# creates Backup CRs). Maintenance is implicit: a default Maintenance is created
+# The canonical first backup: one Repository (S3), one SnapshotPolicy (the recipe,
+# idempotent — runs nothing on its own), one SnapshotSchedule (the cron that
+# creates Snapshot CRs). Maintenance is implicit: a default Maintenance is created
 # on first reference to a Repository unless one already exists.
 #
 # Field shapes verified against crates/api (externally-tagged backend: the bucket
@@ -54,7 +54,7 @@ spec:
       full: { cron: "0 3 * * *", jitter: 1h }
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupConfig
+kind: SnapshotPolicy
 metadata:
   name: postgres-data
   namespace: billing
@@ -72,12 +72,13 @@ spec:
     keepWeekly: 4
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupSchedule
+kind: SnapshotSchedule
 metadata:
   name: postgres-data-nightly
   namespace: billing
 spec:
-  configRef:
+  # Which recipe (SnapshotPolicy) to invoke each firing.
+  policyRef:
     name: postgres-data
   schedule:
     # Jenkins-style H pins a deterministic per-schedule minute (ADR §4.1).

@@ -452,7 +452,7 @@ mod tests {
         // No OTLP endpoint: prometheus-only path, fully offline.
         let mp = MetricsProvider::build("kopiur-test", None).expect("build offline");
         let counter = mp.meter().u64_counter("kopiur_test_total").build();
-        counter.add(1, &[opentelemetry::KeyValue::new("kind", "Backup")]);
+        counter.add(1, &[opentelemetry::KeyValue::new("kind", "Snapshot")]);
         let text = String::from_utf8(mp.gather()).expect("utf8 exposition");
         assert!(
             text.contains("kopiur_test_total"),

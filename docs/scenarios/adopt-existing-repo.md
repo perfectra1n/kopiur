@@ -12,19 +12,19 @@ flowchart TB
   REPO[Repository<br/>connect: create.enabled=false] --> DISC[Kopiur discovers foreign snapshots<br/>origin=discovered, Retain]
   REPO --> MNT[Maintenance<br/>take over the lease]
   DISC --> RST[Restore one discovered snapshot<br/>prove it works]
-  REPO --> BC[BackupConfig<br/>identity matched to the foreign writer]
-  BC --> SCH[BackupSchedule]
+  REPO --> BC[SnapshotPolicy<br/>identity matched to the foreign writer]
+  BC --> SCH[SnapshotSchedule]
 ```
 
 /// info | Discovery is automatic — and Retain-forced
 
 Once the `Repository` connects, Kopiur materializes snapshots it didn't create as
-`Backup` CRs with `origin=discovered`, in the repository's namespace. Discovered
+`Snapshot` CRs with `origin=discovered`, in the repository's namespace. Discovered
 backups are **forced to `deletionPolicy: Retain`** — Kopiur never deletes data it
 didn't create. List them:
 
 ```console
-$ kubectl get backup -n adopt -l kopiur.home-operations.com/origin=discovered
+$ kubectl get snapshots -n adopt -l kopiur.home-operations.com/origin=discovered
 ```
 
 ///
@@ -39,7 +39,7 @@ The four deliberate moves in the bundle:
    (`spec.maintenance.enabled: false`) so the takeover is deliberate, not
    automatic.
 3. **Prove it.** Restore one discovered snapshot into a throwaway PVC.
-4. **Back up going forward, matching identity.** Pin the new `BackupConfig`'s
+4. **Back up going forward, matching identity.** Pin the new `SnapshotPolicy`'s
    `identity` to the foreign writer's `username@hostname:path` so new snapshots
    dedup against — and extend — the existing timeline.
 
@@ -61,7 +61,7 @@ maintenance job, so two processes never compact the repo at once.
 
 This is the field most likely to trip you up. New backups only dedup against the
 old data if Kopiur writes under the **same identity** the previous tool used.
-Inspect a discovered `Backup`'s status (or `kopia snapshot list` against the repo)
+Inspect a discovered `Snapshot`'s status (or `kopia snapshot list` against the repo)
 to read the existing `username@hostname:path`, then set:
 
 ```yaml

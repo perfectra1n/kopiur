@@ -65,6 +65,7 @@ async fn filesystem_roundtrip() {
                 path: repo_dir.path().to_path_buf(),
             },
             Default::default(),
+            &Default::default(),
         )
         .await
         .expect("repository create");
@@ -165,6 +166,7 @@ async fn verbs_roundtrip() {
                 path: repo_dir.path().to_path_buf(),
             },
             Default::default(),
+            &Default::default(),
         )
         .await
         .expect("repository create");

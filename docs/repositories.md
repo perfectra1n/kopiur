@@ -1,6 +1,6 @@
 # Repositories & backends
 
-A **`Repository`** is _where_ your snapshots live. It is the one resource that holds the storage backend, the encryption password, and the credentials — everything `BackupConfig`/`Backup`/`Restore` need but shouldn't have to repeat. Get this right and the rest of Kopiur just points at it by name.
+A **`Repository`** is _where_ your snapshots live. It is the one resource that holds the storage backend, the encryption password, and the credentials — everything `SnapshotPolicy`/`Snapshot`/`Restore` need but shouldn't have to repeat. Get this right and the rest of Kopiur just points at it by name.
 
 There are two flavors:
 
@@ -9,11 +9,11 @@ There are two flavors:
 | **`Repository`**        | Namespaced | One namespace owns the backups (the common case). The repo and its credential Secret live together in that namespace.                   |
 | **`ClusterRepository`** | Cluster    | A platform team owns one shared repository that **many** tenant namespaces back up to, without each tenant knowing the backend details. |
 
-Both have the **same** backend/encryption/create surface; `ClusterRepository` adds a tenancy gate (`allowedNamespaces`) and identity templating. See [ClusterRepository](#clusterrepository-a-shared-repository) below.
+Both have the **same** backend/encryption/create surface; `ClusterRepository` adds a tenancy gate (`allowedNamespaces`) and per-tenant identity CEL expressions. See [ClusterRepository](#clusterrepository-a-shared-repository) below.
 
 /// tip | One shared repository is the recommended default
 
-Point as many backups as you can at **one** repository. Kopia deduplicates by content hash across every writer, so pooling workloads into a single repository stores their common content once — and each `BackupConfig` writes under its own identity, so their snapshots never collide. See [Recommended: one shared repository](concepts/how-kopia-works.md#recommended-one-shared-repository) for the mechanism and the trade-offs.
+Point as many backups as you can at **one** repository. Kopia deduplicates by content hash across every writer, so pooling workloads into a single repository stores their common content once — and each `SnapshotPolicy` writes under its own identity, so their snapshots never collide. See [Recommended: one shared repository](concepts/how-kopia-works.md#recommended-one-shared-repository) for the mechanism and the trade-offs.
 
 ///
 
@@ -23,10 +23,13 @@ Point as many backups as you can at **one** repository. Kopia deduplicates by co
 spec:
     backend: { <one of eight>: { ... } } # WHERE: storage. Exactly one backend.
     encryption: { passwordSecretRef: ... } # the kopia repo password (Secret ref)
-    create: { enabled: true } # initialize the repo if absent (default: off)
-    cacheDefaults: { ... } # mover cache sizing (optional)
+    create: { enabled: true, ecc: { ... } } # initialize the repo if absent (default: off)
+    moverDefaults: { ... } # base config for EVERY mover (SC, resources, cache, ...)
     catalog: { ... } # bounds "discovered" snapshot materialization
     maintenance: { ... } # default-managed; see the Maintenance guide
+    onNamespaceDelete: Orphan # Orphan (default) | Delete — kubectl delete ns behavior
+    mode: ReadWrite # ReadWrite (default) | ReadOnly
+    suspend: false # pause connect/bootstrap + maintenance
 ```
 
 Only `backend` and `encryption` are required. The rest have sane defaults.
@@ -109,11 +112,21 @@ spec:
             key: KOPIA_PASSWORD # which key inside the Secret holds the password
     create:
         enabled: true # create the repo if it doesn't exist yet (default: false)
-        # The three below are consulted ONLY at creation time, then fixed forever:
+        # All of the below are consulted ONLY at creation time, then fixed forever
+        # (webhook- AND apiserver-immutable: editing them is rejected, ADR-0005 §7):
         encryption: AES256-GCM-HMAC-SHA256
         splitter: DYNAMIC-4M-BUZHASH
         hash: BLAKE2B-256-128
+        ecc: # Reed-Solomon parity guarding blobs against backend bit-rot (ADR-0005 §13(a))
+            algorithm: REED-SOLOMON-CRC32
+            overheadPercent: 2
 ```
+
+/// note | Create-time settings are immutable
+
+`encryption`, `create.{splitter,hash,encryption,ecc}` and the pinned identity are fixed at repository creation. Editing them is **rejected** (by the webhook and by CRD `x-kubernetes-validations` transition rules) with an actionable message — create a new `Repository` instead of mutating these.
+
+///
 
 /// warning | Lose the password, lose the backups
 
@@ -127,6 +140,56 @@ With creation disabled, a typo in `bucket`/`endpoint` surfaces as a connect fail
 
 ///
 
+## `moverDefaults` — one place to configure every mover
+
+A repository spawns movers for **everything** — bootstrap (connect/create), backup, restore, maintenance. `moverDefaults` is the single base they all inherit (ADR-0004 §1); a per-recipe `mover` block (on `SnapshotPolicy`/`Restore`/`Maintenance`) overlays it **field-wise** (the recipe wins, the default fills, the hardened security baseline sits underneath — so a partial override can only tighten, never drop `drop:[ALL]`/seccomp). It replaces the old `cacheDefaults` (now `moverDefaults.cache`).
+
+```yaml
+spec:
+    moverDefaults:
+        securityContext: # container SC — runAsUser/runAsGroup, caps, seccomp
+            runAsUser: 1000 # the PUID for every mover (replaces KOPIUR_PUID)
+            runAsGroup: 1000 # the PGID (replaces KOPIUR_PGID)
+        podSecurityContext: # pod SC — notably fsGroup
+            fsGroup: 1000 # make fresh restore volumes group-writable, set once here
+        resources: { requests: { cpu: 250m, memory: 512Mi } }
+        cache: # the former cacheDefaults
+            capacity: 10Gi
+            storageClassName: fast-ssd
+        nodeSelector: { kubernetes.io/arch: amd64 }
+        tolerations: [{ key: backup, operator: Exists }]
+        affinity: { ... }
+        ttlSecondsAfterFinished: 3600 # finished mover Jobs self-GC (ADR-0005 §12)
+        throttle: # cap kopia's bandwidth/ops so a run doesn't saturate the link
+            uploadBytesPerSecond: 10485760
+            downloadBytesPerSecond: 10485760
+```
+
+/// tip | The PUID / PGID story lives here now
+
+The old `KOPIUR_PUID` / `KOPIUR_PGID` env vars are gone. Set the UID/GID **once** on `moverDefaults.securityContext.runAsUser/runAsGroup` (and `podSecurityContext.fsGroup`), and every mover the repository spawns — bootstrap included — inherits it. This also closes the old bootstrap-mover gap: a filesystem/NFS repo on a non-`65532`-owned directory is now bootstrappable with no special-case knob. See [example 09](examples.md#example-09--mover-uidgid--permissions) and [Permissions](permissions.md).
+
+///
+
+## `onNamespaceDelete` — what `kubectl delete ns` does to snapshots
+
+`Orphan` (default) or `Delete` (ADR-0005 §5). A backup tool must not make deleting a namespace a silent data-loss event, so the default is fail-safe:
+
+| Value | On namespace deletion |
+| --- | --- |
+| `Orphan` _(default)_ | Release ownership (drop the `Snapshot` finalizers) **without** deleting the kopia snapshots — off-site history survives. |
+| `Delete` | Cascade: each `Snapshot`'s own `deletionPolicy` applies (produced snapshots are `kopia snapshot delete`d). Opt-in. |
+
+This is distinct from a single `kubectl delete snapshot`, which always honors that one `Snapshot`'s `deletionPolicy`.
+
+## `mode` — ReadWrite or ReadOnly
+
+`mode: ReadWrite` (default) or `ReadOnly` (ADR-0005 §11). A `ReadOnly` repository connects read-only and serves **restores only** — the operator refuses backup Jobs and skips maintenance projection. Use it to decommission a backend or migrate between repositories without any risk of writes.
+
+## `suspend` — pause a repository
+
+`suspend: true` (ADR-0005 §14(e)) pauses connect/bootstrap and maintenance projection declaratively, without deleting the `Repository`. Surfaced via a condition. `suspend` is consistent across `Repository`/`ClusterRepository`/`SnapshotPolicy`/`RepositoryReplication`.
+
 ## Watching a repository
 
 ```console
@@ -137,7 +200,7 @@ primary   Ready   S3        4m
 $ kubectl describe repository primary -n demo # Conditions + Events explain Pending/Failed
 ```
 
-Phases: `Pending` → `Initializing` → **`Ready`** (healthy). `Degraded` means reachable but a sub-operation (e.g. maintenance) is failing; `Failed` means connect/create failed — the actionable reason is on the conditions. `BackupConfig`/`Backup`/`Restore`/`Maintenance` all wait for `Ready` before doing anything, so this is the first thing to check when a backup won't start.
+Phases: `Pending` → `Initializing` → **`Ready`** (healthy). `Degraded` means reachable but a sub-operation (e.g. maintenance) is failing; `Failed` means connect/create failed — the actionable reason is on the conditions. `SnapshotPolicy`/`Snapshot`/`Restore`/`Maintenance` all wait for `Ready` before doing anything, so this is the first thing to check when a backup won't start.
 
 ## ClusterRepository: a shared repository
 
@@ -154,23 +217,63 @@ spec:
     # or:  allowedNamespaces: { all: true } # any namespace
 ```
 
-### `identityDefaults` — per-tenant identity
+### `identityDefaults` — per-tenant identity (CEL)
 
-kopia records every snapshot under `username@hostname:path`. For a shared repo you usually want each tenant's snapshots distinguishable. Templates are rendered (Jinja2-compatible) at admission; a consumer's explicit `spec.identity` always wins over the template. Available variables: `Namespace`, `ConfigName`.
+kopia records every snapshot under `username@hostname:path`. For a shared repo you usually want each tenant's snapshots distinguishable. As of ADR-0004 §5 these are **CEL expressions** (`*Expr`, the kromgo `valueExpr`/`colorExpr` convention), not Jinja2 templates. They are evaluated at admission and pinned to status; a consumer's explicit `spec.identity` always wins.
 
 ```yaml
 spec:
     identityDefaults:
-        hostnameTemplate: "{{ .Namespace }}"
-        usernameTemplate: "{{ .Namespace }}-{{ .ConfigName }}"
+        hostnameExpr: "namespace"
+        usernameExpr: "namespace + '-' + policyName"
 ```
 
-For namespace `billing` + config `postgres-data`, that resolves to `billing-postgres-data@billing:/pvc/…`. (Both the Go-style `{{ .Namespace }}` and the native tera `{{ Namespace }}` spellings work.)
+For namespace `billing` + policy `postgres-data`, that resolves to `billing-postgres-data@billing:/pvc/…`.
+
+The CEL **environment** is the consuming `SnapshotPolicy`'s metadata:
+
+| Variable | Type | Is |
+| --- | --- | --- |
+| `namespace` | string | the SnapshotPolicy's namespace |
+| `policyName` | string | the SnapshotPolicy's name |
+| `labels` | map | `metadata.labels` |
+| `annotations` | map | `metadata.annotations` |
+
+Each `*Expr` must return a **string**. Conditionals and map access come for free:
+
+```yaml
+identityDefaults:
+    hostnameExpr: "'team' in labels ? labels['team'] : namespace"
+    usernameExpr: "namespace + '-' + policyName + (labels['env'] == 'prod' ? '-prod' : '')"
+```
+
+/// note | Migrating from Jinja2 templates
+
+The old `hostnameTemplate`/`usernameTemplate` (Jinja2) are gone. Rewrite the values:
+
+- `"{{ .Namespace }}"` → `hostnameExpr: "namespace"`
+- `"{{ .Namespace }}-{{ .ConfigName }}"` → `usernameExpr: "namespace + '-' + policyName"`
+
+CEL is sandboxed (no I/O), validated at admission (a typo or out-of-scope variable is rejected on `kubectl apply`), and bounded by CEL's cost budget. Each expression is also capped at ~1 KiB.
+
+///
+
+### `credentialProjection.allowed` — the owner gate for shared creds
+
+By default a `ClusterRepository` will **not** let its credential Secret be projected into a foreign consumer namespace (`credentialProjection.allowed` defaults `false`, ADR-0005 §8). Projection is fail-closed: it requires the repository owner's `allowed: true` **and** the consumer's `credentialProjection.enabled: true` **and** the operator's `secrets` RBAC. A namespaced `Repository` has no such gate (its repo and Secret co-reside).
+
+```yaml
+spec:
+    credentialProjection:
+        allowed: true # owner permits projection; consumers still opt in per-CR
+```
+
+See [Movers → credential projection](movers.md#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos).
 
 /// warning | Two requirements for ClusterRepository backups
 
 1. Install the operator with **`installScope=cluster`** (otherwise `ClusterRepository` is never reconciled — see [Installation → scope](install.md#install-scope)).
-2. Get the credential Secret into each **workload** namespace a mover runs in. The easy way: set [`credentialProjection.enabled: true`](movers.md#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos) on the `BackupConfig`/`Restore`/`Maintenance` that uses this repository, and Kopiur copies it for you (off by default, recommended for shared repos). Otherwise replicate it yourself.
+2. Get the credential Secret into each **workload** namespace a mover runs in. The easy way: set [`credentialProjection.enabled: true`](movers.md#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos) on the `SnapshotPolicy`/`Restore`/`Maintenance` that uses this repository, and Kopiur copies it for you (off by default, recommended for shared repos). Otherwise replicate it yourself.
 
 ///
 
@@ -188,7 +291,11 @@ A complete, apply-ready example is [`deploy/examples/02-cluster-repository.yaml`
 | `create.enabled`                                       | Whether to initialize a new repository.           |
 | `backend.s3.tls.disableTls`                            | Plain-HTTP endpoints (in-cluster MinIO/RustFS).   |
 | `allowedNamespaces` _(ClusterRepository)_              | Which namespaces may use the repo.                |
-| `identityDefaults` _(ClusterRepository)_               | Per-tenant snapshot identity.                     |
+| `identityDefaults` _(ClusterRepository)_               | Per-tenant snapshot identity (CEL `*Expr`).       |
+| `moverDefaults`                                        | Base SC/resources/cache for every mover (PUID/PGID). |
+| `onNamespaceDelete`                                    | `Orphan` (default) / `Delete` on namespace delete.|
+| `mode`                                                 | `ReadWrite` (default) / `ReadOnly`.               |
+| `suspend`                                              | Pause connect/bootstrap + maintenance.            |
 
 ## See also
 

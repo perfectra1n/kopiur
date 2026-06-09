@@ -5,7 +5,7 @@
 //! server accepts the structural schemas — a mis-encoded enum or invalid schema
 //! is rejected at apply time.
 //!
-//! Server-side apply is REQUIRED, not a stylistic choice: the `BackupConfig` CRD
+//! Server-side apply is REQUIRED, not a stylistic choice: the `SnapshotPolicy` CRD
 //! is large (its `runJob` hook embeds a full Kubernetes `JobSpec`), and a
 //! client-side `kubectl apply` would store the entire object in the
 //! `last-applied-configuration` annotation, blowing past the 256KB annotation
@@ -46,7 +46,7 @@ fn kubectl_apply_generated_crds() {
 
     // Apply the per-CRD files (not all-crds.yaml, to avoid applying each twice).
     // `--server-side` avoids the last-applied-configuration annotation, which the
-    // large BackupConfig schema would otherwise overflow.
+    // large SnapshotPolicy schema would otherwise overflow.
     let status = Command::new("kubectl")
         .args(["apply", "--server-side", "--force-conflicts", "-f"])
         .arg(crds_dir.join("all-crds.yaml"))

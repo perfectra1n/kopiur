@@ -36,7 +36,7 @@ Deduplication only works **within** a repository — two separate repositories c
 
 A **snapshot** is a point-in-time record of one source. It is not a copy of the data — it is an immutable **manifest** that lists the content hashes making up that source at that instant. Taking a snapshot uploads only the chunks that are new; everything unchanged since last time already exists in the pool and is simply referenced again.
 
-That is why a daily backup of a mostly-static volume is cheap: the second snapshot is almost entirely pointers to chunks the first one already uploaded. In Kopiur, **one `Backup` resource is one kopia snapshot** — see [Backups & schedules](../backups.md).
+That is why a daily backup of a mostly-static volume is cheap: the second snapshot is almost entirely pointers to chunks the first one already uploaded. In Kopiur, **one `Snapshot` resource is one kopia snapshot** — see [Backups & schedules](../backups.md).
 
 ## Identity: `username@hostname:path`
 
@@ -46,7 +46,7 @@ This is the mechanism that makes a single shared repository safe for many indepe
 
 ### How Kopiur fills it in
 
-By default Kopiur derives the identity from the backup's namespace, config name, and source path, and lets you override any part with `BackupConfig.spec.identity`. On a shared [`ClusterRepository`](../repositories.md#clusterrepository-a-shared-repository), `identityDefaults` templates the identity per tenant namespace. The identity is **resolved once at admission and pinned to status**, so it never drifts if you re-apply the config:
+By default Kopiur derives the identity from the backup's namespace, config name, and source path, and lets you override any part with `SnapshotPolicy.spec.identity`. On a shared [`ClusterRepository`](../repositories.md#clusterrepository-a-shared-repository), `identityDefaults` templates the identity per tenant namespace. The identity is **resolved once at admission and pinned to status**, so it never drifts if you re-apply the config:
 
 ```console
 $ kubectl -n billing get backup postgres-data-20260607 \
@@ -54,7 +54,7 @@ $ kubectl -n billing get backup postgres-data-20260607 \
 billing-postgres-data@billing:/pvc/postgres-data
 ```
 
-See [`identityDefaults` — per-tenant identity](../repositories.md#identitydefaults--per-tenant-identity) for the templating surface.
+See [`identityDefaults` — per-tenant identity](../repositories.md#identitydefaults--per-tenant-identity-cel) for the templating surface.
 
 ## Encryption
 
@@ -78,7 +78,7 @@ Unless you have a specific reason not to, **point all of your backups at one rep
 
 The reason is everything above: Kopia deduplicates by content hash across **every** writer in a repository. Pool all your workloads into one and the content they have in common — base image layers, shared libraries, similar database pages across namespaces — is stored exactly once. Split them into a repository each and you lose all of that: separate repositories cannot share a single chunk, so identical content is paid for over and over.
 
-And it's safe to pool them, because of identity. Different `BackupConfig`s write under different `username@hostname:path` identities, so their snapshots never collide even though they share storage. One shared repository is therefore both the **safe** layout and the **maximally efficient** one — which is exactly why platform teams reach for a shared repository in the first place.
+And it's safe to pool them, because of identity. Different `SnapshotPolicy`s write under different `username@hostname:path` identities, so their snapshots never collide even though they share storage. One shared repository is therefore both the **safe** layout and the **maximally efficient** one — which is exactly why platform teams reach for a shared repository in the first place.
 
 /// success | The recommended layout
 

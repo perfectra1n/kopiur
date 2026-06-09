@@ -15,11 +15,12 @@ rules:
       - kopiur.home-operations.com
     resources:
       - repositories
-      - backupconfigs
-      - backups
-      - backupschedules
+      - snapshotpolicies
+      - snapshots
+      - snapshotschedules
       - restores
       - maintenances
+      - repositoryreplications
       - clusterrepositories
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups:
@@ -27,16 +28,18 @@ rules:
     resources:
       - repositories/status
       - repositories/finalizers
-      - backupconfigs/status
-      - backupconfigs/finalizers
-      - backups/status
-      - backups/finalizers
-      - backupschedules/status
-      - backupschedules/finalizers
+      - snapshotpolicies/status
+      - snapshotpolicies/finalizers
+      - snapshots/status
+      - snapshots/finalizers
+      - snapshotschedules/status
+      - snapshotschedules/finalizers
       - restores/status
       - restores/finalizers
       - maintenances/status
       - maintenances/finalizers
+      - repositoryreplications/status
+      - repositoryreplications/finalizers
       - clusterrepositories/status
       - clusterrepositories/finalizers
     verbs: [get, update, patch]

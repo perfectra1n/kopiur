@@ -65,7 +65,7 @@ fn clusterrole_parses_and_grants_expected_rules() {
     let rules = clusterrole.rules.expect("ClusterRole must have rules");
 
     assert!(
-        rule_grants(&rules, "kopiur.home-operations.com", "backups"),
+        rule_grants(&rules, "kopiur.home-operations.com", "snapshots"),
         "must grant backups under kopiur.home-operations.com"
     );
     assert!(
@@ -113,7 +113,11 @@ fn namespaced_role_omits_cluster_crds_but_keeps_mover_minting() {
     let rules = role.rules.expect("Role must have rules");
 
     // Same core grants...
-    assert!(rule_grants(&rules, "kopiur.home-operations.com", "backups"));
+    assert!(rule_grants(
+        &rules,
+        "kopiur.home-operations.com",
+        "snapshots"
+    ));
     assert!(rule_grants(&rules, "batch", "jobs"));
     // Events surfacing works in namespaced mode too (Recorder → events.k8s.io/v1).
     assert!(
@@ -207,8 +211,12 @@ fn mover_role_is_least_privilege() {
 
         // Grants the mover's actual API surface.
         assert!(
-            rule_grants(&role_rules, "kopiur.home-operations.com", "backups/status"),
-            "{rel} must grant backups/status"
+            rule_grants(
+                &role_rules,
+                "kopiur.home-operations.com",
+                "snapshots/status"
+            ),
+            "{rel} must grant snapshots/status"
         );
         assert!(
             rule_grants(&role_rules, "", "configmaps"),
@@ -219,7 +227,7 @@ fn mover_role_is_least_privilege() {
             ("batch", "jobs"),
             ("", "secrets"),
             ("", "pods"),
-            ("kopiur.home-operations.com", "backups"),
+            ("kopiur.home-operations.com", "snapshotschedules"),
         ] {
             assert!(
                 !rule_grants(&role_rules, g, r),

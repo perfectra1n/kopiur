@@ -1,9 +1,6 @@
 #![warn(missing_docs)]
 #![doc = include_str!("../README.md")]
 
-pub mod backup;
-pub mod backup_config;
-pub mod backup_schedule;
 pub mod cache;
 pub mod cluster_repository;
 pub mod config;
@@ -15,7 +12,12 @@ pub mod jobs;
 pub mod maintenance;
 pub mod metrics;
 pub mod repository;
+pub mod repository_replication;
 pub mod restore;
+pub mod snapshot;
+pub mod snapshot_policy;
+pub mod snapshot_schedule;
+pub mod verification;
 pub mod webhook_tls;
 
 use std::sync::Arc;
@@ -32,7 +34,8 @@ use kube::{Api, Client, ResourceExt};
 
 use kopiur_api::common::RepositoryKind;
 use kopiur_api::{
-    Backup, BackupConfig, BackupSchedule, ClusterRepository, Maintenance, Repository, Restore,
+    ClusterRepository, Maintenance, Repository, RepositoryReplication, Restore, Snapshot,
+    SnapshotPolicy, SnapshotSchedule,
 };
 
 use crate::context::{Context, KopiaClientFactory};
@@ -42,10 +45,10 @@ use crate::metrics::Metrics;
 /// `/metrics` server, until shutdown.
 ///
 /// Each `Controller` wires its owned-resource watches per ADR §5.2:
-/// - `BackupSchedule` owns `Backup`.
-/// - `BackupConfig` watches `Backup` (GFS retention).
-/// - `Repository`/`ClusterRepository` watch discovered `Backup`.
-/// - `Backup` owns `Job` + `ConfigMap` (mover run).
+/// - `SnapshotSchedule` owns `Snapshot`.
+/// - `SnapshotPolicy` watches `Snapshot` (GFS retention).
+/// - `Repository`/`ClusterRepository` watch discovered `Snapshot`.
+/// - `Snapshot` owns `Job` + `ConfigMap` (mover run).
 /// - `Restore` watches the target `PVC` (populator handshake).
 pub async fn run() -> anyhow::Result<()> {
     // Install the tracing subscriber (fmt + OTLP traces/logs when configured).
@@ -318,7 +321,7 @@ fn spawn_webhook_tls_reconcile(client: Client, cfg: webhook_tls::WebhookTlsConfi
     });
 }
 
-/// Spawn all seven controllers and join them. Split out so it can be driven
+/// Spawn all eight controllers and join them. Split out so it can be driven
 /// independently of the metrics server. The shared Maintenance informer that the
 /// repo reconcilers read is set up separately in [`run`].
 async fn spawn_all(client: Client, ctx: Arc<Context>) {
@@ -338,27 +341,27 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
         }};
     }
 
-    // Backup owns its mover Job + ConfigMap (reaped via owner-ref GC, §4.10).
-    let backup_api: Api<Backup> = Api::all(client.clone());
-    let backup_ctx = ctx.clone();
-    let backup_ctrl = Controller::new(backup_api, cfg.clone())
+    // Snapshot owns its mover Job + ConfigMap (reaped via owner-ref GC, §4.10).
+    let snapshot_api: Api<Snapshot> = Api::all(client.clone());
+    let snapshot_ctx = ctx.clone();
+    let snapshot_ctrl = Controller::new(snapshot_api, cfg.clone())
         .owns(Api::<Job>::all(client.clone()), cfg.clone())
         .owns(Api::<ConfigMap>::all(client.clone()), cfg.clone())
-        .run(backup::reconcile, backup::error_policy, backup_ctx)
+        .run(snapshot::reconcile, snapshot::error_policy, snapshot_ctx)
         .for_each(|res| async move {
             if let Err(e) = res {
-                tracing::debug!(error = %e, "backup reconcile error");
+                tracing::debug!(error = %e, "snapshot reconcile error");
             }
         });
 
-    // BackupSchedule owns the Backup CRs it creates.
-    let sched_api: Api<BackupSchedule> = Api::all(client.clone());
+    // SnapshotSchedule owns the Snapshot CRs it creates.
+    let sched_api: Api<SnapshotSchedule> = Api::all(client.clone());
     let sched_ctx = ctx.clone();
     let sched_ctrl = Controller::new(sched_api, cfg.clone())
-        .owns(Api::<Backup>::all(client.clone()), cfg.clone())
+        .owns(Api::<Snapshot>::all(client.clone()), cfg.clone())
         .run(
-            backup_schedule::reconcile,
-            backup_schedule::error_policy,
+            snapshot_schedule::reconcile,
+            snapshot_schedule::error_policy,
             sched_ctx,
         )
         .for_each(|res| async move {
@@ -424,18 +427,54 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
             }
         });
 
-    let config_ctrl = controller!(BackupConfig, backup_config);
+    // SnapshotPolicy owns the verification mover Jobs + ConfigMaps it spawns
+    // (ADR-0005 §4), so they're GC'd with the policy and a Job event re-triggers the
+    // reconcile (the verify scheduler).
+    let config_api: Api<SnapshotPolicy> = Api::all(client.clone());
+    let config_ctx = ctx.clone();
+    let config_ctrl = Controller::new(config_api, cfg.clone())
+        .owns(Api::<Job>::all(client.clone()), cfg.clone())
+        .owns(Api::<ConfigMap>::all(client.clone()), cfg.clone())
+        .run(
+            snapshot_policy::reconcile,
+            snapshot_policy::error_policy,
+            config_ctx,
+        )
+        .for_each(|res| async move {
+            if let Err(e) = res {
+                tracing::debug!(error = %e, "snapshot_policy reconcile error");
+            }
+        });
+
     let restore_ctrl = controller!(Restore, restore);
     let maint_ctrl = controller!(Maintenance, maintenance);
 
+    // RepositoryReplication owns its per-slot mover Jobs + ConfigMaps (ADR-0005 §13(d)).
+    let repl_api: Api<RepositoryReplication> = Api::all(client.clone());
+    let repl_ctx = ctx.clone();
+    let repl_ctrl = Controller::new(repl_api, cfg.clone())
+        .owns(Api::<Job>::all(client.clone()), cfg.clone())
+        .owns(Api::<ConfigMap>::all(client.clone()), cfg.clone())
+        .run(
+            repository_replication::reconcile,
+            repository_replication::error_policy,
+            repl_ctx,
+        )
+        .for_each(|res| async move {
+            if let Err(e) = res {
+                tracing::debug!(error = %e, "repository_replication reconcile error");
+            }
+        });
+
     tokio::join!(
-        backup_ctrl,
+        snapshot_ctrl,
         sched_ctrl,
         repo_ctrl,
         crepo_ctrl,
         config_ctrl,
         restore_ctrl,
         maint_ctrl,
+        repl_ctrl,
     );
 }
 

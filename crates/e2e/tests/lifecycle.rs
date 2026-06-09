@@ -12,8 +12,8 @@
 //! ```
 //!
 //! These tests assert on real operator output: a Repository reaching Ready, a
-//! Backup reaching Succeeded with a real kopia snapshot id, a Restore Completed,
-//! schedule-driven Backup creation, finalizer-driven snapshot deletion, and a
+//! Snapshot reaching Succeeded with a real kopia snapshot id, a Restore Completed,
+//! schedule-driven Snapshot creation, finalizer-driven snapshot deletion, and a
 //! Maintenance lease claim — across six of the seven CRDs.
 
 #![cfg(all(unix, feature = "e2e"))]
@@ -28,7 +28,7 @@ use k8s_openapi::api::core::v1::ServiceAccount;
 use k8s_openapi::api::rbac::v1::RoleBinding;
 
 use kopiur_api::{
-    Backup, BackupConfig, BackupSchedule, ClusterRepository, Maintenance, Repository, Restore,
+    ClusterRepository, Maintenance, Repository, Restore, Snapshot, SnapshotPolicy, SnapshotSchedule,
 };
 use kopiur_e2e::{
     E2E_NAMESPACE, Need, World, annotate_namespace, apply_secret, default_timeout,
@@ -61,7 +61,7 @@ fn repository_json(name: &str) -> serde_json::Value {
 fn backup_config_json(name: &str, repo: &str, src_pvc: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupConfig",
+        "kind": "SnapshotPolicy",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
             "repository": { "kind": "Repository", "name": repo },
@@ -93,12 +93,12 @@ fn cluster_repository_json(name: &str) -> serde_json::Value {
     })
 }
 
-/// A `BackupConfig` whose repository ref is a `ClusterRepository` (cluster-scoped:
+/// A `SnapshotPolicy` whose repository ref is a `ClusterRepository` (cluster-scoped:
 /// note no `namespace` on the ref — that is the whole point of this scenario).
 fn cluster_backup_config_json(name: &str, crepo: &str, src_pvc: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupConfig",
+        "kind": "SnapshotPolicy",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
             "repository": { "kind": "ClusterRepository", "name": crepo },
@@ -111,10 +111,10 @@ fn cluster_backup_config_json(name: &str, crepo: &str, src_pvc: &str) -> serde_j
 fn backup_json(name: &str, config: &str, deletion_policy: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "Backup",
+        "kind": "Snapshot",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
-            "configRef": { "name": config },
+            "policyRef": { "name": config },
             "deletionPolicy": deletion_policy
         }
     })
@@ -218,7 +218,7 @@ where
     .await
 }
 
-/// The headline scenario: Repository → Backup (real kopia snapshot) → Restore →
+/// The headline scenario: Repository → Snapshot (real kopia snapshot) → Restore →
 /// finalizer-driven Delete. Proves the entire data path end-to-end.
 #[tokio::test]
 #[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
@@ -232,8 +232,8 @@ async fn backup_restore_delete_lifecycle() {
         .expect("provision filesystem fixtures");
     let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let restores: Api<Restore> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
     // 1. Repository becomes Ready (controller connects/creates the kopia repo).
@@ -245,24 +245,24 @@ async fn backup_restore_delete_lifecycle() {
         .await
         .expect("Repository should reach Ready");
 
-    // 2. BackupConfig + Backup → mover Job → Succeeded with a real snapshot id.
+    // 2. SnapshotPolicy + Snapshot → mover Job → Succeeded with a real snapshot id.
     configs
         .create(
             &PostParams::default(),
             &cr(backup_config_json("e2e-cfg", "e2e-repo", "e2e-src")),
         )
         .await
-        .expect("create BackupConfig");
+        .expect("create SnapshotPolicy");
     backups
         .create(
             &PostParams::default(),
             &cr(backup_json("e2e-backup", "e2e-cfg", "Retain")),
         )
         .await
-        .expect("create Backup");
+        .expect("create Snapshot");
     wait_phase(&backups, "e2e-backup", "Succeeded")
         .await
-        .expect("Backup should reach Succeeded");
+        .expect("Snapshot should reach Succeeded");
     let bstatus = status_json(&backups, "e2e-backup").await;
     let snap_id = bstatus
         .get("snapshot")
@@ -271,17 +271,17 @@ async fn backup_restore_delete_lifecycle() {
         .unwrap_or("");
     assert!(
         !snap_id.is_empty(),
-        "Backup status must carry a real kopia snapshot id, got {bstatus}"
+        "Snapshot status must carry a real kopia snapshot id, got {bstatus}"
     );
 
-    // 3. Restore that Backup into a target PVC → Completed.
+    // 3. Restore that Snapshot into a target PVC → Completed.
     let restore = serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
         "kind": "Restore",
         "metadata": { "name": "e2e-restore", "namespace": E2E_NAMESPACE },
         "spec": {
             "repository": { "kind": "Repository", "name": "e2e-repo" },
-            "source": { "backupRef": { "name": "e2e-backup" } },
+            "source": { "snapshotRef": { "name": "e2e-backup" } },
             "target": { "pvc": { "name": "e2e-dst" } }
         }
     });
@@ -293,8 +293,8 @@ async fn backup_restore_delete_lifecycle() {
         .await
         .expect("Restore should reach Completed");
 
-    // 4. Delete a Backup whose deletionPolicy is Delete → finalizer runs a delete
-    //    Job and the CR is removed. (Use a second Backup so step 2's Retain one
+    // 4. Delete a Snapshot whose deletionPolicy is Delete → finalizer runs a delete
+    //    Job and the CR is removed. (Use a second Snapshot so step 2's Retain one
     //    survives for inspection.)
     backups
         .create(
@@ -302,14 +302,14 @@ async fn backup_restore_delete_lifecycle() {
             &cr(backup_json("e2e-backup-del", "e2e-cfg", "Delete")),
         )
         .await
-        .expect("create deletable Backup");
+        .expect("create deletable Snapshot");
     wait_phase(&backups, "e2e-backup-del", "Succeeded")
         .await
-        .expect("deletable Backup should reach Succeeded");
+        .expect("deletable Snapshot should reach Succeeded");
     backups
         .delete("e2e-backup-del", &DeleteParams::default())
         .await
-        .expect("delete Backup");
+        .expect("delete Snapshot");
     wait_until(
         "e2e-backup-del removed after finalizer",
         Duration::from_secs(120),
@@ -322,12 +322,12 @@ async fn backup_restore_delete_lifecycle() {
         },
     )
     .await
-    .expect("Backup CR should be removed once the snapshot-cleanup finalizer runs");
+    .expect("Snapshot CR should be removed once the snapshot-cleanup finalizer runs");
 }
 
 /// Regression guard (the "ClusterRepository references are ignored" bug): a
-/// `BackupConfig` that references a cluster-scoped `ClusterRepository` must drive
-/// a Backup all the way to `Succeeded`. Before the fix, the controller resolved
+/// `SnapshotPolicy` that references a cluster-scoped `ClusterRepository` must drive
+/// a Snapshot all the way to `Succeeded`. Before the fix, the controller resolved
 /// every repository ref as a namespaced `Repository` regardless of `kind`, so a
 /// `kind: ClusterRepository` config failed with
 /// `missing dependency: Repository <ns>/<name>` and never produced a snapshot —
@@ -344,8 +344,8 @@ async fn cluster_repository_backup_lifecycle() {
         .expect("provision filesystem fixtures");
     let client = world.client().clone();
     let crepos: Api<ClusterRepository> = Api::all(client.clone());
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
     // 1. ClusterRepository becomes Ready (cluster-scoped; controller watches it
     //    cluster-wide under the e2e ClusterRole).
@@ -360,8 +360,8 @@ async fn cluster_repository_backup_lifecycle() {
         .await
         .expect("ClusterRepository should reach Ready");
 
-    // 2. A BackupConfig referencing it by `kind: ClusterRepository` (no namespace
-    //    on the ref) + a Backup → mover Job → Succeeded with a real snapshot id.
+    // 2. A SnapshotPolicy referencing it by `kind: ClusterRepository` (no namespace
+    //    on the ref) + a Snapshot → mover Job → Succeeded with a real snapshot id.
     configs
         .create(
             &PostParams::default(),
@@ -372,17 +372,17 @@ async fn cluster_repository_backup_lifecycle() {
             )),
         )
         .await
-        .expect("create BackupConfig (ClusterRepository-backed)");
+        .expect("create SnapshotPolicy (ClusterRepository-backed)");
     backups
         .create(
             &PostParams::default(),
             &cr(backup_json("e2e-backup-crepo", "e2e-cfg-crepo", "Retain")),
         )
         .await
-        .expect("create Backup");
+        .expect("create Snapshot");
     wait_phase(&backups, "e2e-backup-crepo", "Succeeded")
         .await
-        .expect("ClusterRepository-backed Backup should reach Succeeded");
+        .expect("ClusterRepository-backed Snapshot should reach Succeeded");
     let bstatus = status_json(&backups, "e2e-backup-crepo").await;
     let snap_id = bstatus
         .get("snapshot")
@@ -391,14 +391,14 @@ async fn cluster_repository_backup_lifecycle() {
         .unwrap_or("");
     assert!(
         !snap_id.is_empty(),
-        "ClusterRepository-backed Backup must carry a real kopia snapshot id, got {bstatus}"
+        "ClusterRepository-backed Snapshot must carry a real kopia snapshot id, got {bstatus}"
     );
 
     // Cleanup the cluster-scoped resource (the namespaced ones GC with the ns).
     let _ = crepos.delete("e2e-crepo", &DeleteParams::default()).await;
 }
 
-/// Cross-namespace mover RBAC + credentials (ADR §4.12). A Backup in a workload
+/// Cross-namespace mover RBAC + credentials (ADR §4.12). A Snapshot in a workload
 /// namespace SEPARATE from the operator's must (a) get a least-privilege
 /// `kopiur-mover` ServiceAccount + RoleBinding MINTED in that namespace by the
 /// controller, and (b) when its credentials Secret is absent there, surface a clear
@@ -406,7 +406,7 @@ async fn cluster_repository_backup_lifecycle() {
 /// launching a Job that hangs. Adding the Secret clears the condition.
 ///
 /// Before the fix the mover Job referenced an SA (and `envFrom` Secret) that only
-/// existed in the operator namespace, so a cross-namespace Backup wedged in
+/// existed in the operator namespace, so a cross-namespace Snapshot wedged in
 /// `Running` with the Job stuck in `FailedCreate: serviceaccount ... not found` —
 /// this test would time out waiting for the SA to appear.
 #[tokio::test]
@@ -430,8 +430,8 @@ async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
         .expect("create workload namespace");
 
     let crepos: Api<ClusterRepository> = Api::all(client.clone());
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), APP_NS);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), APP_NS);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), APP_NS);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), APP_NS);
     let sas: Api<ServiceAccount> = Api::namespaced(client.clone(), APP_NS);
     let rbs: Api<RoleBinding> = Api::namespaced(client.clone(), APP_NS);
 
@@ -447,10 +447,10 @@ async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
         .await
         .expect("ClusterRepository should reach Ready");
 
-    // 2. BackupConfig + Backup in the WORKLOAD namespace. No creds Secret there yet.
+    // 2. SnapshotPolicy + Snapshot in the WORKLOAD namespace. No creds Secret there yet.
     let cfg = serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupConfig",
+        "kind": "SnapshotPolicy",
         "metadata": { "name": "e2e-xns-cfg", "namespace": APP_NS },
         "spec": {
             "repository": { "kind": "ClusterRepository", "name": "e2e-xns-crepo" },
@@ -461,14 +461,14 @@ async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
     configs
         .create(&PostParams::default(), &cr(cfg))
         .await
-        .expect("create BackupConfig in workload ns");
+        .expect("create SnapshotPolicy in workload ns");
     backups
         .create(
             &PostParams::default(),
             &cr(backup_json_ns("e2e-xns-backup", "e2e-xns-cfg", APP_NS)),
         )
         .await
-        .expect("create Backup in workload ns");
+        .expect("create Snapshot in workload ns");
 
     // 3. The controller mints the mover SA + RoleBinding in the workload namespace
     //    (this is the core of the fix — it happens before the creds check).
@@ -496,7 +496,7 @@ async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
     // 4. Missing creds → clear, actionable CredentialsAvailable=False condition.
     wait_condition(&backups, "e2e-xns-backup", "CredentialsAvailable", "False")
         .await
-        .expect("Backup should report CredentialsAvailable=False when the Secret is absent");
+        .expect("Snapshot should report CredentialsAvailable=False when the Secret is absent");
     let s = status_json(&backups, "e2e-xns-backup").await;
     let cond = s
         .get("conditions")
@@ -528,7 +528,7 @@ async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
     .expect("apply creds Secret into workload namespace");
     wait_condition(&backups, "e2e-xns-backup", "CredentialsAvailable", "True")
         .await
-        .expect("Backup CredentialsAvailable should clear once the Secret is present");
+        .expect("Snapshot CredentialsAvailable should clear once the Secret is present");
 
     // Cleanup: the cluster-scoped repo + the workload namespace (GCs its CRs).
     let _ = crepos
@@ -538,7 +538,7 @@ async fn cross_namespace_backup_mints_mover_rbac_and_surfaces_missing_creds() {
     let _ = nss.delete(APP_NS, &DeleteParams::default()).await;
 }
 
-/// Privileged-mover namespace opt-in (ADR §4.11/§G16). A `BackupConfig` whose
+/// Privileged-mover namespace opt-in (ADR §4.11/§G16). A `SnapshotPolicy` whose
 /// `spec.mover.securityContext` runs as root must be REFUSED with a clear
 /// `MoverPermitted=False` / `PrivilegedMoverNotPermitted` condition until the
 /// workload namespace carries the `kopiur.home-operations.com/privileged-movers`
@@ -572,8 +572,8 @@ async fn privileged_mover_requires_namespace_optin() {
     .expect("apply creds Secret");
 
     let crepos: Api<ClusterRepository> = Api::all(client.clone());
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), APP_NS);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), APP_NS);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), APP_NS);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), APP_NS);
 
     crepos
         .create(
@@ -586,10 +586,10 @@ async fn privileged_mover_requires_namespace_optin() {
         .await
         .expect("ClusterRepository should reach Ready");
 
-    // A BackupConfig whose mover runs as root (the trilium-rain shape).
+    // A SnapshotPolicy whose mover runs as root (the trilium-rain shape).
     let cfg = serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupConfig",
+        "kind": "SnapshotPolicy",
         "metadata": { "name": "e2e-priv-cfg", "namespace": APP_NS },
         "spec": {
             "repository": { "kind": "ClusterRepository", "name": "e2e-priv-crepo" },
@@ -601,14 +601,14 @@ async fn privileged_mover_requires_namespace_optin() {
     configs
         .create(&PostParams::default(), &cr(cfg))
         .await
-        .expect("create privileged BackupConfig");
+        .expect("create privileged SnapshotPolicy");
     backups
         .create(
             &PostParams::default(),
             &cr(backup_json_ns("e2e-priv-backup", "e2e-priv-cfg", APP_NS)),
         )
         .await
-        .expect("create Backup");
+        .expect("create Snapshot");
 
     // Refused: MoverPermitted=False with the privileged-mover reason + opt-in hint.
     wait_condition(&backups, "e2e-priv-backup", "MoverPermitted", "False")
@@ -721,10 +721,10 @@ async fn mover_inherits_security_context_from_workload_pod() {
     .await
     .expect("workload pod should reach Running so its securityContext can be read");
 
-    // A Repository + a BackupConfig whose mover INHERITS the pod's securityContext.
+    // A Repository + a SnapshotPolicy whose mover INHERITS the pod's securityContext.
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     repos
         .create(
             &PostParams::default(),
@@ -738,7 +738,7 @@ async fn mover_inherits_security_context_from_workload_pod() {
 
     let cfg = serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupConfig",
+        "kind": "SnapshotPolicy",
         "metadata": { "name": "e2e-inherit-cfg", "namespace": E2E_NAMESPACE },
         "spec": {
             "repository": { "kind": "Repository", "name": "e2e-inherit-repo" },
@@ -754,7 +754,7 @@ async fn mover_inherits_security_context_from_workload_pod() {
     configs
         .create(&PostParams::default(), &cr(cfg))
         .await
-        .expect("create BackupConfig with inheritSecurityContextFrom");
+        .expect("create SnapshotPolicy with inheritSecurityContextFrom");
     backups
         .create(
             &PostParams::default(),
@@ -765,7 +765,7 @@ async fn mover_inherits_security_context_from_workload_pod() {
             )),
         )
         .await
-        .expect("create Backup");
+        .expect("create Snapshot");
 
     // The mover Job's pod template must carry the inherited UID (2000), proving the
     // controller resolved the workload pod's securityContext into the run.
@@ -828,7 +828,7 @@ async fn mover_inherits_security_context_from_workload_pod() {
         .await;
 }
 
-/// Explicit `BackupConfig.spec.mover.securityContext` (container) AND
+/// Explicit `SnapshotPolicy.spec.mover.securityContext` (container) AND
 /// `podSecurityContext` (pod, e.g. fsGroup) both reach the backup mover pod — the
 /// non-inherit counterpart of the test above, proving the explicit knobs thread through.
 #[tokio::test]
@@ -846,8 +846,8 @@ async fn backup_mover_applies_explicit_security_and_pod_context() {
     let client = world.client().clone();
 
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     repos
         .create(
             &PostParams::default(),
@@ -861,7 +861,7 @@ async fn backup_mover_applies_explicit_security_and_pod_context() {
 
     let cfg = serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupConfig",
+        "kind": "SnapshotPolicy",
         "metadata": { "name": "e2e-scctx-cfg", "namespace": E2E_NAMESPACE },
         "spec": {
             "repository": { "kind": "Repository", "name": "e2e-scctx-repo" },
@@ -876,14 +876,14 @@ async fn backup_mover_applies_explicit_security_and_pod_context() {
     configs
         .create(&PostParams::default(), &cr(cfg))
         .await
-        .expect("create BackupConfig with explicit mover security contexts");
+        .expect("create SnapshotPolicy with explicit mover security contexts");
     backups
         .create(
             &PostParams::default(),
             &cr(backup_json("e2e-scctx-backup", "e2e-scctx-cfg", "Retain")),
         )
         .await
-        .expect("create Backup");
+        .expect("create Snapshot");
 
     let jobs: Api<Job> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let job = wait_until(
@@ -920,17 +920,17 @@ async fn backup_mover_applies_explicit_security_and_pod_context() {
         .await;
 }
 
-/// A `Backup` JSON in an explicit namespace (cross-namespace scenarios).
+/// A `Snapshot` JSON in an explicit namespace (cross-namespace scenarios).
 fn backup_json_ns(name: &str, config: &str, ns: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "Backup",
+        "kind": "Snapshot",
         "metadata": { "name": name, "namespace": ns },
-        "spec": { "configRef": { "name": config }, "deletionPolicy": "Retain" }
+        "spec": { "policyRef": { "name": config }, "deletionPolicy": "Retain" }
     })
 }
 
-/// A BackupSchedule with an every-minute cron creates a scheduled Backup CR.
+/// A SnapshotSchedule with an every-minute cron creates a scheduled Snapshot CR.
 #[tokio::test]
 #[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
 async fn schedule_creates_backup() {
@@ -943,9 +943,9 @@ async fn schedule_creates_backup() {
         .expect("provision filesystem fixtures");
     let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let schedules: Api<BackupSchedule> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let schedules: Api<SnapshotSchedule> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
     // Reuse / ensure a repo + config exist.
     let _ = repos
@@ -960,21 +960,21 @@ async fn schedule_creates_backup() {
 
     let sched = serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupSchedule",
+        "kind": "SnapshotSchedule",
         "metadata": { "name": "e2e-sched", "namespace": E2E_NAMESPACE },
         "spec": {
-            "configRef": { "name": "e2e-cfg-sched" },
+            "policyRef": { "name": "e2e-cfg-sched" },
             "schedule": { "cron": "* * * * *", "runOnCreate": true }
         }
     });
     schedules
-        .create(&PostParams::default(), &cr::<BackupSchedule>(sched))
+        .create(&PostParams::default(), &cr::<SnapshotSchedule>(sched))
         .await
-        .expect("create BackupSchedule");
+        .expect("create SnapshotSchedule");
 
-    // Within ~2 minutes a scheduled Backup (origin=scheduled) should appear.
+    // Within ~2 minutes a scheduled Snapshot (origin=scheduled) should appear.
     wait_until(
-        "a scheduled Backup is created",
+        "a scheduled Snapshot is created",
         Duration::from_secs(150),
         poll_interval(),
         || async {
@@ -989,7 +989,7 @@ async fn schedule_creates_backup() {
         },
     )
     .await
-    .expect("schedule should create a Backup CR");
+    .expect("schedule should create a Snapshot CR");
 }
 
 /// A Maintenance claims the repository lease.
@@ -1058,7 +1058,7 @@ async fn scrape_controller_metrics(client: &Client) -> anyhow::Result<String> {
     Ok(client.request_text(req).await?)
 }
 
-/// Drive a Backup to Succeeded, then assert the controller exposes the expected
+/// Drive a Snapshot to Succeeded, then assert the controller exposes the expected
 /// metric families with sane values — and that the exposition is valid
 /// Prometheus text (a regression guard for the OTel→Prometheus name rewrite).
 /// The webhook is disabled in the e2e harness, so webhook metrics are covered by
@@ -1075,8 +1075,8 @@ async fn metrics_reflect_backup_lifecycle() {
         .expect("provision filesystem fixtures");
     let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
     // A successful backup so phase/size/duration gauges have real values.
     let _ = repos
@@ -1091,17 +1091,17 @@ async fn metrics_reflect_backup_lifecycle() {
             &cr(backup_config_json("e2e-mx-cfg", "e2e-mx-repo", "e2e-src")),
         )
         .await
-        .expect("create BackupConfig");
+        .expect("create SnapshotPolicy");
     backups
         .create(
             &PostParams::default(),
             &cr(backup_json("e2e-mx-backup", "e2e-mx-cfg", "Retain")),
         )
         .await
-        .expect("create Backup");
+        .expect("create Snapshot");
     wait_phase(&backups, "e2e-mx-backup", "Succeeded")
         .await
-        .expect("Backup should reach Succeeded");
+        .expect("Snapshot should reach Succeeded");
 
     // The Prometheus exporter publishes a family only after first observation and
     // the controller's own self-reconcile must record the Succeeded phase, so
@@ -1117,7 +1117,7 @@ async fn metrics_reflect_backup_lifecycle() {
                     Ok(t)
                         if t.contains("kopiur_controller_reconciliations_total")
                             && t.contains("kopiur_resource_phase")
-                            && t.contains("kopiur_backup_size_bytes") =>
+                            && t.contains("kopiur_snapshot_size_bytes") =>
                     {
                         Ok(Some(t))
                     }
@@ -1133,7 +1133,7 @@ async fn metrics_reflect_backup_lifecycle() {
     // Reconcile loop metrics, per kind.
     assert!(
         text.contains("kopiur_controller_reconciliations_total{")
-            && text.contains("kind=\"Backup\""),
+            && text.contains("kind=\"Snapshot\""),
         "missing per-kind reconciliations counter:\n{text}"
     );
     // Histogram buckets present (validates the OTel histogram → _bucket rewrite).
@@ -1144,18 +1144,18 @@ async fn metrics_reflect_backup_lifecycle() {
     // Our backup's phase gauge: Succeeded == 1.
     let succeeded_series = text.lines().any(|l| {
         l.starts_with("kopiur_resource_phase{")
-            && l.contains("kind=\"Backup\"")
+            && l.contains("kind=\"Snapshot\"")
             && l.contains("name=\"e2e-mx-backup\"")
             && l.contains("phase=\"Succeeded\"")
             && l.trim_end().ends_with(" 1")
     });
     assert!(
         succeeded_series,
-        "expected kopiur_resource_phase ...Backup...Succeeded == 1:\n{text}"
+        "expected kopiur_resource_phase ...Snapshot...Succeeded == 1:\n{text}"
     );
-    // Backup stats gauges populated with a positive size.
+    // Snapshot stats gauges populated with a positive size.
     let positive_size = text.lines().any(|l| {
-        l.starts_with("kopiur_backup_size_bytes{")
+        l.starts_with("kopiur_snapshot_size_bytes{")
             && l.contains("name=\"e2e-mx-backup\"")
             && l.rsplit(' ')
                 .next()
@@ -1164,7 +1164,7 @@ async fn metrics_reflect_backup_lifecycle() {
     });
     assert!(
         positive_size,
-        "expected positive kopiur_backup_size_bytes:\n{text}"
+        "expected positive kopiur_snapshot_size_bytes:\n{text}"
     );
     // Valid Prometheus exposition: HELP/TYPE metadata present.
     assert!(

@@ -9,9 +9,9 @@ If you only want the install reference (every Helm value, scopes, cert options),
 Kopiur splits one job into three resources so each can change independently:
 
 - a **`Repository`** is _where_ snapshots are stored (your S3 bucket, NAS, B2…);
-- a **`BackupConfig`** is the **recipe** — _what_ to back up. It is idempotent and **runs nothing on its own**;
-- a **`Backup`** is an **invocation** — one snapshot, as a Kubernetes object. It is the universal trigger (created by a schedule, by `kubectl`, or by automation);
-- a **`BackupSchedule`** is the **cron** — _when_ the recipe runs. It creates `Backup` CRs for you.
+- a **`SnapshotPolicy`** is the **recipe** — _what_ to back up. It is idempotent and **runs nothing on its own**;
+- a **`Snapshot`** is an **invocation** — one snapshot, as a Kubernetes object. It is the universal trigger (created by a schedule, by `kubectl`, or by automation);
+- a **`SnapshotSchedule`** is the **cron** — _when_ the recipe runs. It creates `Snapshot` CRs for you.
 
 A `Restore` reads a snapshot back into a PVC. That's the whole model. Everything below is just those pieces in order.
 
@@ -56,23 +56,24 @@ $ helm install kopiur deploy/helm/kopiur \
     --namespace kopiur-system
 ```
 
-**Verify** the operator is up and the 7 CRDs are registered:
+**Verify** the operator is up and the 8 CRDs are registered:
 
 ```console
 $ kubectl -n kopiur-system rollout status deploy/kopiur-controller
 $ kubectl -n kopiur-system rollout status deploy/kopiur-webhook
 $ kubectl get crd -l app.kubernetes.io/part-of=kopiur
-NAME                                              CREATED AT
-backupconfigs.kopiur.home-operations.com          ...
-backups.kopiur.home-operations.com                ...
-backupschedules.kopiur.home-operations.com        ...
-clusterrepositories.kopiur.home-operations.com    ...
-maintenances.kopiur.home-operations.com           ...
-repositories.kopiur.home-operations.com           ...
-restores.kopiur.home-operations.com               ...
+NAME                                                  CREATED AT
+snapshotpolicies.kopiur.home-operations.com           ...
+snapshots.kopiur.home-operations.com                  ...
+snapshotschedules.kopiur.home-operations.com          ...
+clusterrepositories.kopiur.home-operations.com        ...
+maintenances.kopiur.home-operations.com               ...
+repositories.kopiur.home-operations.com               ...
+repositoryreplications.kopiur.home-operations.com     ...
+restores.kopiur.home-operations.com                   ...
 ```
 
-Seven CRDs and two ready Deployments means the operator is live.
+Eight CRDs and two ready Deployments means the operator is live.
 
 ## Step 2 — Give it credentials
 
@@ -137,13 +138,13 @@ $ kubectl -n demo describe repository primary    # see Conditions + Events
 
 (Common causes: wrong keys, unreachable endpoint, or a bucket that doesn't exist with `create.enabled: false`. See [Troubleshooting](troubleshooting.md).)
 
-## Step 4 — Write the recipe (BackupConfig)
+## Step 4 — Write the recipe (SnapshotPolicy)
 
 Now describe _what_ to back up and _how long to keep it_. Retention is **GFS** (grandfather-father-son) and is the only thing that prunes successful backups.
 
 ```yaml
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupConfig
+kind: SnapshotPolicy
 metadata:
     name: app-data
     namespace: demo
@@ -159,26 +160,26 @@ spec:
 ```
 
 ```console
-$ kubectl apply -f backupconfig.yaml
-$ kubectl -n demo get backupconfig
+$ kubectl apply -f snapshotpolicy.yaml
+$ kubectl -n demo get snapshotpolicy
 NAME       REPOSITORY   AGE
 app-data   primary      3s
 ```
 
-A `BackupConfig` runs nothing yet — it's the recipe. Next we invoke it.
+A `SnapshotPolicy` runs nothing yet — it's the recipe. Next we invoke it.
 
 ## Step 5 — Take your first backup (and watch it work)
 
-Trigger one snapshot by creating a `Backup` that references the recipe:
+Trigger one snapshot by creating a `Snapshot` that references the recipe:
 
 ```yaml
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: Backup
+kind: Snapshot
 metadata:
     generateName: app-data-manual- # let the API server pick a unique name
     namespace: demo
 spec:
-    configRef:
+    policyRef:
         name: app-data
 ```
 
@@ -200,7 +201,7 @@ $ kubectl -n demo get backup app-data-manual-abc12 -o jsonpath='{.status.stats}'
 {"sizeBytes":...,"bytesNew":...,"filesNew":...}
 ```
 
-If it stays `Pending` with no Job, the mover is blocked on a precondition (usually credentials) — the cause is on the `Backup`'s conditions and as an Event. See [Movers → Troubleshooting](movers.md#troubleshooting).
+If it stays `Pending` with no Job, the mover is blocked on a precondition (usually credentials) — the cause is on the `Snapshot`'s conditions and as an Event. See [Movers → Troubleshooting](movers.md#troubleshooting).
 
 ## Step 6 — Restore it (the half people forget to test)
 
@@ -214,8 +215,8 @@ metadata:
     namespace: demo
 spec:
     source:
-        backupRef:
-            name: app-data-manual-abc12 # the Backup from Step 5
+        snapshotRef:
+            name: app-data-manual-abc12 # the Snapshot from Step 5
     target:
         pvc: # operator creates this PVC
             name: app-data-restored
@@ -236,16 +237,16 @@ app-data-verify   Completed    37s
 
 ## Step 7 — Put it on a schedule
 
-Manual backups prove the pipeline; a `BackupSchedule` makes it routine. It creates `Backup` CRs on a cron, with deterministic jitter so replicas agree and load spreads.
+Manual backups prove the pipeline; a `SnapshotSchedule` makes it routine. It creates `Snapshot` CRs on a cron, with deterministic jitter so replicas agree and load spreads.
 
 ```yaml
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupSchedule
+kind: SnapshotSchedule
 metadata:
     name: app-data-nightly
     namespace: demo
 spec:
-    configRef:
+    policyRef:
         name: app-data
     schedule:
         cron: "H 2 * * *" # "H" = a deterministic per-schedule minute, ~02:00 nightly
@@ -254,13 +255,13 @@ spec:
 ```
 
 ```console
-$ kubectl apply -f backupschedule.yaml
-$ kubectl -n demo get backupschedule
+$ kubectl apply -f snapshotschedule.yaml
+$ kubectl -n demo get snapshotschedule
 NAME               CONFIG     SCHEDULE    SUSPENDED   AGE
 app-data-nightly   app-data   H 2 * * *   false       3s
 
 # the controller pins the next firing into status:
-$ kubectl -n demo get backupschedule app-data-nightly \
+$ kubectl -n demo get snapshotschedule app-data-nightly \
     -o jsonpath='{.status.nextSchedule.at}'
 2026-06-07T02:17:00Z
 ```
@@ -269,7 +270,18 @@ That's a complete, recurring, restore-tested backup. 🎉
 
 ## What just happened (and where to go next)
 
-You created a **Repository** (where), a **BackupConfig** (what), invoked it with a **Backup** (one snapshot), proved it with a **Restore**, and automated it with a **BackupSchedule** (when). Maintenance — the periodic `kopia maintenance` that reclaims space — was set up for you automatically the moment the repository existed; you don't have to do anything for it.
+You created a **Repository** (where), a **SnapshotPolicy** (what), invoked it with a **Snapshot** (one snapshot), proved it with a **Restore**, and automated it with a **SnapshotSchedule** (when). Maintenance — the periodic `kopia maintenance` that reclaims space — was set up for you automatically the moment the repository existed; you don't have to do anything for it.
+
+/// tip | Wait for `Ready` (kstatus / GitOps)
+
+Every reconciled CRD exposes standard `metav1.Condition`s (`Ready`, plus `Reconciling`/`Stalled`) and `status.observedGeneration` (ADR-0005 §2), so Flux `wait`/`healthChecks`, Argo CD health, and plain `kubectl wait` work natively:
+
+```console
+$ kubectl -n demo wait --for=condition=Ready repository/primary --timeout=2m
+$ kubectl -n demo wait --for=condition=Ready snapshotpolicy/app-data --timeout=2m
+```
+
+///
 
 From here:
 
@@ -278,21 +290,21 @@ From here:
 - **[Backups & schedules](backups.md)** — multi-PVC selectors, hooks (quiesce a database before snapshotting), retention tuning, `deletionPolicy`.
 - **[Restores](restores.md)** — point-in-time restore, deploy-or-restore (GitOps), and restoring snapshots Kopiur didn't create.
 - **[Maintenance](maintenance.md)** — what runs, when, and how shared repositories coordinate.
-- **[Examples](examples.md)** — eight complete, apply-ready manifests covering the patterns above.
+- **[Examples](examples.md)** — the complete, apply-ready manifest ladder covering the patterns above.
 - **[Troubleshooting](troubleshooting.md)** — when a step above doesn't go green.
 
 ## Tearing down the walkthrough
 
 ```console
-$ kubectl -n demo delete backupschedule app-data-nightly
+$ kubectl -n demo delete snapshotschedule app-data-nightly
 $ kubectl -n demo delete restore app-data-verify
-$ kubectl -n demo delete backup --all          # finalizer also deletes the snapshots
-$ kubectl -n demo delete backupconfig app-data
+$ kubectl -n demo delete snapshot --all         # finalizer also deletes the snapshots
+$ kubectl -n demo delete snapshotpolicy app-data
 $ kubectl -n demo delete repository primary
 ```
 
-/// warning | Deleting a Backup deletes its snapshot
+/// warning | Deleting a Snapshot deletes its snapshot
 
-A scheduled/manual `Backup` defaults to `deletionPolicy: Delete`, so removing the CR runs `kopia snapshot delete` via a finalizer. Use `Retain` (or `Orphan`) if you want the CR gone but the snapshot kept — see [Backups → deletionPolicy](backups.md#deletionpolicy--what-happens-to-the-snapshot).
+A scheduled/manual `Snapshot` defaults to `deletionPolicy: Delete`, so removing the CR runs `kopia snapshot delete` via a finalizer. Use `Retain` (or `Orphan`) if you want the CR gone but the snapshot kept — see [Backups → deletionPolicy](backups.md#deletionpolicy--what-happens-to-the-snapshot).
 
 ///

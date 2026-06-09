@@ -1,15 +1,15 @@
 # Example 13 — Restore by raw kopia identity (ADR-0003 §4.6)
 #
-# When there is no `Backup` CR to point at — a snapshot written by a foreign kopia
+# When there is no `Snapshot` CR to point at — a snapshot written by a foreign kopia
 # client, or one that aged out of the catalog — restore by the raw kopia identity
 # (`username@hostname:path`). This mode REQUIRES an explicit `spec.repository`
-# (there's no Backup/BackupConfig to infer it from).
+# (there's no Backup/SnapshotPolicy to infer it from).
 #
-#   # find identities/snapshots in a repo with the kopia CLI (or `kubectl get backup`
+#   # find identities/snapshots in a repo with the kopia CLI (or `kubectl get snapshots`
 #   # for catalogued ones):
 #   kopia snapshot list --all
 #
-# Default identity is `<backupConfigName>@<namespace>:/pvc/<pvcName>` — see
+# Default identity is `<snapshotPolicyName>@<namespace>:/pvc/<pvcName>` — see
 # docs/concepts/how-kopia-works.md.
 #
 # Field shapes verified against crates/api: source.identity is

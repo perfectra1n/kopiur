@@ -453,6 +453,75 @@ fn child_meta_omits_empty_labels() {
     assert!(m.labels.is_none());
 }
 
+// --- child_labels always carries managed-by (§14(c)) --------------------
+
+#[test]
+fn child_labels_always_includes_managed_by() {
+    // Empty extra → still has managed-by=kopiur.
+    let l = child_labels(&[]);
+    assert_eq!(
+        l.get(crate::consts::MANAGED_BY_LABEL).map(String::as_str),
+        Some("kopiur")
+    );
+    // Extra labels are merged in alongside managed-by.
+    let l2 = child_labels(&[("kopiur.home-operations.com/config", "pg")]);
+    assert_eq!(
+        l2.get(crate::consts::MANAGED_BY_LABEL).map(String::as_str),
+        Some("kopiur")
+    );
+    assert_eq!(
+        l2.get("kopiur.home-operations.com/config")
+            .map(String::as_str),
+        Some("pg")
+    );
+}
+
+// --- set_ready kstatus conditions (§2) ----------------------------------
+
+#[test]
+fn set_ready_emits_ready_reconciling_stalled_per_outcome() {
+    // Ready → Ready=True, Reconciling=False, Stalled=False, with observedGeneration.
+    let out = set_ready(&[], Some(7), ReadyOutcome::Ready, "Reconciled", "all good");
+    let find = |t: &str| out.iter().find(|c| c.type_ == t).unwrap();
+    assert_eq!(find("Ready").status, "True");
+    assert_eq!(find("Ready").observed_generation, Some(7));
+    assert_eq!(find("Reconciling").status, "False");
+    assert_eq!(find("Stalled").status, "False");
+
+    // Stalled (terminal) → Ready=False, Stalled=True.
+    let out = set_ready(&[], Some(7), ReadyOutcome::Stalled, "Failed", "bad creds");
+    let find = |t: &str| out.iter().find(|c| c.type_ == t).unwrap();
+    assert_eq!(find("Ready").status, "False");
+    assert_eq!(find("Stalled").status, "True");
+    assert_eq!(find("Reconciling").status, "False");
+}
+
+#[test]
+fn set_ready_preserves_transition_time_when_unchanged_and_flips_on_change() {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+    // Seed Ready=True with a fixed transition time.
+    let t0 = Time(k8s_openapi::jiff::Timestamp::from_second(1_700_000_000).unwrap());
+    let seeded = vec![Condition {
+        type_: "Ready".into(),
+        status: "True".into(),
+        reason: "Reconciled".into(),
+        message: "ok".into(),
+        last_transition_time: t0.clone(),
+        observed_generation: Some(1),
+    }];
+    // Still Ready → Ready's transition time is preserved (no flip).
+    let same = set_ready(&seeded, Some(2), ReadyOutcome::Ready, "Reconciled", "ok2");
+    let ready = same.iter().find(|c| c.type_ == "Ready").unwrap();
+    assert_eq!(ready.last_transition_time, t0, "Ready time moved on no-op");
+    assert_eq!(ready.observed_generation, Some(2));
+
+    // Flip to Stalled → Ready's status changes to False, so its time advances.
+    let flipped = set_ready(&seeded, Some(2), ReadyOutcome::Stalled, "Failed", "boom");
+    let ready = flipped.iter().find(|c| c.type_ == "Ready").unwrap();
+    assert_ne!(ready.last_transition_time, t0, "Ready time must flip");
+    assert_eq!(ready.status, "False");
+}
+
 // --- upsert_condition ---------------------------------------------------
 
 #[test]
@@ -958,9 +1027,9 @@ fn repo_kind_str_maps_both_variants() {
 
 #[test]
 fn privileged_mover_message_is_actionable() {
-    let msg = privileged_mover_message("BackupConfig", "trilium-rain", "trilium", "kopiur-mover");
+    let msg = privileged_mover_message("SnapshotPolicy", "trilium-rain", "trilium", "kopiur-mover");
     // What: the owning kind + name + namespace.
-    assert!(msg.contains("BackupConfig `trilium-rain`"));
+    assert!(msg.contains("SnapshotPolicy `trilium-rain`"));
     assert!(msg.contains("`trilium`"));
     // Why: tenant could reuse the minted SA at that privilege.
     assert!(msg.contains("kopiur-mover"));
@@ -971,7 +1040,7 @@ fn privileged_mover_message_is_actionable() {
     assert!(msg.contains("=true"));
     // Alternative fix: drop the elevated context, named for the right object.
     assert!(msg.contains("securityContext"));
-    assert!(msg.contains("from the BackupConfig `spec.mover`"));
+    assert!(msg.contains("from the SnapshotPolicy `spec.mover`"));
 }
 
 #[test]

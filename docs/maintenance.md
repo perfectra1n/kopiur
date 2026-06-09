@@ -147,7 +147,7 @@ $ kubectl get jobs -n billing -l app.kubernetes.io/component=maintenance
 
 ## Behavior you can rely on
 
-- **Runs at the scheduled time.** Spawning is gated on the same cron + jitter logic as `BackupSchedule`, seeded deterministically per resource, so two replicas agree and the run lands in its window — it is not "every reconcile".
+- **Runs at the scheduled time.** Spawning is gated on the same cron + jitter logic as `SnapshotSchedule`, seeded deterministically per resource, so two replicas agree and the run lands in its window — it is not "every reconcile".
 - **Waits for the repository.** Maintenance only runs once the target repository reports `Ready` (an object-store repository must finish connecting or being created first). Until then the resource shows `LeaseOwned=False, reason=WaitingForRepository`.
 - **One run at a time.** The operator never starts a second maintenance Job for a repository while one is in flight.
 - **Catches up after downtime — once.** If the operator is down across several scheduled slots, it runs a single catch-up pass on recovery, not a storm of missed runs.

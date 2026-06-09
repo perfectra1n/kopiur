@@ -13,7 +13,7 @@ readers** —
    [`prometheus::Registry`] behind the always-on `/metrics` pull endpoint (so a
    `ServiceMonitor` scrapes the pods directly — no collector required, no
    topology change), and
-2. an OTLP [`PeriodicReader`] that *pushes* the same measurements to a collector
+2. an OTLP [`PeriodicReader`] that _pushes_ the same measurements to a collector
    — added **only** when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
 
 Recording a value updates both; there is no double instrumentation. Traces (the
@@ -31,27 +31,27 @@ run blind).
 
 ## Key types
 
-| Item | Role |
-|---|---|
-| [`init_tracing`] | Installs the global `tracing` subscriber once per process (fmt layer always first, then OTLP trace/log layers when configured). Returns a [`TelemetryGuard`] that flushes OTLP providers on drop. |
-| [`MetricsProvider`] | Owns the meter provider + Prometheus registry. `meter()` creates instruments; `gather()` renders the `/metrics` text exposition; `shutdown()` flushes before a short-lived mover exits. |
-| [`OtlpConfig`] | Resolved (validated) OTLP endpoint, or `None` when OTLP is disabled. |
-| [`LogFormat`] | Console fmt format selected by `KOPIUR_LOG_FORMAT`: `Text` (default) or `Json`. |
-| [`TelemetryError`] / [`Signal`] | Actionable, classified telemetry errors and the signal (metrics/traces/logs) they apply to. |
+| Item                            | Role                                                                                                                                                                                              |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`init_tracing`]                | Installs the global `tracing` subscriber once per process (fmt layer always first, then OTLP trace/log layers when configured). Returns a [`TelemetryGuard`] that flushes OTLP providers on drop. |
+| [`MetricsProvider`]             | Owns the meter provider + Prometheus registry. `meter()` creates instruments; `gather()` renders the `/metrics` text exposition; `shutdown()` flushes before a short-lived mover exits.           |
+| [`OtlpConfig`]                  | Resolved (validated) OTLP endpoint, or `None` when OTLP is disabled.                                                                                                                              |
+| [`LogFormat`]                   | Console fmt format selected by `KOPIUR_LOG_FORMAT`: `Text` (default) or `Json`.                                                                                                                   |
+| [`TelemetryError`] / [`Signal`] | Actionable, classified telemetry errors and the signal (metrics/traces/logs) they apply to.                                                                                                       |
 
 ## Environment variables
 
 The names are centralized in the [`env`](mod@crate::env) module — read sites use the constants,
 never string literals.
 
-| Constant | Variable | Effect |
-|---|---|---|
-| [`env::OTEL_EXPORTER_OTLP_ENDPOINT`] | `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector gRPC endpoint; unset disables OTLP entirely. |
-| [`env::OTEL_EXPORTER_OTLP_PROTOCOL`] | `OTEL_EXPORTER_OTLP_PROTOCOL` | Only `grpc` is compiled in; other values are rejected. |
-| [`env::OTEL_EXPORTER_OTLP_HEADERS`] | `OTEL_EXPORTER_OTLP_HEADERS` | Extra OTLP headers (e.g. `authorization=Bearer …`). |
-| [`env::KOPIUR_OTEL_STRICT`] | `KOPIUR_OTEL_STRICT` | `true`/`1` makes telemetry misconfig fail-fast instead of degrading. |
-| [`env::RUST_LOG`] | `RUST_LOG` | Standard `tracing` filter (default `info`; e.g. `info,kopia=debug`). |
-| [`env::KOPIUR_LOG_FORMAT`] | `KOPIUR_LOG_FORMAT` | `text` (default) or `json`; unknown values degrade to `text`. |
+| Constant                             | Variable                      | Effect                                                               |
+| ------------------------------------ | ----------------------------- | -------------------------------------------------------------------- |
+| [`env::OTEL_EXPORTER_OTLP_ENDPOINT`] | `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector gRPC endpoint; unset disables OTLP entirely.               |
+| [`env::OTEL_EXPORTER_OTLP_PROTOCOL`] | `OTEL_EXPORTER_OTLP_PROTOCOL` | Only `grpc` is compiled in; other values are rejected.               |
+| [`env::OTEL_EXPORTER_OTLP_HEADERS`]  | `OTEL_EXPORTER_OTLP_HEADERS`  | Extra OTLP headers (e.g. `authorization=Bearer …`).                  |
+| [`env::KOPIUR_OTEL_STRICT`]          | `KOPIUR_OTEL_STRICT`          | `true`/`1` makes telemetry misconfig fail-fast instead of degrading. |
+| [`env::RUST_LOG`]                    | `RUST_LOG`                    | Standard `tracing` filter (default `info`; e.g. `info,kopia=debug`). |
+| [`env::KOPIUR_LOG_FORMAT`]           | `KOPIUR_LOG_FORMAT`           | `text` (default) or `json`; unknown values degrade to `text`.        |
 
 [`env::OTLP_PASSTHROUGH`] and [`env::LOG_PASSTHROUGH`] list the vars the
 controller forwards onto mover `Job`s (OTLP only when a collector is configured;
@@ -86,7 +86,7 @@ let _guard = init_tracing("kopiur-controller")?;
 // Build the meter provider + Prometheus registry; create instruments from it.
 let metrics = MetricsProvider::new("kopiur-controller");
 let reconciles = metrics.meter().u64_counter("kopiur_controller_reconciliations_total").build();
-reconciles.add(1, &[opentelemetry::KeyValue::new("kind", "Backup")]);
+reconciles.add(1, &[opentelemetry::KeyValue::new("kind", "Snapshot")]);
 
 // Serve `metrics.gather()` from `/metrics`; call `metrics.shutdown()` before a mover exits.
 # Ok(())

@@ -73,9 +73,12 @@ opentelemetry-appender-tracing = "0.31"
 tracing-opentelemetry = "0.32"
 url = "2"
 
-# Scheduling / templating
+# Scheduling / expressions
 croner = "2"
-tera = "1"
+# CEL (Common Expression Language) for identity *Expr fields (ADR-0004 §5) and the
+# broader *Expr convention (ADR-0005 §15). Sync + tokio-free, so it is safe in the
+# api crate (ADR §5.1). Replaces the former Jinja2/tera identity templating.
+cel = "0.13"
 
 # Self-managed webhook TLS (the `tls.mode: self` chart path): the controller
 # mints its own CA + serving leaf instead of depending on cert-manager. MSRV

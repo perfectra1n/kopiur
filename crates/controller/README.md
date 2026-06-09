@@ -12,10 +12,10 @@ runs **seven** controllers concurrently — one per top-level CRD in API group
 
 - [`repository`] / [`cluster_repository`] — validate and project a repository;
   default-manage an owned [`Maintenance`](kopiur_api::Maintenance) CR.
-- [`backup_config`] — the backup *recipe*; enforces GFS retention by watching
-  the `Backup`s it parents.
-- [`backup_schedule`] — turns a cron + jitter into `Backup` *invocations* it owns.
-- [`backup`] — one invocation; owns its mover `Job` + `ConfigMap` and ties the
+- [`snapshot_policy`] — the backup _recipe_; enforces GFS retention by watching
+  the `Snapshot`s it parents.
+- [`snapshot_schedule`] — turns a cron + jitter into `Snapshot` _invocations_ it owns.
+- [`snapshot`] — one invocation; owns its mover `Job` + `ConfigMap` and ties the
   kopia snapshot's lifecycle to the CR via a finalizer + `deletionPolicy`.
 - [`restore`] — drives a restore mover and the PVC populator handshake.
 - [`maintenance`] — runs scheduled kopia maintenance.
@@ -47,8 +47,8 @@ feature-gated integration tests.
 - [`config`] — every controller env var name + fixed config value in one place.
 - [`jobs`] — the pure mover `Job`/`ConfigMap` builder.
 - Pure decision helpers, unit-tested cluster-free:
-  [`backup::plan_deletion`], [`backup_schedule::next_fire`],
-  [`backup_schedule::concurrency_allows`], [`backup_config::backups_to_delete`].
+  [`snapshot::plan_deletion`], [`snapshot_schedule::next_fire`],
+  [`snapshot_schedule::concurrency_allows`], [`snapshot_policy::backups_to_delete`].
 
 ## Example
 
@@ -64,11 +64,11 @@ kopiur_controller::run().await?;
 ```
 
 The pure decision helpers run without a cluster. Here is the concurrency gate a
-`BackupSchedule` uses to decide whether a new run may start:
+`SnapshotSchedule` uses to decide whether a new run may start:
 
 ```rust
 use kopiur_api::ConcurrencyPolicy;
-use kopiur_controller::backup_schedule::concurrency_allows;
+use kopiur_controller::snapshot_schedule::concurrency_allows;
 
 // `Forbid` blocks a new run while one is already active...
 assert!(!concurrency_allows(ConcurrencyPolicy::Forbid, true));

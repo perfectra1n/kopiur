@@ -48,10 +48,10 @@ the operator's Prometheus metrics (all `kopiur_*`, scraped from `/metrics` — s
 
 ```promql
 # A backup hasn't succeeded in over 26h (a missed nightly + margin).
-time() - kopiur_backup_last_success_timestamp_seconds > 26 * 3600
+time() - kopiur_snapshot_last_success_timestamp_seconds > 26 * 3600
 
 # A schedule is racking up consecutive failures.
-kopiur_backup_consecutive_failures > 2
+kopiur_snapshot_consecutive_failures > 2
 ```
 
 And alert on the drill itself by watching the `CronJob`'s Job failures (e.g.
@@ -72,5 +72,5 @@ data is rare, but a drill that _opens_ the data rules it out entirely.
 ## See also
 
 - [Observability](../dev/observability.md) — the full `kopiur_*` metric surface and how to scrape it.
-- [Restores](../restores.md) — `fromConfig`, `onMissingSnapshot`, and restore phases.
+- [Restores](../restores.md) — `fromPolicy`, `onMissingSnapshot`, and restore phases.
 - [Scenario 02 — recover from data loss](recover-lost-data.md) — the real restore your drills are rehearsing.

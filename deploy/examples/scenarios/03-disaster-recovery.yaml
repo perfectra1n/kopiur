@@ -9,14 +9,14 @@
 # Two differences from a normal install make this a DR bundle:
 #   1. The Repository CONNECTS to the existing repo (create.enabled: false) — it
 #      must already exist; we are not initializing a new empty one.
-#   2. A PASSIVE Restore (source.fromConfig, no target, onMissingSnapshot:
-#      Continue) is wired into the PVC's dataSourceRef as a volume populator, so
+#   2. A PASSIVE populator Restore (source.fromPolicy, target.populator: {},
+#      onMissingSnapshot: Continue) is wired into the PVC's dataSourceRef, so
 #      the PVC restores the latest snapshot BEFORE the app starts. On a truly
 #      empty repo the PVC just comes up blank and is backed up going forward.
 #
 # The load-bearing subtlety — IDENTITY must match the old cluster. kopia finds
 # the old snapshots by `username@hostname:path`. By default username = the
-# BackupConfig name and hostname = the namespace, so re-creating the config with
+# SnapshotPolicy name and hostname = the namespace, so re-creating the config with
 # the SAME name in the SAME namespace resolves the same snapshots automatically.
 # We pin `identity` explicitly here so the recovery is robust even if you rebuild
 # into a differently-named namespace.
@@ -60,7 +60,7 @@ spec:
     enabled: false # CONNECT to the surviving repo; do NOT initialize a new one
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupConfig
+kind: SnapshotPolicy
 metadata:
   name: postgres-data
   namespace: billing
@@ -70,7 +70,7 @@ spec:
   sources:
     - pvc:
         name: postgres-data
-  # Pin the identity to what the OLD cluster recorded, so fromConfig below
+  # Pin the identity to what the OLD cluster recorded, so fromPolicy below
   # resolves the surviving snapshots no matter where you rebuild.
   identity:
     username: postgres-data
@@ -79,7 +79,8 @@ spec:
     keepDaily: 14
     keepWeekly: 6
 ---
-# PASSIVE Restore — no `target`. It does nothing on its own; the PVC consumes it.
+# PASSIVE populator Restore (target.populator: {}). It does nothing on its own;
+# the PVC below consumes it via spec.dataSourceRef.
 apiVersion: kopiur.home-operations.com/v1alpha1
 kind: Restore
 metadata:
@@ -87,11 +88,14 @@ metadata:
   namespace: billing
 spec:
   source:
-    fromConfig:
+    fromPolicy:
       name: postgres-data
       offset: 0 # 0 = latest surviving snapshot
+  # ADR-0005 §9: `target` is REQUIRED; populator intent is the explicit empty form.
+  target:
+    populator: {}
   policy:
-    # Default for fromConfig; explicit here. Empty repo ⇒ PVC comes up blank
+    # Default for fromPolicy; explicit here. Empty repo ⇒ PVC comes up blank
     # instead of failing the deploy.
     onMissingSnapshot: Continue
 ---
@@ -116,12 +120,12 @@ spec:
 ---
 # Resume nightly backups on the new cluster, so DR also re-establishes protection.
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupSchedule
+kind: SnapshotSchedule
 metadata:
   name: postgres-data-nightly
   namespace: billing
 spec:
-  configRef:
+  policyRef:
     name: postgres-data
   schedule:
     cron: "H 2 * * *"

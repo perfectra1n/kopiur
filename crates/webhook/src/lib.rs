@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod handlers;
+pub mod identity_collision;
 pub mod metrics;
 pub mod routes;
 pub mod tenancy;

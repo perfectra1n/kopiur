@@ -43,7 +43,7 @@ pub enum Error {
     #[error("validation error: {0}")]
     Validation(String),
 
-    /// A required referenced object (Repository, BackupConfig, …) was not
+    /// A required referenced object (Repository, SnapshotPolicy, …) was not
     /// found. Transient: it may appear shortly (GitOps apply ordering).
     #[error("missing dependency: {0}")]
     MissingDependency(String),

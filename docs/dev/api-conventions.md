@@ -9,18 +9,18 @@ These conventions are load-bearing — they were derived empirically against `ku
 #[kube(
     group = "kopiur.home-operations.com",
     version = "v1alpha1",
-    kind = "BackupConfig",
+    kind = "SnapshotPolicy",
     namespaced,                       // OMIT this line for ClusterRepository (cluster-scoped)
-    status = "BackupConfigStatus",
-    shortname = "kopiabc",
+    status = "SnapshotPolicyStatus",
+    shortname = "kopiasp",
     category = "kopiur",
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#
 )]
 #[serde(rename_all = "camelCase")]
-pub struct BackupConfigSpec { ... }
+pub struct SnapshotPolicySpec { ... }
 ```
 
-- The `kind` derive generates the root struct named by `kind` (e.g. `BackupConfig`), with your `*Spec` as `.spec` and `*Status` as `.status`. Re-export both from `lib.rs`.
+- The `kind` derive generates the root struct named by `kind` (e.g. `SnapshotPolicy`), with your `*Spec` as `.spec` and `*Status` as `.status`. Re-export both from `lib.rs`.
 - Every spec/sub-object/status struct: `#[serde(rename_all = "camelCase")]`.
 
 ## 2. Discriminated unions = **externally-tagged** Rust enums

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
 
-use kopiur_api::{BackupPhase, PhaseLabel, RepositoryPhase, RestorePhase};
+use kopiur_api::{PhaseLabel, RepositoryPhase, RestorePhase, SnapshotPhase};
 use kopiur_telemetry::MetricsProvider;
 
 /// All controller metrics, sharing one meter provider + Prometheus registry.
@@ -38,7 +38,7 @@ pub struct Metrics {
     // others (enumerate-and-reset), labeled by kind/namespace/name/phase.
     resource_phase: Gauge<i64>,
 
-    // Backup business metrics.
+    // Snapshot business metrics.
     backup_last_success_timestamp: Gauge<i64>,
     backup_consecutive_failures: Gauge<i64>,
     backup_size_bytes: Gauge<i64>,
@@ -94,23 +94,23 @@ impl Metrics {
             .build();
 
         let backup_last_success_timestamp = m
-            .i64_gauge("kopiur_backup_last_success_timestamp_seconds")
+            .i64_gauge("kopiur_snapshot_last_success_timestamp_seconds")
             .with_description("Unix timestamp of the most recent successful backup.")
             .build();
         let backup_consecutive_failures = m
-            .i64_gauge("kopiur_backup_consecutive_failures")
+            .i64_gauge("kopiur_snapshot_consecutive_failures")
             .with_description("Number of consecutive backup failures.")
             .build();
         let backup_size_bytes = m
-            .i64_gauge("kopiur_backup_size_bytes")
+            .i64_gauge("kopiur_snapshot_size_bytes")
             .with_description("Logical size in bytes of the last successful backup.")
             .build();
         let backup_files = m
-            .i64_gauge("kopiur_backup_files")
+            .i64_gauge("kopiur_snapshot_files")
             .with_description("File count of the last successful backup.")
             .build();
         let backup_duration_seconds = m
-            .i64_gauge("kopiur_backup_duration_seconds")
+            .i64_gauge("kopiur_snapshot_duration_seconds")
             .with_description("Duration in seconds of the last successful backup.")
             .build();
         let snapshot_deletion_failures = m
@@ -124,8 +124,8 @@ impl Metrics {
             )
             .build();
         let schedule_backups_created = m
-            .u64_counter("kopiur_schedule_backups_created")
-            .with_description("Total Backup CRs created by a BackupSchedule.")
+            .u64_counter("kopiur_schedule_snapshots_created")
+            .with_description("Total Snapshot CRs created by a SnapshotSchedule.")
             .build();
         let secrets_projected = m
             .u64_counter("kopiur_secrets_projected")
@@ -146,7 +146,7 @@ impl Metrics {
             .with_description("Number of snapshots in the repository.")
             .build();
         let repo_discovered_backups = m
-            .i64_gauge("kopiur_repo_discovered_backups")
+            .i64_gauge("kopiur_repo_discovered_snapshots")
             .with_description("Number of backups discovered in the repository catalog.")
             .build();
         let repo_maintenance_configured = m
@@ -243,9 +243,9 @@ impl Metrics {
         self.write_phase(kind, ns, name, Some(phase));
     }
 
-    /// Record a `Backup` phase gauge.
-    pub fn set_backup_phase(&self, ns: &str, name: &str, phase: BackupPhase) {
-        self.write_phase("Backup", ns, name, Some(phase));
+    /// Record a `Snapshot` phase gauge.
+    pub fn set_backup_phase(&self, ns: &str, name: &str, phase: SnapshotPhase) {
+        self.write_phase("Snapshot", ns, name, Some(phase));
     }
 
     /// Record a `Restore` phase gauge.
@@ -261,7 +261,7 @@ impl Metrics {
             .record(ts, &ns_name(ns, name));
     }
 
-    /// Set the consecutive-failure count for a BackupConfig.
+    /// Set the consecutive-failure count for a SnapshotPolicy.
     pub fn set_backup_consecutive_failures(&self, ns: &str, name: &str, n: i64) {
         self.backup_consecutive_failures
             .record(n, &ns_name(ns, name));
@@ -307,7 +307,7 @@ impl Metrics {
             .add(1, &[KeyValue::new("namespace", ns.to_string())]);
     }
 
-    /// Count a Backup CR created by a BackupSchedule.
+    /// Count a Snapshot CR created by a SnapshotSchedule.
     pub fn inc_schedule_backup_created(&self, ns: &str, name: &str) {
         self.schedule_backups_created.add(1, &ns_name(ns, name));
     }
@@ -390,10 +390,10 @@ mod tests {
     #[test]
     fn metrics_register_and_export_under_kopiur_namespace() {
         let m = Metrics::new();
-        m.record_reconcile("Backup", 0.1);
-        m.record_error("Backup", "transient");
+        m.record_reconcile("Snapshot", 0.1);
+        m.record_error("Snapshot", "transient");
         m.inc_orphaned_snapshot("ns");
-        m.set_backup_phase("ns", "db", BackupPhase::Succeeded);
+        m.set_backup_phase("ns", "db", SnapshotPhase::Succeeded);
         m.set_backup_stats("ns", "db", Some(1234), Some(10), Some(5));
         m.set_repository_maintenance_configured("Repository", "ns", "nas", false);
         let text = String::from_utf8(m.gather()).unwrap();
@@ -404,7 +404,7 @@ mod tests {
         );
         assert!(text.contains("kopiur_orphaned_snapshots_total"), "{text}");
         assert!(text.contains("kopiur_resource_phase"), "{text}");
-        assert!(text.contains("kopiur_backup_size_bytes"), "{text}");
+        assert!(text.contains("kopiur_snapshot_size_bytes"), "{text}");
         assert!(
             text.contains("kopiur_repository_maintenance_configured"),
             "{text}"
@@ -414,14 +414,14 @@ mod tests {
     #[test]
     fn clear_phase_zeros_all_variants() {
         let m = Metrics::new();
-        m.set_backup_phase("ns", "db", BackupPhase::Failed);
-        m.clear_phase::<BackupPhase>("Backup", "ns", "db");
+        m.set_backup_phase("ns", "db", SnapshotPhase::Failed);
+        m.clear_phase::<SnapshotPhase>("Snapshot", "ns", "db");
         let text = String::from_utf8(m.gather()).unwrap();
-        // After clearing, no Backup phase series for db is 1.
+        // After clearing, no Snapshot phase series for db is 1.
         for line in text.lines() {
             if line.starts_with("kopiur_resource_phase{")
                 && line.contains("name=\"db\"")
-                && line.contains("kind=\"Backup\"")
+                && line.contains("kind=\"Snapshot\"")
             {
                 assert!(line.trim_end().ends_with(" 0"), "phase not cleared: {line}");
             }

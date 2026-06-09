@@ -1,0 +1,58 @@
+# Example 19 — Repository replication (the "2" in 3-2-1) (ADR-0005 §13(d))
+#
+# A RepositoryReplication mirrors a source repository's blobs to a SECOND backend
+# on a schedule (`kopia repository sync-to`). It is the off-site copy that turns a
+# single repository into a 3-2-1 strategy: same data, a second medium/location.
+#
+# RepositoryReplication is NAMESPACED (it lives alongside its source repository,
+# like Maintenance) and references a Repository or ClusterRepository via
+# `sourceRef`. The destination is exactly one backend (the same externally-tagged
+# `Backend` shape used by Repository) and MUST differ from the source's backend.
+#
+# Encryption: omit `destinationEncryption` and the mirror reuses the SOURCE
+# repository's password — the common case for a true mirror, where sync-to copies
+# blobs verbatim (the format, including encryption material, is identical). Set it
+# only when the destination needs its own password.
+#
+# Field shapes verified against crates/api: sourceRef is a RepositoryRef
+# (kind defaults to Repository); destination is an externally-tagged Backend;
+# schedule is { cron, jitter }.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: offsite-mirror-creds
+  namespace: billing
+type: Opaque
+stringData:
+  # Credentials for the DESTINATION backend (here a second S3 bucket / region).
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: RepositoryReplication
+metadata:
+  name: nas-primary-offsite
+  namespace: billing
+spec:
+  # Mirror FROM this repository (must already exist — see example 01).
+  sourceRef:
+    kind: Repository
+    name: nas-primary
+  # Mirror TO this backend. Exactly one backend; must differ from the source.
+  destination:
+    s3:
+      bucket: offsite-mirror
+      prefix: prod/
+      region: us-west-2
+      auth:
+        secretRef:
+          name: offsite-mirror-creds
+  # Omit destinationEncryption to reuse the source repo's password (true mirror).
+  # destinationEncryption:
+  #   passwordSecretRef: { name: offsite-mirror-creds, key: KOPIA_PASSWORD }
+  schedule:
+    cron: "0 5 * * *" # nightly, after the 02:xx backups have landed
+    jitter: 1h
+  # Pause replication without deleting the CR (ADR-0005 §14(e)).
+  suspend: false

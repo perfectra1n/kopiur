@@ -97,7 +97,7 @@ pub async fn first_missing_cred(
 /// Returns an actionable [`Error::MissingDependency`] (Transient — a GitOps apply
 /// may add the Secret shortly) naming the first missing Secret. Used by the
 /// bootstrap paths (repository/cluster-repository), whose Secret is same-namespace;
-/// the Backup/Restore paths use [`first_missing_cred`] to also surface a condition.
+/// the Snapshot/Restore paths use [`first_missing_cred`] to also surface a condition.
 pub async fn ensure_creds_present(
     client: &kube::Client,
     job_ns: &str,
@@ -162,6 +162,43 @@ pub fn build_projected_secret(
     }
 }
 
+/// The decision for projecting a repository credential Secret across namespaces
+/// (ADR-0005 §8). Pure + exhaustive so the fail-closed authorization model is
+/// tested in one place. A same-namespace Secret is never a "projection" — it is a
+/// verify-in-place, decided separately by the caller (`src_ns == job_ns`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionDecision {
+    /// Copy the source Secret into the Job's namespace.
+    Project,
+    /// Do not project: surface the reason. Carries which gate was unmet.
+    Deny(ProjectionDenyReason),
+}
+
+/// Why a cross-namespace credential projection was denied (ADR-0005 §8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionDenyReason {
+    /// The consumer never opted in (`credentialProjection.enabled` is false/absent).
+    ConsumerNotOptedIn,
+    /// The repository owner has not allowed projection
+    /// (`ClusterRepository.credentialProjection.allowed` is false/absent).
+    OwnerNotAllowed,
+}
+
+/// Decide whether to project a repository credential Secret into a **foreign**
+/// consumer namespace (ADR-0005 §8). Fail-closed: projection requires BOTH the
+/// consumer opt-in (`enabled`) AND the repository-owner allow (`allowed`); operator
+/// RBAC is enforced separately at apply time (a `403` → actionable error). Pure +
+/// exhaustively matched so the authorization model lives in one tested place.
+///
+/// (RBAC is the third gate but it is an apply-time IO outcome, not a pure input.)
+pub fn projection_decision(consumer_enabled: bool, owner_allowed: bool) -> ProjectionDecision {
+    match (consumer_enabled, owner_allowed) {
+        (true, true) => ProjectionDecision::Project,
+        (false, _) => ProjectionDecision::Deny(ProjectionDenyReason::ConsumerNotOptedIn),
+        (true, false) => ProjectionDecision::Deny(ProjectionDenyReason::OwnerNotAllowed),
+    }
+}
+
 /// The credential Secret names a mover Job should load via `envFrom`, plus how
 /// many of them the operator actually projected (copied cross-namespace) this run.
 pub struct MoverCreds {
@@ -173,51 +210,69 @@ pub struct MoverCreds {
 }
 
 /// Resolve the credential Secret names a mover Job should load via `envFrom`,
-/// handling both the self-managed default and opt-in projection.
+/// handling both the self-managed default and gated cross-namespace projection
+/// (ADR-0005 §8).
 ///
-/// - `project == false` (the default): verify each `refs` Secret already exists in
-///   `job_ns`; a missing one yields an actionable [`Error::MissingDependency`].
-///   Returns the original names, `projected: 0`.
-/// - `project == true` (opted in): for each ref, if its source namespace **is**
-///   `job_ns` the Secret is already where the mover needs it — verify it is present
-///   (identical to the opt-out path) and use its original name, copying nothing. If
-///   the source namespace **differs** (a shared `ClusterRepository`), read the
+/// `consumer_enabled` is the consumer opt-in (`credentialProjection.enabled` on the
+/// `SnapshotPolicy`/`Restore`); `owner_allowed` is the repository-owner allow
+/// (`ClusterRepository.credentialProjection.allowed`). Per-ref:
+///
+/// - **Same-namespace** (`src_ns == job_ns`, the common namespaced-`Repository`
+///   layout): the Secret is already where the mover needs it. Verify it is present
+///   and use its original name — no projection, no gate (there is nothing to copy
+///   across a trust boundary). A missing one yields an actionable error.
+/// - **Cross-namespace** (a shared `ClusterRepository`): projection is gated by
+///   [`projection_decision`] — it requires BOTH `consumer_enabled` AND
+///   `owner_allowed`, else it **fails closed** with an actionable
+///   [`Error::MissingDependency`] naming the unmet gate. When permitted, read the
 ///   source Secret and apply a per-Job copy (named [`projected_creds_name`], owned
-///   by `owner`) into `job_ns`, and use the projected name. A missing source Secret
-///   (or an unresolvable source namespace) yields an actionable
-///   [`Error::MissingDependency`]; a `403` on apply is mapped to a message pointing
-///   at the Helm RBAC toggle (degrade-not-crash — projection needs cluster-wide
-///   `secrets` create/patch).
+///   by `owner`) into `job_ns`. A missing source Secret / unresolvable source
+///   namespace yields an actionable error; a `403` on apply maps to the Helm RBAC
+///   toggle hint (degrade-not-crash — projection needs cluster-wide `secrets`
+///   create/patch, the third gate).
 ///
 /// Re-reading the source and re-applying on every run keeps copies fresh, so there
 /// is no drift to reconcile and no source-watch to maintain.
+#[allow(clippy::too_many_arguments)]
 pub async fn resolve_mover_creds(
     client: &kube::Client,
     job_ns: &str,
     job_name: &str,
     owner: &OwnerReference,
     refs: &[CredsSecretRef],
-    project: bool,
+    consumer_enabled: bool,
+    owner_allowed: bool,
     ctx: &CredsContext<'_>,
 ) -> Result<MoverCreds> {
-    if !project {
-        ensure_creds_present(client, job_ns, ctx).await?;
-        return Ok(MoverCreds {
-            names: refs.iter().map(|r| r.name.clone()).collect(),
-            projected: 0,
-        });
-    }
-
     let dst: Api<Secret> = Api::namespaced(client.clone(), job_ns);
     let mut names = Vec::with_capacity(refs.len());
     let mut projected = 0u64;
     for (idx, r) in refs.iter().enumerate() {
-        let src_ns = r.namespace.as_deref().ok_or_else(|| {
-            Error::MissingDependency(projection_unresolved_ns_message(&r.name, ctx))
-        })?;
+        let src_ns = match r.namespace.as_deref() {
+            Some(ns) => ns,
+            // No resolvable source namespace. If the Secret happens to already be in
+            // the Job's namespace we'd have matched the same-namespace branch via an
+            // explicit ns; with none resolvable we can neither verify-in-place nor
+            // project. When the consumer didn't ask for projection, fall back to the
+            // self-managed verify in job_ns; otherwise it's the unresolved-source error.
+            None => {
+                if consumer_enabled {
+                    return Err(Error::MissingDependency(projection_unresolved_ns_message(
+                        &r.name, ctx,
+                    )));
+                }
+                if dst.get_opt(&r.name).await?.is_none() {
+                    return Err(Error::MissingDependency(missing_creds_message(
+                        &r.name, job_ns, ctx,
+                    )));
+                }
+                names.push(r.name.clone());
+                continue;
+            }
+        };
         // Already in the mover's namespace (the common namespaced-Repository case):
-        // nothing to copy. Verify it is present — exactly the self-managed path —
-        // and use its original name, so default-on projection is a no-op here.
+        // nothing to copy across a trust boundary. Verify it is present — exactly the
+        // self-managed path — and use its original name. No owner/consumer gate here.
         if src_ns == job_ns {
             if dst.get_opt(&r.name).await?.is_none() {
                 return Err(Error::MissingDependency(missing_creds_message(
@@ -227,7 +282,31 @@ pub async fn resolve_mover_creds(
             names.push(r.name.clone());
             continue;
         }
-        // Cross-namespace: project a per-Job copy owned by the consuming CR.
+        // Cross-namespace. If the consumer never opted in, this is the self-managed
+        // path: the user is expected to have placed the Secret in the mover namespace
+        // themselves (e.g. a hand-copied ClusterRepository password). Verify it is
+        // present in `job_ns` and use its name — never silently project without opt-in.
+        if !consumer_enabled {
+            if dst.get_opt(&r.name).await?.is_none() {
+                return Err(Error::MissingDependency(missing_creds_message(
+                    &r.name, job_ns, ctx,
+                )));
+            }
+            names.push(r.name.clone());
+            continue;
+        }
+        // Consumer opted in: projection is gated. Fail closed unless the repository
+        // owner also allows it (ADR-0005 §8). (RBAC is the third gate, enforced at
+        // apply time below as a 403 → actionable error.)
+        match projection_decision(consumer_enabled, owner_allowed) {
+            ProjectionDecision::Project => {}
+            ProjectionDecision::Deny(reason) => {
+                return Err(Error::MissingDependency(projection_denied_message(
+                    &r.name, src_ns, job_ns, reason, ctx,
+                )));
+            }
+        }
+        // Permitted: project a per-Job copy owned by the consuming CR.
         let src_api: Api<Secret> = Api::namespaced(client.clone(), src_ns);
         let src = src_api.get_opt(&r.name).await?.ok_or_else(|| {
             Error::MissingDependency(projection_source_missing_message(
@@ -246,16 +325,20 @@ pub async fn resolve_mover_creds(
 }
 
 /// Resolve the mover Job's `envFrom` credential Secret names for a consumer run
-/// (Backup/Restore/Maintenance) against a [`ResolvedRepository`]. Convenience over
+/// (Snapshot/Restore/Maintenance) against a [`ResolvedRepository`]. Convenience over
 /// [`resolve_mover_creds`] that derives the credential references (with their
 /// source namespaces) and the [`CredsContext`] from the repository. `owner` is the
 /// consuming CR's owner reference, applied to any projected Secret so GC reaps it
-/// with that CR. `project` is the consumer's opt-in
-/// (`spec.credentialProjection.enabled` on the `BackupConfig`/`Restore`/
-/// `Maintenance`) — projection is a consumer-side decision, not a repository one.
-/// `repo_kind`/`repo_name` only label the actionable messages (a `Restore` may
-/// infer its repository from the source config, so they are plain strings rather
-/// than a `RepositoryRef`).
+/// with that CR.
+///
+/// `consumer_enabled` is the consumer opt-in (`spec.credentialProjection.enabled` on
+/// the `SnapshotPolicy`/`Restore`/`Maintenance`); the owner gate
+/// (`ClusterRepository.credentialProjection.allowed`) is read from the resolved
+/// repository (`repo.credential_projection_allowed`) — a namespaced `Repository`
+/// reports `false`, which is harmless because its projection is always a
+/// same-namespace no-op (ADR-0005 §8). `repo_kind`/`repo_name` only label the
+/// actionable messages (a `Restore` may infer its repository from the source
+/// config, so they are plain strings rather than a `RepositoryRef`).
 #[allow(clippy::too_many_arguments)]
 pub async fn resolve_mover_creds_for(
     client: &kube::Client,
@@ -263,7 +346,7 @@ pub async fn resolve_mover_creds_for(
     job_name: &str,
     owner: &OwnerReference,
     repo: &ResolvedRepository,
-    project: bool,
+    consumer_enabled: bool,
     repo_kind: &str,
     repo_name: &str,
 ) -> Result<MoverCreds> {
@@ -279,7 +362,49 @@ pub async fn resolve_mover_creds_for(
         repo_name,
         repo_secret_namespace: repo.encryption.password_secret_ref.namespace.as_deref(),
     };
-    resolve_mover_creds(client, job_ns, job_name, owner, &refs, project, &ctx).await
+    resolve_mover_creds(
+        client,
+        job_ns,
+        job_name,
+        owner,
+        &refs,
+        consumer_enabled,
+        repo.credential_projection_allowed,
+        &ctx,
+    )
+    .await
+}
+
+/// Actionable message when a cross-namespace credential projection is denied by the
+/// fail-closed §8 gate. Names the unmet gate (consumer opt-in vs. repository-owner
+/// allow), the Secret + namespaces, and the concrete fix. The what/why/fix rule.
+fn projection_denied_message(
+    secret: &str,
+    src_ns: &str,
+    job_ns: &str,
+    reason: ProjectionDenyReason,
+    ctx: &CredsContext,
+) -> String {
+    let (why, fix) = match reason {
+        ProjectionDenyReason::ConsumerNotOptedIn => (
+            "the consumer has not opted in to credential projection",
+            "set `spec.credentialProjection.enabled: true` on this SnapshotPolicy/Restore \
+             (and ensure the ClusterRepository owner sets `credentialProjection.allowed: true`), \
+             or create the Secret in the mover namespace yourself",
+        ),
+        ProjectionDenyReason::OwnerNotAllowed => (
+            "the ClusterRepository owner has not allowed credential projection",
+            "ask the repository owner to set `credentialProjection.allowed: true` on the \
+             ClusterRepository, or create the Secret in the mover namespace yourself",
+        ),
+    };
+    format!(
+        "credential Secret `{secret}` lives in namespace `{src_ns}` but the mover Job runs in \
+         `{job_ns}`, and projecting it across namespaces is not permitted: {why}. The referenced \
+         {kind} `{name}` is the source. Fix: {fix}.",
+        kind = ctx.repo_kind,
+        name = ctx.repo_name,
+    )
 }
 
 /// Actionable message when projection cannot read a source Secret because its
@@ -350,7 +475,7 @@ mod tests {
     fn owner(name: &str) -> OwnerReference {
         OwnerReference {
             api_version: "kopiur.home-operations.com/v1alpha1".into(),
-            kind: "Backup".into(),
+            kind: "Snapshot".into(),
             name: name.into(),
             uid: "uid-123".into(),
             controller: Some(true),
@@ -365,6 +490,59 @@ mod tests {
             repo_name: "shared",
             repo_secret_namespace: Some("kopiur-system"),
         }
+    }
+
+    // --- projection_decision: the §8 fail-closed authorization gate ----------
+
+    #[test]
+    fn projection_allowed_only_when_consumer_and_owner_both_agree() {
+        assert_eq!(projection_decision(true, true), ProjectionDecision::Project);
+    }
+
+    #[test]
+    fn projection_denied_when_owner_disallows_even_if_consumer_enabled() {
+        // The headline §8 fix: a tenant opting in cannot copy the shared repo password
+        // unless the ClusterRepository owner allows it.
+        assert_eq!(
+            projection_decision(true, false),
+            ProjectionDecision::Deny(ProjectionDenyReason::OwnerNotAllowed)
+        );
+    }
+
+    #[test]
+    fn projection_denied_when_consumer_not_opted_in() {
+        assert_eq!(
+            projection_decision(false, true),
+            ProjectionDecision::Deny(ProjectionDenyReason::ConsumerNotOptedIn)
+        );
+        assert_eq!(
+            projection_decision(false, false),
+            ProjectionDecision::Deny(ProjectionDenyReason::ConsumerNotOptedIn)
+        );
+    }
+
+    #[test]
+    fn projection_denied_message_names_the_unmet_gate() {
+        let owner_msg = projection_denied_message(
+            "repo-pw",
+            "kopiur-system",
+            "team-a",
+            ProjectionDenyReason::OwnerNotAllowed,
+            &ctx(),
+        );
+        assert!(owner_msg.contains("owner has not allowed"));
+        assert!(owner_msg.contains("credentialProjection.allowed: true"));
+        assert!(owner_msg.contains("`repo-pw`"));
+
+        let consumer_msg = projection_denied_message(
+            "repo-pw",
+            "kopiur-system",
+            "team-a",
+            ProjectionDenyReason::ConsumerNotOptedIn,
+            &ctx(),
+        );
+        assert!(consumer_msg.contains("consumer has not opted in"));
+        assert!(consumer_msg.contains("credentialProjection.enabled: true"));
     }
 
     #[test]
@@ -401,7 +579,7 @@ mod tests {
         // Owned by the consuming CR in the SAME namespace → valid ownerRef, native GC.
         let owners = s.metadata.owner_references.as_ref().unwrap();
         assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].kind, "Backup");
+        assert_eq!(owners[0].kind, "Snapshot");
         assert_eq!(owners[0].controller, Some(true));
         // Data copied verbatim; type defaulted to Opaque; not immutable (refreshable).
         assert_eq!(s.data, src.data);

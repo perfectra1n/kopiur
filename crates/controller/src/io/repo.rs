@@ -1,7 +1,10 @@
 use kube::Api;
 
 use kopiur_api::backend::{Backend, RepoVolume};
-use kopiur_api::common::{CacheDefaults, Encryption, RepositoryKind, RepositoryRef};
+use kopiur_api::cluster_repository::IdentityDefaults;
+use kopiur_api::common::{
+    Encryption, MoverDefaults, NamespaceDeletePolicy, RepositoryKind, RepositoryMode, RepositoryRef,
+};
 use kopiur_api::{ClusterRepository, Repository};
 
 use crate::error::{Error, Result};
@@ -9,6 +12,13 @@ use crate::jobs::MountSource;
 
 /// Default key within the encryption password Secret when unset.
 pub const DEFAULT_PASSWORD_KEY: &str = "KOPIA_PASSWORD";
+
+/// Resolve the mover work-spec throttle from a repository's `moverDefaults.throttle`
+/// (ADR-0005 §13(e)). Thin wrapper over the single tested mapping so the field is
+/// never inert; an absent throttle yields an empty spec (the mover skips the call).
+pub fn throttle_spec(defaults: Option<&MoverDefaults>) -> kopiur_mover::workspec::ThrottleSpec {
+    kopiur_mover::workspec::ThrottleSpec::from_mover_defaults(defaults)
+}
 
 /// The credentials a mover Job needs, sourced from a repository's
 /// `encryption.passwordSecretRef`. The Secret is mounted as env (`envFrom`), so
@@ -42,9 +52,27 @@ pub struct ResolvedRepository {
     /// `None` for a cluster-scoped [`ClusterRepository`]). Used as the *source*
     /// namespace fallback when a credential Secret reference omits one.
     pub repo_namespace: Option<String>,
-    /// The repository's `cacheDefaults`, inherited by its movers' kopia cache
-    /// unless a run's `mover.cache` overrides them (ADR §3.1).
-    pub cache_defaults: Option<CacheDefaults>,
+    /// The repository's `moverDefaults` — the base for every mover it spawns
+    /// (security context, pod security context, resources, cache, node placement,
+    /// Job TTL), merged field-wise under each run's `mover` (ADR-0004 §1/§2).
+    pub mover_defaults: Option<MoverDefaults>,
+    /// The `ClusterRepository`'s `identityDefaults` (CEL `*Expr`), applied when a
+    /// consumer doesn't override its identity (ADR-0004 §5). `None` for a namespaced
+    /// `Repository` (which has no identity defaults).
+    pub identity_defaults: Option<IdentityDefaults>,
+    /// The repository's namespace-deletion cascade policy (ADR-0005 §5): `Orphan`
+    /// (keep history) or `Delete` (cascade). Consulted by the `Snapshot` finalizer
+    /// when the owning namespace is terminating.
+    pub on_namespace_delete: NamespaceDeletePolicy,
+    /// The `ClusterRepository`-owner credential-projection allow gate
+    /// (`credentialProjection.allowed`, ADR-0005 §8). `false` for a namespaced
+    /// `Repository` (which has no such gate — projection there is a same-namespace
+    /// no-op, so the owner gate is irrelevant).
+    pub credential_projection_allowed: bool,
+    /// The repository's access mode (`ReadWrite`/`ReadOnly`, ADR-0005 §11). A
+    /// `ReadOnly` repo refuses backup Jobs and maintenance (restores allowed); the
+    /// `Snapshot` reconciler gates on [`RepositoryMode::allows_writes`].
+    pub mode: RepositoryMode,
 }
 
 /// Which API a [`RepositoryRef`] resolves against, derived purely from `kind`.
@@ -53,7 +81,7 @@ pub struct ResolvedRepository {
 /// unit-tested without a cluster. It is the regression guard for the class of
 /// bug where a `kind: ClusterRepository` ref silently fell through to a
 /// namespaced `Repository` lookup and produced `missing dependency: Repository
-/// <ns>/<name>` for cluster-backed `BackupConfig`s.
+/// <ns>/<name>` for cluster-backed `SnapshotPolicy`s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoLookup {
     /// Namespaced `Repository` get in `namespace`.
@@ -133,7 +161,15 @@ pub async fn resolve_repository_ref(
                 repo_namespace: Some(namespace),
                 backend: repo.spec.backend,
                 encryption: repo.spec.encryption,
-                cache_defaults: repo.spec.cache_defaults,
+                mover_defaults: repo.spec.mover_defaults,
+                // A namespaced Repository has no identity defaults.
+                identity_defaults: None,
+                on_namespace_delete: repo.spec.on_namespace_delete,
+                // A namespaced Repository has no owner-side projection gate: its
+                // credential Secret co-resides with the consumer, so projection is a
+                // same-namespace no-op. Treat the gate as not-applicable (false).
+                credential_projection_allowed: false,
+                mode: repo.spec.mode,
             })
         }
         RepoLookup::Cluster { name } => {
@@ -146,7 +182,15 @@ pub async fn resolve_repository_ref(
                 repo_namespace: None,
                 backend: repo.spec.backend,
                 encryption: repo.spec.encryption,
-                cache_defaults: repo.spec.cache_defaults,
+                mover_defaults: repo.spec.mover_defaults,
+                identity_defaults: repo.spec.identity_defaults,
+                on_namespace_delete: repo.spec.on_namespace_delete,
+                credential_projection_allowed: repo
+                    .spec
+                    .credential_projection
+                    .map(|p| p.allowed)
+                    .unwrap_or(false),
+                mode: repo.spec.mode,
             })
         }
     }
@@ -178,6 +222,29 @@ pub async fn repository_ready(
                 .await?
                 .ok_or_else(|| Error::MissingDependency(format!("ClusterRepository {name}")))?;
             Ok(repo.status.and_then(|s| s.phase) == ready)
+        }
+    }
+}
+
+/// Whether the named `Namespace` is being torn down — its `deletionTimestamp` is
+/// set, or its `status.phase` is `Terminating`. Used by the `Snapshot` finalizer to
+/// decide the namespace-deletion cascade (ADR-0005 §5). A missing Namespace (already
+/// gone) counts as terminating — the namespace is clearly being removed. A transient
+/// read error propagates so the caller can back off rather than guess.
+pub async fn namespace_is_terminating(client: &kube::Client, namespace: &str) -> Result<bool> {
+    use k8s_openapi::api::core::v1::Namespace;
+    let api: Api<Namespace> = Api::all(client.clone());
+    match api.get_opt(namespace).await? {
+        None => Ok(true),
+        Some(ns) => {
+            let has_ts = ns.metadata.deletion_timestamp.is_some();
+            let terminating = ns
+                .status
+                .as_ref()
+                .and_then(|s| s.phase.as_deref())
+                .map(|p| p == "Terminating")
+                .unwrap_or(false);
+            Ok(has_ts || terminating)
         }
     }
 }

@@ -15,7 +15,7 @@ pattern, hardened for DR with two changes from a normal install.
    — it must already exist; we are not initializing a new empty one. A typo in
    the bucket then surfaces as a connect error instead of silently creating a
    second, empty repository at the wrong address.
-2. A **passive `Restore`** (`source.fromConfig`, no `target`,
+2. A **passive `Restore`** (`source.fromPolicy`, no `target`,
    `onMissingSnapshot: Continue`) is wired into the PVC's `dataSourceRef` as a
    volume populator, so the PVC restores the latest snapshot **before the app
    starts**.
@@ -25,7 +25,7 @@ pattern, hardened for DR with two changes from a normal install.
 /// warning | Identity must match the old cluster
 
 kopia finds the surviving snapshots by `username@hostname:path`. The defaults are
-`username = BackupConfig name` and `hostname = namespace`, so rebuilding with the
+`username = SnapshotPolicy name` and `hostname = namespace`, so rebuilding with the
 **same name in the same namespace** resolves the same snapshots automatically.
 This bundle pins `identity` explicitly anyway, so recovery still works even if you
 rebuild into a differently-named namespace. The `KOPIA_PASSWORD` must also be the
@@ -40,7 +40,7 @@ rebuild into a differently-named namespace. The `KOPIA_PASSWORD` must also be th
 | `KOPIA_PASSWORD` | the **original** repo password | kopia can't decrypt otherwise. |
 | `backend.s3.bucket` / `prefix` | the surviving bucket/prefix | that's where the snapshots are. |
 | `create.enabled` | `false` | connect, don't re-initialize. |
-| `identity.username` / `hostname` | what the old cluster recorded | so `fromConfig` resolves the old snapshots. |
+| `identity.username` / `hostname` | what the old cluster recorded | so `fromPolicy` resolves the old snapshots. |
 
 ```yaml
 --8<-- "deploy/examples/scenarios/03-disaster-recovery.yaml"
@@ -50,10 +50,10 @@ rebuild into a differently-named namespace. The `KOPIA_PASSWORD` must also be th
 
 ```mermaid
 flowchart LR
-  R[Repository<br/>connects to existing repo] --> BC[BackupConfig<br/>identity pinned]
-  BC --> RS[passive Restore<br/>fromConfig: latest]
+  R[Repository<br/>connects to existing repo] --> BC[SnapshotPolicy<br/>identity pinned]
+  BC --> RS[passive Restore<br/>fromPolicy: latest]
   RS -->|dataSourceRef populator| PVC[PVC postgres-data<br/>restored before app starts]
-  BC --> SCH[BackupSchedule<br/>protection resumes]
+  BC --> SCH[SnapshotSchedule<br/>protection resumes]
 ```
 
 On a cluster pointed at the **existing** repo, the PVC is provisioned by restoring
@@ -91,5 +91,5 @@ The volume-populator handshake needs the `AnyVolumeDataSource` feature (GA from
 ## See also
 
 - [Restores → deploy-or-restore](../restores.md#deploy-or-restore-gitops) and [example 05](../examples.md#example-05--deploy-or-restore-gitops) — the populator mechanism in detail.
-- [Scenario 04 — migrate across clusters](migrate-across-clusters.md) — when the destination's name/namespace is _different_ (and `fromConfig` won't resolve the old snapshots).
+- [Scenario 04 — migrate across clusters](migrate-across-clusters.md) — when the destination's name/namespace is _different_ (and `fromPolicy` won't resolve the old snapshots).
 - [Repositories & backends](../repositories.md) — `create.enabled` and connection details.

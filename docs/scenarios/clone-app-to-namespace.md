@@ -26,10 +26,10 @@ Two options:
 ## Step 2 — Restore prod's snapshot into the destination
 
 The bundle creates the `staging` namespace and a `Restore` that resolves prod's
-latest snapshot (`source.fromConfig` with `namespace: billing`) into a new
+latest snapshot (`source.fromPolicy` with `namespace: billing`) into a new
 `postgres-data-clone` PVC in `staging`. The mover's `securityContext` matches the
 staging app's UID so the cloned files are usable. (To clone a _specific_ snapshot
-instead of the latest, use `source.backupRef` with the prod `Backup`'s name +
+instead of the latest, use `source.snapshotRef` with the prod `Snapshot`'s name +
 `namespace` — see [example 16](../examples.md#example-16--cross-namespace-clone-restore).)
 
 ```yaml
@@ -52,8 +52,8 @@ for _write_ and never modified.
 
 /// note | Identity, not magic
 
-`fromConfig` resolves the snapshot by kopia identity
-(`<backupConfigName>@<namespace>:/pvc/<pvcName>`), which is why it needs the source
+`fromPolicy` resolves the snapshot by kopia identity
+(`<snapshotPolicyName>@<namespace>:/pvc/<pvcName>`), which is why it needs the source
 namespace. The clone lands under a new identity for its own future backups. See
 [How Kopia works](../concepts/how-kopia-works.md).
 

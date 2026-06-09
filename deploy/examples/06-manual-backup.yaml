@@ -1,25 +1,30 @@
 # Example 06 — Manual one-shot backup (ADR-0001 §5.6)
 #
-# A Backup CR is the universal trigger: created by a BackupSchedule, by
+# A Snapshot CR is the universal trigger: created by a SnapshotSchedule, by
 # `kubectl create`, or by any external system (Argo Events Sensor, Tekton Task,
 # GitHub Actions, a webhook handler). Trigger is separable from recipe (G17).
 #
-# For scheduled/manual backups the spec carries `configRef`. `deletionPolicy` is
+# For scheduled/manual backups the spec carries `policyRef`. `deletionPolicy` is
 # a closed enum: Delete (default for produced) | Retain | Orphan (ADR §4.5).
 # `tags` are arbitrary kopia snapshot tags.
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: Backup
+kind: Snapshot
 metadata:
   name: postgres-data-pre-migration
   namespace: billing
 spec:
-  configRef:
+  policyRef:
     name: postgres-data
   tags:
     reason: "pre-schema-migration"
-  # Keep this snapshot even when the next GFS prune runs.
+  # Keep the Snapshot CR even when the next GFS prune runs.
   deletionPolicy: Retain
+  # Pin the underlying kopia snapshot so GFS retention NEVER expires it — for a
+  # pre-migration / compliance hold (ADR-0005 §13(c)). Clear it to release the
+  # hold. `pin` exempts the snapshot from expiry; `deletionPolicy` governs what
+  # happens to the snapshot when THIS CR is deleted — they're independent.
+  pin: true
   # Optional per-run failure controls passed through to the mover Job (G6):
   failurePolicy:
     backoffLimit: 2

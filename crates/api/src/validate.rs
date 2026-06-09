@@ -15,15 +15,16 @@
 //! An empty vec means valid.
 
 use crate::backend::NfsVolume;
-use crate::backup::{BackupSpec, Origin};
-use crate::backup_config::{BackupConfigSpec, Source};
-use crate::backup_schedule::BackupScheduleSpec;
 use crate::cluster_repository::{AllowedNamespaces, ClusterRepositorySpec};
 use crate::common::{DeletionPolicy, MoverSpec, RepositoryKind, RepositoryRef};
 use crate::error::{ValidationError, ValidationResult};
 use crate::maintenance::{MaintenanceSpec, RepositoryMaintenanceSpec};
 use crate::repository::RepositorySpec;
+use crate::repository_replication::RepositoryReplicationSpec;
 use crate::restore::{RestoreSource, RestoreSpec, RestoreTarget};
+use crate::snapshot::{Origin, SnapshotSpec};
+use crate::snapshot_policy::{SnapshotPolicySpec, Source};
+use crate::snapshot_schedule::SnapshotScheduleSpec;
 use std::collections::BTreeMap;
 
 /// A `RepositoryRef` is well-formed: a `ClusterRepository` reference is by name
@@ -122,7 +123,7 @@ pub fn validate_consumer_against_cluster_repo(
     }
 }
 
-/// A `Backup`'s `deletionPolicy` is legal for its origin (ADR §4.5).
+/// A `Snapshot`'s `deletionPolicy` is legal for its origin (ADR §4.5).
 ///
 /// `origin: discovered` forces `Retain`: `None` (defaults to `Retain`) and an
 /// explicit `Retain` pass; `Delete`/`Orphan` are rejected. Other origins accept any
@@ -163,10 +164,10 @@ pub fn validate_source(source: &Source) -> ValidationResult {
         [first, second, ..] => Err(ValidationError::MutuallyExclusive {
             a: (*first).to_string(),
             b: (*second).to_string(),
-            context: "backup source".to_string(),
+            context: "snapshot source".to_string(),
         }),
         [_only] => match &source.nfs {
-            Some(nfs) => validate_nfs_volume(nfs, "backup source"),
+            Some(nfs) => validate_nfs_volume(nfs, "snapshot source"),
             None => Ok(()),
         },
     }
@@ -174,7 +175,7 @@ pub fn validate_source(source: &Source) -> ValidationResult {
 
 /// An inline [`NfsVolume`] is well-formed: a non-empty server and an absolute
 /// export path. The structural schema can't express either, so the webhook does.
-/// `context` names where it appears (e.g. `"backup source"`, `"filesystem repo"`)
+/// `context` names where it appears (e.g. `"snapshot source"`, `"filesystem repo"`)
 /// for an actionable message.
 pub fn validate_nfs_volume(nfs: &NfsVolume, context: &str) -> ValidationResult {
     if nfs.server.trim().is_empty() {
@@ -194,25 +195,44 @@ pub fn validate_nfs_volume(nfs: &NfsVolume, context: &str) -> ValidationResult {
     Ok(())
 }
 
-/// A `Restore` spec is internally consistent (ADR §3.6/§4.6).
+/// A `Restore` spec is internally consistent (ADR §3.6/§4.6 / ADR-0005 §9).
 ///
 /// The externally-tagged `RestoreSource`/`RestoreTarget` enums already guarantee
 /// **exactly one** variant — that is a compile-time/serde invariant, not re-checked
-/// here. We validate the cross-field rules the enums can't express:
+/// here (a `Restore` with no `target` now fails to deserialize entirely, ADR-0005 §9).
+/// We validate the cross-field rules the enums can't express:
 /// - `source.identity` requires `spec.repository` (nothing else can derive it).
 /// - if `target: pvc`, the template must name the PVC (`name` non-empty).
+/// - `target: populator` forbids `mover.inheritSecurityContextFrom`: no workload pod
+///   exists at provision time to inherit from (ADR-0005 §9 / ADR §4.7) — point the
+///   user at `moverDefaults` / an explicit `securityContext` instead.
 pub fn validate_restore(spec: &RestoreSpec) -> ValidationResult {
-    // Exactly-one-variant on `source`/`target` is guaranteed by the enum + Option;
-    // see RestoreSource / Option<RestoreTarget>.
+    // Exactly-one-variant on `source`/`target` is guaranteed by the enums; see
+    // RestoreSource / RestoreTarget (both required, externally tagged).
     if matches!(spec.source, RestoreSource::Identity(_)) && spec.repository.is_none() {
         return Err(ValidationError::RestoreSourceRepositoryRequired);
     }
-    if let Some(RestoreTarget::Pvc(t)) = &spec.target
-        && t.name.trim().is_empty()
-    {
-        return Err(ValidationError::MissingRequiredField {
-            field: "restore.target.pvc.name".to_string(),
-        });
+    match &spec.target {
+        RestoreTarget::Pvc(t) if t.name.trim().is_empty() => {
+            return Err(ValidationError::MissingRequiredField {
+                field: "restore.target.pvc.name".to_string(),
+            });
+        }
+        RestoreTarget::Populator(_) => {
+            if let Some(m) = &spec.mover
+                && m.inherit_security_context_from.is_some()
+            {
+                return Err(ValidationError::InvalidFieldValue {
+                    field: "restore.mover.inheritSecurityContextFrom".to_string(),
+                    reason: "is not allowed with target.populator: no workload pod exists at \
+                             provision time to inherit a security context from; set \
+                             mover.securityContext explicitly or rely on the repository's \
+                             moverDefaults instead"
+                        .to_string(),
+                });
+            }
+        }
+        RestoreTarget::Pvc(_) | RestoreTarget::PvcRef(_) => {}
     }
     if let Some(m) = &spec.mover {
         validate_mover(m, "Restore mover")?;
@@ -290,6 +310,172 @@ pub fn validate_repository_maintenance(
     errs
 }
 
+/// Accumulate every create-time-immutable field that changed between `old` and
+/// `new` repository specs (ADR-0005 §7). Shared by both repository kinds via the
+/// thin [`validate_repository_immutability`] / [`validate_cluster_repository_immutability`]
+/// wrappers, which pass the `encryption` password ref + the `create.{splitter,hash,
+/// encryption}` algorithms — the fields kopia bakes into the repository format.
+///
+/// Pure: the webhook supplies `old`/`new` from the admission request's old/new
+/// objects; CREATE has no old object, so this is only wired into the UPDATE path.
+fn diff_immutable_repo_fields(
+    old_encryption: &crate::common::Encryption,
+    new_encryption: &crate::common::Encryption,
+    old_create: Option<&crate::common::CreateBehavior>,
+    new_create: Option<&crate::common::CreateBehavior>,
+) -> Vec<ValidationError> {
+    let mut errs = Vec::new();
+    // `encryption` (the whole block — its password Secret ref pins the repository's
+    // encryption material). A changed password ref points at a different repository.
+    if old_encryption != new_encryption {
+        errs.push(ValidationError::Immutable {
+            field: "encryption".to_string(),
+        });
+    }
+    // The create-time kopia algorithms. Compared field-wise so the message names the
+    // exact field. `create` itself may be absent on either side (absent ⇒ None algos).
+    let old_splitter = old_create.and_then(|c| c.splitter.as_deref());
+    let new_splitter = new_create.and_then(|c| c.splitter.as_deref());
+    if old_splitter != new_splitter {
+        errs.push(ValidationError::Immutable {
+            field: "create.splitter".to_string(),
+        });
+    }
+    let old_hash = old_create.and_then(|c| c.hash.as_deref());
+    let new_hash = new_create.and_then(|c| c.hash.as_deref());
+    if old_hash != new_hash {
+        errs.push(ValidationError::Immutable {
+            field: "create.hash".to_string(),
+        });
+    }
+    let old_enc = old_create.and_then(|c| c.encryption.as_deref());
+    let new_enc = new_create.and_then(|c| c.encryption.as_deref());
+    if old_enc != new_enc {
+        errs.push(ValidationError::Immutable {
+            field: "create.encryption".to_string(),
+        });
+    }
+    // ECC (Reed-Solomon parity) is baked into the repository format at create time
+    // (ADR-0005 §13(a)) — immutable post-create like the other create knobs.
+    let old_ecc = old_create.and_then(|c| c.ecc.as_ref());
+    let new_ecc = new_create.and_then(|c| c.ecc.as_ref());
+    if old_ecc != new_ecc {
+        errs.push(ValidationError::Immutable {
+            field: "create.ecc".to_string(),
+        });
+    }
+    errs
+}
+
+/// Reject changes to create-time-immutable `Repository` fields on UPDATE (ADR-0005
+/// §7): `encryption`, `create.splitter`, `create.hash`, `create.encryption`. Returns
+/// every changed field so a user sees them all at once. Empty ⇒ no immutable change.
+///
+/// ```
+/// use kopiur_api::repository::RepositorySpec;
+/// use kopiur_api::validate::validate_repository_immutability;
+/// # use kopiur_api::backend::{Backend, FilesystemBackend};
+/// # use kopiur_api::common::{CreateBehavior, Encryption, SecretKeyRef};
+/// # fn spec(splitter: Option<&str>) -> RepositorySpec {
+/// #     RepositorySpec {
+/// #         backend: Backend::Filesystem(FilesystemBackend { path: "/r".into(), volume: None }),
+/// #         encryption: Encryption { password_secret_ref: SecretKeyRef { name: "s".into(), namespace: None, key: None } },
+/// #         create: Some(CreateBehavior { enabled: true, encryption: None, splitter: splitter.map(String::from), hash: None, ecc: None }),
+/// #         mover_defaults: None, catalog: None, maintenance: None, on_namespace_delete: Default::default(), mode: Default::default(), suspend: false,
+/// #     }
+/// # }
+/// // Unchanged splitter → accepted.
+/// assert!(validate_repository_immutability(&spec(Some("FIXED-4M")), &spec(Some("FIXED-4M"))).is_empty());
+/// // Changed splitter → rejected.
+/// assert!(!validate_repository_immutability(&spec(Some("FIXED-4M")), &spec(Some("DYNAMIC"))).is_empty());
+/// ```
+pub fn validate_repository_immutability(
+    old: &RepositorySpec,
+    new: &RepositorySpec,
+) -> Vec<ValidationError> {
+    diff_immutable_repo_fields(
+        &old.encryption,
+        &new.encryption,
+        old.create.as_ref(),
+        new.create.as_ref(),
+    )
+}
+
+/// Reject changes to create-time-immutable `ClusterRepository` fields on UPDATE
+/// (ADR-0005 §7). Same field set as [`validate_repository_immutability`].
+pub fn validate_cluster_repository_immutability(
+    old: &ClusterRepositorySpec,
+    new: &ClusterRepositorySpec,
+) -> Vec<ValidationError> {
+    diff_immutable_repo_fields(
+        &old.encryption,
+        &new.encryption,
+        old.create.as_ref(),
+        new.create.as_ref(),
+    )
+}
+
+/// An already-admitted `SnapshotPolicy`'s identity, keyed for collision detection
+/// (ADR-0005 §6). `repo_key` is a normalized repository identity (e.g.
+/// `"ClusterRepository/shared"` or `"Repository/backups/nas"`) so two policies are
+/// "the same repository" only when their keys match; `name` is the policy's
+/// `namespace/name` for the actionable message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingIdentity {
+    /// The other policy's resolved `username@hostname[:path]` identity string.
+    pub identity: String,
+    /// The other policy's normalized repository key.
+    pub repo_key: String,
+    /// `namespace/name` of the other policy (for the conflict message).
+    pub name: String,
+}
+
+/// Detect whether a `SnapshotPolicy`'s resolved identity collides with an
+/// already-admitted policy's identity **in the same repository** (ADR-0005 §6).
+/// Pure so the decision is unit-tested; the webhook does the IO (list policies,
+/// resolve each identity) and calls this. Returns the conflicting `namespace/name`
+/// or `None`.
+///
+/// - `self_name` is the candidate's own `namespace/name`, skipped so a re-apply of
+///   the same object never collides with itself.
+/// - A collision requires BOTH the same `repo_key` AND the same `identity` string.
+///
+/// ```
+/// use kopiur_api::validate::{detect_identity_collision, ExistingIdentity};
+///
+/// let existing = vec![ExistingIdentity {
+///     identity: "pg@billing:/pvc/data".into(),
+///     repo_key: "ClusterRepository/shared".into(),
+///     name: "billing/pg-a".into(),
+/// }];
+/// // Same identity + same repo, different policy → collision.
+/// assert_eq!(
+///     detect_identity_collision("pg@billing:/pvc/data", "ClusterRepository/shared", "billing/pg-b", &existing),
+///     Some("billing/pg-a".to_string()),
+/// );
+/// // Same identity but a DIFFERENT repository → no collision (separate snapshot history).
+/// assert_eq!(
+///     detect_identity_collision("pg@billing:/pvc/data", "Repository/billing/nas", "billing/pg-b", &existing),
+///     None,
+/// );
+/// // Self (same name) is skipped.
+/// assert_eq!(
+///     detect_identity_collision("pg@billing:/pvc/data", "ClusterRepository/shared", "billing/pg-a", &existing),
+///     None,
+/// );
+/// ```
+pub fn detect_identity_collision(
+    self_identity: &str,
+    self_repo_key: &str,
+    self_name: &str,
+    existing: &[ExistingIdentity],
+) -> Option<String> {
+    existing
+        .iter()
+        .find(|e| e.name != self_name && e.repo_key == self_repo_key && e.identity == self_identity)
+        .map(|e| e.name.clone())
+}
+
 /// A cron expression parses with the same parser the controller uses at runtime, so
 /// bad expressions are rejected at apply time, not at first reconcile (ADR §4.1).
 ///
@@ -329,8 +515,8 @@ pub fn validate_cron(expr: &str) -> ValidationResult {
 
 // --- Per-CRD aggregate validators (accumulate every problem) ----------------
 
-/// Validate a `BackupConfig` spec, accumulating all problems.
-pub fn validate_backup_config(spec: &BackupConfigSpec) -> Vec<ValidationError> {
+/// Validate a `SnapshotPolicy` spec, accumulating all problems.
+pub fn validate_backup_config(spec: &SnapshotPolicySpec) -> Vec<ValidationError> {
     let mut errs = Vec::new();
     if let Err(e) = validate_repository_ref(&spec.repository) {
         errs.push(e);
@@ -346,18 +532,38 @@ pub fn validate_backup_config(spec: &BackupConfigSpec) -> Vec<ValidationError> {
         }
     }
     if let Some(m) = &spec.mover
-        && let Err(e) = validate_mover(m, "BackupConfig mover")
+        && let Err(e) = validate_mover(m, "SnapshotPolicy mover")
     {
         errs.push(e);
+    }
+    // Verification (ADR-0005 §4): override schedules must parse, and the optional
+    // `successExpr` (ADR-0005 §15) must compile + trial-evaluate to a bool with no
+    // out-of-scope variable — rejected at admission rather than at first verify run.
+    if let Some(v) = &spec.verification {
+        if let Some(q) = &v.quick
+            && let Err(e) = validate_cron(&q.cron)
+        {
+            errs.push(e);
+        }
+        if let Some(d) = &v.deep
+            && let Err(e) = validate_cron(&d.schedule.cron)
+        {
+            errs.push(e);
+        }
+        if let Some(expr) = &v.success_expr
+            && let Err(e) = crate::success_expr::validate_success_expr(expr)
+        {
+            errs.push(e);
+        }
     }
     errs
 }
 
-/// Validate a `Backup` spec for a given origin, accumulating all problems.
+/// Validate a `Snapshot` spec for a given origin, accumulating all problems.
 ///
 /// `origin` is supplied by the caller because the canonical value lives in
 /// `status.origin` / the `kopiur.home-operations.com/origin` label, not in `spec` (ADR §3.4).
-pub fn validate_backup(spec: &BackupSpec, origin: Origin) -> Vec<ValidationError> {
+pub fn validate_backup(spec: &SnapshotSpec, origin: Origin) -> Vec<ValidationError> {
     let mut errs = Vec::new();
     if let Err(e) = validate_backup_deletion_policy(origin, spec.deletion_policy) {
         errs.push(e);
@@ -365,9 +571,29 @@ pub fn validate_backup(spec: &BackupSpec, origin: Origin) -> Vec<ValidationError
     errs
 }
 
-/// Validate a `BackupSchedule` spec, accumulating all problems.
-pub fn validate_backup_schedule(spec: &BackupScheduleSpec) -> Vec<ValidationError> {
+/// Exactly one of `policyRef` / `policySelector` is set on a `SnapshotSchedule`
+/// (ADR-0005 §10). Neither ⇒ `MissingRequiredField`; both ⇒ `MutuallyExclusive`.
+/// Pure so the XOR decision is unit-tested directly.
+pub fn validate_schedule_policy_target(spec: &SnapshotScheduleSpec) -> ValidationResult {
+    match (spec.policy_ref.is_some(), spec.policy_selector.is_some()) {
+        (true, true) => Err(ValidationError::MutuallyExclusive {
+            a: "policyRef".to_string(),
+            b: "policySelector".to_string(),
+            context: "SnapshotSchedule".to_string(),
+        }),
+        (false, false) => Err(ValidationError::MissingRequiredField {
+            field: "exactly one of spec.policyRef or spec.policySelector".to_string(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Validate a `SnapshotSchedule` spec, accumulating all problems.
+pub fn validate_backup_schedule(spec: &SnapshotScheduleSpec) -> Vec<ValidationError> {
     let mut errs = Vec::new();
+    if let Err(e) = validate_schedule_policy_target(spec) {
+        errs.push(e);
+    }
     if let Err(e) = validate_cron(&spec.schedule.cron) {
         errs.push(e);
     }
@@ -387,6 +613,79 @@ pub fn validate_repository(spec: &RepositorySpec) -> Vec<ValidationError> {
         errs.extend(validate_repository_maintenance(m, false));
     }
     errs
+}
+
+/// Validate a `RepositoryReplication` spec, accumulating all problems (ADR-0005
+/// §13(d)): the `sourceRef` is well-formed, the schedule cron parses, the
+/// destination backend's content is valid, and (when a mover is set) it's
+/// well-formed. The "destination differs from source" rule needs the resolved
+/// source backend, which this pure validator cannot fetch — the webhook resolves it
+/// and calls [`replication_destination_differs`] separately.
+pub fn validate_repository_replication(spec: &RepositoryReplicationSpec) -> Vec<ValidationError> {
+    let mut errs = Vec::new();
+    if let Err(e) = validate_repository_ref(&spec.source_ref) {
+        errs.push(e);
+    }
+    if let Err(e) = validate_cron(&spec.schedule.cron) {
+        errs.push(e);
+    }
+    if let Err(e) = validate_backend(&spec.destination) {
+        errs.push(e);
+    }
+    if let Some(m) = &spec.mover
+        && let Err(e) = validate_mover(m, "RepositoryReplication mover")
+    {
+        errs.push(e);
+    }
+    errs
+}
+
+/// Whether a replication's `destination` backend differs from its source
+/// repository's backend (ADR-0005 §13(d)). Replicating a repository to *itself* is a
+/// no-op (or a loop), so the webhook rejects it. Pure so the decision is unit-tested;
+/// the webhook resolves the source backend (it has a client) and calls this. A
+/// "same" destination is detected structurally: same backend kind AND the same
+/// identifying target (bucket+prefix / path / container / host+path / url / remote).
+///
+/// ```
+/// use kopiur_api::backend::{Backend, FilesystemBackend, S3Backend};
+/// use kopiur_api::validate::replication_destination_differs;
+///
+/// let fs_a = Backend::Filesystem(FilesystemBackend { path: "/a".into(), volume: None });
+/// let fs_b = Backend::Filesystem(FilesystemBackend { path: "/b".into(), volume: None });
+/// // Different paths → differ.
+/// assert!(replication_destination_differs(&fs_a, &fs_b));
+/// // Same path → same target (would be a self-replication).
+/// assert!(!replication_destination_differs(&fs_a, &fs_a));
+/// // Different backend kinds always differ.
+/// let s3 = Backend::S3(S3Backend { bucket: "b".into(), prefix: None, endpoint: None, region: None, auth: None, tls: None });
+/// assert!(replication_destination_differs(&fs_a, &s3));
+/// ```
+pub fn replication_destination_differs(
+    source: &crate::backend::Backend,
+    dest: &crate::backend::Backend,
+) -> bool {
+    backend_target_key(source) != backend_target_key(dest)
+}
+
+/// A structural identity key for a backend (kind + identifying target), used by
+/// [`replication_destination_differs`] to decide whether two backends point at the
+/// same storage. Exhaustive over [`crate::backend::Backend`] so a new backend cannot
+/// compile until its key is defined.
+fn backend_target_key(backend: &crate::backend::Backend) -> String {
+    use crate::backend::Backend;
+    let kind = backend.kind_str();
+    let target = match backend {
+        Backend::Filesystem(f) => f.path.clone(),
+        Backend::S3(s) => format!("{}/{}", s.bucket, s.prefix.clone().unwrap_or_default()),
+        Backend::Azure(a) => format!("{}/{}", a.container, a.prefix.clone().unwrap_or_default()),
+        Backend::Gcs(g) => format!("{}/{}", g.bucket, g.prefix.clone().unwrap_or_default()),
+        Backend::B2(b) => format!("{}/{}", b.bucket, b.prefix.clone().unwrap_or_default()),
+        Backend::Sftp(s) => format!("{}:{}", s.host, s.path),
+        Backend::WebDav(w) => w.url.clone(),
+        Backend::Rclone(r) => r.remote_path.clone(),
+    };
+    format!("{kind}:{target}")
 }
 
 /// Validate backend *content* the structural schema can't express. Today this is
@@ -446,6 +745,20 @@ pub fn validate_cluster_repository(spec: &ClusterRepositorySpec) -> Vec<Validati
     }
     if let Some(m) = &spec.maintenance {
         errs.extend(validate_repository_maintenance(m, true));
+    }
+    // Identity CEL expressions must compile + trial-evaluate to a string at admission
+    // (ADR-0004 §5), so a typo / out-of-scope variable is rejected on `kubectl apply`.
+    if let Some(id) = &spec.identity_defaults {
+        if let Some(expr) = &id.hostname_expr
+            && let Err(e) = crate::identity::validate_identity_expr(expr)
+        {
+            errs.push(e);
+        }
+        if let Some(expr) = &id.username_expr
+            && let Err(e) = crate::identity::validate_identity_expr(expr)
+        {
+            errs.push(e);
+        }
     }
     errs
 }
@@ -647,7 +960,7 @@ mod tests {
 
     #[test]
     fn source_with_both_pvc_and_selector_is_rejected() {
-        use crate::backup_config::{PvcSelector, PvcSource};
+        use crate::snapshot_policy::{PvcSelector, PvcSource};
         let src = Source {
             pvc: Some(PvcSource { name: "p".into() }),
             pvc_selector: Some(PvcSelector {
@@ -696,7 +1009,7 @@ mod tests {
 
     #[test]
     fn nfs_source_with_pvc_is_mutually_exclusive() {
-        use crate::backup_config::PvcSource;
+        use crate::snapshot_policy::PvcSource;
         let src = Source {
             pvc: Some(PvcSource { name: "p".into() }),
             pvc_selector: None,
@@ -809,10 +1122,16 @@ mod tests {
     // --- validate_restore ---
 
     fn restore_with(source: RestoreSource, repo: Option<RepositoryRef>) -> RestoreSpec {
+        use crate::common::ObjectRef;
         RestoreSpec {
             repository: repo,
             source,
-            target: None,
+            // A benign existing-PVC target (target is required, ADR-0005 §9); the
+            // populator-specific rules are exercised in dedicated tests.
+            target: RestoreTarget::PvcRef(ObjectRef {
+                name: "tgt".into(),
+                namespace: None,
+            }),
             options: None,
             policy: None,
             credential_projection: None,
@@ -862,7 +1181,7 @@ mod tests {
     fn restore_backup_ref_does_not_require_repository() {
         use crate::common::ObjectRef;
         let spec = restore_with(
-            RestoreSource::BackupRef(ObjectRef {
+            RestoreSource::SnapshotRef(ObjectRef {
                 name: "b".into(),
                 namespace: None,
             }),
@@ -876,18 +1195,18 @@ mod tests {
         use crate::common::ObjectRef;
         use crate::restore::PvcTemplate;
         let mut spec = restore_with(
-            RestoreSource::BackupRef(ObjectRef {
+            RestoreSource::SnapshotRef(ObjectRef {
                 name: "b".into(),
                 namespace: None,
             }),
             None,
         );
-        spec.target = Some(RestoreTarget::Pvc(PvcTemplate {
+        spec.target = RestoreTarget::Pvc(PvcTemplate {
             name: "  ".into(),
             storage_class_name: None,
             capacity: None,
             access_modes: vec![],
-        }));
+        });
         assert!(matches!(
             validate_restore(&spec),
             Err(ValidationError::MissingRequiredField { .. })
@@ -940,7 +1259,7 @@ mod tests {
 
         // Surfaced through the Restore validator.
         let mut spec = restore_with(
-            RestoreSource::BackupRef(ObjectRef {
+            RestoreSource::SnapshotRef(ObjectRef {
                 name: "b".into(),
                 namespace: None,
             }),
@@ -1020,9 +1339,12 @@ mod tests {
                 },
             },
             create: None,
-            cache_defaults: None,
+            mover_defaults: None,
             catalog: None,
             maintenance: None,
+            on_namespace_delete: Default::default(),
+            mode: Default::default(),
+            suspend: false,
         };
         assert!(validate_repository_no_inline_retention(&spec).is_ok());
     }
@@ -1031,16 +1353,22 @@ mod tests {
 
     #[test]
     fn backup_config_aggregate_collects_multiple_errors() {
-        let spec = BackupConfigSpec {
+        let spec = SnapshotPolicySpec {
             repository: repo_ref(RepositoryKind::ClusterRepository, Some("forbidden")),
             identity: Some(Identity::default()),
             sources: vec![], // missing required
-            copy_method: None,
+            copy_method: Default::default(),
             volume_snapshot_class_name: None,
             group_by: None,
             retention: None,
             default_deletion_policy: None,
-            policy: None,
+            compression: None,
+            files: None,
+            extra_args: vec![],
+            error_handling: None,
+            upload: None,
+            verification: None,
+            suspend: false,
             hooks: None,
             mover: None,
             credential_projection: None,
@@ -1060,8 +1388,8 @@ mod tests {
 
     #[test]
     fn backup_config_valid_spec_has_no_errors() {
-        use crate::backup_config::{PvcSource, Source};
-        let spec = BackupConfigSpec {
+        use crate::snapshot_policy::{PvcSource, Source};
+        let spec = SnapshotPolicySpec {
             repository: repo_ref(RepositoryKind::Repository, Some("backups")),
             identity: None,
             sources: vec![Source {
@@ -1073,12 +1401,18 @@ mod tests {
                 source_path_override: None,
                 source_path_strategy: None,
             }],
-            copy_method: None,
+            copy_method: Default::default(),
             volume_snapshot_class_name: None,
             group_by: None,
             retention: None,
             default_deletion_policy: None,
-            policy: None,
+            compression: None,
+            files: None,
+            extra_args: vec![],
+            error_handling: None,
+            upload: None,
+            verification: None,
+            suspend: false,
             hooks: None,
             mover: None,
             credential_projection: None,
@@ -1088,11 +1422,12 @@ mod tests {
 
     #[test]
     fn backup_aggregate_rejects_discovered_delete() {
-        let spec = BackupSpec {
-            config_ref: None,
+        let spec = SnapshotSpec {
+            policy_ref: None,
             tags: None,
             failure_policy: None,
             deletion_policy: Some(DeletionPolicy::Delete),
+            pin: false,
         };
         let errs = validate_backup(&spec, Origin::Discovered);
         assert_eq!(errs.len(), 1);
@@ -1104,13 +1439,14 @@ mod tests {
 
     #[test]
     fn backup_schedule_aggregate_rejects_bad_cron() {
-        use crate::backup_schedule::ScheduleSpec;
-        use crate::common::ConfigRef;
-        let spec = BackupScheduleSpec {
-            config_ref: ConfigRef {
+        use crate::common::PolicyRef;
+        use crate::snapshot_schedule::ScheduleSpec;
+        let spec = SnapshotScheduleSpec {
+            policy_ref: Some(PolicyRef {
                 name: "c".into(),
                 namespace: None,
-            },
+            }),
+            policy_selector: None,
             schedule: ScheduleSpec {
                 cron: "totally bad".into(),
                 jitter: None,
@@ -1126,6 +1462,77 @@ mod tests {
         assert!(
             errs.iter()
                 .any(|e| matches!(e, ValidationError::InvalidCron { .. }))
+        );
+    }
+
+    // --- §10 policyRef XOR policySelector ---
+
+    #[test]
+    fn schedule_requires_exactly_one_policy_target() {
+        use crate::common::PolicyRef;
+        use crate::snapshot_schedule::ScheduleSpec;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+        let base_schedule = || ScheduleSpec {
+            cron: "0 2 * * *".into(),
+            jitter: None,
+            timezone: None,
+            run_on_create: false,
+            suspend: false,
+            concurrency_policy: Default::default(),
+            starting_deadline_seconds: None,
+        };
+        let pref = || {
+            Some(PolicyRef {
+                name: "pg".into(),
+                namespace: None,
+            })
+        };
+        let sel = || Some(LabelSelector::default());
+
+        // Neither → MissingRequiredField.
+        let neither = SnapshotScheduleSpec {
+            policy_ref: None,
+            policy_selector: None,
+            schedule: base_schedule(),
+            failed_jobs_history_limit: None,
+        };
+        assert!(matches!(
+            validate_schedule_policy_target(&neither),
+            Err(ValidationError::MissingRequiredField { .. })
+        ));
+
+        // Both → MutuallyExclusive.
+        let both = SnapshotScheduleSpec {
+            policy_ref: pref(),
+            policy_selector: sel(),
+            schedule: base_schedule(),
+            failed_jobs_history_limit: None,
+        };
+        assert!(matches!(
+            validate_schedule_policy_target(&both),
+            Err(ValidationError::MutuallyExclusive { .. })
+        ));
+
+        // Exactly one (either form) → ok.
+        let only_ref = SnapshotScheduleSpec {
+            policy_ref: pref(),
+            policy_selector: None,
+            schedule: base_schedule(),
+            failed_jobs_history_limit: None,
+        };
+        let only_sel = SnapshotScheduleSpec {
+            policy_ref: None,
+            policy_selector: sel(),
+            schedule: base_schedule(),
+            failed_jobs_history_limit: None,
+        };
+        assert!(validate_schedule_policy_target(&only_ref).is_ok());
+        assert!(validate_schedule_policy_target(&only_sel).is_ok());
+        // The aggregate validator surfaces the XOR problem too.
+        assert!(
+            validate_backup_schedule(&neither)
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRequiredField { .. }))
         );
     }
 
@@ -1147,9 +1554,12 @@ mod tests {
                 },
             },
             create: None,
-            cache_defaults: None,
+            mover_defaults: None,
             catalog: None,
             maintenance: m,
+            on_namespace_delete: Default::default(),
+            mode: Default::default(),
+            suspend: false,
         }
     }
 
@@ -1232,12 +1642,419 @@ mod tests {
                 },
             },
             create: None,
-            cache_defaults: None,
+            mover_defaults: None,
             catalog: None,
             allowed_namespaces: AllowedNamespaces::All(false),
             identity_defaults: None,
             maintenance: None,
+            on_namespace_delete: Default::default(),
+            mode: Default::default(),
+            suspend: false,
+            credential_projection: None,
         };
         assert!(!validate_cluster_repository(&spec).is_empty());
+    }
+
+    #[test]
+    fn cluster_repository_rejects_bad_identity_expr() {
+        use crate::backend::{Backend, FilesystemBackend};
+        use crate::cluster_repository::IdentityDefaults;
+        use crate::common::{Encryption, SecretKeyRef};
+        let spec = ClusterRepositorySpec {
+            backend: Backend::Filesystem(FilesystemBackend {
+                path: "/r".into(),
+                volume: None,
+            }),
+            encryption: Encryption {
+                password_secret_ref: SecretKeyRef {
+                    name: "s".into(),
+                    namespace: Some("kopia-system".into()),
+                    key: None,
+                },
+            },
+            create: None,
+            mover_defaults: None,
+            catalog: None,
+            allowed_namespaces: AllowedNamespaces::All(true),
+            // `namspace` is an out-of-scope typo → rejected at admission (ADR-0004 §5).
+            identity_defaults: Some(IdentityDefaults {
+                hostname_expr: Some("namspace".into()),
+                username_expr: None,
+            }),
+            maintenance: None,
+            on_namespace_delete: Default::default(),
+            mode: Default::default(),
+            suspend: false,
+            credential_projection: None,
+        };
+        let errs = validate_cluster_repository(&spec);
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::IdentityExprEval { .. })),
+            "expected IdentityExprEval, got {errs:?}"
+        );
+    }
+
+    // --- create-time immutability (ADR-0005 §7) -----------------------------
+
+    fn repo_spec_create(
+        enc_secret: &str,
+        splitter: Option<&str>,
+        hash: Option<&str>,
+        create_enc: Option<&str>,
+    ) -> RepositorySpec {
+        use crate::backend::{Backend, FilesystemBackend};
+        use crate::common::{CreateBehavior, Encryption, SecretKeyRef};
+        RepositorySpec {
+            backend: Backend::Filesystem(FilesystemBackend {
+                path: "/repo".into(),
+                volume: None,
+            }),
+            encryption: Encryption {
+                password_secret_ref: SecretKeyRef {
+                    name: enc_secret.into(),
+                    namespace: None,
+                    key: None,
+                },
+            },
+            create: Some(CreateBehavior {
+                enabled: true,
+                encryption: create_enc.map(String::from),
+                splitter: splitter.map(String::from),
+                hash: hash.map(String::from),
+                ecc: None,
+            }),
+            mover_defaults: None,
+            catalog: None,
+            maintenance: None,
+            on_namespace_delete: Default::default(),
+            mode: Default::default(),
+            suspend: false,
+        }
+    }
+
+    #[test]
+    fn repository_immutability_accepts_unchanged_fields() {
+        let old = repo_spec_create("pw", Some("FIXED-4M"), Some("BLAKE2B-256"), Some("AES256"));
+        let new = old.clone();
+        assert!(validate_repository_immutability(&old, &new).is_empty());
+    }
+
+    #[test]
+    fn repository_immutability_rejects_changed_encryption_secret() {
+        let old = repo_spec_create("pw-old", None, None, None);
+        let new = repo_spec_create("pw-new", None, None, None);
+        let errs = validate_repository_immutability(&old, &new);
+        assert_eq!(
+            errs,
+            vec![ValidationError::Immutable {
+                field: "encryption".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn repository_immutability_rejects_changed_ecc() {
+        use crate::common::Ecc;
+        let mut old = repo_spec_create("pw", None, None, None);
+        let mut new = old.clone();
+        if let Some(c) = old.create.as_mut() {
+            c.ecc = Some(Ecc {
+                algorithm: Some("REED-SOLOMON-CRC32".into()),
+                overhead_percent: Some(2),
+            });
+        }
+        if let Some(c) = new.create.as_mut() {
+            c.ecc = Some(Ecc {
+                algorithm: Some("REED-SOLOMON-CRC32".into()),
+                overhead_percent: Some(5), // changed overhead → immutable
+            });
+        }
+        let errs = validate_repository_immutability(&old, &new);
+        assert!(errs.contains(&ValidationError::Immutable {
+            field: "create.ecc".to_string()
+        }));
+        // Unchanged ECC → no error.
+        assert!(validate_repository_immutability(&old, &old.clone()).is_empty());
+    }
+
+    #[test]
+    fn repository_immutability_rejects_changed_splitter_hash_and_create_encryption() {
+        let old = repo_spec_create("pw", Some("FIXED-4M"), Some("BLAKE2B-256"), Some("AES256"));
+        let new = repo_spec_create("pw", Some("DYNAMIC"), Some("HMAC-SHA256"), Some("CHACHA20"));
+        let errs = validate_repository_immutability(&old, &new);
+        assert!(errs.contains(&ValidationError::Immutable {
+            field: "create.splitter".to_string()
+        }));
+        assert!(errs.contains(&ValidationError::Immutable {
+            field: "create.hash".to_string()
+        }));
+        assert!(errs.contains(&ValidationError::Immutable {
+            field: "create.encryption".to_string()
+        }));
+        // Unchanged encryption secret → no `encryption` immutable error.
+        assert!(!errs.contains(&ValidationError::Immutable {
+            field: "encryption".to_string()
+        }));
+    }
+
+    #[test]
+    fn repository_immutability_tolerates_absent_create_on_both_sides() {
+        // create absent ⇒ no algos pinned; unchanged ⇒ no immutable errors.
+        let mut old = repo_spec_create("pw", None, None, None);
+        old.create = None;
+        let new = old.clone();
+        assert!(validate_repository_immutability(&old, &new).is_empty());
+    }
+
+    #[test]
+    fn cluster_repository_immutability_rejects_changed_splitter() {
+        use crate::backend::{Backend, FilesystemBackend};
+        use crate::common::{CreateBehavior, Encryption, SecretKeyRef};
+        let mk = |splitter: &str| ClusterRepositorySpec {
+            backend: Backend::Filesystem(FilesystemBackend {
+                path: "/r".into(),
+                volume: None,
+            }),
+            encryption: Encryption {
+                password_secret_ref: SecretKeyRef {
+                    name: "s".into(),
+                    namespace: Some("kopia-system".into()),
+                    key: None,
+                },
+            },
+            create: Some(CreateBehavior {
+                enabled: true,
+                encryption: None,
+                splitter: Some(splitter.into()),
+                hash: None,
+                ecc: None,
+            }),
+            mover_defaults: None,
+            catalog: None,
+            allowed_namespaces: AllowedNamespaces::All(true),
+            identity_defaults: None,
+            maintenance: None,
+            on_namespace_delete: Default::default(),
+            mode: Default::default(),
+            suspend: false,
+            credential_projection: None,
+        };
+        let old = mk("FIXED-4M");
+        let same = mk("FIXED-4M");
+        assert!(validate_cluster_repository_immutability(&old, &same).is_empty());
+        let changed = mk("DYNAMIC");
+        assert!(
+            validate_cluster_repository_immutability(&old, &changed).contains(
+                &ValidationError::Immutable {
+                    field: "create.splitter".to_string()
+                }
+            )
+        );
+    }
+
+    // --- identity-collision detection (ADR-0005 §6) -------------------------
+
+    #[test]
+    fn identity_collision_same_repo_same_identity_is_detected() {
+        let existing = vec![ExistingIdentity {
+            identity: "pg@billing:/pvc/data".into(),
+            repo_key: "ClusterRepository/shared".into(),
+            name: "billing/pg-a".into(),
+        }];
+        assert_eq!(
+            detect_identity_collision(
+                "pg@billing:/pvc/data",
+                "ClusterRepository/shared",
+                "billing/pg-b",
+                &existing
+            ),
+            Some("billing/pg-a".to_string())
+        );
+    }
+
+    #[test]
+    fn identity_collision_different_repo_is_allowed() {
+        let existing = vec![ExistingIdentity {
+            identity: "pg@billing:/pvc/data".into(),
+            repo_key: "ClusterRepository/shared".into(),
+            name: "billing/pg-a".into(),
+        }];
+        // Same identity but a different repository → no collision (separate history).
+        assert_eq!(
+            detect_identity_collision(
+                "pg@billing:/pvc/data",
+                "Repository/billing/nas",
+                "billing/pg-b",
+                &existing
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn identity_collision_skips_self() {
+        let existing = vec![ExistingIdentity {
+            identity: "pg@billing:/pvc/data".into(),
+            repo_key: "ClusterRepository/shared".into(),
+            name: "billing/pg-a".into(),
+        }];
+        // A re-apply of the same object (same name) must not collide with itself.
+        assert_eq!(
+            detect_identity_collision(
+                "pg@billing:/pvc/data",
+                "ClusterRepository/shared",
+                "billing/pg-a",
+                &existing
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn identity_collision_different_identity_is_allowed() {
+        let existing = vec![ExistingIdentity {
+            identity: "pg@billing:/pvc/data".into(),
+            repo_key: "ClusterRepository/shared".into(),
+            name: "billing/pg-a".into(),
+        }];
+        assert_eq!(
+            detect_identity_collision(
+                "redis@billing:/pvc/cache",
+                "ClusterRepository/shared",
+                "billing/redis",
+                &existing
+            ),
+            None
+        );
+    }
+
+    // --- §13(d) RepositoryReplication ---
+
+    fn replication_spec(
+        source: RepositoryRef,
+        dest: crate::backend::Backend,
+        cron: &str,
+    ) -> RepositoryReplicationSpec {
+        use crate::common::CronSpec;
+        RepositoryReplicationSpec {
+            source_ref: source,
+            destination: dest,
+            destination_encryption: None,
+            schedule: CronSpec {
+                cron: cron.into(),
+                jitter: None,
+            },
+            mover: None,
+            suspend: false,
+        }
+    }
+
+    #[test]
+    fn replication_valid_spec_has_no_errors() {
+        use crate::backend::{Backend, S3Backend};
+        let spec = replication_spec(
+            repo_ref(RepositoryKind::Repository, None),
+            Backend::S3(S3Backend {
+                bucket: "mirror".into(),
+                prefix: None,
+                endpoint: None,
+                region: None,
+                auth: None,
+                tls: None,
+            }),
+            "0 5 * * *",
+        );
+        assert!(validate_repository_replication(&spec).is_empty());
+    }
+
+    #[test]
+    fn replication_rejects_bad_cron_and_bad_clusterrepo_ref() {
+        use crate::backend::{Backend, S3Backend};
+        // A ClusterRepository sourceRef with a namespace + a bad cron → two errors.
+        let spec = replication_spec(
+            repo_ref(RepositoryKind::ClusterRepository, Some("oops")),
+            Backend::S3(S3Backend {
+                bucket: "mirror".into(),
+                prefix: None,
+                endpoint: None,
+                region: None,
+                auth: None,
+                tls: None,
+            }),
+            "not a cron",
+        );
+        let errs = validate_repository_replication(&spec);
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::ClusterRepoNamespaceForbidden { .. }))
+        );
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::InvalidCron { .. }))
+        );
+    }
+
+    #[test]
+    fn replication_rejects_invalid_destination_backend_content() {
+        use crate::backend::{Backend, FilesystemBackend, NfsVolume, RepoVolume};
+        // A filesystem destination with a relative NFS repo path is invalid content.
+        let spec = replication_spec(
+            repo_ref(RepositoryKind::Repository, None),
+            Backend::Filesystem(FilesystemBackend {
+                path: "/mirror".into(),
+                volume: Some(RepoVolume::Nfs(NfsVolume {
+                    server: "nas".into(),
+                    path: "relative/path".into(),
+                })),
+            }),
+            "0 5 * * *",
+        );
+        let errs = validate_repository_replication(&spec);
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::InvalidFieldValue { .. }))
+        );
+    }
+
+    #[test]
+    fn replication_destination_differs_decision() {
+        use crate::backend::{Backend, FilesystemBackend, S3Backend};
+        let fs_a = Backend::Filesystem(FilesystemBackend {
+            path: "/a".into(),
+            volume: None,
+        });
+        let fs_a2 = Backend::Filesystem(FilesystemBackend {
+            path: "/a".into(),
+            volume: None,
+        });
+        let fs_b = Backend::Filesystem(FilesystemBackend {
+            path: "/b".into(),
+            volume: None,
+        });
+        // Same path → same target (self-replication).
+        assert!(!replication_destination_differs(&fs_a, &fs_a2));
+        // Different path → differ.
+        assert!(replication_destination_differs(&fs_a, &fs_b));
+        // S3 differs from filesystem.
+        let s3 = Backend::S3(S3Backend {
+            bucket: "b".into(),
+            prefix: None,
+            endpoint: None,
+            region: None,
+            auth: None,
+            tls: None,
+        });
+        assert!(replication_destination_differs(&fs_a, &s3));
+        // Same S3 bucket+prefix → same target.
+        let s3b = Backend::S3(S3Backend {
+            bucket: "b".into(),
+            prefix: None,
+            endpoint: None,
+            region: None,
+            auth: None,
+            tls: None,
+        });
+        assert!(!replication_destination_differs(&s3, &s3b));
     }
 }

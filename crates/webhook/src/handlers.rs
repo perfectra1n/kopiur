@@ -15,25 +15,26 @@
 
 use kopiur_api as api;
 
-use api::backup::{BackupSpec, Origin};
-use api::backup_config::BackupConfigSpec;
-use api::backup_schedule::BackupScheduleSpec;
 use api::cluster_repository::ClusterRepositorySpec;
 use api::common::{DeletionPolicy, RepositoryKind, RepositoryRef};
 use api::error::ValidationError;
 use api::maintenance::MaintenanceSpec;
 use api::repository::RepositorySpec;
+use api::repository_replication::RepositoryReplicationSpec;
 use api::restore::RestoreSpec;
+use api::snapshot::{Origin, SnapshotSpec};
+use api::snapshot_policy::SnapshotPolicySpec;
+use api::snapshot_schedule::SnapshotScheduleSpec;
 
 use crate::tenancy::{self, TenancyDecision};
 use json_patch::{AddOperation, Patch, PatchOperation, jsonptr::PointerBuf};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Client;
 use kube::core::DynamicObject;
-use kube::core::admission::{AdmissionRequest, AdmissionResponse};
+use kube::core::admission::{AdmissionRequest, AdmissionResponse, Operation};
 use serde_json::{Value, json};
 
-/// The finalizer that ties a kopia snapshot's lifecycle to its `Backup` CR (ADR §4.5).
+/// The finalizer that ties a kopia snapshot's lifecycle to its `Snapshot` CR (ADR §4.5).
 pub const SNAPSHOT_CLEANUP_FINALIZER: &str = "kopiur.home-operations.com/snapshot-cleanup";
 
 /// Dispatch a decoded `AdmissionRequest` to the handler for its `kind`.
@@ -48,11 +49,12 @@ pub async fn dispatch(
 ) -> AdmissionResponse {
     let base = AdmissionResponse::from(req);
     match req.kind.kind.as_str() {
-        "BackupConfig" => handle_backup_config(req, base, client).await,
-        "Backup" => handle_backup(req, base),
-        "BackupSchedule" => handle_backup_schedule(req, base),
+        "SnapshotPolicy" => handle_snapshot_policy(req, base, client).await,
+        "Snapshot" => handle_snapshot(req, base),
+        "SnapshotSchedule" => handle_snapshot_schedule(req, base),
         "Restore" => handle_restore(req, base, client).await,
         "Maintenance" => handle_maintenance(req, base, client).await,
+        "RepositoryReplication" => handle_repository_replication(req, base, client).await,
         "ClusterRepository" => handle_cluster_repository(req, base),
         "Repository" => handle_repository(req, base),
         other => {
@@ -82,13 +84,24 @@ fn raw_object(req: &AdmissionRequest<DynamicObject>) -> Result<&DynamicObject, &
 
 /// Deserialize `object.data["spec"]` into a typed spec `T`. A missing `spec`
 /// deserializes from `null`/`{}` so specs that are entirely optional (e.g. a
-/// discovered `Backup`) still decode.
+/// discovered `Snapshot`) still decode.
 fn decode_spec<T: serde::de::DeserializeOwned>(data: &Value) -> Result<T, serde_json::Error> {
     let spec = data
         .get("spec")
         .cloned()
         .unwrap_or(Value::Object(Default::default()));
     serde_json::from_value(spec)
+}
+
+/// Decode the OLD object's typed spec `T` from an UPDATE admission request, if
+/// present. `None` for CREATE (no old object) or when the old object carries no
+/// decodable spec. Used by the create-time-immutability checks (ADR-0005 §7), which
+/// only run on UPDATE.
+fn decode_old_spec<T: serde::de::DeserializeOwned>(
+    req: &AdmissionRequest<DynamicObject>,
+) -> Option<T> {
+    let old = req.old_object.as_ref()?;
+    decode_spec(&old.data).ok()
 }
 
 /// Join a validation-error vec into a single user-facing rejection message.
@@ -121,7 +134,7 @@ fn ptr(path: &str) -> PointerBuf {
 /// (`deletionTimestamp` set): the controller's deletion path PATCHes the object to
 /// REMOVE this finalizer, and that PATCH is itself an UPDATE admission — re-adding
 /// here would immediately undo the removal, so the snapshot-cleanup finalizer
-/// could never clear and the `Backup` CR would never be garbage-collected.
+/// could never clear and the `Snapshot` CR would never be garbage-collected.
 fn ensure_finalizer_ops(meta: &ObjectMeta, ops: &mut Vec<PatchOperation>) {
     if meta.deletion_timestamp.is_some() {
         return;
@@ -146,9 +159,9 @@ fn ensure_finalizer_ops(meta: &ObjectMeta, ops: &mut Vec<PatchOperation>) {
     }
 }
 
-// --- BackupConfig -----------------------------------------------------------
+// --- SnapshotPolicy -----------------------------------------------------------
 
-async fn handle_backup_config(
+async fn handle_snapshot_policy(
     req: &AdmissionRequest<DynamicObject>,
     resp: AdmissionResponse,
     client: Option<&Client>,
@@ -157,9 +170,9 @@ async fn handle_backup_config(
         Ok(o) => o,
         Err(m) => return resp.deny(m),
     };
-    let spec: BackupConfigSpec = match decode_spec(&obj.data) {
+    let spec: SnapshotPolicySpec = match decode_spec(&obj.data) {
         Ok(s) => s,
-        Err(e) => return resp.deny(format!("failed to decode BackupConfig spec: {e}")),
+        Err(e) => return resp.deny(format!("failed to decode SnapshotPolicy spec: {e}")),
     };
 
     let errs = api::validate::validate_backup_config(&spec);
@@ -174,12 +187,39 @@ async fn handle_backup_config(
         return resp.deny(msg);
     }
 
+    // Identity-collision detection (ADR-0005 §6): reject a SnapshotPolicy whose
+    // resolved `username@hostname[:path]` identity collides with an already-admitted
+    // policy's identity in the same repository — two recipes must not interleave
+    // snapshots into one kopia identity. The IO is best-effort (fails open), so a
+    // transient list/get error never wedges an apply.
+    if let Some(ns) = req.namespace.as_deref() {
+        let name = obj.metadata.name.as_deref().unwrap_or(req.name.as_str());
+        if let Some(collision) = crate::identity_collision::check_identity_collision(
+            client,
+            name,
+            ns,
+            &spec,
+            obj.metadata.labels.as_ref(),
+            obj.metadata.annotations.as_ref(),
+        )
+        .await
+        {
+            return resp.deny(
+                ValidationError::IdentityCollision {
+                    identity: collision.identity,
+                    conflict: collision.conflict,
+                }
+                .to_string(),
+            );
+        }
+    }
+
     resp
 }
 
-// --- Backup -----------------------------------------------------------------
+// --- Snapshot -----------------------------------------------------------------
 
-fn handle_backup(
+fn handle_snapshot(
     req: &AdmissionRequest<DynamicObject>,
     resp: AdmissionResponse,
 ) -> AdmissionResponse {
@@ -187,9 +227,9 @@ fn handle_backup(
         Ok(o) => o,
         Err(m) => return resp.deny(m),
     };
-    let spec: BackupSpec = match decode_spec(&obj.data) {
+    let spec: SnapshotSpec = match decode_spec(&obj.data) {
         Ok(s) => s,
-        Err(e) => return resp.deny(format!("failed to decode Backup spec: {e}")),
+        Err(e) => return resp.deny(format!("failed to decode Snapshot spec: {e}")),
     };
 
     let origin = backup_origin(&obj.metadata, &obj.data);
@@ -199,18 +239,18 @@ fn handle_backup(
         return resp.deny(join_errors(&errs));
     }
 
-    // Manual backups carrying a configRef to a ClusterRepository are not expressible
-    // here (Backup.spec has no repository field — it derives from the configRef), so
-    // there is no inline ClusterRepository ref to gate on a Backup. Tenancy for the
-    // recipe is enforced on the BackupConfig. We still default deletionPolicy and the
+    // Manual backups carrying a policyRef to a ClusterRepository are not expressible
+    // here (Snapshot.spec has no repository field — it derives from the policyRef), so
+    // there is no inline ClusterRepository ref to gate on a Snapshot. Tenancy for the
+    // recipe is enforced on the SnapshotPolicy. We still default deletionPolicy and the
     // finalizer.
 
     let mut ops = Vec::new();
 
     // Origin-aware default deletionPolicy when absent (ADR §4.5):
     //   discovered → forced Retain; produced (scheduled/manual) → Delete.
-    // (BackupConfig.defaultDeletionPolicy inheritance is the controller's job once it
-    // resolves the configRef; the webhook only sets the safe origin-aware default.)
+    // (SnapshotPolicy.defaultDeletionPolicy inheritance is the controller's job once it
+    // resolves the policyRef; the webhook only sets the safe origin-aware default.)
     if spec.deletion_policy.is_none() {
         let default = match origin {
             Origin::Discovered => DeletionPolicy::Retain,
@@ -223,13 +263,13 @@ fn handle_backup(
         ));
     }
 
-    // Every Backup carries the snapshot-cleanup finalizer (ADR §4.5).
+    // Every Snapshot carries the snapshot-cleanup finalizer (ADR §4.5).
     ensure_finalizer_ops(&obj.metadata, &mut ops);
 
     with_patch_or_deny(resp, ops)
 }
 
-/// Resolve a `Backup`'s origin from the `kopiur.home-operations.com/origin` label (canonical) or
+/// Resolve a `Snapshot`'s origin from the `kopiur.home-operations.com/origin` label (canonical) or
 /// `status.origin`, defaulting to `manual` for user-created backups with no marker.
 fn backup_origin(meta: &ObjectMeta, data: &Value) -> Origin {
     let from_label = meta
@@ -244,14 +284,14 @@ fn backup_origin(meta: &ObjectMeta, data: &Value) -> Origin {
     match from_label.or(from_status) {
         Some("discovered") => Origin::Discovered,
         Some("scheduled") => Origin::Scheduled,
-        // A user `kubectl create`-ing a Backup with no origin marker is manual.
+        // A user `kubectl create`-ing a Snapshot with no origin marker is manual.
         _ => Origin::Manual,
     }
 }
 
-// --- BackupSchedule ---------------------------------------------------------
+// --- SnapshotSchedule ---------------------------------------------------------
 
-fn handle_backup_schedule(
+fn handle_snapshot_schedule(
     req: &AdmissionRequest<DynamicObject>,
     resp: AdmissionResponse,
 ) -> AdmissionResponse {
@@ -260,9 +300,9 @@ fn handle_backup_schedule(
         Err(m) => return resp.deny(m),
     };
     let data = &obj.data;
-    let spec: BackupScheduleSpec = match decode_spec(data) {
+    let spec: SnapshotScheduleSpec = match decode_spec(data) {
         Ok(s) => s,
-        Err(e) => return resp.deny(format!("failed to decode BackupSchedule spec: {e}")),
+        Err(e) => return resp.deny(format!("failed to decode SnapshotSchedule spec: {e}")),
     };
 
     let errs = api::validate::validate_backup_schedule(&spec);
@@ -270,37 +310,12 @@ fn handle_backup_schedule(
         return resp.deny(join_errors(&errs));
     }
 
-    // Make the GitOps-safe defaults explicit on the object (ADR §4.1, G3/G5):
-    //   schedule.runOnCreate = false, schedule.concurrencyPolicy = Forbid.
-    // serde already defaults these when deserializing, but they are skip-serialized,
-    // so they are absent on the stored object unless we pin them via the patch.
-    let mut ops = Vec::new();
-    let schedule = data.get("spec").and_then(|s| s.get("schedule"));
-    let run_on_create_absent = schedule
-        .map(|s| s.get("runOnCreate").is_none())
-        .unwrap_or(true);
-    let concurrency_absent = schedule
-        .map(|s| s.get("concurrencyPolicy").is_none())
-        .unwrap_or(true);
-
-    // spec.schedule is required by the schema; if it somehow decoded but is absent in
-    // raw JSON we skip defaulting (validation above would have caught a missing cron).
-    if schedule.is_some() {
-        if run_on_create_absent {
-            ops.push(PatchOperation::Add(AddOperation {
-                path: ptr("/spec/schedule/runOnCreate"),
-                value: json!(false),
-            }));
-        }
-        if concurrency_absent {
-            ops.push(PatchOperation::Add(AddOperation {
-                path: ptr("/spec/schedule/concurrencyPolicy"),
-                value: json!("Forbid"),
-            }));
-        }
-    }
-
-    with_patch_or_deny(resp, ops)
+    // No spec-mutating defaulting here: `schedule.runOnCreate` (false) and
+    // `schedule.concurrencyPolicy` (Forbid) now carry real OpenAPI `default:`s in the
+    // CRD schema (ADR-0005 §1), so the apiserver materializes them. The webhook writes
+    // no user spec (the status-only-write invariant, ADR-0005 §14(d)) — a write-back
+    // into spec makes Argo/Flux perpetually `OutOfSync`.
+    resp
 }
 
 // --- Restore ----------------------------------------------------------------
@@ -364,6 +379,84 @@ async fn handle_maintenance(
     resp
 }
 
+// --- RepositoryReplication --------------------------------------------------
+
+async fn handle_repository_replication(
+    req: &AdmissionRequest<DynamicObject>,
+    resp: AdmissionResponse,
+    client: Option<&Client>,
+) -> AdmissionResponse {
+    let obj = match raw_object(req) {
+        Ok(o) => o,
+        Err(m) => return resp.deny(m),
+    };
+    let spec: RepositoryReplicationSpec = match decode_spec(&obj.data) {
+        Ok(s) => s,
+        Err(e) => return resp.deny(format!("failed to decode RepositoryReplication spec: {e}")),
+    };
+
+    let errs = api::validate::validate_repository_replication(&spec);
+    if !errs.is_empty() {
+        return resp.deny(join_errors(&errs));
+    }
+
+    // Tenancy: a ClusterRepository sourceRef is gated against allowedNamespaces.
+    if let TenancyDecision::Deny(msg) =
+        tenancy_for(&spec.source_ref, req.namespace.as_deref(), client).await
+    {
+        return resp.deny(msg);
+    }
+
+    // §13(d): the destination must differ from the source's backend (no self-mirror).
+    // Resolve the source backend via the client and compare. Best-effort — a missing
+    // client / unresolvable source skips this one check (the structural validations
+    // above already ran), mirroring how tenancy degrades when inputs are unavailable.
+    if let Some(client) = client
+        && let Some(source_backend) =
+            resolve_source_backend(client, &spec.source_ref, req.namespace.as_deref()).await
+        && !api::validate::replication_destination_differs(&source_backend, &spec.destination)
+    {
+        return resp.deny(
+            ValidationError::ReplicationDestinationSameAsSource {
+                backend: spec.destination.kind_str().to_string(),
+            }
+            .to_string(),
+        );
+    }
+
+    resp
+}
+
+/// Resolve a replication source's backend from its `RepositoryRef` (a namespaced
+/// `Repository` or a cluster-scoped `ClusterRepository`). Returns `None` when the
+/// repo can't be fetched (so the differs check is skipped rather than guessed).
+async fn resolve_source_backend(
+    client: &Client,
+    source: &RepositoryRef,
+    consumer_namespace: Option<&str>,
+) -> Option<api::backend::Backend> {
+    use kube::Api;
+    match source.kind {
+        RepositoryKind::Repository => {
+            let ns = source.namespace.as_deref().or(consumer_namespace)?;
+            let api: Api<api::Repository> = Api::namespaced(client.clone(), ns);
+            api.get_opt(&source.name)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.spec.backend)
+        }
+        RepositoryKind::ClusterRepository => {
+            let api: Api<api::ClusterRepository> = Api::all(client.clone());
+            api.get_opt(&source.name)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.spec.backend)
+        }
+    }
+}
+
 // --- ClusterRepository ------------------------------------------------------
 
 fn handle_cluster_repository(
@@ -379,7 +472,17 @@ fn handle_cluster_repository(
         Err(e) => return resp.deny(format!("failed to decode ClusterRepository spec: {e}")),
     };
 
-    let errs = api::validate::validate_cluster_repository(&spec);
+    let mut errs = api::validate::validate_cluster_repository(&spec);
+    // Create-time immutability (ADR-0005 §7): on UPDATE, reject changes to
+    // `encryption`/`create.{splitter,hash,encryption}` — kopia bakes them into the
+    // repository format. CREATE has no old object, so the check is UPDATE-only.
+    if req.operation == Operation::Update
+        && let Some(old) = decode_old_spec::<ClusterRepositorySpec>(req)
+    {
+        errs.extend(api::validate::validate_cluster_repository_immutability(
+            &old, &spec,
+        ));
+    }
     if !errs.is_empty() {
         return resp.deny(join_errors(&errs));
     }
@@ -401,7 +504,13 @@ fn handle_repository(
         Err(e) => return resp.deny(format!("failed to decode Repository spec: {e}")),
     };
 
-    let errs = api::validate::validate_repository(&spec);
+    let mut errs = api::validate::validate_repository(&spec);
+    // Create-time immutability (ADR-0005 §7), UPDATE-only.
+    if req.operation == Operation::Update
+        && let Some(old) = decode_old_spec::<RepositorySpec>(req)
+    {
+        errs.extend(api::validate::validate_repository_immutability(&old, &spec));
+    }
     if !errs.is_empty() {
         return resp.deny(join_errors(&errs));
     }
@@ -441,7 +550,7 @@ async fn tenancy_for(
 }
 
 /// Build a JSON-patch op that sets `spec.<field>`, creating `/spec` first if the raw
-/// object had no spec object at all (an empty discovered `Backup`). We use a `test`
+/// object had no spec object at all (an empty discovered `Snapshot`). We use a `test`
 /// guard only when `/spec` is known present to keep patches minimal.
 fn set_spec_field(data: &Value, field: &str, value: Value) -> PatchOperation {
     if data.get("spec").and_then(|s| s.as_object()).is_some() {

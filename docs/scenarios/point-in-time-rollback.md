@@ -2,11 +2,11 @@
 
 **You need a specific moment, not "yesterday."** A bad deploy at 14:30 quietly
 corrupted data over the next hour. You want the volume exactly as it was at **14:00**
-— just before things went wrong — and you don't want to scroll through `Backup` CRs
+— just before things went wrong — and you don't want to scroll through `Snapshot` CRs
 guessing which one that was.
 
-This is what `source.fromConfig` with `asOf` is for: it resolves through the
-`BackupConfig`'s **identity** (so it works even if the relevant `Backup` CR has aged
+This is what `source.fromPolicy` with `asOf` is for: it resolves through the
+`SnapshotPolicy`'s **identity** (so it works even if the relevant `Snapshot` CR has aged
 out of the catalog) and picks the newest snapshot **at or before** an instant. As
 always, restore into a **side-by-side** PVC and verify before cutting over.
 
@@ -27,7 +27,7 @@ one, not both.
 ## Step 2 — Restore into a clone and verify
 
 The bundle restores into a fresh `postgres-data-1400` PVC; the live volume is
-untouched. Because `fromConfig` defaults to `onMissingSnapshot: Continue`
+untouched. Because `fromPolicy` defaults to `onMissingSnapshot: Continue`
 (deploy-or-restore), a deliberate rollback sets it to **`Fail`** so an instant with no
 snapshot is a loud error, not a silent empty volume.
 
@@ -63,6 +63,6 @@ wrong instant the original is gone too. Clone, verify, _then_ cut over.
 
 ## See also
 
-- [Restores → point-in-time](../restores.md#fromconfig--resolve-via-a-backupconfigs-identity) — the `asOf` / `offset` reference.
+- [Restores → point-in-time](../restores.md#frompolicy--resolve-via-a-snapshotpolicys-identity) — the `asOf` / `offset` reference.
 - [Example 14 — point-in-time / offset restore](../examples.md#example-14--point-in-time--offset-restore) and [example 15 — in-place mirror](../examples.md#example-15--in-place-mirror-restore).
-- [Scenario 02 — recover lost data](recover-lost-data.md) — the same safe clone-and-verify habit for a known `Backup` CR.
+- [Scenario 02 — recover lost data](recover-lost-data.md) — the same safe clone-and-verify habit for a known `Snapshot` CR.

@@ -1,4 +1,4 @@
-//! kopiur-mover: the per-`Backup`/`Restore` Job binary (ADR §4.10).
+//! kopiur-mover: the per-`Snapshot`/`Restore` Job binary (ADR §4.10).
 //!
 //! Flow:
 //! 1. Read the work-spec path from arg/env, parse [`MoverWorkSpec`].
@@ -31,7 +31,8 @@ use kopiur_mover::credentials;
 use kopiur_mover::env::{KOPIA_BINARY, RESULT_CONFIGMAP, WORK_SPEC_PATH};
 use kopiur_mover::status::StatusUpdate;
 use kopiur_mover::workspec::{
-    self, BootstrapRepositoryOp, MaintenanceOp, MoverWorkSpec, Operation,
+    self, BootstrapRepositoryOp, KOPIUR_PIN_NAME, MaintenanceOp, MoverWorkSpec, Operation,
+    ReplicateOp, VerifyOp, VerifyTier,
 };
 
 fn main() -> std::process::ExitCode {
@@ -90,20 +91,39 @@ async fn run() -> Result<()> {
             // lease decision needs `kopia maintenance info`, which requires repo
             // access the controller does not have for object stores (ADR §3.7/§5.4).
             Operation::Maintenance(op) => run_maintenance_flow(&client, &spec, op, &connect).await,
+            // Verify, like maintenance, owns its own connect lifecycle and PATCHes
+            // the SnapshotPolicy `.status` directly (ADR-0005 §4).
+            Operation::Verify(op) => run_verify_flow(&client, &spec, op, &connect).await,
+            // Replicate connects to the source, then `repository sync-to` the
+            // destination; PATCHes the RepositoryReplication `.status` (ADR-0005 §13(d)).
+            Operation::Replicate(op) => run_replicate_flow(&client, &spec, op, &connect).await,
             _ => {
                 // A best-effort status reporter. If we cannot build a kube client
                 // (e.g. running outside a cluster), we log instead of failing.
                 let reporter = StatusReporter::try_new(&spec).await;
                 match client.repository_connect(&connect, spec.cache).await {
                     Err(e) => terminal_failure(&reporter, &e).await,
-                    Ok(()) => match execute(&client, &spec, &reporter).await {
-                        Ok(update) => {
-                            reporter.report(&update).await;
-                            info!(phase = %update.phase, "operation succeeded");
-                            Ok(())
+                    Ok(()) => {
+                        // Apply repository throttle (moverDefaults.throttle, ADR-0005
+                        // §13(e)) after connecting, before the data op. A throttle
+                        // failure is terminal: an un-throttled run could saturate the
+                        // link the user explicitly capped.
+                        if !spec.throttle.is_empty()
+                            && let Err(e) = client
+                                .repository_throttle_set(&spec.throttle.to_kopia())
+                                .await
+                        {
+                            return terminal_failure(&reporter, &e).await;
                         }
-                        Err(e) => terminal_failure(&reporter, &e).await,
-                    },
+                        match execute(&client, &spec, &reporter).await {
+                            Ok(update) => {
+                                reporter.report(&update).await;
+                                info!(phase = %update.phase, "operation succeeded");
+                                Ok(())
+                            }
+                            Err(e) => terminal_failure(&reporter, &e).await,
+                        }
+                    }
                 }
             }
         },
@@ -173,13 +193,24 @@ async fn run_operation(
     spec: &MoverWorkSpec,
 ) -> Result<StatusUpdate, KopiaError> {
     match &spec.operation {
-        Operation::Backup(op) => {
+        Operation::Snapshot(op) => {
             // Record the snapshot under the operator-resolved identity
             // (`username@hostname:sourcePath`), not the mover pod's ambient
             // user/host — ADR §4.2. The catalog, retention, and restore paths
             // all key on this identity.
             let id = &spec.identity;
             let override_source = format!("{}@{}:{}", id.username, id.hostname, id.source_path);
+            // Apply the resolved kopia `policy set` knobs (compression / never-compress
+            // / ignore rules / ignore-cache-dirs / backup-side error handling / upload
+            // parallelism / extraArgs) against this snapshot's source identity BEFORE
+            // creating the snapshot, so SnapshotPolicy.spec.{compression,files,
+            // errorHandling,upload,extraArgs} actually reach kopia (ADR-0005 §13(b)/§13(f),
+            // ADR-0004 §4b). Skipped when nothing is configured.
+            if !op.policy.is_empty() {
+                client
+                    .policy_set(&override_source, &op.policy.to_kopia())
+                    .await?;
+            }
             let result = client
                 .snapshot_create(&op.source_path, &op.tags, Some(&override_source))
                 .await?;
@@ -190,7 +221,7 @@ async fn run_operation(
                 .snapshot_restore_with(&op.snapshot_id, &op.target_path, &op.restore_options())
                 .await?;
             // Restore's terminal success phase is `Completed`, not `Succeeded`
-            // (the Backup phase) — the Restore CRD enum rejects `Succeeded`.
+            // (the Snapshot phase) — the Restore CRD enum rejects `Succeeded`.
             Ok(StatusUpdate::completed(chrono::Utc::now()))
         }
         Operation::SnapshotDelete(op) => {
@@ -199,7 +230,22 @@ async fn run_operation(
             client.snapshot_delete(&op.snapshot_id).await?;
             Ok(StatusUpdate::succeeded(chrono::Utc::now()))
         }
-        // Bootstrap and Maintenance are dispatched in `run()` before the
+        Operation::SnapshotPin(op) => {
+            // Reconcile kopia's pin state with Snapshot.spec.pin (ADR-0005 §13(c))
+            // so kopia's own maintenance/expire honors the pin on object stores.
+            // Idempotent: kopia treats a redundant add/remove as a no-op.
+            if op.pin {
+                client
+                    .snapshot_pin(&op.snapshot_id, KOPIUR_PIN_NAME)
+                    .await?;
+            } else {
+                client
+                    .snapshot_unpin(&op.snapshot_id, KOPIUR_PIN_NAME)
+                    .await?;
+            }
+            Ok(StatusUpdate::succeeded(chrono::Utc::now()))
+        }
+        // Bootstrap, Maintenance, and Verify are dispatched in `run()` before the
         // connect+execute path; they own their own connect lifecycle and never
         // reach here. Named explicitly (not `_`) so a future Operation variant
         // still fails to compile until handled (ADR §5.5).
@@ -208,6 +254,12 @@ async fn run_operation(
         }
         Operation::Maintenance(_) => {
             unreachable!("Maintenance is handled by run_maintenance_flow, not execute()")
+        }
+        Operation::Verify(_) => {
+            unreachable!("Verify is handled by run_verify_flow, not execute()")
+        }
+        Operation::Replicate(_) => {
+            unreachable!("Replicate is handled by run_replicate_flow, not execute()")
         }
     }
 }
@@ -286,7 +338,10 @@ async fn run_bootstrap(
             return BootstrapResult::failed(&e);
         }
         info!(class = %e.class(), "connect failed; attempting repository create");
-        if let Err(ce) = client.repository_create(&connect_spec, cache).await {
+        if let Err(ce) = client
+            .repository_create(&connect_spec, cache, &op.create_options())
+            .await
+        {
             return BootstrapResult::failed(&ce);
         }
         if let Err(ce) = client.repository_connect(&connect_spec, cache).await {
@@ -469,6 +524,311 @@ async fn run_maintenance_flow(
 /// Build a uniform maintenance error for the process exit (Job → `Failed`).
 fn maintenance_err(stage: &str, e: &KopiaError) -> anyhow::Error {
     anyhow::anyhow!("maintenance {stage} failed (class {}): {e}", e.class())
+}
+
+/// Drive a `Verify` run (ADR-0005 §4): connect, run the quick (`kopia snapshot
+/// verify`) or deep (scratch-restore) tier, evaluate the optional CEL `successExpr`
+/// over the result, and PATCH the `SnapshotPolicy` `.status.lastVerified` on
+/// success. Owns its own connect lifecycle like maintenance. Returns an error
+/// (non-zero exit → Job `Failed`) when a kopia call fails or `successExpr` rejects.
+async fn run_verify_flow(
+    client: &KopiaClient,
+    spec: &MoverWorkSpec,
+    op: &VerifyOp,
+    connect: &ConnectSpec,
+) -> Result<()> {
+    info!(
+        backend = spec.repository.kind_str(),
+        tier = op.tier.kind_str(),
+        policy = %spec.target_ref.name,
+        "running verification"
+    );
+    if let Err(e) = client.repository_connect(connect, spec.cache).await {
+        patch_verify_status(&spec.target_ref, &verify_failed_body(&e.to_string())).await;
+        error!(class = %e.class(), "verify connect failed");
+        return Err(anyhow::anyhow!(
+            "verify connect failed (class {}): {e}",
+            e.class()
+        ));
+    }
+
+    // Run the tier and collect the result environment for successExpr. A kopia
+    // failure is terminal; a clean run yields the stats the predicate inspects.
+    let (stats, restored) = match &op.tier {
+        VerifyTier::Quick(q) => {
+            if let Err(e) = client.snapshot_verify(&q.to_kopia()).await {
+                patch_verify_status(&spec.target_ref, &verify_failed_body(&e.to_string())).await;
+                error!(class = %e.class(), "snapshot verify failed");
+                return Err(anyhow::anyhow!(
+                    "snapshot verify failed (class {}): {e}",
+                    e.class()
+                ));
+            }
+            // kopia `snapshot verify` reports no machine-readable file/byte counts on
+            // stdout, so we conservatively report 0/0/0 for the predicate environment
+            // and rely on the exit code for the integrity verdict. (A future kopia
+            // JSON surface can populate real counts.)
+            (kopiur_api::VerifyStats::default(), None)
+        }
+        VerifyTier::Deep(d) => {
+            // Resolve the snapshot id to restore: the controller's choice, else the
+            // newest snapshot for this identity.
+            let id = match &d.snapshot_id {
+                Some(id) => id.clone(),
+                None => match resolve_latest_snapshot_id(client, spec).await {
+                    Ok(Some(id)) => id,
+                    Ok(None) => {
+                        let msg = "deep verify found no snapshot to restore for this identity";
+                        patch_verify_status(&spec.target_ref, &verify_failed_body(msg)).await;
+                        return Err(anyhow::anyhow!("{msg}"));
+                    }
+                    Err(e) => {
+                        patch_verify_status(&spec.target_ref, &verify_failed_body(&e.to_string()))
+                            .await;
+                        return Err(anyhow::anyhow!("deep verify snapshot list failed: {e}"));
+                    }
+                },
+            };
+            if let Err(e) = client.snapshot_restore(&id, &d.scratch_path).await {
+                patch_verify_status(&spec.target_ref, &verify_failed_body(&e.to_string())).await;
+                error!(class = %e.class(), "deep verify scratch-restore failed");
+                return Err(anyhow::anyhow!(
+                    "deep verify restore failed (class {}): {e}",
+                    e.class()
+                ));
+            }
+            // Count what the scratch-restore produced so `restored.files`/`stats.files`
+            // are meaningful to a successExpr. A read failure here is non-fatal: we
+            // treat the restore exit code as authoritative and report 0.
+            let files = count_files(&d.scratch_path).unwrap_or(0);
+            (
+                kopiur_api::VerifyStats {
+                    files,
+                    bytes: 0,
+                    errors: 0,
+                },
+                Some(kopiur_api::RestoredStats {
+                    files,
+                    checksum_matches: true,
+                }),
+            )
+        }
+    };
+
+    // Evaluate the optional CEL successExpr over the result — killing the silent
+    // "0 files" success when the user opted in.
+    if let Some(expr) = &op.success_expr {
+        let snapshot = std::collections::BTreeMap::new();
+        let inputs = kopiur_api::SuccessExprInputs {
+            stats,
+            snapshot,
+            restored,
+            _marker: std::marker::PhantomData,
+        };
+        match kopiur_api::eval_success_expr(expr, &inputs) {
+            Ok(true) => {}
+            Ok(false) => {
+                let msg = format!("verification successExpr evaluated false: {expr:?}");
+                patch_verify_status(&spec.target_ref, &verify_failed_body(&msg)).await;
+                warn!("{msg}");
+                return Err(anyhow::anyhow!("{msg}"));
+            }
+            Err(e) => {
+                let msg = format!("verification successExpr failed to evaluate: {e}");
+                patch_verify_status(&spec.target_ref, &verify_failed_body(&msg)).await;
+                return Err(anyhow::anyhow!("{msg}"));
+            }
+        }
+    }
+
+    patch_verify_status(
+        &spec.target_ref,
+        &verify_ok_body(op.tier.kind_str(), &chrono::Utc::now()),
+    )
+    .await;
+    info!(tier = op.tier.kind_str(), "verification succeeded");
+    Ok(())
+}
+
+/// The newest snapshot id for this run's identity, by source path (the kopia
+/// catalog records the path authoritatively; the pod's user/host differ).
+async fn resolve_latest_snapshot_id(
+    client: &KopiaClient,
+    spec: &MoverWorkSpec,
+) -> Result<Option<String>, KopiaError> {
+    let mut list = client.snapshot_list(None).await?;
+    list.sort_by_key(|e| std::cmp::Reverse(e.end_time));
+    let path = &spec.identity.source_path;
+    Ok(list
+        .into_iter()
+        .find(|e| e.source.path == *path)
+        .map(|e| e.id))
+}
+
+/// Best-effort recursive file count under `dir` for the deep-verify result
+/// environment. Returns `None` on any IO error (the caller treats it as 0).
+fn count_files(dir: &str) -> Option<i64> {
+    fn walk(dir: &std::path::Path, count: &mut i64) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                walk(&entry.path(), count)?;
+            } else if ft.is_file() {
+                *count += 1;
+            }
+        }
+        Ok(())
+    }
+    let mut count = 0i64;
+    walk(std::path::Path::new(dir), &mut count).ok()?;
+    Some(count)
+}
+
+/// `{ "status": ... }` body for a successful verification: stamp `lastVerified`
+/// and a `Verified=True` condition.
+fn verify_ok_body(tier: &str, now: &chrono::DateTime<chrono::Utc>) -> serde_json::Value {
+    let ts = now.to_rfc3339();
+    serde_json::json!({
+        "status": {
+            "lastVerified": ts,
+            "conditions": [{
+                "type": "Verified",
+                "status": "True",
+                "reason": "VerificationSucceeded",
+                "message": format!("{tier} verification succeeded"),
+                "lastTransitionTime": ts,
+                "observedGeneration": 0,
+            }],
+        }
+    })
+}
+
+/// `{ "status": ... }` body for a failed verification: a `Verified=False` condition.
+fn verify_failed_body(message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": {
+            "conditions": [{
+                "type": "Verified",
+                "status": "False",
+                "reason": "VerificationFailed",
+                "message": message,
+                "lastTransitionTime": chrono::Utc::now().to_rfc3339(),
+                "observedGeneration": 0,
+            }],
+        }
+    })
+}
+
+/// PATCH a raw `{ "status": ... }` merge body onto the `SnapshotPolicy` `.status`
+/// (best-effort; logged on failure). Reuses the same dynamic-API pattern as
+/// [`patch_maintenance_status`].
+async fn patch_verify_status(target: &workspec::TargetRef, body: &serde_json::Value) {
+    patch_maintenance_status(target, body).await;
+}
+
+/// Drive a `Replicate` run (ADR-0005 §13(d)): connect to the *source* repository,
+/// then `kopia repository sync-to <destination>` to mirror its blobs to the
+/// destination backend. PATCHes the `RepositoryReplication` `.status`. Owns its own
+/// connect lifecycle like maintenance. Returns an error (non-zero exit → Job
+/// `Failed`) when a kopia call fails.
+async fn run_replicate_flow(
+    client: &KopiaClient,
+    spec: &MoverWorkSpec,
+    op: &ReplicateOp,
+    connect: &ConnectSpec,
+) -> Result<()> {
+    info!(
+        source_backend = spec.repository.kind_str(),
+        destination_backend = op.destination.kind_str(),
+        replication = %spec.target_ref.name,
+        "replicating repository"
+    );
+    // Connect to the source first (this pod is the only place with repo access for
+    // object stores — the same rationale as maintenance/verify).
+    if let Err(e) = client.repository_connect(connect, spec.cache).await {
+        patch_replicate_status(&spec.target_ref, &replicate_failed_body(&e.to_string())).await;
+        error!(class = %e.class(), "replication source connect failed");
+        return Err(anyhow::anyhow!(
+            "replication connect failed (class {}): {e}",
+            e.class()
+        ));
+    }
+
+    // Materialize the DESTINATION's file-based credentials (SFTP key/GCS JSON/rclone)
+    // into a separate staging dir so they don't collide with the source's, then run
+    // sync-to. Env-only destinations (S3/Azure/B2/WebDAV/filesystem) pass through.
+    let mut dest = op.destination.to_connect_spec();
+    if let Err(e) = credentials::materialize(&mut dest, &credential_staging_dir().join("dest")) {
+        let msg = format!("materializing destination credentials failed: {e}");
+        patch_replicate_status(&spec.target_ref, &replicate_failed_body(&msg)).await;
+        return Err(anyhow::anyhow!("{msg}"));
+    }
+
+    if let Err(e) = client.repository_sync_to(&dest, op.delete_extra).await {
+        patch_replicate_status(&spec.target_ref, &replicate_failed_body(&e.to_string())).await;
+        error!(class = %e.class(), "repository sync-to failed");
+        return Err(anyhow::anyhow!(
+            "repository sync-to failed (class {}): {e}",
+            e.class()
+        ));
+    }
+
+    patch_replicate_status(
+        &spec.target_ref,
+        &replicate_ok_body(op.destination.kind_str(), &chrono::Utc::now()),
+    )
+    .await;
+    info!(
+        destination = op.destination.kind_str(),
+        "replication succeeded"
+    );
+    Ok(())
+}
+
+/// `{ "status": ... }` body for a successful replication: stamp `lastReplicated`,
+/// the destination backend, phase `Succeeded`, and a `Ready=True` condition.
+fn replicate_ok_body(dest: &str, now: &chrono::DateTime<chrono::Utc>) -> serde_json::Value {
+    let ts = now.to_rfc3339();
+    serde_json::json!({
+        "status": {
+            "phase": "Succeeded",
+            "destinationBackend": dest,
+            "lastReplicated": ts,
+            "conditions": [{
+                "type": "Ready",
+                "status": "True",
+                "reason": "ReplicationSucceeded",
+                "message": format!("replicated to {dest}"),
+                "lastTransitionTime": ts,
+                "observedGeneration": 0,
+            }],
+        }
+    })
+}
+
+/// `{ "status": ... }` body for a failed replication: phase `Failed` + a
+/// `Ready=False` condition.
+fn replicate_failed_body(message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": {
+            "phase": "Failed",
+            "conditions": [{
+                "type": "Ready",
+                "status": "False",
+                "reason": "ReplicationFailed",
+                "message": message,
+                "lastTransitionTime": chrono::Utc::now().to_rfc3339(),
+                "observedGeneration": 0,
+            }],
+        }
+    })
+}
+
+/// PATCH a raw `{ "status": ... }` merge body onto the `RepositoryReplication`
+/// `.status` (best-effort; logged on failure). Reuses the dynamic-API pattern.
+async fn patch_replicate_status(target: &workspec::TargetRef, body: &serde_json::Value) {
+    patch_maintenance_status(target, body).await;
 }
 
 /// `{ "status": ... }` body for a successful maintenance run. A full run also

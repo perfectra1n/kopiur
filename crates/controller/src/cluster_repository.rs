@@ -2,12 +2,12 @@
 //!
 //! Same storage lifecycle as [`crate::repository`] (connect/create, status,
 //! catalog scan), plus the cluster-scoped placement rule for discovered
-//! `Backup` CRs (ADR §2.3): a discovered snapshot is materialized in the
+//! `Snapshot` CRs (ADR §2.3): a discovered snapshot is materialized in the
 //! namespace named by its identity hostname **if** that namespace exists and is
 //! in `allowedNamespaces`; otherwise it falls back to `catalog.fallbackNamespace`.
 //!
 //! [`placement_namespace`] encodes that rule purely and is unit-tested; the
-//! existence check and `Backup` creation are the thin IO parts.
+//! existence check and `Snapshot` creation are the thin IO parts.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -28,14 +28,14 @@ use kopiur_mover::workspec::{
     BootstrapRepositoryOp, MoverOptions, MoverWorkSpec, Operation, ResolvedIdentity, TargetRef,
 };
 
-use crate::backup::{backend_to_repository_connect, mover_pull_policy_pub};
 use crate::consts::{API_VERSION, BOOTSTRAP_JOB_DEADLINE_SECS, REPOSITORY_BOOTSTRAPPED_CONDITION};
 use crate::context::Context;
 use crate::error::{Error, Result, TERMINAL_HEARTBEAT, error_policy_for};
 use crate::io;
 use crate::jobs::{self, JobLimits, MoverJobInputs};
+use crate::snapshot::{backend_to_repository_connect, mover_pull_policy_pub};
 
-/// Where to materialize a discovered `Backup` under a `ClusterRepository`
+/// Where to materialize a discovered `Snapshot` under a `ClusterRepository`
 /// (ADR §2.3). `identity_namespace` is the namespace named by the snapshot's
 /// identity hostname; `namespace_allowed` is whether it exists and is in the
 /// tenancy gate. Falls back to `fallback` when not allowed; returns `None` if
@@ -78,7 +78,7 @@ pub async fn reconcile(repo: Arc<ClusterRepository>, ctx: Arc<Context>) -> Resul
 
 /// Mirror a ClusterRepository's phase + catalog gauges (cluster-scoped, so the
 /// `namespace` label is empty). Zeroes the phase on deletion and re-reads the
-/// freshest status on success — see the Backup equivalent for the rationale.
+/// freshest status on success — see the Snapshot equivalent for the rationale.
 async fn record_cluster_repository_status_metrics(
     repo: &ClusterRepository,
     ctx: &Context,
@@ -122,6 +122,30 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
     let name = repo.name_any();
     let api: Api<ClusterRepository> = Api::all(ctx.client.clone());
 
+    // §14(e): a suspended ClusterRepository skips connect/bootstrap and maintenance
+    // projection — a declarative pause surfaced via a condition.
+    if repo.spec.suspend {
+        let conds = repo
+            .status
+            .as_ref()
+            .map(|s| s.conditions.clone())
+            .unwrap_or_default();
+        let conditions = io::set_ready(
+            &conds,
+            repo.metadata.generation,
+            io::ReadyOutcome::Reconciling,
+            "Suspended",
+            "ClusterRepository is suspended (spec.suspend); skipping connect and maintenance",
+        );
+        io::patch_status(
+            &api,
+            &name,
+            serde_json::json!({ "observedGeneration": repo.metadata.generation, "conditions": conditions }),
+        )
+        .await?;
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
+
     // Same connect/create/status lifecycle as Repository. Cluster-scoped secret
     // refs MUST carry an explicit namespace (webhook-enforced).
     match &repo.spec.backend {
@@ -163,10 +187,18 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
                 // is terminal. A terminal failure (connect OR a failed create)
                 // surfaces Failed + an actionable Event (e.g. filesystem "Access
                 // Denied") rather than an invisible reconcile error with no status.
+                let create_opts = kopiur_mover::workspec::CreateOptionsSpec::from_create(
+                    repo.spec.create.as_ref(),
+                )
+                .to_kopia();
                 let outcome =
                     if kopiur_mover::bootstrap::should_attempt_create(create_enabled, e.class()) {
                         match client
-                            .repository_create(&spec, kopiur_kopia::CacheTuning::default())
+                            .repository_create(
+                                &spec,
+                                kopiur_kopia::CacheTuning::default(),
+                                &create_opts,
+                            )
                             .await
                         {
                             Ok(_) => {
@@ -232,7 +264,7 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
             .await?;
 
             // NOTE: catalog placement for a ClusterRepository materializes each
-            // discovered Backup in the namespace named by the snapshot identity's
+            // discovered Snapshot in the namespace named by the snapshot identity's
             // hostname when it's allowed (placement_namespace + the tested
             // validate_consumer_against_cluster_repo gate), else the catalog
             // fallbackNamespace. The placement DECISION is implemented and tested
@@ -249,23 +281,26 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
                 .as_ref()
                 .map(|s| s.conditions.clone())
                 .unwrap_or_default();
-            let placement = cluster_maintenance_placement(ctx, repo);
-            io::ensure_maintenance(
-                ctx,
-                &api,
-                repo,
-                &repo.object_ref(&()),
-                RepositoryKind::ClusterRepository,
-                "ClusterRepository",
-                "",
-                None,
-                placement.as_deref(),
-                &name,
-                repo.spec.maintenance.as_ref(),
-                &conditions,
-                repo.metadata.generation,
-            )
-            .await;
+            // §11: ReadOnly cluster repos run no maintenance.
+            if repo.spec.mode.allows_writes() {
+                let placement = cluster_maintenance_placement(ctx, repo);
+                io::ensure_maintenance(
+                    ctx,
+                    &api,
+                    repo,
+                    &repo.object_ref(&()),
+                    RepositoryKind::ClusterRepository,
+                    "ClusterRepository",
+                    "",
+                    None,
+                    placement.as_deref(),
+                    &name,
+                    repo.spec.maintenance.as_ref(),
+                    &conditions,
+                    repo.metadata.generation,
+                )
+                .await;
+            }
         }
         other => {
             // Object-store backends bootstrap via a short-lived mover Job (ADR
@@ -280,7 +315,7 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
 }
 
 /// Drive the object-store bootstrap for a `ClusterRepository`. Mirrors the
-/// namespaced [`crate::repository::reconcile`] path, minus discovered-Backup
+/// namespaced [`crate::repository::reconcile`] path, minus discovered-Snapshot
 /// materialization: cross-namespace catalog placement for a ClusterRepository is
 /// a separate concern (see [`placement_namespace`]), so `scanCatalog` is off and
 /// the bootstrap reports identity + snapshot count only.
@@ -303,7 +338,7 @@ async fn bootstrap_cluster_object_store(
     let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), &job_ns);
 
     if let Some(job) = job_api.get_opt(&job_name).await? {
-        return match crate::backup::job_terminal_state(&job) {
+        return match crate::snapshot::job_terminal_state(&job) {
             None => {
                 io::patch_status(
                     api,
@@ -328,14 +363,33 @@ async fn bootstrap_cluster_object_store(
         .as_ref()
         .map(|c| c.enabled)
         .unwrap_or(false);
-    // ClusterRepository: no discovered-Backup materialization (scanCatalog off).
-    let work_spec = cluster_bootstrap_work_spec(backend, name, &job_ns, create_enabled);
+    // ClusterRepository: no discovered-Snapshot materialization (scanCatalog off).
+    let work_spec = cluster_bootstrap_work_spec(
+        backend,
+        name,
+        &job_ns,
+        create_enabled,
+        repo.spec.create.as_ref(),
+        repo.spec.mover_defaults.as_ref(),
+    );
     let creds_secrets = io::mover_creds_secrets(backend, &repo.spec.encryption);
     let owner = io::owner_ref_for(repo, "ClusterRepository")?;
     let mut labels = BTreeMap::new();
     labels.insert(
         "kopiur.home-operations.com/cluster-repository".to_string(),
         name.to_string(),
+    );
+    // The cluster-repo bootstrap Job inherits the repository's `moverDefaults`
+    // (ADR-0004 §1) — same bootstrap-gap fix as the namespaced Repository. The Job
+    // lands in `job_ns` (spec.maintenance.namespace or KOPIUR_NAMESPACE); not gated
+    // (repo-owner-authored, operator namespace).
+    let resolved_mover = kopiur_api::common::resolve_mover(
+        repo.spec.mover_defaults.as_ref(),
+        None,
+        None,
+        None,
+        None,
+        None,
     );
     let inputs = MoverJobInputs {
         name: &job_name,
@@ -349,11 +403,15 @@ async fn bootstrap_cluster_object_store(
         // `finalize_cluster_bootstrap` runs and surfaces a Warning Event.
         limits: JobLimits {
             active_deadline_seconds: Some(BOOTSTRAP_JOB_DEADLINE_SECS),
+            ttl_seconds_after_finished: resolved_mover.ttl_seconds_after_finished,
             ..JobLimits::default()
         },
-        resources: None,
-        security_context: None,
-        pod_security_context: None,
+        resources: resolved_mover.resources.clone(),
+        security_context: resolved_mover.security_context.clone(),
+        pod_security_context: resolved_mover.pod_security_context.clone(),
+        node_selector: resolved_mover.node_selector.clone(),
+        tolerations: resolved_mover.tolerations.clone(),
+        affinity: resolved_mover.affinity.clone(),
         labels,
         source_volume: None,
         repo_volume: None,
@@ -398,12 +456,15 @@ fn cluster_bootstrap_work_spec(
     name: &str,
     job_ns: &str,
     auto_create: bool,
+    create: Option<&kopiur_api::common::CreateBehavior>,
+    mover_defaults: Option<&kopiur_api::common::MoverDefaults>,
 ) -> MoverWorkSpec {
     MoverWorkSpec {
         version: 1,
         operation: Operation::BootstrapRepository(BootstrapRepositoryOp {
             auto_create,
             scan_catalog: false,
+            create_options: kopiur_mover::workspec::CreateOptionsSpec::from_create(create),
         }),
         identity: ResolvedIdentity {
             username: "kopiur-bootstrap".to_string(),
@@ -421,6 +482,7 @@ fn cluster_bootstrap_work_spec(
         options: MoverOptions::default(),
         // Bootstrap is a connect/create probe, not a data run: kopia defaults.
         cache: Default::default(),
+        throttle: io::throttle_spec(mover_defaults),
     }
 }
 
@@ -522,23 +584,26 @@ async fn finalize_cluster_bootstrap(
     // Ensure the managed Maintenance for this ClusterRepository (§3.7). Build on
     // the conditions we just patched (including `Bootstrapped`), not the stale
     // cached object, so this patch doesn't drop the `Bootstrapped` set above.
-    let placement = cluster_maintenance_placement(ctx, repo);
-    io::ensure_maintenance(
-        ctx,
-        api,
-        repo,
-        &repo.object_ref(&()),
-        RepositoryKind::ClusterRepository,
-        "ClusterRepository",
-        "",
-        None,
-        placement.as_deref(),
-        name,
-        repo.spec.maintenance.as_ref(),
-        &conditions,
-        repo.metadata.generation,
-    )
-    .await;
+    // §11: ReadOnly cluster repos run no maintenance.
+    if repo.spec.mode.allows_writes() {
+        let placement = cluster_maintenance_placement(ctx, repo);
+        io::ensure_maintenance(
+            ctx,
+            api,
+            repo,
+            &repo.object_ref(&()),
+            RepositoryKind::ClusterRepository,
+            "ClusterRepository",
+            "",
+            None,
+            placement.as_deref(),
+            name,
+            repo.spec.maintenance.as_ref(),
+            &conditions,
+            repo.metadata.generation,
+        )
+        .await;
+    }
 
     Ok(Action::requeue(Duration::from_secs(300)))
 }

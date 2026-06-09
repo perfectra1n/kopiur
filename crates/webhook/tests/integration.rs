@@ -46,7 +46,7 @@ async fn webhook_serves_admission_over_ephemeral_port() {
         "kind": "AdmissionReview",
         "request": {
             "uid": "integ-uid",
-            "kind": { "group": "kopiur.home-operations.com", "version": "v1alpha1", "kind": "BackupSchedule" },
+            "kind": { "group": "kopiur.home-operations.com", "version": "v1alpha1", "kind": "SnapshotSchedule" },
             "resource": { "group": "kopiur.home-operations.com", "version": "v1alpha1", "resource": "backupschedules" },
             "name": "nightly",
             "namespace": "default",
@@ -54,9 +54,9 @@ async fn webhook_serves_admission_over_ephemeral_port() {
             "userInfo": { "username": "integ" },
             "object": {
                 "apiVersion": "kopiur.home-operations.com/v1alpha1",
-                "kind": "BackupSchedule",
+                "kind": "SnapshotSchedule",
                 "metadata": { "name": "nightly", "namespace": "default" },
-                "spec": { "configRef": { "name": "c" }, "schedule": { "cron": "0 2 * * *" } }
+                "spec": { "policyRef": { "name": "c" }, "schedule": { "cron": "0 2 * * *" } }
             }
         }
     });

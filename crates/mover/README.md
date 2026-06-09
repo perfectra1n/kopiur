@@ -1,6 +1,6 @@
 # kopiur-mover
 
-The per-`Backup`/`Restore` Job binary that drives `kopia` inside a pod — and the
+The per-`Snapshot`/`Restore` Job binary that drives `kopia` inside a pod — and the
 pure data library that defines its contract with the controller.
 
 ## Role in the workspace
@@ -39,7 +39,7 @@ The spec carries **resolved values only** — identity already rendered, reposit
 connect info concrete (ADR §4.2). The mover never re-derives anything; it executes
 exactly what the controller decided. Both the [`workspec::Operation`] selector and
 the [`workspec::RepositoryConnect`] backend selector are **externally-tagged
-enums** (`{ "backup": {...} }`, `{ "filesystem": {...} }`), mirroring the api
+enums** (`{ "snapshot": {...} }`, `{ "filesystem": {...} }`), mirroring the api
 crate's enum discipline: a new operation or backend cannot compile until every
 `match` handles it. Credentials are _not_ in the spec — they arrive as env vars
 from a mounted Secret, so they never land in a ConfigMap.
@@ -49,7 +49,7 @@ from a mounted Secret, so they never land in a ConfigMap.
 | Type                                                                         | What it is                                                          |
 | ---------------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | [`workspec::MoverWorkSpec`]                                                  | The full controller→mover JSON contract                             |
-| [`workspec::Operation`]                                                      | Backup / Restore / SnapshotDelete / BootstrapRepository             |
+| [`workspec::Operation`]                                                      | Snapshot / Restore / SnapshotDelete / BootstrapRepository           |
 | [`workspec::RepositoryConnect`]                                              | Serializable backend selector (mirrors `kopiur_kopia::ConnectSpec`) |
 | [`workspec::ResolvedIdentity`]                                               | The pinned `username@hostname:path` identity                        |
 | [`status::StatusUpdate`] / [`status::FailureBlock`] / [`status::MoverPhase`] | Pure result → CR-status mapping                                     |
@@ -66,9 +66,10 @@ use kopiur_mover::workspec::*;
 
 let spec = MoverWorkSpec {
     version: 1,
-    operation: Operation::Backup(BackupOp {
+    operation: Operation::Snapshot(SnapshotOp {
         source_path: "/data".into(),
         tags: BTreeMap::new(),
+        policy: Default::default(),
     }),
     identity: ResolvedIdentity {
         username: "mydb".into(),
@@ -78,13 +79,14 @@ let spec = MoverWorkSpec {
     repository: RepositoryConnect::Filesystem { path: "/repo".into() },
     target_ref: TargetRef {
         api_version: "kopiur.home-operations.com/v1alpha1".into(),
-        kind: "Backup".into(),
+        kind: "Snapshot".into(),
         name: "mydb-20260601".into(),
         namespace: "prod".into(),
     },
     hook_plan: HookPlanSummary::default(),
     options: MoverOptions::default(),
     cache: kopiur_kopia::CacheTuning::default(),
+    throttle: Default::default(),
 };
 
 // Round-trips through serde_json unchanged.
@@ -94,9 +96,9 @@ assert_eq!(back, spec);
 
 // Externally tagged on the wire (camelCase keys).
 let v: serde_json::Value = serde_json::to_value(&spec).unwrap();
-assert_eq!(v["operation"]["backup"]["sourcePath"], "/data");
+assert_eq!(v["operation"]["snapshot"]["sourcePath"], "/data");
 assert_eq!(v["repository"]["filesystem"]["path"], "/repo");
-assert_eq!(spec.operation.kind_str(), "Backup");
+assert_eq!(spec.operation.kind_str(), "Snapshot");
 ```
 
 The actual `kopia` invocation and the kube `PATCH` happen in the binary against a

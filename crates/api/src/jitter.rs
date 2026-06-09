@@ -20,7 +20,7 @@
 //! "deterministic hashed jitter within the field's range," resolved *here* (not in
 //! the cron parser). [`substitute_h`] rewrites each `H` in a 5-field cron to a
 //! concrete value derived from the same FNV hash of the seed, so the resolved
-//! expression is stable per `BackupSchedule` and parseable by `croner`.
+//! expression is stable per `SnapshotSchedule` and parseable by `croner`.
 //! [`crate::validate::validate_cron`] validates the *shape* by substituting a fixed
 //! placeholder; this function produces the *spread*.
 
@@ -51,7 +51,7 @@ fn fnv1a(seed: &str, slot_start_unix: i64) -> u64 {
 /// `(seed, slot_start_unix)`. NO RNG, NO clock.
 ///
 /// `seed` should be a stable per-schedule key — the ADR specifies
-/// `BackupSchedule.UID` (combined here with the slot's wall-clock start). The same
+/// `SnapshotSchedule.UID` (combined here with the slot's wall-clock start). The same
 /// `(seed, slot_start, max)` always yields the same `Duration`; different seeds or
 /// slots spread across the window. `max == 0` yields `Duration::ZERO`.
 ///

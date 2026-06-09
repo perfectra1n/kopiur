@@ -2,13 +2,13 @@
 #
 # Reproduce a production bug against REAL data, or seed a staging/preview
 # environment, by cloning prod's latest snapshot into another namespace. The
-# `backupRef` carries the SOURCE namespace (billing); the Restore and its target PVC
+# `snapshotRef` carries the SOURCE namespace (billing); the Restore and its target PVC
 # live in the DESTINATION namespace (staging). The restore mover runs in the
 # destination, so the repo credentials must be readable there — a shared
 # `ClusterRepository` + `credentialProjection` does that without hand-placing
 # Secrets.
 #
-# Field shapes verified against crates/api: source.backupRef = { name, namespace? };
+# Field shapes verified against crates/api: source.snapshotRef = { name, namespace? };
 # credentialProjection = { enabled }; mover.securityContext is a core/v1
 # SecurityContext.
 ---
@@ -28,7 +28,7 @@ spec:
     kind: ClusterRepository # shared, cluster-scoped — reachable from any namespace
     name: platform-shared
   source:
-    fromConfig:
+    fromPolicy:
       name: postgres-data
       namespace: billing # SOURCE — resolve prod's latest snapshot by identity
   target:

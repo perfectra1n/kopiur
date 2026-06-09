@@ -2,21 +2,21 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: backupschedules.kopiur.home-operations.com
+  name: snapshotschedules.kopiur.home-operations.com
 spec:
   group: kopiur.home-operations.com
   names:
     categories:
     - kopiur
-    kind: BackupSchedule
-    plural: backupschedules
+    kind: SnapshotSchedule
+    plural: snapshotschedules
     shortNames:
     - kopiasched
-    singular: backupschedule
+    singular: snapshotschedule
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.configRef.name
+    - jsonPath: .spec.policyRef.name
       name: Config
       type: string
     - jsonPath: .spec.schedule.cron
@@ -31,43 +31,85 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Auto-generated derived type for BackupScheduleSpec via `CustomResource`
+        description: Auto-generated derived type for SnapshotScheduleSpec via `CustomResource`
         properties:
           spec:
             description: |-
-              Cron + `configRef`. One source of `Backup` CRs; pausing it doesn't affect
+              Cron + `policyRef`. One source of `Snapshot` CRs; pausing it doesn't affect
               in-flight or completed runs. ADR §3.5.
             properties:
-              configRef:
-                description: |-
-                  The `BackupConfig` (the recipe) this schedule invokes; resolved in the
-                  schedule's own namespace. ADR §3.5 separates recipe from schedule.
-                properties:
-                  name:
-                    description: Name of the referenced `BackupConfig`.
-                    type: string
-                  namespace:
-                    description: Namespace of the `BackupConfig`; absent = same namespace as the referrer.
-                    nullable: true
-                    type: string
-                required:
-                - name
-                type: object
               failedJobsHistoryLimit:
                 description: |-
-                  Bounds *failed* `Backup` CRs from this schedule. Successful retention is
-                  GFS-driven on `BackupConfig.spec.retention` — there is deliberately NO
+                  Bounds *failed* `Snapshot` CRs from this schedule. Successful retention is
+                  GFS-driven on `SnapshotPolicy.spec.retention` — there is deliberately NO
                   `successfulJobsHistoryLimit` (ADR-0003 §4.4, ADR-0001 §4.4).
                 format: uint32
                 minimum: 0.0
                 nullable: true
                 type: integer
+              policyRef:
+                description: |-
+                  The single `SnapshotPolicy` (recipe) this schedule invokes; resolved in the
+                  schedule's own namespace. ADR §3.5 separates recipe from schedule. **Mutually
+                  exclusive** with `policySelector` — exactly one is required (webhook-enforced,
+                  ADR-0005 §10). Optional at the type level so `policySelector` can be used instead.
+                nullable: true
+                properties:
+                  name:
+                    description: Name of the referenced `SnapshotPolicy`.
+                    type: string
+                  namespace:
+                    description: Namespace of the `SnapshotPolicy`; absent = same namespace as the referrer.
+                    nullable: true
+                    type: string
+                required:
+                - name
+                type: object
+              policySelector:
+                description: |-
+                  Fan-out form (ADR-0005 §10): a label selector over `SnapshotPolicy` objects in
+                  the schedule's namespace. Each matching policy gets a `Snapshot` per firing
+                  ("back up everything tagged `tier=critical` nightly" in one object). **Mutually
+                  exclusive** with `policyRef`. Mirrors the `pvcSelector` pattern.
+                nullable: true
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
+                    items:
+                      description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies to.
+                          type: string
+                        operator:
+                          description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
+                          items:
+                            type: string
+                          type: array
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
               schedule:
                 description: Cron, jitter, timezone, and concurrency for the firing cadence. ADR §3.5.
                 properties:
                   concurrencyPolicy:
                     default: Forbid
-                    description: How to handle a firing while a prior run is still in flight. ADR §4.1.
+                    description: |-
+                      How to handle a firing while a prior run is still in flight. ADR §4.1.
+
+                      Carries a real OpenAPI `default: Forbid` (ADR-0005 §1) — unconditional, so it
+                      materializes into the stored object / `kubectl explain`.
                     enum:
                     - Forbid
                     - Allow
@@ -81,7 +123,13 @@ spec:
                     nullable: true
                     type: string
                   runOnCreate:
-                    description: 'GitOps-friendly default: do NOT fire immediately on create. ADR §4.1 (G3).'
+                    default: false
+                    description: |-
+                      GitOps-friendly default: do NOT fire immediately on create. ADR §4.1 (G3).
+
+                      Carries a real OpenAPI `default: false` (ADR-0005 §1) so it materializes into
+                      the stored object / `kubectl explain` and GitOps stops diff-thrashing. NOT
+                      `skip_serializing_if`-elided, so the materialized value round-trips.
                     type: boolean
                   startingDeadlineSeconds:
                     description: |-
@@ -103,11 +151,13 @@ spec:
                 - cron
                 type: object
             required:
-            - configRef
             - schedule
             type: object
+            x-kubernetes-validations:
+            - message: exactly one of policyRef or policySelector
+              rule: '[has(self.policyRef), has(self.policySelector)].filter(x, x).size() == 1'
           status:
-            description: 'Observed state of a `BackupSchedule`: pinned firing slots and failure run. ADR §3.5.'
+            description: 'Observed state of a `SnapshotSchedule`: pinned firing slots and failure run. ADR §3.5.'
             nullable: true
             properties:
               conditions:
@@ -159,19 +209,19 @@ spec:
                       serializes back as `at`.
                     nullable: true
                     type: string
-                  backupRef:
-                    description: The `Backup` CR this slot produced, when one was created.
+                  snapshotRef:
+                    description: The `Snapshot` CR this slot produced, when one was created.
                     nullable: true
                     properties:
                       name:
-                        description: The `Backup`'s `metadata.name` (same namespace as the schedule).
+                        description: The `Snapshot`'s `metadata.name` (same namespace as the schedule).
                         type: string
                     required:
                     - name
                     type: object
                 type: object
               lastSuccessfulSchedule:
-                description: The most recent firing whose `Backup` succeeded. ADR §3.5.
+                description: The most recent firing whose `Snapshot` succeeded. ADR §3.5.
                 nullable: true
                 properties:
                   at:
@@ -181,12 +231,12 @@ spec:
                       serializes back as `at`.
                     nullable: true
                     type: string
-                  backupRef:
-                    description: The `Backup` CR this slot produced, when one was created.
+                  snapshotRef:
+                    description: The `Snapshot` CR this slot produced, when one was created.
                     nullable: true
                     properties:
                       name:
-                        description: The `Backup`'s `metadata.name` (same namespace as the schedule).
+                        description: The `Snapshot`'s `metadata.name` (same namespace as the schedule).
                         type: string
                     required:
                     - name
@@ -203,12 +253,12 @@ spec:
                       serializes back as `at`.
                     nullable: true
                     type: string
-                  backupRef:
-                    description: The `Backup` CR this slot produced, when one was created.
+                  snapshotRef:
+                    description: The `Snapshot` CR this slot produced, when one was created.
                     nullable: true
                     properties:
                       name:
-                        description: The `Backup`'s `metadata.name` (same namespace as the schedule).
+                        description: The `Snapshot`'s `metadata.name` (same namespace as the schedule).
                         type: string
                     required:
                     - name
@@ -222,7 +272,7 @@ spec:
             type: object
         required:
         - spec
-        title: BackupSchedule
+        title: SnapshotSchedule
         type: object
     served: true
     storage: true

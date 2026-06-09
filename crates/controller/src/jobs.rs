@@ -12,11 +12,11 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, ConfigMapVolumeSource, Container, EmptyDirVolumeSource, EnvFromSource,
+    Affinity, ConfigMap, ConfigMapVolumeSource, Container, EmptyDirVolumeSource, EnvFromSource,
     EphemeralVolumeSource, NFSVolumeSource, PersistentVolumeClaimSpec,
     PersistentVolumeClaimTemplate, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec,
-    PodTemplateSpec, ResourceRequirements, SeccompProfile, SecretEnvSource, SecurityContext,
-    Volume, VolumeMount, VolumeResourceRequirements,
+    PodTemplateSpec, ResourceRequirements, SecretEnvSource, SecurityContext, Toleration, Volume,
+    VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
@@ -115,7 +115,7 @@ pub struct VolumeMountSpec {
     pub source: MountSource,
     /// Absolute mount path inside the mover container.
     pub mount_path: String,
-    /// Whether the mount is read-only (Backup sources are mounted read-only).
+    /// Whether the mount is read-only (Snapshot sources are mounted read-only).
     pub read_only: bool,
 }
 
@@ -188,7 +188,7 @@ impl VolumeMountSpec {
 
 /// All inputs needed to build a mover run's `ConfigMap` + `Job`.
 pub struct MoverJobInputs<'a> {
-    /// Base name for both objects (e.g. the `Backup` CR name).
+    /// Base name for both objects (e.g. the `Snapshot` CR name).
     pub name: &'a str,
     /// Namespace both objects live in.
     pub namespace: &'a str,
@@ -203,19 +203,28 @@ pub struct MoverJobInputs<'a> {
     pub image_pull_policy: Option<&'a str>,
     /// Job retry/deadline limits.
     pub limits: JobLimits,
-    /// Optional resource requests/limits for the mover container.
+    /// Resolved resource requests/limits for the mover container (after the
+    /// `moverDefaults ⊂ recipe` merge).
     pub resources: Option<ResourceRequirements>,
-    /// Optional per-recipe security-context override; merged over the
-    /// hardened defaults.
-    pub security_context: Option<SecurityContext>,
-    /// Optional pod-level security context for the mover pod (notably `fsGroup`, so an
+    /// The **fully-resolved** container security context the caller computed via
+    /// [`kopiur_api::common::resolve_mover`] (`hardened ⊂ moverDefaults ⊂ recipe`,
+    /// ADR-0004 §2). Always present — `build_job` applies it verbatim; the merge and
+    /// the privileged-mover gate already ran upstream.
+    pub security_context: SecurityContext,
+    /// Resolved pod-level security context for the mover pod (notably `fsGroup`, so an
     /// unprivileged mover can write a freshly-provisioned restore volume). `None`
     /// leaves the pod without a pod-level securityContext.
     pub pod_security_context: Option<PodSecurityContext>,
+    /// Pod `nodeSelector` from `moverDefaults` (ADR-0004 §1). `None` leaves it unset.
+    pub node_selector: Option<BTreeMap<String, String>>,
+    /// Pod tolerations from `moverDefaults`. `None` leaves them unset.
+    pub tolerations: Option<Vec<Toleration>>,
+    /// Pod affinity from `moverDefaults`. `None` leaves it unset.
+    pub affinity: Option<Affinity>,
     /// Extra labels applied to both objects (origin/config/snapshot keys).
     pub labels: BTreeMap<String, String>,
     /// The source volume to back up (PVC or inline NFS), mounted read-only at the
-    /// snapshot source path (Backup ops). `None` for restore / delete ops.
+    /// snapshot source path (Snapshot ops). `None` for restore / delete ops.
     pub source_volume: Option<VolumeMountSpec>,
     /// The repo volume for the filesystem backend (PVC or inline NFS), mounted
     /// read-write at the repo path so kopia can write the repository. `None` for
@@ -232,7 +241,7 @@ pub struct MoverJobInputs<'a> {
     /// for `BootstrapRepository` runs; `None` for backup/restore/delete).
     pub result_configmap: Option<&'a str>,
     /// ServiceAccount the mover pod runs as. The mover PATCHes the owning
-    /// Backup/Restore `.status`, so it needs an SA bound to the operator's
+    /// Snapshot/Restore `.status`, so it needs an SA bound to the operator's
     /// status-patch rules. `None` falls back to the namespace `default` SA
     /// (which generally cannot patch `*/status`), so the controller should
     /// always supply one in a real deployment.
@@ -252,24 +261,16 @@ pub struct MoverJobInputs<'a> {
     pub cache_volume: CacheVolume,
 }
 
-/// The restricted-PSA-compatible default security context (§4.11/G16):
-/// non-root, no privilege escalation, drop ALL caps, seccomp RuntimeDefault.
-/// A per-recipe override (e.g. `privilegedMode` for `lost+found`) replaces it.
-pub fn default_security_context() -> SecurityContext {
-    SecurityContext {
-        run_as_non_root: Some(true),
-        allow_privilege_escalation: Some(false),
-        read_only_root_filesystem: Some(false),
-        capabilities: Some(k8s_openapi::api::core::v1::Capabilities {
-            drop: Some(vec!["ALL".to_string()]),
-            add: None,
-        }),
-        seccomp_profile: Some(SeccompProfile {
-            type_: "RuntimeDefault".to_string(),
-            localhost_profile: None,
-        }),
-        ..Default::default()
-    }
+/// The caller-supplied labels with `app.kubernetes.io/managed-by=kopiur` always
+/// injected (ADR-0005 §14(c)): every mover Job / work-spec ConfigMap / pod is then
+/// recognized as kopiur-managed by Argo/Flux. A caller-set `managed-by` is not
+/// overridden (it would already be `kopiur`).
+fn managed_labels(inputs: &MoverJobInputs<'_>) -> BTreeMap<String, String> {
+    let mut labels = inputs.labels.clone();
+    labels
+        .entry(crate::consts::MANAGED_BY_LABEL.to_string())
+        .or_insert_with(|| crate::consts::MANAGED_BY_VALUE.to_string());
+    labels
 }
 
 /// Build the `ConfigMap` carrying the serialized work spec. Returns a
@@ -283,7 +284,7 @@ pub fn build_config_map(inputs: &MoverJobInputs<'_>) -> Result<ConfigMap, serde_
         metadata: ObjectMeta {
             name: Some(inputs.name.to_string()),
             namespace: Some(inputs.namespace.to_string()),
-            labels: Some(inputs.labels.clone()),
+            labels: Some(managed_labels(inputs)),
             owner_references: Some(vec![inputs.owner.clone()]),
             ..Default::default()
         },
@@ -337,13 +338,12 @@ fn cache_volume_source(cache: &CacheVolume) -> Volume {
 /// Build the mover `Job` that mounts the work-spec ConfigMap and runs the
 /// kopiur-mover image. `restartPolicy: Never`; backoff/deadline from limits.
 pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
-    let sec_ctx = inputs
-        .security_context
-        .clone()
-        .unwrap_or_else(default_security_context);
+    // The container security context is fully resolved upstream (hardened ⊂
+    // moverDefaults ⊂ recipe, ADR-0004 §2); apply it verbatim.
+    let sec_ctx = inputs.security_context.clone();
 
     // Volumes + mounts: always the work-spec ConfigMap; plus the source PVC
-    // (read-only, for Backup) and the repo PVC (read-write, filesystem backend).
+    // (read-only, for Snapshot) and the repo PVC (read-write, filesystem backend).
     let mut volumes = vec![Volume {
         name: "work-spec".to_string(),
         config_map: Some(ConfigMapVolumeSource {
@@ -472,6 +472,10 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
         // Pod-level securityContext (e.g. fsGroup) so an unprivileged mover can write
         // a freshly-provisioned restore volume. `None` leaves the pod spec minimal.
         security_context: inputs.pod_security_context.clone(),
+        // Pod placement from the repository's moverDefaults (ADR-0004 §1).
+        node_selector: inputs.node_selector.clone(),
+        tolerations: inputs.tolerations.clone(),
+        affinity: inputs.affinity.clone(),
         ..Default::default()
     };
 
@@ -479,7 +483,7 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
         metadata: ObjectMeta {
             name: Some(inputs.name.to_string()),
             namespace: Some(inputs.namespace.to_string()),
-            labels: Some(inputs.labels.clone()),
+            labels: Some(managed_labels(inputs)),
             annotations: (!inputs.annotations.is_empty()).then(|| inputs.annotations.clone()),
             owner_references: Some(vec![inputs.owner.clone()]),
             ..Default::default()
@@ -490,7 +494,7 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
             ttl_seconds_after_finished: inputs.limits.ttl_seconds_after_finished.map(|t| t as i32),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
-                    labels: Some(inputs.labels.clone()),
+                    labels: Some(managed_labels(inputs)),
                     ..Default::default()
                 }),
                 spec: Some(pod_spec),
@@ -518,15 +522,16 @@ pub fn owner_ref(kind: &str, name: &str, uid: &str) -> OwnerReference {
 mod tests {
     use super::*;
     use kopiur_mover::workspec::{
-        BackupOp, MoverOptions, Operation, RepositoryConnect, ResolvedIdentity, TargetRef,
+        MoverOptions, Operation, RepositoryConnect, ResolvedIdentity, SnapshotOp, TargetRef,
     };
 
     fn sample_work_spec() -> MoverWorkSpec {
         MoverWorkSpec {
             version: 1,
-            operation: Operation::Backup(BackupOp {
+            operation: Operation::Snapshot(SnapshotOp {
                 source_path: "/data".into(),
                 tags: BTreeMap::new(),
+                policy: Default::default(),
             }),
             identity: ResolvedIdentity {
                 username: "db".into(),
@@ -538,13 +543,14 @@ mod tests {
             },
             target_ref: TargetRef {
                 api_version: API_VERSION.into(),
-                kind: "Backup".into(),
+                kind: "Snapshot".into(),
                 name: "db-1".into(),
                 namespace: "prod".into(),
             },
             hook_plan: Default::default(),
             options: MoverOptions::default(),
             cache: Default::default(),
+            throttle: Default::default(),
         }
     }
 
@@ -557,14 +563,19 @@ mod tests {
         MoverJobInputs {
             name: "db-1",
             namespace: "prod",
-            owner: owner_ref("Backup", "db-1", "uid-123"),
+            owner: owner_ref("Snapshot", "db-1", "uid-123"),
             work_spec: ws,
             image: DEFAULT_MOVER_IMAGE,
             image_pull_policy: None,
             limits,
             resources: None,
-            security_context: None,
+            // The caller always supplies a fully-resolved SC; default to the hardened
+            // base (what `resolve_mover(None, None, …)` yields).
+            security_context: kopiur_api::common::hardened_security_context(),
             pod_security_context: None,
+            node_selector: None,
+            tolerations: None,
+            affinity: None,
             labels,
             source_volume: None,
             repo_volume: None,
@@ -680,17 +691,17 @@ mod tests {
 
     #[test]
     fn job_applies_container_security_context_override() {
-        // A per-recipe container securityContext REPLACES the hardened default
-        // verbatim (build_job uses it as-is, not merged) — the resolved effective
-        // context the controller passes is what the mover container runs with.
+        // build_job applies the resolved container securityContext verbatim — the
+        // hardened ⊂ moverDefaults ⊂ recipe merge already ran upstream in
+        // `resolve_mover`, so whatever the controller passes is what the mover runs.
         let ws = sample_work_spec();
         let mut i = inputs(&ws, JobLimits::default());
-        i.security_context = Some(SecurityContext {
+        i.security_context = SecurityContext {
             run_as_user: Some(1000),
             run_as_group: Some(1000),
             run_as_non_root: Some(true),
             ..Default::default()
-        });
+        };
         let job = build_job(&i);
         let sc = job.spec.unwrap().template.spec.unwrap().containers[0]
             .security_context
@@ -706,10 +717,10 @@ mod tests {
         // fresh volume is writable) both land on the mover pod, independently.
         let ws = sample_work_spec();
         let mut i = inputs(&ws, JobLimits::default());
-        i.security_context = Some(SecurityContext {
+        i.security_context = SecurityContext {
             run_as_user: Some(1000),
             ..Default::default()
-        });
+        };
         i.pod_security_context = Some(PodSecurityContext {
             fs_group: Some(1000),
             fs_group_change_policy: Some("OnRootMismatch".to_string()),
@@ -956,6 +967,46 @@ mod tests {
             .security_context
             .expect("pod securityContext");
         assert_eq!(psc.fs_group, Some(1000));
+    }
+
+    #[test]
+    fn node_selector_tolerations_and_affinity_flow_to_the_pod() {
+        // moverDefaults pod placement (nodeSelector/tolerations/affinity) reaches the
+        // mover pod spec (ADR-0004 §1).
+        use k8s_openapi::api::core::v1::{Affinity, NodeAffinity, Toleration};
+        let ws = sample_work_spec();
+        let mut i = inputs(&ws, JobLimits::default());
+        i.node_selector = Some(BTreeMap::from([(
+            "disktype".to_string(),
+            "ssd".to_string(),
+        )]));
+        i.tolerations = Some(vec![Toleration {
+            key: Some("dedicated".into()),
+            operator: Some("Exists".into()),
+            ..Default::default()
+        }]);
+        i.affinity = Some(Affinity {
+            node_affinity: Some(NodeAffinity::default()),
+            ..Default::default()
+        });
+        let pod = build_job(&i).spec.unwrap().template.spec.unwrap();
+        assert_eq!(pod.node_selector.unwrap()["disktype"], "ssd");
+        assert_eq!(
+            pod.tolerations.unwrap()[0].key.as_deref(),
+            Some("dedicated")
+        );
+        assert!(pod.affinity.unwrap().node_affinity.is_some());
+
+        // Unset → pod placement fields stay None (no churn for the common case).
+        let bare = build_job(&inputs(&ws, JobLimits::default()))
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap();
+        assert!(bare.node_selector.is_none());
+        assert!(bare.tolerations.is_none());
+        assert!(bare.affinity.is_none());
     }
 
     #[test]

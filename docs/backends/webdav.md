@@ -56,7 +56,7 @@ Note the spec key is `webDav` (camelCase, capital D).
 
 - **`url`** — the collection URL. Include the full path to the repository folder.
 - **`create.enabled`** — initialize the repository if missing.
-- **`cacheDefaults`** — mover cache sizing ([movers](../movers.md)).
+- **`moverDefaults.cache`** — mover cache sizing ([movers](../movers.md)).
 
 ## As a `ClusterRepository`
 
@@ -67,11 +67,11 @@ where the movers run — see [Movers](../movers.md).
 
 ## Back up and restore against this repository
 
-The lifecycle is backend-independent. Once `Ready`, add a `BackupConfig` +
-`BackupSchedule` ([Backups & schedules](../backups.md),
+The lifecycle is backend-independent. Once `Ready`, add a `SnapshotPolicy` +
+`SnapshotSchedule` ([Backups & schedules](../backups.md),
 [Example 01](../examples.md#example-01--single-pvc-scheduled)) and restore by
-picking a `Backup` ([Restores](../restores.md),
-[Example 03](../examples.md#example-03--restore-by-picking-a-backup)).
+picking a `Snapshot` ([Restores](../restores.md),
+[Example 03](../examples.md#example-03--restore-by-picking-a-snapshot)).
 
 ## Troubleshooting
 

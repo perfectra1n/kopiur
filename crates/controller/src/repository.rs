@@ -6,12 +6,12 @@
 //!    short-lived Job (ADR §5.4) so a controller restart never strands a kopia
 //!    process. Set `status.phase`/`uniqueID`/`backend`/`storageStats`.
 //! 3. Periodic catalog scan (`snapshot list`) materializing `origin: discovered`
-//!    `Backup` CRs, bounded by `catalog.retain`, deduplicated by
+//!    `Snapshot` CRs, bounded by `catalog.retain`, deduplicated by
 //!    `(Repository.UID, kopiaSnapshotID)` (ADR §2.1).
 //!
 //! The catalog **dedup decision** is a pure function ([`catalog_dedup_key`] +
 //! [`needs_materialization`]) and is unit-tested here; the kopia `snapshot list`
-//! IO and `Backup` CR creation are the thin parts.
+//! IO and `Snapshot` CR creation are the thin parts.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -25,14 +25,13 @@ use kube::{Api, Resource, ResourceExt};
 
 use kopiur_api::backend::Backend;
 use kopiur_api::common::RepositoryKind;
-use kopiur_api::{Backup, Repository, RepositoryPhase, validate};
+use kopiur_api::{Repository, RepositoryPhase, Snapshot, validate};
 use kopiur_kopia::{ConnectSpec, KopiaErrorClass, SnapshotListEntry};
 use kopiur_mover::bootstrap::{BootstrapResult, RESULT_CONFIGMAP_KEY};
 use kopiur_mover::workspec::{
     BootstrapRepositoryOp, MoverOptions, MoverWorkSpec, Operation, ResolvedIdentity, TargetRef,
 };
 
-use crate::backup::{backend_to_repository_connect, mover_pull_policy_pub};
 use crate::consts::{
     API_VERSION, BOOTSTRAP_JOB_DEADLINE_SECS, ORIGIN_LABEL, REPOSITORY_BOOTSTRAPPED_CONDITION,
     REPOSITORY_UID_LABEL, SNAPSHOT_ID_LABEL,
@@ -41,6 +40,7 @@ use crate::context::Context;
 use crate::error::{Error, Result, TERMINAL_HEARTBEAT, error_policy_for};
 use crate::io;
 use crate::jobs::{self, JobLimits, MoverJobInputs};
+use crate::snapshot::{backend_to_repository_connect, mover_pull_policy_pub};
 
 /// The dedup key for a discovered snapshot: `(Repository.UID, kopiaSnapshotID)`
 /// (ADR §2.1). Two scans of the same repo never materialize the same snapshot
@@ -49,10 +49,10 @@ pub fn catalog_dedup_key(repo_uid: &str, snapshot_id: &str) -> (String, String) 
     (repo_uid.to_string(), snapshot_id.to_string())
 }
 
-/// Given the snapshot ids already materialized as `Backup` CRs (the existing
+/// Given the snapshot ids already materialized as `Snapshot` CRs (the existing
 /// set, keyed by `(repo_uid, id)`) and a fresh `snapshot list`, return the
-/// entries that still need a `Backup` CR created. Pure; the caller does the
-/// `Backup` CR creation.
+/// entries that still need a `Snapshot` CR created. Pure; the caller does the
+/// `Snapshot` CR creation.
 pub fn needs_materialization<'a>(
     repo_uid: &str,
     existing: &BTreeSet<(String, String)>,
@@ -98,7 +98,7 @@ pub async fn reconcile(repo: Arc<Repository>, ctx: Arc<Context>) -> Result<Actio
 
 /// Mirror a Repository's phase + catalog gauges. Zeroes the phase on deletion
 /// (so Degraded/Failed alerts clear) and re-reads the freshest status on success
-/// (the passed object is the pre-reconcile cache copy). See the Backup
+/// (the passed object is the pre-reconcile cache copy). See the Snapshot
 /// equivalent for the rationale.
 async fn record_repository_status_metrics(repo: &Repository, ctx: &Context, ok: bool) {
     let (Some(ns), name) = (repo.namespace(), repo.name_any()) else {
@@ -145,6 +145,31 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
         .uid()
         .ok_or_else(|| Error::Invariant("Repository has no uid".into()))?;
     let api: Api<Repository> = Api::namespaced(ctx.client.clone(), &namespace);
+
+    // §14(e): a suspended Repository skips connect/bootstrap AND maintenance
+    // projection entirely — a declarative pause. Surface it via a condition and back
+    // off long; nothing else runs.
+    if repo.spec.suspend {
+        let conds = repo
+            .status
+            .as_ref()
+            .map(|s| s.conditions.clone())
+            .unwrap_or_default();
+        let conditions = io::set_ready(
+            &conds,
+            repo.meta().generation,
+            io::ReadyOutcome::Reconciling,
+            "Suspended",
+            "Repository is suspended (spec.suspend); skipping connect and maintenance",
+        );
+        io::patch_status(
+            &api,
+            &name,
+            serde_json::json!({ "observedGeneration": repo.meta().generation, "conditions": conditions }),
+        )
+        .await?;
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
 
     // The controller may run kopia in-process for the FILESYSTEM backend only
     // (ADR §5.4 permits short idempotent ops; a *bare-path* filesystem repo is
@@ -209,10 +234,21 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
                 // is terminal. A terminal failure (connect OR a failed create)
                 // surfaces Failed + an actionable Event (e.g. filesystem "Access
                 // Denied") rather than an invisible reconcile error with no status.
+                // Create-time-fixed format knobs (encryption/splitter/hash/ECC),
+                // resolved from spec.create and honored only on actual create
+                // (ADR-0005 §13(a)). Immutable post-create (§7).
+                let create_opts = kopiur_mover::workspec::CreateOptionsSpec::from_create(
+                    repo.spec.create.as_ref(),
+                )
+                .to_kopia();
                 let outcome =
                     if kopiur_mover::bootstrap::should_attempt_create(create_enabled, e.class()) {
                         match client
-                            .repository_create(&spec, kopiur_kopia::CacheTuning::default())
+                            .repository_create(
+                                &spec,
+                                kopiur_kopia::CacheTuning::default(),
+                                &create_opts,
+                            )
                             .await
                         {
                             Ok(_) => {
@@ -289,7 +325,7 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
             )
             .await?;
 
-            // Catalog scan: materialize discovered Backups for unseen snapshots,
+            // Catalog scan: materialize discovered Snapshots for unseen snapshots,
             // bounded by catalog.retain.perIdentity. Filesystem lists in-process.
             let listing = client.snapshot_list(None).await?;
             let total = listing.len() as i64;
@@ -304,22 +340,26 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
                 .as_ref()
                 .map(|s| s.conditions.clone())
                 .unwrap_or_default();
-            io::ensure_maintenance(
-                ctx,
-                &api,
-                repo,
-                &repo.object_ref(&()),
-                RepositoryKind::Repository,
-                "Repository",
-                &namespace,
-                Some(&namespace),
-                Some(&namespace),
-                &name,
-                repo.spec.maintenance.as_ref(),
-                &conditions,
-                repo.metadata.generation,
-            )
-            .await;
+            // §11: a ReadOnly repository runs no maintenance (it serves restores
+            // only). Skip the projection so no managed Maintenance is created.
+            if repo.spec.mode.allows_writes() {
+                io::ensure_maintenance(
+                    ctx,
+                    &api,
+                    repo,
+                    &repo.object_ref(&()),
+                    RepositoryKind::Repository,
+                    "Repository",
+                    &namespace,
+                    Some(&namespace),
+                    Some(&namespace),
+                    &name,
+                    repo.spec.maintenance.as_ref(),
+                    &conditions,
+                    repo.metadata.generation,
+                )
+                .await;
+            }
         }
         other => {
             // Object-store backends run connect/create/status/catalog in a
@@ -354,7 +394,7 @@ async fn bootstrap_via_mover(
     let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), namespace);
 
     if let Some(job) = job_api.get_opt(&job_name).await? {
-        return match crate::backup::job_terminal_state(&job) {
+        return match crate::snapshot::job_terminal_state(&job) {
             // Still running: surface Initializing and poll.
             None => {
                 io::patch_status(
@@ -383,7 +423,15 @@ async fn bootstrap_via_mover(
         .as_ref()
         .map(|c| c.enabled)
         .unwrap_or(false);
-    let work_spec = bootstrap_work_spec(backend, name, namespace, create_enabled, true);
+    let work_spec = bootstrap_work_spec(
+        backend,
+        name,
+        namespace,
+        create_enabled,
+        true,
+        repo.spec.create.as_ref(),
+        repo.spec.mover_defaults.as_ref(),
+    );
     // Mint the mover SA + RoleBinding in the Repository's namespace before launching
     // the bootstrap Job (ADR §4.12).
     if let Some(sa) = ctx.mover_service_account.as_deref() {
@@ -400,7 +448,7 @@ async fn bootstrap_via_mover(
     // verify the user-managed credential Secret is present. The bootstrap Job runs
     // in the Repository's own namespace, where its Secret already lives — so it
     // never needs projection (projection is a consumer-side opt-in on
-    // BackupConfig/Restore/Maintenance, not on the repository).
+    // SnapshotPolicy/Restore/Maintenance, not on the repository).
     let owner = io::owner_ref_for(repo, "Repository")?;
     let refs = io::mover_creds_secret_refs(backend, &repo.spec.encryption, Some(namespace));
     let creds_names: Vec<String> = refs.iter().map(|r| r.name.clone()).collect();
@@ -410,7 +458,8 @@ async fn bootstrap_via_mover(
         &job_name,
         &owner,
         &refs,
-        false, // never project on the bootstrap path
+        false, // consumer opt-in: never project on the bootstrap path
+        false, // owner allow: irrelevant on the same-namespace bootstrap path
         &io::CredsContext {
             secret_names: &creds_names,
             repo_kind: "Repository",
@@ -438,6 +487,20 @@ async fn bootstrap_via_mover(
             mount_path: io::filesystem_repo_path(backend).unwrap_or_default(),
             read_only: false,
         });
+    // The bootstrap (connect/create) Job has no recipe `mover`, but inherits the
+    // repository's `moverDefaults` — the bootstrap-gap fix (ADR-0004 §1): a
+    // filesystem/NFS repo on a non-65532-owned directory becomes bootstrappable by
+    // setting `moverDefaults.podSecurityContext.fsGroup` / `securityContext.runAsUser`
+    // once, with no special-case knob. Not subject to the privileged-mover namespace
+    // gate: it runs in the repo's own namespace and is authored by the repo owner.
+    let resolved_mover = kopiur_api::common::resolve_mover(
+        repo.spec.mover_defaults.as_ref(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let inputs = MoverJobInputs {
         name: &job_name,
         namespace,
@@ -451,11 +514,15 @@ async fn bootstrap_via_mover(
         // no Event. The deadline forces it terminal so `finalize_bootstrap` runs.
         limits: JobLimits {
             active_deadline_seconds: Some(BOOTSTRAP_JOB_DEADLINE_SECS),
+            ttl_seconds_after_finished: resolved_mover.ttl_seconds_after_finished,
             ..JobLimits::default()
         },
-        resources: None,
-        security_context: None,
-        pod_security_context: None,
+        resources: resolved_mover.resources.clone(),
+        security_context: resolved_mover.security_context.clone(),
+        pod_security_context: resolved_mover.pod_security_context.clone(),
+        node_selector: resolved_mover.node_selector.clone(),
+        tolerations: resolved_mover.tolerations.clone(),
+        affinity: resolved_mover.affinity.clone(),
         labels,
         source_volume: None,
         repo_volume,
@@ -483,19 +550,25 @@ async fn bootstrap_via_mover(
 /// Build the bootstrap work spec for an object-store backend. Identity is a
 /// sentinel (bootstrap connects/creates the repo, it does not snapshot under any
 /// identity). `scan_catalog` drives whether the mover returns the snapshot list
-/// for discovered-Backup materialization.
+/// for discovered-Snapshot materialization.
+#[allow(clippy::too_many_arguments)]
 fn bootstrap_work_spec(
     backend: &Backend,
     name: &str,
     namespace: &str,
     auto_create: bool,
     scan_catalog: bool,
+    create: Option<&kopiur_api::common::CreateBehavior>,
+    mover_defaults: Option<&kopiur_api::common::MoverDefaults>,
 ) -> MoverWorkSpec {
     MoverWorkSpec {
         version: 1,
         operation: Operation::BootstrapRepository(BootstrapRepositoryOp {
             auto_create,
             scan_catalog,
+            // Create-time format knobs (encryption/splitter/hash/ECC) honored only
+            // when the bootstrap creates the repo (ADR-0005 §13(a)).
+            create_options: kopiur_mover::workspec::CreateOptionsSpec::from_create(create),
         }),
         identity: ResolvedIdentity {
             username: "kopiur-bootstrap".to_string(),
@@ -513,6 +586,8 @@ fn bootstrap_work_spec(
         options: MoverOptions::default(),
         // Bootstrap is a connect/create probe, not a data run: kopia defaults.
         cache: Default::default(),
+        // Apply the repo throttle on the bootstrap connection too (§13(e)).
+        throttle: io::throttle_spec(mover_defaults),
     }
 }
 
@@ -536,7 +611,7 @@ async fn read_bootstrap_result(
 }
 
 /// Reflect a finished bootstrap Job into the Repository status. On success:
-/// `Ready` + uniqueId, then materialize discovered Backups from the returned
+/// `Ready` + uniqueId, then materialize discovered Snapshots from the returned
 /// snapshots. On failure: `Failed` + an actionable `Bootstrapped=False`
 /// condition carrying the kopia error class/message.
 #[allow(clippy::too_many_arguments)]
@@ -640,7 +715,7 @@ async fn finalize_bootstrap(
         );
     }
 
-    // Materialize discovered Backups from the snapshots the Job returned.
+    // Materialize discovered Snapshots from the snapshots the Job returned.
     scan_catalog(
         ctx,
         repo,
@@ -656,22 +731,25 @@ async fn finalize_bootstrap(
     // conditions we just patched (which include `Bootstrapped`), NOT the stale
     // cached object — otherwise this patch would drop the `Bootstrapped`
     // condition we set above (both writes replace the whole conditions array).
-    io::ensure_maintenance(
-        ctx,
-        api,
-        repo,
-        &repo.object_ref(&()),
-        RepositoryKind::Repository,
-        "Repository",
-        namespace,
-        Some(namespace),
-        Some(namespace),
-        name,
-        repo.spec.maintenance.as_ref(),
-        &conditions,
-        repo.metadata.generation,
-    )
-    .await;
+    // §11: a ReadOnly repository runs no maintenance — skip the projection.
+    if repo.spec.mode.allows_writes() {
+        io::ensure_maintenance(
+            ctx,
+            api,
+            repo,
+            &repo.object_ref(&()),
+            RepositoryKind::Repository,
+            "Repository",
+            namespace,
+            Some(namespace),
+            Some(namespace),
+            name,
+            repo.spec.maintenance.as_ref(),
+            &conditions,
+            repo.metadata.generation,
+        )
+        .await;
+    }
 
     Ok(Action::requeue(Duration::from_secs(300)))
 }
@@ -698,7 +776,7 @@ fn bootstrap_condition(
     )
 }
 
-/// Compute which snapshots in `listing` still need a `Backup` CR, and create the
+/// Compute which snapshots in `listing` still need a `Snapshot` CR, and create the
 /// bounded `origin: discovered` set (forced `deletionPolicy: Retain`).
 ///
 /// `listing` is the snapshot set to materialize from: produced in-process for the
@@ -716,8 +794,8 @@ async fn scan_catalog(
     listing: &[SnapshotListEntry],
     total_snapshot_count: i64,
 ) -> Result<()> {
-    // Existing discovered Backups keyed by (repo_uid, snapshot_id).
-    let backup_api: Api<Backup> = Api::namespaced(ctx.client.clone(), namespace);
+    // Existing discovered Snapshots keyed by (repo_uid, snapshot_id).
+    let backup_api: Api<Snapshot> = Api::namespaced(ctx.client.clone(), namespace);
     let lp = ListParams::default().labels(&format!("{ORIGIN_LABEL}=discovered"));
     let existing_crs = backup_api.list(&lp).await?.items;
     let mut existing: BTreeSet<(String, String)> = BTreeSet::new();
@@ -753,7 +831,7 @@ async fn scan_catalog(
         created += 1;
     }
     if created > 0 {
-        tracing::info!(repo = %repo_name, created, "materialized discovered Backup CRs");
+        tracing::info!(repo = %repo_name, created, "materialized discovered Snapshot CRs");
     }
 
     // Logical bytes under management is recorded directly from kopia's data
@@ -783,7 +861,7 @@ async fn scan_catalog(
     Ok(())
 }
 
-/// Create one `origin: discovered` Backup CR for a snapshot. `deletionPolicy` is
+/// Create one `origin: discovered` Snapshot CR for a snapshot. `deletionPolicy` is
 /// FORCED to `Retain` (the operator never deletes a discovered snapshot, §4.5).
 async fn create_discovered_backup(
     ctx: &Context,
@@ -793,9 +871,9 @@ async fn create_discovered_backup(
     repo_uid: &str,
     entry: &SnapshotListEntry,
 ) -> Result<()> {
-    use kopiur_api::backup::{BackupSpec, BackupStatus, SnapshotInfo};
     use kopiur_api::common::{DeletionPolicy, ResolvedIdentity};
-    use kopiur_api::{BackupPhase, Origin};
+    use kopiur_api::snapshot::{SnapshotInfo, SnapshotSpec, SnapshotStatus};
+    use kopiur_api::{Origin, SnapshotPhase};
 
     // CR name: stable from the (short) snapshot id, namespaced under repo.
     let short = entry.id.chars().take(16).collect::<String>();
@@ -807,19 +885,21 @@ async fn create_discovered_backup(
     labels.insert(SNAPSHOT_ID_LABEL.to_string(), entry.id.clone());
 
     let owner = io::owner_ref_for(repo, "Repository")?;
-    let mut backup = Backup::new(
+    let mut backup = Snapshot::new(
         &cr_name,
-        BackupSpec {
-            config_ref: None,
+        SnapshotSpec {
+            policy_ref: None,
             tags: None,
             failure_policy: None,
             // Forced Retain for discovered (webhook would reject otherwise).
             deletion_policy: Some(DeletionPolicy::Retain),
+            // Discovered snapshots are not pinned by the operator.
+            pin: false,
         },
     );
     backup.metadata = io::child_meta(&cr_name, namespace, labels, Some(owner));
-    backup.status = Some(BackupStatus {
-        phase: Some(BackupPhase::Discovered),
+    backup.status = Some(SnapshotStatus {
+        phase: Some(SnapshotPhase::Discovered),
         origin: Some(Origin::Discovered),
         snapshot: Some(SnapshotInfo {
             kopia_snapshot_id: entry.id.clone(),
@@ -832,7 +912,7 @@ async fn create_discovered_backup(
         ..Default::default()
     });
 
-    let api: Api<Backup> = Api::namespaced(ctx.client.clone(), namespace);
+    let api: Api<Snapshot> = Api::namespaced(ctx.client.clone(), namespace);
     // Create the CR; the discovered status is then PATCHed onto the subresource.
     match io::apply(&api, &cr_name, &backup).await {
         Ok(_) => {}

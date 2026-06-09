@@ -1,6 +1,6 @@
 //! The `Restore` reconciler (ADR §4.6, §4.7).
 //!
-//! Resolves the source (`backupRef` / `fromConfig` / `identity`), pins
+//! Resolves the source (`snapshotRef` / `fromPolicy` / `identity`), pins
 //! `status.resolved`, creates a restore mover `Job`, and handles the passive
 //! populator mode (a PVC's `spec.dataSourceRef` points at the `Restore`).
 //!
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
-use kopiur_api::backup::Backup;
+use kopiur_api::snapshot::Snapshot;
 use kopiur_api::{
     OnMissingSnapshot, Restore, RestorePhase, RestoreSource, RestoreTarget, validate,
 };
@@ -39,19 +39,19 @@ use crate::jobs::{self, JobLimits, MoverJobInputs, VolumeMountSpec};
 /// variant must be handled here too).
 pub fn source_mode(source: &RestoreSource) -> &'static str {
     match source {
-        RestoreSource::BackupRef(_) => "BackupRef",
-        RestoreSource::FromConfig(_) => "FromConfig",
+        RestoreSource::SnapshotRef(_) => "SnapshotRef",
+        RestoreSource::FromPolicy(_) => "FromPolicy",
         RestoreSource::Identity(_) => "Identity",
     }
 }
 
 /// The default `onMissingSnapshot` for a source mode when the spec doesn't set
-/// it (ADR §4.6 / SKILL "Restores fail closed"): `fromConfig` defaults to
+/// it (ADR §4.6 / SKILL "Restores fail closed"): `fromPolicy` defaults to
 /// `Continue` (deploy-or-restore), everything else fails closed (`Fail`).
 pub fn default_on_missing(source: &RestoreSource) -> OnMissingSnapshot {
     match source {
-        RestoreSource::FromConfig(_) => OnMissingSnapshot::Continue,
-        RestoreSource::BackupRef(_) | RestoreSource::Identity(_) => OnMissingSnapshot::Fail,
+        RestoreSource::FromPolicy(_) => OnMissingSnapshot::Continue,
+        RestoreSource::SnapshotRef(_) | RestoreSource::Identity(_) => OnMissingSnapshot::Fail,
     }
 }
 
@@ -68,10 +68,10 @@ pub fn effective_on_missing(
 /// the reconcile loop can dispatch without re-deriving it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopulatorState {
-    /// No `target` on the spec: this `Restore` is a passive populator source,
-    /// awaiting a PVC `dataSourceRef` to claim it.
+    /// `target: populator`: this `Restore` is a passive populator source, awaiting a
+    /// PVC `dataSourceRef` to claim it (ADR-0005 §9).
     AwaitingClaim,
-    /// A `target` is set: the operator drives the restore directly.
+    /// An explicit `pvc`/`pvcRef` target: the operator drives the restore directly.
     DirectTarget,
 }
 
@@ -86,12 +86,14 @@ pub fn restore_job_duration_seconds(job: &k8s_openapi::api::batch::v1::Job) -> O
     (secs >= 0).then_some(secs)
 }
 
-/// Decide the populator state from whether a `target` is present.
-pub fn populator_state(has_target: bool) -> PopulatorState {
-    if has_target {
-        PopulatorState::DirectTarget
-    } else {
-        PopulatorState::AwaitingClaim
+/// Decide the populator state from the restore `target` (ADR-0005 §9). Pure +
+/// exhaustive over [`RestoreTarget`] (no `_ =>`), so a new target variant must be
+/// considered here before it compiles: `populator` awaits a PVC `dataSourceRef`
+/// claim; `pvc`/`pvcRef` is a direct, operator-driven restore.
+pub fn populator_state(target: &RestoreTarget) -> PopulatorState {
+    match target {
+        RestoreTarget::Populator(_) => PopulatorState::AwaitingClaim,
+        RestoreTarget::Pvc(_) | RestoreTarget::PvcRef(_) => PopulatorState::DirectTarget,
     }
 }
 
@@ -108,7 +110,7 @@ pub async fn reconcile(restore: Arc<Restore>, ctx: Arc<Context>) -> Result<Actio
 
 /// Mirror a Restore's phase gauge. Zeroes it on deletion (so a Failed restore's
 /// alert clears once the CR is gone) and re-reads the freshest status on success
-/// — see the Backup equivalent for the rationale. (Restore *duration* is
+/// — see the Snapshot equivalent for the rationale. (Restore *duration* is
 /// recorded at the Job-completion site, not from status.)
 async fn record_restore_status_metrics(restore: &Restore, ctx: &Context, ok: bool) {
     let (Some(ns), name) = (restore.namespace(), restore.name_any()) else {
@@ -145,7 +147,7 @@ async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
     // nothing left to do until the spec changes, so don't re-resolve, re-pin a
     // fresh timestamp, or re-write the phase — each of which would churn status and
     // self-trigger another reconcile (the same hot-loop class as the repo bug).
-    // Mirrors the Backup reconciler's terminal discipline.
+    // Mirrors the Snapshot reconciler's terminal discipline.
     if matches!(
         restore.status.as_ref().and_then(|s| s.phase),
         Some(RestorePhase::Completed) | Some(RestorePhase::Failed)
@@ -153,7 +155,25 @@ async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
         return Ok(Action::requeue(std::time::Duration::from_secs(600)));
     }
 
-    let state = populator_state(restore.spec.target.is_some());
+    // §3: pin the resolved source kind to status so the SOURCE printer column shows
+    // where the restore reads from. Deterministic (from the spec source variant), so
+    // an unchanged value is a no-op patch.
+    let source_kind = source_mode(&restore.spec.source);
+    if restore
+        .status
+        .as_ref()
+        .and_then(|s| s.source_kind.as_deref())
+        != Some(source_kind)
+    {
+        io::patch_status(
+            &api,
+            &name,
+            serde_json::json!({ "sourceKind": source_kind }),
+        )
+        .await?;
+    }
+
+    let state = populator_state(&restore.spec.target);
     let on_missing = effective_on_missing(
         restore
             .spec
@@ -271,9 +291,9 @@ async fn drive_direct_restore(
     if let Some(job) = job_api.get_opt(name).await? {
         // Guard each phase write with a phase-equality check so a tracked Job that
         // sits terminal (or keeps running) doesn't re-patch an identical phase on
-        // every requeue and self-trigger. Mirrors the Backup reconciler.
+        // every requeue and self-trigger. Mirrors the Snapshot reconciler.
         let phase = restore.status.as_ref().and_then(|s| s.phase);
-        return match crate::backup::job_terminal_state(&job) {
+        return match crate::snapshot::job_terminal_state(&job) {
             Some(true) => {
                 if let Some(secs) = restore_job_duration_seconds(&job) {
                     ctx.metrics.set_restore_duration(namespace, name, secs);
@@ -302,12 +322,17 @@ async fn drive_direct_restore(
 
     // Resolve the repository + target PVC for the restore Job.
     let repo = resolve_restore_repository(ctx, restore, namespace).await?;
-    let target_pvc = match restore.spec.target.as_ref() {
-        Some(RestoreTarget::PvcRef(r)) => r.name.clone(),
-        Some(RestoreTarget::Pvc(t)) => t.name.clone(),
-        None => {
+    // DirectTarget is only reached for an explicit PVC target (populator routes to
+    // AwaitingClaim in the reconcile dispatch). Exhaustive over RestoreTarget so a new
+    // variant must be considered here.
+    let target_pvc = match &restore.spec.target {
+        RestoreTarget::PvcRef(r) => r.name.clone(),
+        RestoreTarget::Pvc(t) => t.name.clone(),
+        RestoreTarget::Populator(_) => {
             return Err(Error::Invariant(
-                "DirectTarget restore without a target".into(),
+                "DirectTarget restore reached with a populator target (should route to \
+                 AwaitingClaim)"
+                    .into(),
             ));
         }
     };
@@ -339,15 +364,35 @@ async fn drive_direct_restore(
             .await?;
     let privileged_mode = restore.spec.mover.as_ref().and_then(|m| m.privileged_mode);
 
+    // Field-wise merge the repository's moverDefaults under the recipe's effective
+    // contexts/resources/cache (`hardened ⊂ moverDefaults ⊂ recipe`, ADR-0004 §1/§2).
+    // The gate and the Job both run on the MERGED result.
+    let resolved_mover = kopiur_api::common::resolve_mover(
+        repo.mover_defaults.as_ref(),
+        effective_sc.as_ref(),
+        effective_pod_sc.as_ref(),
+        restore
+            .spec
+            .mover
+            .as_ref()
+            .and_then(|m| m.resources.as_ref()),
+        restore.spec.mover.as_ref().and_then(|m| m.cache.as_ref()),
+        restore
+            .spec
+            .mover
+            .as_ref()
+            .and_then(|m| m.ttl_seconds_after_finished),
+    );
+
     // Privileged-mover gate (ADR §4.11/§G16, VolSync-parity): an elevated restore mover
     // (root/privileged/added caps/`privilegedMode`, container- OR pod-level) requires the
     // target namespace to opt in via the `kopiur.home-operations.com/privileged-movers`
     // annotation — a tenant there could otherwise reuse the minted mover SA at that
     // privilege. Refuse with a clear `MoverPermitted=False` condition + Event otherwise.
-    // Mirrors the Backup gate.
+    // Mirrors the Snapshot gate.
     if kopiur_api::common::requires_privilege_resolved(
-        effective_sc.as_ref(),
-        effective_pod_sc.as_ref(),
+        Some(&resolved_mover.security_context),
+        resolved_mover.pod_security_context.as_ref(),
         privileged_mode,
     ) && !io::namespace_allows_privileged_movers(&ctx.client, namespace).await?
     {
@@ -524,6 +569,8 @@ async fn drive_direct_restore(
         hook_plan: Default::default(),
         options: MoverOptions::default(),
         cache,
+        // Repo throttle applies to restore too (§13(e)).
+        throttle: io::throttle_spec(repo.mover_defaults.as_ref()),
     };
     let repo_volume =
         io::filesystem_repo_mount_source(&repo.backend).map(|source| VolumeMountSpec {
@@ -546,17 +593,22 @@ async fn drive_direct_restore(
         owner,
         work_spec: &work_spec,
         image: &ctx.mover_image,
-        image_pull_policy: crate::backup::mover_pull_policy_pub(),
-        limits: restore_job_limits(restore),
-        resources: restore
-            .spec
-            .mover
-            .as_ref()
-            .and_then(|m| m.resources.clone()),
-        // The resolved effective contexts (explicit or inherited) — the same values
-        // the privileged gate above ran on.
-        security_context: effective_sc,
-        pod_security_context: effective_pod_sc,
+        image_pull_policy: crate::snapshot::mover_pull_policy_pub(),
+        limits: {
+            let mut l = restore_job_limits(restore);
+            if l.ttl_seconds_after_finished.is_none() {
+                l.ttl_seconds_after_finished = resolved_mover.ttl_seconds_after_finished;
+            }
+            l
+        },
+        resources: resolved_mover.resources.clone(),
+        // The fully-merged contexts (hardened ⊂ moverDefaults ⊂ recipe) — the same
+        // values the privileged gate above ran on.
+        security_context: resolved_mover.security_context.clone(),
+        pod_security_context: resolved_mover.pod_security_context.clone(),
+        node_selector: resolved_mover.node_selector.clone(),
+        tolerations: resolved_mover.tolerations.clone(),
+        affinity: resolved_mover.affinity.clone(),
         labels: io::child_labels(&[("kopiur.home-operations.com/op", "restore")]),
         // Restore writes INTO the target PVC, mounted read-write at /restore.
         source_volume: Some(VolumeMountSpec::pvc(target_pvc, target_path, false)),
@@ -584,9 +636,9 @@ async fn resolve_snapshot(
     namespace: &str,
 ) -> Result<Option<String>> {
     match &restore.spec.source {
-        RestoreSource::BackupRef(r) => {
+        RestoreSource::SnapshotRef(r) => {
             let ns = r.namespace.as_deref().unwrap_or(namespace);
-            let api: Api<Backup> = Api::namespaced(ctx.client.clone(), ns);
+            let api: Api<Snapshot> = Api::namespaced(ctx.client.clone(), ns);
             let backup = api.get_opt(&r.name).await?;
             Ok(backup
                 .and_then(|b| b.status)
@@ -610,16 +662,20 @@ async fn resolve_snapshot(
             .await?;
             Ok(pick_offset(snapshots, id.offset.unwrap_or(0)))
         }
-        RestoreSource::FromConfig(c) => {
-            // Resolve identity from the BackupConfig, then list newest/offset.
-            use kopiur_api::BackupConfig;
+        RestoreSource::FromPolicy(c) => {
+            // Resolve identity from the SnapshotPolicy, then list newest/offset.
+            use kopiur_api::SnapshotPolicy;
             let cfg_ns = c.namespace.as_deref().unwrap_or(namespace);
-            let cfg_api: Api<BackupConfig> = Api::namespaced(ctx.client.clone(), cfg_ns);
+            let cfg_api: Api<SnapshotPolicy> = Api::namespaced(ctx.client.clone(), cfg_ns);
             let config = cfg_api.get_opt(&c.name).await?.ok_or_else(|| {
-                Error::MissingDependency(format!("BackupConfig {cfg_ns}/{}", c.name))
+                Error::MissingDependency(format!("SnapshotPolicy {cfg_ns}/{}", c.name))
             })?;
-            let identity = crate::backup_config::config_identity(&config, cfg_ns)?;
             let repo = resolve_restore_repository(ctx, restore, namespace).await?;
+            let identity = crate::snapshot_policy::config_identity(
+                &config,
+                cfg_ns,
+                repo.identity_defaults.as_ref(),
+            )?;
             let snapshots = list_for_identity(
                 ctx,
                 &repo,
@@ -629,7 +685,7 @@ async fn resolve_snapshot(
                 identity.source_path.as_deref(),
             )
             .await?;
-            Ok(pick_offset(snapshots, c.offset.unwrap_or(0)))
+            Ok(pick_offset(snapshots, c.offset))
         }
     }
 }
@@ -680,8 +736,8 @@ fn pick_offset(snapshots: Vec<kopiur_kopia::SnapshotListEntry>, offset: i64) -> 
 }
 
 /// Resolve the repository a restore targets (`spec.repository` or, when omitted,
-/// via the backupRef'd Backup's recipe). Implemented for the explicit-repository
-/// and BackupRef paths.
+/// via the snapshotRef'd Snapshot's recipe). Implemented for the explicit-repository
+/// and SnapshotRef paths.
 async fn resolve_restore_repository(
     ctx: &Context,
     restore: &Restore,
@@ -692,29 +748,28 @@ async fn resolve_restore_repository(
     if let Some(rref) = &restore.spec.repository {
         return io::resolve_repository_ref(&ctx.client, rref, namespace).await;
     }
-    // FromConfig: resolve via the BackupConfig's repository.
-    if let RestoreSource::FromConfig(c) = &restore.spec.source {
-        use kopiur_api::BackupConfig;
+    // FromPolicy: resolve via the SnapshotPolicy's repository.
+    if let RestoreSource::FromPolicy(c) = &restore.spec.source {
+        use kopiur_api::SnapshotPolicy;
         let cfg_ns = c.namespace.as_deref().unwrap_or(namespace);
-        let cfg_api: Api<BackupConfig> = Api::namespaced(ctx.client.clone(), cfg_ns);
-        let config = cfg_api
-            .get_opt(&c.name)
-            .await?
-            .ok_or_else(|| Error::MissingDependency(format!("BackupConfig {cfg_ns}/{}", c.name)))?;
+        let cfg_api: Api<SnapshotPolicy> = Api::namespaced(ctx.client.clone(), cfg_ns);
+        let config = cfg_api.get_opt(&c.name).await?.ok_or_else(|| {
+            Error::MissingDependency(format!("SnapshotPolicy {cfg_ns}/{}", c.name))
+        })?;
         return io::resolve_repository_ref(&ctx.client, &config.spec.repository, cfg_ns).await;
     }
     Err(Error::Validation(
-        "restore requires spec.repository (or a fromConfig source)".into(),
+        "restore requires spec.repository (or a fromPolicy source)".into(),
     ))
 }
 
 /// Map a resolved repository backend to the mover connect spec for a restore.
 fn restore_connect(repo: &ResolvedRepository) -> Result<RepositoryConnect> {
-    crate::backup::repository_connect_pub(repo)
+    crate::snapshot::repository_connect_pub(repo)
 }
 
 /// Mover `Job` limits from the restore's `failurePolicy`, falling back to ADR
-/// defaults. Mirrors `backup::job_limits`; TTL stays unset so the one-Job-per-CR is
+/// defaults. Mirrors `snapshot::job_limits`; TTL stays unset so the one-Job-per-CR is
 /// reaped by owner-reference GC when the `Restore` is deleted.
 fn restore_job_limits(restore: &Restore) -> JobLimits {
     match &restore.spec.failure_policy {
@@ -748,7 +803,7 @@ pub fn error_policy(_obj: Arc<Restore>, err: &Error, ctx: Arc<Context>) -> Actio
 mod tests {
     use super::*;
     use kopiur_api::common::ObjectRef;
-    use kopiur_api::restore::{FromConfig, IdentitySource};
+    use kopiur_api::restore::{FromPolicy, IdentitySource};
 
     fn job_with_times(start: Option<&str>, end: Option<&str>) -> k8s_openapi::api::batch::v1::Job {
         use k8s_openapi::api::batch::v1::{Job, JobStatus};
@@ -777,18 +832,18 @@ mod tests {
         assert_eq!(restore_job_duration_seconds(&skew), None);
     }
 
-    fn backup_ref() -> RestoreSource {
-        RestoreSource::BackupRef(ObjectRef {
+    fn snapshot_ref() -> RestoreSource {
+        RestoreSource::SnapshotRef(ObjectRef {
             name: "b".into(),
             namespace: None,
         })
     }
     fn from_config() -> RestoreSource {
-        RestoreSource::FromConfig(FromConfig {
+        RestoreSource::FromPolicy(FromPolicy {
             name: "cfg".into(),
             namespace: None,
             as_of: None,
-            offset: Some(0),
+            offset: 0,
         })
     }
     fn identity() -> RestoreSource {
@@ -808,34 +863,57 @@ mod tests {
             default_on_missing(&from_config()),
             OnMissingSnapshot::Continue
         );
-        assert_eq!(default_on_missing(&backup_ref()), OnMissingSnapshot::Fail);
+        assert_eq!(default_on_missing(&snapshot_ref()), OnMissingSnapshot::Fail);
         assert_eq!(default_on_missing(&identity()), OnMissingSnapshot::Fail);
     }
 
     #[test]
     fn explicit_on_missing_overrides_default() {
-        // fromConfig would default Continue, but an explicit Fail wins.
+        // fromPolicy would default Continue, but an explicit Fail wins.
         assert_eq!(
             effective_on_missing(Some(OnMissingSnapshot::Fail), &from_config()),
             OnMissingSnapshot::Fail
         );
-        // backupRef defaults Fail, explicit Continue wins.
+        // snapshotRef defaults Fail, explicit Continue wins.
         assert_eq!(
-            effective_on_missing(Some(OnMissingSnapshot::Continue), &backup_ref()),
+            effective_on_missing(Some(OnMissingSnapshot::Continue), &snapshot_ref()),
             OnMissingSnapshot::Continue
         );
     }
 
     #[test]
     fn source_mode_strings_match_each_variant() {
-        assert_eq!(source_mode(&backup_ref()), "BackupRef");
-        assert_eq!(source_mode(&from_config()), "FromConfig");
+        assert_eq!(source_mode(&snapshot_ref()), "SnapshotRef");
+        assert_eq!(source_mode(&from_config()), "FromPolicy");
         assert_eq!(source_mode(&identity()), "Identity");
     }
 
     #[test]
-    fn populator_state_depends_on_target_presence() {
-        assert_eq!(populator_state(false), PopulatorState::AwaitingClaim);
-        assert_eq!(populator_state(true), PopulatorState::DirectTarget);
+    fn populator_state_depends_on_target_variant() {
+        use kopiur_api::PopulatorTarget;
+        use kopiur_api::common::ObjectRef;
+        use kopiur_api::restore::PvcTemplate;
+        // populator target → passive AwaitingClaim.
+        assert_eq!(
+            populator_state(&RestoreTarget::Populator(PopulatorTarget {})),
+            PopulatorState::AwaitingClaim
+        );
+        // explicit pvc/pvcRef → operator-driven DirectTarget.
+        assert_eq!(
+            populator_state(&RestoreTarget::PvcRef(ObjectRef {
+                name: "data".into(),
+                namespace: None,
+            })),
+            PopulatorState::DirectTarget
+        );
+        assert_eq!(
+            populator_state(&RestoreTarget::Pvc(PvcTemplate {
+                name: "created".into(),
+                storage_class_name: None,
+                capacity: None,
+                access_modes: vec![],
+            })),
+            PopulatorState::DirectTarget
+        );
     }
 }

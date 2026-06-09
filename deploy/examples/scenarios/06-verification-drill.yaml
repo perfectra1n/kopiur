@@ -1,23 +1,63 @@
 # Scenario 06 — Backup verification / restore drills (an untested backup isn't one)
 #
-# A backup you have never restored is a hope, not a guarantee. This scenario runs
-# a periodic DRILL: restore the latest snapshot into a THROWAWAY PVC, assert it
-# completed, then clean up — so a broken backup is caught by you on a schedule,
-# not by a real outage. Kopiur has no RestoreSchedule kind (restores are one-shot
-# operations), so the cadence is a tiny CronJob that creates Restore CRs.
+# A backup you have never restored is a hope, not a guarantee. There are two ways
+# to prove restorability on a schedule:
 #
-# This file has two halves:
+#   0) FIRST-CLASS verification (ADR-0005 §4, RECOMMENDED). Put a `verification:`
+#      block on the SnapshotPolicy and the operator runs it for you: a frequent
+#      blob-level `kopia snapshot verify` (quick) and a rarer scratch-restore test
+#      (deep) into an ephemeral PVC. An optional CEL `successExpr` asserts the
+#      result is good (killing the silent "0 files" success). Surfaces
+#      `status.lastVerified` + the kopiur_snapshot_verified_timestamp metric.
+#   A/B) DIY DRILL. If you want full control of the drill, a tiny CronJob that
+#      creates Restore CRs works too (shown below) — restore into a THROWAWAY PVC,
+#      assert Completed, clean up.
+#
+# This file has three parts:
+#   0) The SnapshotPolicy with a native `verification:` block (the easy path).
 #   A) A run-one-now drill Restore you can `kubectl apply` by hand.
 #   B) The automation: a ServiceAccount + RBAC + CronJob that creates a
 #      timestamped drill each night, waits for Completed, and deletes both the
 #      Restore and its throwaway PVC.
 #
 # Pair this with alerting on the operator's metrics (PromQL examples are in the
-# docs page): kopiur_backup_last_success_timestamp_seconds going stale, and the
+# docs page): kopiur_snapshot_last_success_timestamp_seconds going stale, and the
 # drill CronJob's own failures.
 #
-# Field shapes verified against crates/api (source.fromConfig, target.pvc). The
-# RBAC/CronJob are plain core/k8s objects.
+# Field shapes verified against crates/api (verification.{quick,deep,successExpr,
+# verifyFilesPercent}; source.fromPolicy, target.pvc). The RBAC/CronJob are plain
+# core/k8s objects.
+---
+# ── 0) First-class verification on the recipe (the recommended path) ──────────
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: SnapshotPolicy
+metadata:
+  name: postgres-data
+  namespace: billing
+spec:
+  repository:
+    name: postgres-primary
+  sources:
+    - pvc:
+        name: postgres-data
+  retention:
+    keepDaily: 14
+  # The operator verifies restorability on this cadence — no CronJob needed.
+  verification:
+    # Quick: blob-level `kopia snapshot verify`, often.
+    quick:
+      cron: "0 4 * * *"
+      jitter: 30m
+    # Deep: scratch-restore the latest snapshot into an ephemeral PVC, weekly.
+    deep:
+      schedule:
+        cron: "0 5 * * 0"
+        jitter: 1h
+      capacity: 100Gi
+      storageClassName: fast-ssd
+    # CEL pass/fail over the result — a verify with 0 files or any error FAILS.
+    successExpr: "stats.files > 0 && stats.errors == 0"
+    verifyFilesPercent: 10 # how much of each file `quick` reads fully
 ---
 # ── A) Run a single drill by hand ────────────────────────────────────────────
 apiVersion: kopiur.home-operations.com/v1alpha1
@@ -27,7 +67,7 @@ metadata:
   namespace: billing
 spec:
   source:
-    fromConfig:
+    fromPolicy:
       name: postgres-data
       offset: 0 # latest snapshot
   target:
@@ -118,7 +158,7 @@ spec:
                     namespace: ${ns}
                   spec:
                     source:
-                      fromConfig:
+                      fromPolicy:
                         name: postgres-data
                         offset: 0
                     target:

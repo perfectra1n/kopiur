@@ -1,6 +1,6 @@
 # Example 10 — Back up an NFS export directly (ADR-0003 §3.3)
 #
-# A BackupConfig whose source is an inline NFS export — no PersistentVolumeClaim.
+# A SnapshotPolicy whose source is an inline NFS export — no PersistentVolumeClaim.
 # The operator mounts the export read-only into the backup mover and kopia
 # snapshots it. Reach for this to back up a NAS share (a media library, a docs
 # tree) that lives outside Kubernetes and you don't want to wrap in a PVC.
@@ -46,7 +46,7 @@ spec:
     enabled: true
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupConfig
+kind: SnapshotPolicy
 metadata:
   name: media-library
   namespace: media
@@ -66,12 +66,12 @@ spec:
     keepWeekly: 4
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupSchedule
+kind: SnapshotSchedule
 metadata:
   name: media-library-nightly
   namespace: media
 spec:
-  configRef:
+  policyRef:
     name: media-library
   schedule:
     cron: "H 4 * * *"

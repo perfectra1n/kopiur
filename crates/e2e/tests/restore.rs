@@ -10,7 +10,7 @@
 //!
 //! Gated by `#[cfg(feature = "e2e")]` + `#[ignore]`; skip gracefully with no cluster.
 //! Driven by `mise run //crates/e2e:test` (Filesystem fixtures only — no object
-//! store). All restores reuse a single seed Backup in the operator namespace.
+//! store). All restores reuse a single seed Snapshot in the operator namespace.
 
 #![cfg(all(unix, feature = "e2e"))]
 
@@ -22,7 +22,7 @@ use serde::de::DeserializeOwned;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod};
 
-use kopiur_api::{Backup, BackupConfig, ClusterRepository, Repository, Restore};
+use kopiur_api::{ClusterRepository, Repository, Restore, Snapshot, SnapshotPolicy};
 use kopiur_e2e::{
     E2E_NAMESPACE, Need, World, annotate_namespace, default_timeout, ensure_namespace,
     poll_interval, wait_until,
@@ -143,13 +143,13 @@ const SEED_REPO: &str = "e2e-r-repo";
 const SEED_CFG: &str = "e2e-r-cfg";
 const SEED_BACKUP: &str = "e2e-r-seed";
 
-/// Ensure a single Repository + BackupConfig + Backup exist and the Backup has
+/// Ensure a single Repository + SnapshotPolicy + Snapshot exist and the Snapshot has
 /// `Succeeded` (a real snapshot to restore from). Idempotent so every restore test
 /// can call it; the restores reference `SEED_BACKUP` cross-resource.
 async fn ensure_seed_backup(client: &Client) {
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
     if repos.get_opt(SEED_REPO).await.ok().flatten().is_none() {
         let _ = repos
@@ -163,7 +163,7 @@ async fn ensure_seed_backup(client: &Client) {
     if configs.get_opt(SEED_CFG).await.ok().flatten().is_none() {
         let cfg = serde_json::json!({
             "apiVersion": "kopiur.home-operations.com/v1alpha1",
-            "kind": "BackupConfig",
+            "kind": "SnapshotPolicy",
             "metadata": { "name": SEED_CFG, "namespace": E2E_NAMESPACE },
             "spec": {
                 "repository": { "kind": "Repository", "name": SEED_REPO },
@@ -176,15 +176,15 @@ async fn ensure_seed_backup(client: &Client) {
     if backups.get_opt(SEED_BACKUP).await.ok().flatten().is_none() {
         let backup = serde_json::json!({
             "apiVersion": "kopiur.home-operations.com/v1alpha1",
-            "kind": "Backup",
+            "kind": "Snapshot",
             "metadata": { "name": SEED_BACKUP, "namespace": E2E_NAMESPACE },
-            "spec": { "configRef": { "name": SEED_CFG }, "deletionPolicy": "Retain" }
+            "spec": { "policyRef": { "name": SEED_CFG }, "deletionPolicy": "Retain" }
         });
         let _ = backups.create(&PostParams::default(), &cr(backup)).await;
     }
     wait_phase(&backups, SEED_BACKUP, "Succeeded")
         .await
-        .expect("seed Backup should reach Succeeded with a snapshot");
+        .expect("seed Snapshot should reach Succeeded with a snapshot");
 }
 
 /// A Restore referencing the seed backup, writing into a fresh target PVC, with the
@@ -192,7 +192,7 @@ async fn ensure_seed_backup(client: &Client) {
 fn restore_json(name: &str, extra_spec: serde_json::Value) -> serde_json::Value {
     let mut spec = serde_json::json!({
         "repository": { "kind": "Repository", "name": SEED_REPO },
-        "source": { "backupRef": { "name": SEED_BACKUP } },
+        "source": { "snapshotRef": { "name": SEED_BACKUP } },
         "target": { "pvc": { "name": format!("{name}-dst"), "capacity": "1Gi", "accessModes": ["ReadWriteOnce"] } }
     });
     let (serde_json::Value::Object(base), serde_json::Value::Object(more)) =
@@ -299,7 +299,7 @@ async fn restore_mover_pod_security_context_fsgroup_is_applied() {
 }
 
 /// `Restore.spec.failurePolicy` drives the restore Job's backoff/deadline (parity
-/// with `Backup.spec.failurePolicy`).
+/// with `Snapshot.spec.failurePolicy`).
 #[tokio::test]
 #[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
 async fn restore_failure_policy_sets_job_backoff_and_deadline() {
@@ -597,7 +597,7 @@ async fn pod_level_root_gates_restore() {
 /// The privileged-mover gate guards restores too: a root restore mover is refused
 /// with `MoverPermitted=False` until the restore's namespace opts in, then clears.
 /// Self-contained in its own namespace (via a ClusterRepository + cross-namespace
-/// backupRef) so the opt-in annotation doesn't leak into the other restore tests.
+/// snapshotRef) so the opt-in annotation doesn't leak into the other restore tests.
 #[tokio::test]
 #[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
 async fn privileged_restore_mover_requires_namespace_optin() {
@@ -645,7 +645,7 @@ async fn privileged_restore_mover_requires_namespace_optin() {
         "metadata": { "name": "e2e-privr-restore", "namespace": RESTORE_NS },
         "spec": {
             "repository": { "kind": "ClusterRepository", "name": "e2e-privr-crepo" },
-            "source": { "backupRef": { "name": SEED_BACKUP, "namespace": E2E_NAMESPACE } },
+            "source": { "snapshotRef": { "name": SEED_BACKUP, "namespace": E2E_NAMESPACE } },
             "target": { "pvc": { "name": "e2e-privr-dst", "capacity": "1Gi", "accessModes": ["ReadWriteOnce"] } },
             "mover": { "securityContext": { "runAsUser": 0, "runAsGroup": 0 } }
         }

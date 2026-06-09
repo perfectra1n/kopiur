@@ -1,4 +1,4 @@
-//! The `Backup` reconciler — the heart of the ADR §5.5 thesis.
+//! The `Snapshot` reconciler — the heart of the ADR §5.5 thesis.
 //!
 //! Two paths:
 //! 1. **Normal reconcile** (produced backups): add the `kopiur.home-operations.com/snapshot-cleanup`
@@ -23,12 +23,12 @@ use kube::runtime::events::{Event, EventType};
 use kube::{Api, Resource, ResourceExt};
 
 use kopiur_api::backend::Backend;
-use kopiur_api::backup::BackupPhase;
-use kopiur_api::common::ResolvedIdentity as ApiResolvedIdentity;
-use kopiur_api::{Backup, BackupConfig, DeletionPolicy, Origin};
+use kopiur_api::common::{NamespaceDeletePolicy, ResolvedIdentity as ApiResolvedIdentity};
+use kopiur_api::snapshot::SnapshotPhase;
+use kopiur_api::{DeletionPolicy, Origin, Snapshot, SnapshotPolicy};
 use kopiur_mover::workspec::{
-    BackupOp, MoverOptions, MoverWorkSpec, Operation, RepositoryConnect,
-    ResolvedIdentity as MoverIdentity, SnapshotDeleteOp, TargetRef,
+    MoverOptions, MoverWorkSpec, Operation, RepositoryConnect, ResolvedIdentity as MoverIdentity,
+    SnapshotDeleteOp, SnapshotOp, SnapshotPinOp, TargetRef,
 };
 
 use crate::config;
@@ -80,7 +80,85 @@ pub fn plan_deletion(
     }
 }
 
-/// Compute the effective `DeletionPolicy` for a `Backup`, honoring the
+/// Reshape a per-`Snapshot` deletion plan for the **namespace-deletion** cascade
+/// policy (ADR-0005 §5). This is the data-loss-prevention fix: a `kubectl delete ns`
+/// must not silently destroy off-site backup history.
+///
+/// - When the owning namespace is NOT terminating, a single `kubectl delete snapshot`
+///   honors the `Snapshot`'s own plan unchanged (`base_plan`).
+/// - When the namespace IS terminating, the owning repository's
+///   [`NamespaceDeletePolicy`] decides:
+///   - `Orphan` (the fail-safe default) → force [`DeletionPlan::OrphanSnapshot`]:
+///     remove the finalizer WITHOUT `kopia snapshot delete`, keeping history.
+///   - `Delete` → opt-in cascade: fall through to the per-`Snapshot` `base_plan`.
+///
+/// Pure + exhaustive over [`NamespaceDeletePolicy`] (no `_ =>`), so a new variant
+/// cannot compile until handled here (ADR §5.5). The fail-safe path is also taken
+/// when the repository can't be resolved (repo already gone) — the caller passes
+/// `Orphan` in that case.
+pub fn namespace_delete_plan(
+    policy: NamespaceDeletePolicy,
+    ns_terminating: bool,
+    base_plan: DeletionPlan,
+) -> DeletionPlan {
+    if !ns_terminating {
+        return base_plan;
+    }
+    match policy {
+        NamespaceDeletePolicy::Orphan => DeletionPlan::OrphanSnapshot,
+        NamespaceDeletePolicy::Delete => base_plan,
+    }
+}
+
+/// Map a `Snapshot` phase to its kstatus [`io::ReadyOutcome`] (ADR-0005 §2), so
+/// `kubectl wait --for=condition=Ready` and Flux/Argo health work uniformly. Pure +
+/// exhaustive: a new phase cannot compile until its Ready mapping is decided.
+///
+/// - `Succeeded`/`Discovered` → `Ready` (the snapshot exists / is catalogued).
+/// - `Failed` → `Stalled` (terminal: won't progress without a spec change/retry).
+/// - `Pending`/`Running`/`Deleting` → `Reconciling` (in flight).
+pub fn snapshot_ready_outcome(phase: SnapshotPhase) -> io::ReadyOutcome {
+    match phase {
+        SnapshotPhase::Succeeded | SnapshotPhase::Discovered => io::ReadyOutcome::Ready,
+        SnapshotPhase::Failed => io::ReadyOutcome::Stalled,
+        SnapshotPhase::Pending | SnapshotPhase::Running | SnapshotPhase::Deleting => {
+            io::ReadyOutcome::Reconciling
+        }
+    }
+}
+
+/// Build the `(phase, observedGeneration, conditions)` status JSON for a `Snapshot`
+/// reaching `phase`, deriving the kstatus Ready/Reconciling/Stalled conditions via
+/// [`snapshot_ready_outcome`] + [`io::set_ready`]. Existing conditions (e.g.
+/// `CredentialsAvailable`) are preserved by `set_ready`'s upsert.
+fn snapshot_ready_status(
+    backup: &Snapshot,
+    phase: SnapshotPhase,
+    reason: &str,
+    message: &str,
+) -> serde_json::Value {
+    use kopiur_api::common::PhaseLabel;
+    let existing = backup
+        .status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default();
+    let generation = backup.meta().generation;
+    let conditions = io::set_ready(
+        &existing,
+        generation,
+        snapshot_ready_outcome(phase),
+        reason,
+        message,
+    );
+    serde_json::json!({
+        "phase": phase.label(),
+        "observedGeneration": generation,
+        "conditions": conditions,
+    })
+}
+
+/// Compute the effective `DeletionPolicy` for a `Snapshot`, honoring the
 /// origin-aware default (ADR §4.5): discovered backups are forced to `Retain`,
 /// produced backups default to `Delete` when unset.
 pub fn effective_deletion_policy(
@@ -94,10 +172,38 @@ pub fn effective_deletion_policy(
     }
 }
 
-/// Resolve a `Backup`'s origin from its status (canonical) or its
+/// The kopia-side pin action a `Snapshot` reconcile must take (ADR-0005 §13(c)),
+/// derived purely from `spec.pin` (desired) and `status.pinned` (observed). No IO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinAction {
+    /// Apply the pin (`kopia snapshot pin --add`): desired `true`, not yet pinned.
+    Pin,
+    /// Remove the pin (`kopia snapshot pin --remove`): desired `false`, currently pinned.
+    Unpin,
+    /// Nothing to do — kopia's pin state already matches `spec.pin`.
+    NoOp,
+}
+
+/// Decide the kopia-side pin action from the desired (`spec.pin`) and observed
+/// (`status.pinned`) state. Pure + exhaustive so the decision is unit-tested and a
+/// redundant `kopia snapshot pin` is never issued.
+///
+/// `observed == None` means we've never reconciled the pin: act iff `desired` is
+/// `true` (apply it); a never-pinned snapshot with `desired == false` is already in
+/// the right state, so `NoOp` (don't spawn an unpin for a pin that was never set).
+pub fn pin_decision(desired: bool, observed: Option<bool>) -> PinAction {
+    match (desired, observed) {
+        (true, Some(true)) => PinAction::NoOp,
+        (true, _) => PinAction::Pin,
+        (false, Some(true)) => PinAction::Unpin,
+        (false, _) => PinAction::NoOp,
+    }
+}
+
+/// Resolve a `Snapshot`'s origin from its status (canonical) or its
 /// `kopiur.home-operations.com/origin` label, defaulting to `Manual` when neither is present
 /// (a bare `kubectl create`).
-pub fn resolve_origin(b: &Backup) -> Origin {
+pub fn resolve_origin(b: &Snapshot) -> Origin {
     if let Some(o) = b.status.as_ref().and_then(|s| s.origin) {
         return o;
     }
@@ -112,46 +218,47 @@ pub fn resolve_origin(b: &Backup) -> Origin {
     }
 }
 
-/// Reconcile a `Backup`.
+/// Reconcile a `Snapshot`.
 ///
 /// IO is intentionally thin here: the decision logic ([`plan_deletion`],
 /// [`effective_deletion_policy`], the job builders in [`crate::jobs`]) is pure
 /// and unit-tested; this function wires those decisions to the cluster.
-#[tracing::instrument(skip(backup, ctx), fields(kind = "Backup", namespace = %backup.namespace().unwrap_or_default(), name = %backup.name_any()))]
-pub async fn reconcile(backup: Arc<Backup>, ctx: Arc<Context>) -> Result<Action> {
+#[tracing::instrument(skip(backup, ctx), fields(kind = "Snapshot", namespace = %backup.namespace().unwrap_or_default(), name = %backup.name_any()))]
+pub async fn reconcile(backup: Arc<Snapshot>, ctx: Arc<Context>) -> Result<Action> {
     let start = std::time::Instant::now();
     let result = reconcile_inner(&backup, &ctx).await;
     ctx.metrics
-        .record_reconcile("Backup", start.elapsed().as_secs_f64());
+        .record_reconcile("Snapshot", start.elapsed().as_secs_f64());
     record_backup_status_metrics(&backup, &ctx, result.is_ok()).await;
     result
 }
 
-/// Drive the Backup's phase + stats gauges. On deletion the phase series is
+/// Drive the Snapshot's phase + stats gauges. On deletion the phase series is
 /// zeroed so `kopiur_resource_phase{...} == 1` alerts clear before the CR is GC'd
 /// (OTel sync gauges can't drop a series). Otherwise, on a successful reconcile,
 /// the freshest status is re-read — the object handed to `reconcile` is the
 /// pre-reconcile watch-cache copy, so reading its status would lag one cycle.
-async fn record_backup_status_metrics(backup: &Backup, ctx: &Context, ok: bool) {
+async fn record_backup_status_metrics(backup: &Snapshot, ctx: &Context, ok: bool) {
     let (Some(ns), name) = (backup.namespace(), backup.name_any()) else {
         return;
     };
     if backup.metadata.deletion_timestamp.is_some() {
-        ctx.metrics.clear_phase::<BackupPhase>("Backup", &ns, &name);
+        ctx.metrics
+            .clear_phase::<SnapshotPhase>("Snapshot", &ns, &name);
         return;
     }
     if !ok {
         return;
     }
-    let api: Api<Backup> = Api::namespaced(ctx.client.clone(), &ns);
+    let api: Api<Snapshot> = Api::namespaced(ctx.client.clone(), &ns);
     if let Ok(Some(latest)) = api.get_opt(&name).await {
         record_backup_metrics(&latest, ctx);
     }
 }
 
-/// Mirror the Backup's observed status onto the phase + stats gauges. Idempotent
+/// Mirror the Snapshot's observed status onto the phase + stats gauges. Idempotent
 /// (it `set`s current values), so it is safe to call every reconcile.
-fn record_backup_metrics(backup: &Backup, ctx: &Context) {
+fn record_backup_metrics(backup: &Snapshot, ctx: &Context) {
     let (Some(ns), name) = (backup.namespace(), backup.name_any()) else {
         return;
     };
@@ -177,29 +284,31 @@ fn record_backup_metrics(backup: &Backup, ctx: &Context) {
     }
 }
 
-async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
+async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
     let origin = resolve_origin(backup);
     let policy = effective_deletion_policy(backup.spec.deletion_policy, origin);
     let namespace = backup
         .namespace()
-        .ok_or_else(|| Error::Invariant("Backup has no namespace".into()))?;
+        .ok_or_else(|| Error::Invariant("Snapshot has no namespace".into()))?;
     let name = backup.name_any();
-    let api: Api<Backup> = Api::namespaced(ctx.client.clone(), &namespace);
+    let api: Api<Snapshot> = Api::namespaced(ctx.client.clone(), &namespace);
 
     if backup.metadata.deletion_timestamp.is_some() {
         return handle_deletion(backup, ctx, &api, &namespace, &name, policy).await;
     }
 
     // Discovered backups are catalog rows, not runs: never spawn a Job. Pin the
-    // Discovered phase if unset and stop.
+    // Discovered phase (with kstatus Ready, ADR-0005 §2) if unset and stop.
     if origin == Origin::Discovered {
-        if backup.status.as_ref().and_then(|s| s.phase) != Some(BackupPhase::Discovered) {
-            io::patch_status(
-                &api,
-                &name,
-                serde_json::json!({ "phase": "Discovered", "origin": "discovered" }),
-            )
-            .await?;
+        if backup.status.as_ref().and_then(|s| s.phase) != Some(SnapshotPhase::Discovered) {
+            let mut status = snapshot_ready_status(
+                backup,
+                SnapshotPhase::Discovered,
+                "Discovered",
+                "catalog-materialized snapshot",
+            );
+            status["origin"] = serde_json::json!("discovered");
+            io::patch_status(&api, &name, status).await?;
         }
         return Ok(Action::requeue(Duration::from_secs(600)));
     }
@@ -217,22 +326,43 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
     if let Some(job) = job_api.get_opt(&name).await? {
         match job_terminal_state(&job) {
             Some(true) => {
-                if backup.status.as_ref().and_then(|s| s.phase) != Some(BackupPhase::Succeeded) {
+                if backup.status.as_ref().and_then(|s| s.phase) != Some(SnapshotPhase::Succeeded) {
                     finalize_succeeded(ctx, backup, &api, &name, &namespace).await?;
                 }
-                return Ok(Action::requeue(Duration::from_secs(600)));
+                // §13(c): reconcile kopia-side pin state with spec.pin once the
+                // snapshot exists. A no-op when already in the desired state.
+                return reconcile_pin(backup, ctx, &api, &namespace, &name).await;
             }
             Some(false) => {
-                if backup.status.as_ref().and_then(|s| s.phase) != Some(BackupPhase::Failed) {
-                    io::patch_status(&api, &name, serde_json::json!({ "phase": "Failed" })).await?;
+                if backup.status.as_ref().and_then(|s| s.phase) != Some(SnapshotPhase::Failed) {
+                    io::patch_status(
+                        &api,
+                        &name,
+                        snapshot_ready_status(
+                            backup,
+                            SnapshotPhase::Failed,
+                            "MoverJobFailed",
+                            "the backup mover Job failed; see the Job/pod logs",
+                        ),
+                    )
+                    .await?;
                 }
                 return Ok(Action::requeue(Duration::from_secs(120)));
             }
             None => {
                 // Job exists but is still running; mark Running and wait.
-                if backup.status.as_ref().and_then(|s| s.phase) != Some(BackupPhase::Running) {
-                    io::patch_status(&api, &name, serde_json::json!({ "phase": "Running" }))
-                        .await?;
+                if backup.status.as_ref().and_then(|s| s.phase) != Some(SnapshotPhase::Running) {
+                    io::patch_status(
+                        &api,
+                        &name,
+                        snapshot_ready_status(
+                            backup,
+                            SnapshotPhase::Running,
+                            "MoverJobRunning",
+                            "the backup mover Job is in flight",
+                        ),
+                    )
+                    .await?;
                 }
                 return Ok(Action::requeue(Duration::from_secs(30)));
             }
@@ -241,6 +371,48 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
 
     // No Job yet: resolve the recipe and create the mover Job + ConfigMap.
     let (config, repo) = resolve_recipe(ctx, backup, &namespace).await?;
+
+    // §11: a ReadOnly repository serves restores only — refuse to create a backup
+    // Job. Surface a clear condition + Event and stop (not an error: it's a
+    // deliberate, terminal-until-spec-change state). Restores remain allowed (the
+    // Restore reconciler does not gate on mode).
+    if !repo.mode.allows_writes() {
+        let conds = backup
+            .status
+            .as_ref()
+            .map(|s| s.conditions.clone())
+            .unwrap_or_default();
+        let conditions = io::upsert_condition(
+            &conds,
+            crate::consts::REPOSITORY_WRITABLE_CONDITION,
+            false,
+            crate::consts::REPOSITORY_READ_ONLY_REASON,
+            &readonly_backup_message(&config.spec.repository.name),
+            backup.meta().generation,
+        );
+        io::patch_status(
+            &api,
+            &name,
+            serde_json::json!({ "phase": "Failed", "conditions": conditions }),
+        )
+        .await?;
+        let _ = ctx
+            .recorder
+            .publish(
+                &Event {
+                    type_: EventType::Warning,
+                    reason: crate::consts::REPOSITORY_READ_ONLY_REASON.into(),
+                    note: Some(readonly_backup_message(&config.spec.repository.name)),
+                    action: "RefuseBackupReadOnlyRepository".into(),
+                    secondary: None,
+                },
+                &backup.object_ref(&()),
+            )
+            .await;
+        tracing::warn!(backup = %name, repository = %config.spec.repository.name, "refusing backup: repository is ReadOnly");
+        return Ok(Action::await_change());
+    }
+
     let (work_spec, source_volume, repo_volume, _) =
         build_backup_run(backup, &config, &repo, &namespace, &name)?;
 
@@ -271,6 +443,29 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
             .await?;
     let privileged_mode = config.spec.mover.as_ref().and_then(|m| m.privileged_mode);
 
+    // Field-wise merge the repository's moverDefaults under the recipe's effective
+    // contexts/resources/cache: `hardened ⊂ moverDefaults ⊂ recipe` (ADR-0004 §1/§2).
+    // Both the privileged-mover gate below and the Job run on the MERGED result, so an
+    // elevation introduced by moverDefaults is gated too, and a partial recipe override
+    // can only tighten (never drops the hardened drop:[ALL]/seccomp).
+    let resolved_mover = kopiur_api::common::resolve_mover(
+        repo.mover_defaults.as_ref(),
+        effective_sc.as_ref(),
+        effective_pod_sc.as_ref(),
+        config
+            .spec
+            .mover
+            .as_ref()
+            .and_then(|m| m.resources.as_ref()),
+        config.spec.mover.as_ref().and_then(|m| m.cache.as_ref()),
+        // Recipe `mover.ttlSecondsAfterFinished` wins over the repo default (§12).
+        config
+            .spec
+            .mover
+            .as_ref()
+            .and_then(|m| m.ttl_seconds_after_finished),
+    );
+
     // Privileged-mover gate (ADR §4.11/§G16, VolSync-parity): an elevated mover
     // (root/privileged/added caps/`privilegedMode`, container- OR pod-level) requires
     // the workload namespace to opt in via the
@@ -278,8 +473,8 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
     // otherwise reuse the minted mover SA at that privilege. Refuse with a clear
     // `MoverPermitted=False` condition + Event otherwise.
     if kopiur_api::common::requires_privilege_resolved(
-        effective_sc.as_ref(),
-        effective_pod_sc.as_ref(),
+        Some(&resolved_mover.security_context),
+        resolved_mover.pod_security_context.as_ref(),
         privileged_mode,
     ) && !io::namespace_allows_privileged_movers(&ctx.client, &namespace).await?
     {
@@ -287,7 +482,8 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
             .mover_service_account
             .as_deref()
             .unwrap_or(config::DEFAULT_MOVER_NAME);
-        let msg = io::privileged_mover_message("BackupConfig", &config.name_any(), &namespace, sa);
+        let msg =
+            io::privileged_mover_message("SnapshotPolicy", &config.name_any(), &namespace, sa);
         let existing = backup
             .status
             .as_ref()
@@ -319,7 +515,7 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         // out-of-band (like a missing creds Secret) — Transient, NOT Structural, so
         // it is re-checked on the short transient cadence and the opt-in takes
         // effect within ~30s instead of a 5-minute structural backoff. (A namespace
-        // annotation does not enqueue this Backup, so the requeue is what picks it
+        // annotation does not enqueue this Snapshot, so the requeue is what picks it
         // up.) Mirrors the `CredentialsAvailable=False` gate above.
         return Err(Error::MissingDependency(msg));
     }
@@ -340,10 +536,10 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         io::patch_status(&api, &name, serde_json::json!({ "conditions": conditions })).await?;
     }
 
-    let owner = io::owner_ref_for(backup, "Backup")?;
+    let owner = io::owner_ref_for(backup, "Snapshot")?;
     // Resolve the credential Secret names the mover loads via envFrom. With
     // `spec.credentialProjection` enabled, the operator copies the repository's
-    // Secret(s) into THIS namespace (owned by the Backup, GC'd with it) and returns
+    // Secret(s) into THIS namespace (owned by the Snapshot, GC'd with it) and returns
     // the projected names; otherwise it verifies the user-managed Secret(s) are
     // already present here. Either way a problem surfaces as a clear
     // `CredentialsAvailable=False` condition + Warning Event before we launch a Job
@@ -426,14 +622,19 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
     let creds_secrets = creds.names;
 
     let labels = run_labels(&config, origin);
-    let limits = job_limits(backup);
+    let mut limits = job_limits(backup);
+    // moverDefaults.ttlSecondsAfterFinished applies unless the recipe's FailurePolicy
+    // already set a TTL (ADR-0005 §12).
+    if limits.ttl_seconds_after_finished.is_none() {
+        limits.ttl_seconds_after_finished = resolved_mover.ttl_seconds_after_finished;
+    }
     // Resolve the cache VOLUME (emptyDir / sized-ephemeral / persistent PVC). A
-    // persistent cache PVC is owned by the BackupConfig so a warm cache survives
-    // across individual Backup runs (ADR §3.1).
+    // persistent cache PVC is owned by the SnapshotPolicy so a warm cache survives
+    // across individual Snapshot runs (ADR §3.1).
     let cache_volume = crate::cache::resolve_cache_volume(
         &ctx.client,
         &namespace,
-        io::owner_ref_for(&config, "BackupConfig")?,
+        io::owner_ref_for(&config, "SnapshotPolicy")?,
         &format!("kopiur-cache-{}", config.name_any()),
         crate::cache::effective_cache(
             &repo,
@@ -450,11 +651,14 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
         image: &ctx.mover_image,
         image_pull_policy: mover_pull_policy(),
         limits,
-        resources: config.spec.mover.as_ref().and_then(|m| m.resources.clone()),
-        // The resolved effective contexts (explicit or inherited) — the same values
-        // the privileged gate above ran on.
-        security_context: effective_sc,
-        pod_security_context: effective_pod_sc,
+        resources: resolved_mover.resources.clone(),
+        // The fully-merged contexts (hardened ⊂ moverDefaults ⊂ recipe) — the same
+        // values the privileged gate above ran on.
+        security_context: resolved_mover.security_context.clone(),
+        pod_security_context: resolved_mover.pod_security_context.clone(),
+        node_selector: resolved_mover.node_selector.clone(),
+        tolerations: resolved_mover.tolerations.clone(),
+        affinity: resolved_mover.affinity.clone(),
         labels,
         source_volume,
         repo_volume,
@@ -483,9 +687,9 @@ async fn reconcile_inner(backup: &Backup, ctx: &Context) -> Result<Action> {
 /// Execute the deletion plan (the tested [`plan_deletion`] decision) against the
 /// cluster, then remove the finalizer when cleanup completes.
 async fn handle_deletion(
-    backup: &Backup,
+    backup: &Snapshot,
     ctx: &Context,
-    api: &Api<Backup>,
+    api: &Api<Snapshot>,
     namespace: &str,
     name: &str,
     policy: DeletionPolicy,
@@ -499,7 +703,29 @@ async fn handle_deletion(
         return Ok(Action::await_change());
     }
 
-    let plan = plan_deletion(policy, backup.annotations());
+    let base_plan = plan_deletion(policy, backup.annotations());
+
+    // Namespace-deletion cascade (ADR-0005 §5): if the owning namespace is being torn
+    // down, the repository's `onNamespaceDelete` decides. Default `Orphan` keeps
+    // off-site history (a `kubectl delete ns` must not be a data-loss event); only an
+    // explicit `Delete` cascades to the per-Snapshot plan. Resolving the repo policy
+    // needs the recipe; if it can't be resolved (repo/recipe already gone), fail safe
+    // to `Orphan`. A non-terminating namespace leaves `base_plan` unchanged, so a lone
+    // `kubectl delete snapshot` still honors the Snapshot's own deletionPolicy.
+    let plan = match io::namespace_is_terminating(&ctx.client, namespace).await {
+        Ok(false) => base_plan,
+        Ok(true) => {
+            let ns_policy = resolve_recipe(ctx, backup, namespace)
+                .await
+                .map(|(_, repo)| repo.on_namespace_delete)
+                .unwrap_or(NamespaceDeletePolicy::Orphan);
+            namespace_delete_plan(ns_policy, true, base_plan)
+        }
+        // Transient read error: don't guess. Fall back to the per-Snapshot plan so a
+        // single delete still works; the namespace-cascade case re-evaluates on the
+        // next pass once the read succeeds.
+        Err(_) => base_plan,
+    };
     tracing::info!(?plan, backup = %name, "executing backup deletion plan");
 
     match plan {
@@ -549,9 +775,9 @@ async fn handle_deletion(
 /// absent; on terminal success removes the finalizer; on failure records a
 /// Deleting phase, bumps the failure metric, and requeues.
 async fn delete_snapshot_via_job(
-    backup: &Backup,
+    backup: &Snapshot,
     ctx: &Context,
-    api: &Api<Backup>,
+    api: &Api<Snapshot>,
     namespace: &str,
     name: &str,
     snapshot_id: &str,
@@ -579,8 +805,8 @@ async fn delete_snapshot_via_job(
     // Create the SnapshotDelete Job. We need the recipe to know how to connect
     // and authenticate to the repository.
     let (config, repo) = resolve_recipe(ctx, backup, namespace).await?;
-    let identity = resolve_identity_for(&config, namespace)?;
-    let owner = io::owner_ref_for(backup, "Backup")?;
+    let identity = resolve_identity_for(&config, namespace, repo.identity_defaults.as_ref())?;
+    let owner = io::owner_ref_for(backup, "Snapshot")?;
     // Resolve (and, when `spec.credentialProjection` is enabled, project) the mover's
     // credential Secret(s) into this namespace before building the Job. Errors
     // propagate as MissingDependency (Transient) — this is the delete path, so we
@@ -614,7 +840,7 @@ async fn delete_snapshot_via_job(
         repository: repository_connect(&repo)?,
         target_ref: TargetRef {
             api_version: API_VERSION.to_string(),
-            kind: "Backup".to_string(),
+            kind: "Snapshot".to_string(),
             name: name.to_string(),
             namespace: namespace.to_string(),
         },
@@ -622,6 +848,7 @@ async fn delete_snapshot_via_job(
         options: MoverOptions::default(),
         // A one-shot finalizer delete: kopia's default cache is fine.
         cache: Default::default(),
+        throttle: Default::default(),
     };
 
     let mut labels = run_labels(&config, resolve_origin(backup));
@@ -635,6 +862,21 @@ async fn delete_snapshot_via_job(
             mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
             read_only: false,
         });
+    // The finalizer delete-Job has no recipe `mover`, but still inherits the
+    // repository's moverDefaults (security context, placement) so it can reach a
+    // filesystem/NFS repo on a non-65532-owned directory (ADR-0004 §1).
+    let resolved_mover = kopiur_api::common::resolve_mover(
+        repo.mover_defaults.as_ref(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let limits = JobLimits {
+        ttl_seconds_after_finished: resolved_mover.ttl_seconds_after_finished,
+        ..JobLimits::default()
+    };
     let inputs = MoverJobInputs {
         name: &job_name,
         namespace,
@@ -642,10 +884,13 @@ async fn delete_snapshot_via_job(
         work_spec: &work_spec,
         image: &ctx.mover_image,
         image_pull_policy: mover_pull_policy(),
-        limits: JobLimits::default(),
-        resources: None,
-        security_context: None,
-        pod_security_context: None,
+        limits,
+        resources: resolved_mover.resources.clone(),
+        security_context: resolved_mover.security_context.clone(),
+        pod_security_context: resolved_mover.pod_security_context.clone(),
+        node_selector: resolved_mover.node_selector.clone(),
+        tolerations: resolved_mover.tolerations.clone(),
+        affinity: resolved_mover.affinity.clone(),
         labels,
         source_volume: None,
         repo_volume,
@@ -677,6 +922,162 @@ async fn delete_snapshot_via_job(
     Ok(Action::requeue(Duration::from_secs(15)))
 }
 
+/// Reconcile kopia's snapshot-pin state with `Snapshot.spec.pin` (ADR-0005 §13(c)),
+/// after the snapshot exists. Issues a `SnapshotPin` mover Job only when the desired
+/// (`spec.pin`) and observed (`status.pinned`) state differ (the tested
+/// [`pin_decision`]); on the Job's terminal success it records the new observed pin
+/// state in `status.pinned`. A `NoOp` (or a not-yet-recorded snapshot id) just
+/// returns the standard succeeded-snapshot requeue.
+async fn reconcile_pin(
+    backup: &Snapshot,
+    ctx: &Context,
+    api: &Api<Snapshot>,
+    namespace: &str,
+    name: &str,
+) -> Result<Action> {
+    let desired = backup.spec.pin;
+    let observed = backup.status.as_ref().and_then(|s| s.pinned);
+    let steady = Action::requeue(Duration::from_secs(600));
+    let action = pin_decision(desired, observed);
+    if action == PinAction::NoOp {
+        return Ok(steady);
+    }
+    // Need the kopia snapshot id to pin/unpin; it's recorded once Succeeded.
+    let Some(snapshot_id) = backup
+        .status
+        .as_ref()
+        .and_then(|s| s.snapshot.as_ref())
+        .map(|s| s.kopia_snapshot_id.clone())
+    else {
+        // Not resolved yet (e.g. object-store mover hasn't PATCHed the id) — retry.
+        return Ok(Action::requeue(Duration::from_secs(30)));
+    };
+
+    let job_name = format!("{name}-pin");
+    let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), namespace);
+    if let Some(job) = job_api.get_opt(&job_name).await? {
+        match job_terminal_state(&job) {
+            Some(true) => {
+                // Record the new observed pin state so the next reconcile is a NoOp.
+                io::patch_status(api, name, serde_json::json!({ "pinned": desired })).await?;
+                tracing::info!(backup = %name, %snapshot_id, pin = desired, "snapshot pin reconciled");
+                return Ok(steady);
+            }
+            Some(false) => {
+                tracing::warn!(backup = %name, "snapshot pin Job failed; backing off");
+                return Ok(Action::requeue(Duration::from_secs(120)));
+            }
+            None => return Ok(Action::requeue(Duration::from_secs(15))),
+        }
+    }
+
+    // Create the SnapshotPin Job (mirrors the SnapshotDelete one-shot path).
+    let (config, repo) = resolve_recipe(ctx, backup, namespace).await?;
+    let identity = resolve_identity_for(&config, namespace, repo.identity_defaults.as_ref())?;
+    let owner = io::owner_ref_for(backup, "Snapshot")?;
+    let creds = io::resolve_mover_creds_for(
+        &ctx.client,
+        namespace,
+        &job_name,
+        &owner,
+        &repo,
+        config
+            .spec
+            .credential_projection
+            .as_ref()
+            .is_some_and(|p| p.enabled),
+        io::repo_kind_str(config.spec.repository.kind),
+        &config.spec.repository.name,
+    )
+    .await?;
+    if creds.projected > 0 {
+        ctx.metrics
+            .inc_secrets_projected(namespace, creds.projected);
+    }
+    let creds_secrets = creds.names;
+    let work_spec = MoverWorkSpec {
+        version: 1,
+        operation: Operation::SnapshotPin(SnapshotPinOp {
+            snapshot_id: snapshot_id.clone(),
+            pin: matches!(action, PinAction::Pin),
+        }),
+        identity,
+        repository: repository_connect(&repo)?,
+        target_ref: TargetRef {
+            api_version: API_VERSION.to_string(),
+            kind: "Snapshot".to_string(),
+            name: name.to_string(),
+            namespace: namespace.to_string(),
+        },
+        hook_plan: Default::default(),
+        options: MoverOptions::default(),
+        cache: Default::default(),
+        throttle: Default::default(),
+    };
+    let mut labels = run_labels(&config, resolve_origin(backup));
+    labels.insert(
+        "kopiur.home-operations.com/op".to_string(),
+        "snapshot-pin".to_string(),
+    );
+    let repo_volume =
+        io::filesystem_repo_mount_source(&repo.backend).map(|source| VolumeMountSpec {
+            source,
+            mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
+            read_only: false,
+        });
+    let resolved_mover = kopiur_api::common::resolve_mover(
+        repo.mover_defaults.as_ref(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let limits = JobLimits {
+        ttl_seconds_after_finished: resolved_mover.ttl_seconds_after_finished,
+        ..JobLimits::default()
+    };
+    let inputs = MoverJobInputs {
+        name: &job_name,
+        namespace,
+        owner,
+        work_spec: &work_spec,
+        image: &ctx.mover_image,
+        image_pull_policy: mover_pull_policy(),
+        limits,
+        resources: resolved_mover.resources.clone(),
+        security_context: resolved_mover.security_context.clone(),
+        pod_security_context: resolved_mover.pod_security_context.clone(),
+        node_selector: resolved_mover.node_selector.clone(),
+        tolerations: resolved_mover.tolerations.clone(),
+        affinity: resolved_mover.affinity.clone(),
+        labels,
+        source_volume: None,
+        repo_volume,
+        creds_secrets,
+        result_configmap: None,
+        service_account: ctx.mover_service_account.as_deref(),
+        passthrough_env: ctx.mover_env_passthrough.clone(),
+        annotations: Default::default(),
+        cache_volume: Default::default(),
+    };
+    if let Some(sa) = ctx.mover_service_account.as_deref() {
+        io::ensure_mover_rbac(
+            &ctx.client,
+            namespace,
+            sa,
+            &ctx.mover_role_kind,
+            &ctx.mover_clusterrole,
+        )
+        .await?;
+    }
+    let cm = jobs::build_config_map(&inputs)?;
+    let job = jobs::build_job(&inputs);
+    io::apply_mover_objects(&ctx.client, namespace, &job_name, &cm, &job).await?;
+    tracing::info!(backup = %name, %snapshot_id, ?action, "created SnapshotPin Job");
+    Ok(Action::requeue(Duration::from_secs(15)))
+}
+
 /// On a Job's terminal success, pin phase=Succeeded and the resulting kopia
 /// snapshot id/identity into status. The controller is the authoritative source
 /// of the terminal phase AND (for the filesystem backend) of the snapshot id: it
@@ -685,24 +1086,27 @@ async fn delete_snapshot_via_job(
 /// The mover still PATCHes stats when it can reach the API server.
 async fn finalize_succeeded(
     ctx: &Context,
-    backup: &Backup,
-    api: &Api<Backup>,
+    backup: &Snapshot,
+    api: &Api<Snapshot>,
     name: &str,
     namespace: &str,
 ) -> Result<()> {
     // Try to resolve the snapshot id authoritatively for the filesystem backend.
     let snapshot = resolve_succeeded_snapshot(ctx, backup, namespace).await;
-    let status = match snapshot {
-        Ok(Some((id, identity))) => serde_json::json!({
-            "phase": "Succeeded",
-            "snapshot": {
-                "kopiaSnapshotID": id,
-                "identity": identity,
-            },
-        }),
-        // Either object-store backend (mover PATCHes id) or no match yet.
-        _ => serde_json::json!({ "phase": "Succeeded" }),
-    };
+    // Base status carries the kstatus Ready conditions (ADR-0005 §2) so
+    // `kubectl wait --for=condition=Ready` works on a Succeeded Snapshot.
+    let mut status = snapshot_ready_status(
+        backup,
+        SnapshotPhase::Succeeded,
+        "SnapshotCreated",
+        "the kopia snapshot was created successfully",
+    );
+    if let Ok(Some((id, identity))) = snapshot {
+        status["snapshot"] = serde_json::json!({
+            "kopiaSnapshotID": id,
+            "identity": identity,
+        });
+    }
     io::patch_status(api, name, status).await?;
     ctx.metrics
         .set_backup_last_success(namespace, name, chrono::Utc::now().timestamp());
@@ -715,11 +1119,11 @@ async fn finalize_succeeded(
 /// status `identity` JSON body, or `None` when not resolvable in-process.
 async fn resolve_succeeded_snapshot(
     ctx: &Context,
-    backup: &Backup,
+    backup: &Snapshot,
     namespace: &str,
 ) -> Result<Option<(String, serde_json::Value)>> {
     let (config, repo) = resolve_recipe(ctx, backup, namespace).await?;
-    let identity = resolve_identity_for(&config, namespace)?;
+    let identity = resolve_identity_for(&config, namespace, repo.identity_defaults.as_ref())?;
     match &repo.backend {
         Backend::Filesystem(fs) => {
             let creds = io::repo_credentials(&repo.encryption);
@@ -756,23 +1160,23 @@ async fn resolve_succeeded_snapshot(
     }
 }
 
-/// Resolve a `Backup`'s referenced `BackupConfig` and that config's
+/// Resolve a `Snapshot`'s referenced `SnapshotPolicy` and that config's
 /// `Repository`. Cluster references and non-filesystem backends still resolve
 /// here; backend-specific behavior is decided downstream.
 async fn resolve_recipe(
     ctx: &Context,
-    backup: &Backup,
+    backup: &Snapshot,
     namespace: &str,
-) -> Result<(BackupConfig, ResolvedRepository)> {
-    let config_ref = backup
+) -> Result<(SnapshotPolicy, ResolvedRepository)> {
+    let policy_ref = backup
         .spec
-        .config_ref
+        .policy_ref
         .as_ref()
-        .ok_or_else(|| Error::Invariant("produced Backup has no configRef".into()))?;
-    let cfg_ns = config_ref.namespace.as_deref().unwrap_or(namespace);
-    let cfg_api: Api<BackupConfig> = Api::namespaced(ctx.client.clone(), cfg_ns);
-    let config = cfg_api.get_opt(&config_ref.name).await?.ok_or_else(|| {
-        Error::MissingDependency(format!("BackupConfig {cfg_ns}/{}", config_ref.name))
+        .ok_or_else(|| Error::Invariant("produced Snapshot has no policyRef".into()))?;
+    let cfg_ns = policy_ref.namespace.as_deref().unwrap_or(namespace);
+    let cfg_api: Api<SnapshotPolicy> = Api::namespaced(ctx.client.clone(), cfg_ns);
+    let config = cfg_api.get_opt(&policy_ref.name).await?.ok_or_else(|| {
+        Error::MissingDependency(format!("SnapshotPolicy {cfg_ns}/{}", policy_ref.name))
     })?;
 
     // Honor `repository.kind`: namespaced `Repository` (cross-ns via
@@ -786,27 +1190,27 @@ async fn resolve_recipe(
 /// Build everything a backup run needs: the work spec, the source volume mount
 /// (PVC or inline NFS), the repo volume mount (filesystem only), and the
 /// credentials Secret name.
-type BackupRun<'a> = (
+type SnapshotRun<'a> = (
     MoverWorkSpec,
     Option<VolumeMountSpec>,
     Option<VolumeMountSpec>,
     Vec<String>,
 );
 fn build_backup_run(
-    _backup: &Backup,
-    config: &BackupConfig,
+    _backup: &Snapshot,
+    config: &SnapshotPolicy,
     repo: &ResolvedRepository,
     namespace: &str,
     _name: &str,
-) -> Result<BackupRun<'static>> {
-    let identity = resolve_identity_for(config, namespace)?;
+) -> Result<SnapshotRun<'static>> {
+    let identity = resolve_identity_for(config, namespace, repo.identity_defaults.as_ref())?;
 
     // First source's volume + path drive the mount and the snapshot source path.
     let source = config
         .spec
         .sources
         .first()
-        .ok_or_else(|| Error::Invariant("BackupConfig has no sources".into()))?;
+        .ok_or_else(|| Error::Invariant("SnapshotPolicy has no sources".into()))?;
 
     // The mover snapshots whatever is mounted at `source_path`, so the mount path
     // and the kopia source path are the same. PVC: `/pvc/<name>` by default; NFS:
@@ -865,21 +1269,27 @@ fn build_backup_run(
     );
     let work_spec = MoverWorkSpec {
         version: 1,
-        operation: Operation::Backup(BackupOp {
+        operation: Operation::Snapshot(SnapshotOp {
             source_path: source_path.clone(),
             tags: tags_for(config),
+            // Flattened SnapshotPolicy policy knobs → kopia `policy set` flags
+            // (compression / files / errorHandling / upload / extraArgs). Wired so
+            // these never stay inert (ADR-0005 §13(b)/§13(f), ADR-0004 §4b).
+            policy: policy_args_for(config),
         }),
         identity,
         repository: repository_connect(repo)?,
         target_ref: TargetRef {
             api_version: API_VERSION.to_string(),
-            kind: "Backup".to_string(),
+            kind: "Snapshot".to_string(),
             name: _name.to_string(),
             namespace: namespace.to_string(),
         },
         hook_plan: Default::default(),
         options: MoverOptions::default(),
         cache,
+        // Repository-wide throttle (moverDefaults.throttle, ADR-0005 §13(e)).
+        throttle: crate::io::throttle_spec(repo.mover_defaults.as_ref()),
     };
 
     let source_volume = Some(source_volume);
@@ -893,9 +1303,16 @@ fn build_backup_run(
     Ok((work_spec, source_volume, repo_volume, creds_secrets))
 }
 
-/// Resolve identity from a `BackupConfig` (overrides + defaults) into the mover
-/// wire identity. Reuses `api::identity::resolve_identity` (the tested kernel).
-fn resolve_identity_for(config: &BackupConfig, namespace: &str) -> Result<MoverIdentity> {
+/// Resolve identity from a `SnapshotPolicy` (overrides + the repository's CEL
+/// `identityDefaults`) into the mover wire identity. Reuses
+/// `api::identity::resolve_identity` (the tested kernel). `defaults` is the
+/// `ClusterRepository`'s `identityDefaults` (ADR-0004 §5), `None` for a namespaced
+/// `Repository`.
+fn resolve_identity_for(
+    config: &SnapshotPolicy,
+    namespace: &str,
+    defaults: Option<&kopiur_api::IdentityDefaults>,
+) -> Result<MoverIdentity> {
     let first = config.spec.sources.first();
     let pvc_name = first.and_then(|s| s.pvc.as_ref().map(|p| p.name.clone()));
     // A non-PVC NFS source supplies the sourcePath default (the export path).
@@ -905,7 +1322,9 @@ fn resolve_identity_for(config: &BackupConfig, namespace: &str) -> Result<MoverI
         object_name: &config.name_any(),
         namespace,
         overrides: config.spec.identity.as_ref(),
-        template: None,
+        defaults,
+        labels: config.metadata.labels.as_ref(),
+        annotations: config.metadata.annotations.as_ref(),
         pvc_name: pvc_name.as_deref(),
         default_source_path: nfs_source_path.as_deref(),
         source_path_override: source_path_override.as_deref(),
@@ -984,15 +1403,33 @@ pub(crate) fn backend_to_repository_connect(backend: &Backend) -> RepositoryConn
     }
 }
 
+/// Actionable message for a backup refused because its repository is `ReadOnly`
+/// (§11): what / why / how-to-fix. Pure so the text is unit-asserted.
+fn readonly_backup_message(repo_name: &str) -> String {
+    format!(
+        "refusing to create a backup: repository `{repo_name}` is `mode: ReadOnly` (ADR-0005 §11), \
+         which serves restores only. Set the repository's `spec.mode: ReadWrite` to allow backups, \
+         or target a different repository."
+    )
+}
+
 /// Snapshot tags from the config + run metadata.
-fn tags_for(config: &BackupConfig) -> BTreeMap<String, String> {
+fn tags_for(config: &SnapshotPolicy) -> BTreeMap<String, String> {
     let mut tags = BTreeMap::new();
     tags.insert("kopiur:config".to_string(), config.name_any());
     tags
 }
 
+/// Resolve the kopia `policy set` knobs the mover applies before snapshotting
+/// (compression / files / errorHandling / upload / extraArgs). Delegates to the
+/// single tested mapping so these flattened `SnapshotPolicy` fields are never
+/// inert (ADR-0005 §13(b)/§13(f), ADR-0004 §4b).
+fn policy_args_for(config: &SnapshotPolicy) -> kopiur_mover::workspec::PolicyArgsSpec {
+    kopiur_mover::workspec::PolicyArgsSpec::from_policy(&config.spec)
+}
+
 /// Labels applied to the mover Job/ConfigMap and any child objects.
-fn run_labels(config: &BackupConfig, origin: Origin) -> BTreeMap<String, String> {
+fn run_labels(config: &SnapshotPolicy, origin: Origin) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     labels.insert(ORIGIN_LABEL.to_string(), origin_str(origin).to_string());
     labels.insert(CONFIG_LABEL.to_string(), config.name_any());
@@ -1008,7 +1445,7 @@ fn origin_str(origin: Origin) -> &'static str {
 }
 
 /// Job limits from the backup's `failurePolicy`, falling back to ADR defaults.
-fn job_limits(backup: &Backup) -> JobLimits {
+fn job_limits(backup: &Snapshot) -> JobLimits {
     match &backup.spec.failure_policy {
         Some(fp) => JobLimits {
             backoff_limit: fp.backoff_limit.unwrap_or(2),
@@ -1053,9 +1490,9 @@ pub(crate) fn job_terminal_state(job: &Job) -> Option<bool> {
     None
 }
 
-/// `error_policy` for the `Backup` controller.
-pub fn error_policy(_backup: Arc<Backup>, err: &Error, ctx: Arc<Context>) -> Action {
-    error_policy_for("Backup", err, &ctx)
+/// `error_policy` for the `Snapshot` controller.
+pub fn error_policy(_backup: Arc<Snapshot>, err: &Error, ctx: Arc<Context>) -> Action {
+    error_policy_for("Snapshot", err, &ctx)
 }
 
 #[cfg(test)]
@@ -1067,6 +1504,114 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    // --- §11 ReadOnly gate: ReadOnly refuses backups; restores allowed elsewhere ---
+
+    #[test]
+    fn readonly_repository_refuses_backup_writes() {
+        use kopiur_api::common::RepositoryMode;
+        // The pure gate the reconciler branches on.
+        assert!(!RepositoryMode::ReadOnly.allows_writes());
+        assert!(RepositoryMode::ReadWrite.allows_writes());
+        // The refusal message names the repo, the mode, and how to fix.
+        let msg = readonly_backup_message("nas");
+        assert!(msg.contains("nas"));
+        assert!(msg.contains("ReadOnly"));
+        assert!(msg.contains("ReadWrite"));
+    }
+
+    // --- §13(c) pin decision (pure: spec.pin vs observed → pin/unpin/noop) ---
+
+    #[test]
+    fn pin_decision_covers_every_case() {
+        // Desired pinned, never reconciled → apply the pin.
+        assert_eq!(pin_decision(true, None), PinAction::Pin);
+        // Desired pinned, observed unpinned → apply.
+        assert_eq!(pin_decision(true, Some(false)), PinAction::Pin);
+        // Desired pinned, already pinned → no-op (never issue a redundant pin).
+        assert_eq!(pin_decision(true, Some(true)), PinAction::NoOp);
+        // Desired unpinned, currently pinned → remove.
+        assert_eq!(pin_decision(false, Some(true)), PinAction::Unpin);
+        // Desired unpinned, never pinned / observed unpinned → no-op.
+        assert_eq!(pin_decision(false, None), PinAction::NoOp);
+        assert_eq!(pin_decision(false, Some(false)), PinAction::NoOp);
+    }
+
+    // --- §2 phase → Ready mapping ---
+
+    #[test]
+    fn snapshot_ready_outcome_maps_every_phase() {
+        use kopiur_api::snapshot::SnapshotPhase;
+        assert_eq!(
+            snapshot_ready_outcome(SnapshotPhase::Succeeded),
+            io::ReadyOutcome::Ready
+        );
+        assert_eq!(
+            snapshot_ready_outcome(SnapshotPhase::Discovered),
+            io::ReadyOutcome::Ready
+        );
+        assert_eq!(
+            snapshot_ready_outcome(SnapshotPhase::Failed),
+            io::ReadyOutcome::Stalled
+        );
+        for p in [
+            SnapshotPhase::Pending,
+            SnapshotPhase::Running,
+            SnapshotPhase::Deleting,
+        ] {
+            assert_eq!(snapshot_ready_outcome(p), io::ReadyOutcome::Reconciling);
+        }
+    }
+
+    #[test]
+    fn policy_args_for_threads_flattened_knobs() {
+        // §13(b)/§13(f) end-to-end at the controller seam: the SnapshotPolicy policy
+        // knobs become non-empty work-spec policy args.
+        use kopiur_api::snapshot_policy::{Compression, ErrorHandling};
+        let mut sp = sample_policy();
+        sp.spec.compression = Some(Compression {
+            compressor: Some("zstd".into()),
+            never_compress: vec![],
+        });
+        sp.spec.error_handling = Some(ErrorHandling {
+            ignore_file_errors: true,
+            ..Default::default()
+        });
+        let p = policy_args_for(&sp);
+        assert!(!p.is_empty());
+        assert_eq!(p.compression.as_deref(), Some("zstd"));
+        assert_eq!(p.ignore_file_errors, Some(true));
+    }
+
+    fn sample_policy() -> kopiur_api::SnapshotPolicy {
+        kopiur_api::SnapshotPolicy::new(
+            "pg",
+            kopiur_api::SnapshotPolicySpec {
+                repository: kopiur_api::common::RepositoryRef {
+                    kind: Default::default(),
+                    name: "r".into(),
+                    namespace: None,
+                },
+                identity: None,
+                sources: vec![],
+                copy_method: Default::default(),
+                volume_snapshot_class_name: None,
+                group_by: None,
+                retention: None,
+                default_deletion_policy: None,
+                compression: None,
+                files: None,
+                extra_args: vec![],
+                error_handling: None,
+                upload: None,
+                verification: None,
+                suspend: false,
+                hooks: None,
+                mover: None,
+                credential_projection: None,
+            },
+        )
     }
 
     // --- backend_to_repository_connect: every CRD Backend variant must map to a
@@ -1161,16 +1706,23 @@ mod tests {
                 },
             },
             repo_namespace: Some("media-ns".into()),
-            cache_defaults: None,
+            mover_defaults: None,
+            identity_defaults: None,
+            on_namespace_delete: Default::default(),
+            mode: Default::default(),
+            credential_projection_allowed: false,
         }
     }
 
-    fn config_with_source(name: &str, source: kopiur_api::backup_config::Source) -> BackupConfig {
-        use kopiur_api::backup_config::BackupConfigSpec;
+    fn config_with_source(
+        name: &str,
+        source: kopiur_api::snapshot_policy::Source,
+    ) -> SnapshotPolicy {
         use kopiur_api::common::{RepositoryKind, RepositoryRef};
-        BackupConfig::new(
+        use kopiur_api::snapshot_policy::SnapshotPolicySpec;
+        SnapshotPolicy::new(
             name,
-            BackupConfigSpec {
+            SnapshotPolicySpec {
                 repository: RepositoryRef {
                     kind: RepositoryKind::Repository,
                     name: "repo".into(),
@@ -1178,12 +1730,18 @@ mod tests {
                 },
                 identity: None,
                 sources: vec![source],
-                copy_method: None,
+                copy_method: Default::default(),
                 volume_snapshot_class_name: None,
                 group_by: None,
                 retention: None,
                 default_deletion_policy: None,
-                policy: None,
+                compression: None,
+                files: None,
+                extra_args: vec![],
+                error_handling: None,
+                upload: None,
+                verification: None,
+                suspend: false,
                 hooks: None,
                 mover: None,
                 credential_projection: None,
@@ -1191,14 +1749,15 @@ mod tests {
         )
     }
 
-    fn dummy_backup() -> Backup {
-        Backup::new(
+    fn dummy_backup() -> Snapshot {
+        Snapshot::new(
             "b1",
-            kopiur_api::backup::BackupSpec {
-                config_ref: None,
+            kopiur_api::snapshot::SnapshotSpec {
+                policy_ref: None,
                 tags: None,
                 failure_policy: None,
                 deletion_policy: None,
+                pin: false,
             },
         )
     }
@@ -1207,7 +1766,7 @@ mod tests {
     fn build_backup_run_maps_nfs_source_to_inline_nfs_mount() {
         use crate::jobs::MountSource;
         use kopiur_api::backend::NfsVolume;
-        use kopiur_api::backup_config::Source;
+        use kopiur_api::snapshot_policy::Source;
         let cfg = config_with_source(
             "media",
             Source {
@@ -1239,8 +1798,8 @@ mod tests {
         assert!(src.read_only, "a backup source is mounted read-only");
         // kopia records the export path as the snapshot source path.
         match ws.operation {
-            Operation::Backup(op) => assert_eq!(op.source_path, "/mnt/eros/Media"),
-            other => panic!("expected a Backup operation, got {other:?}"),
+            Operation::Snapshot(op) => assert_eq!(op.source_path, "/mnt/eros/Media"),
+            other => panic!("expected a Snapshot operation, got {other:?}"),
         }
         // Object-store repo → no repo volume to mount.
         assert!(repo_volume.is_none());
@@ -1249,7 +1808,7 @@ mod tests {
     #[test]
     fn build_backup_run_honors_source_path_override_for_nfs() {
         use kopiur_api::backend::NfsVolume;
-        use kopiur_api::backup_config::Source;
+        use kopiur_api::snapshot_policy::Source;
         let cfg = config_with_source(
             "media",
             Source {
@@ -1269,8 +1828,8 @@ mod tests {
         // The override drives both the mount path and the recorded source path.
         assert_eq!(source_volume.unwrap().mount_path, "/data");
         match ws.operation {
-            Operation::Backup(op) => assert_eq!(op.source_path, "/data"),
-            other => panic!("expected a Backup operation, got {other:?}"),
+            Operation::Snapshot(op) => assert_eq!(op.source_path, "/data"),
+            other => panic!("expected a Snapshot operation, got {other:?}"),
         }
     }
 
@@ -1283,7 +1842,7 @@ mod tests {
         // mount path (and kopia source path) must be a safe non-root path.
         use crate::jobs::MountSource;
         use kopiur_api::backend::NfsVolume;
-        use kopiur_api::backup_config::Source;
+        use kopiur_api::snapshot_policy::Source;
         let cfg = config_with_source(
             "media",
             Source {
@@ -1316,17 +1875,17 @@ mod tests {
         );
         assert_eq!(src.mount_path, crate::consts::NFS_SOURCE_MOUNT_PATH);
         match ws.operation {
-            Operation::Backup(op) => {
+            Operation::Snapshot(op) => {
                 assert_eq!(op.source_path, crate::consts::NFS_SOURCE_MOUNT_PATH)
             }
-            other => panic!("expected a Backup operation, got {other:?}"),
+            other => panic!("expected a Snapshot operation, got {other:?}"),
         }
     }
 
     #[test]
     fn build_backup_run_maps_pvc_source_to_pvc_mount() {
         use crate::jobs::MountSource;
-        use kopiur_api::backup_config::{PvcSource, Source};
+        use kopiur_api::snapshot_policy::{PvcSource, Source};
         let cfg = config_with_source(
             "pg",
             Source {
@@ -1354,7 +1913,7 @@ mod tests {
 
     #[test]
     fn build_backup_run_rejects_a_source_with_neither_pvc_nor_nfs() {
-        use kopiur_api::backup_config::Source;
+        use kopiur_api::snapshot_policy::Source;
         // pvcSelector-only / empty single source: the single-source mover path
         // needs an explicit pvc or nfs (the webhook rejects this earlier; the
         // controller defends against it rather than building a bogus Job).
@@ -1427,6 +1986,62 @@ mod tests {
         assert_eq!(
             plan_deletion(DeletionPolicy::Delete, &a),
             DeletionPlan::DeleteSnapshot
+        );
+    }
+
+    // --- namespace_delete_plan (ADR-0005 §5 data-loss prevention) -----------
+
+    #[test]
+    fn non_terminating_namespace_keeps_the_per_snapshot_plan() {
+        // A lone `kubectl delete snapshot` (namespace healthy) honors the Snapshot's
+        // own plan regardless of the repository's onNamespaceDelete policy.
+        for policy in [NamespaceDeletePolicy::Orphan, NamespaceDeletePolicy::Delete] {
+            for base in [
+                DeletionPlan::DeleteSnapshot,
+                DeletionPlan::RetainSnapshot,
+                DeletionPlan::OrphanSnapshot,
+            ] {
+                assert_eq!(namespace_delete_plan(policy, false, base), base);
+            }
+        }
+    }
+
+    #[test]
+    fn terminating_namespace_orphan_policy_forces_orphan() {
+        // The fail-safe default: a deleted namespace must not run `kopia snapshot
+        // delete`, even when the Snapshot's own plan was DeleteSnapshot.
+        for base in [
+            DeletionPlan::DeleteSnapshot,
+            DeletionPlan::RetainSnapshot,
+            DeletionPlan::OrphanSnapshot,
+        ] {
+            assert_eq!(
+                namespace_delete_plan(NamespaceDeletePolicy::Orphan, true, base),
+                DeletionPlan::OrphanSnapshot
+            );
+        }
+    }
+
+    #[test]
+    fn terminating_namespace_delete_policy_cascades_to_base_plan() {
+        // Opt-in cascade: with onNamespaceDelete=Delete, the per-Snapshot plan applies
+        // (so a produced Snapshot still runs the snapshot delete).
+        assert_eq!(
+            namespace_delete_plan(
+                NamespaceDeletePolicy::Delete,
+                true,
+                DeletionPlan::DeleteSnapshot
+            ),
+            DeletionPlan::DeleteSnapshot
+        );
+        // ...and a Retain/Orphan base is preserved unchanged.
+        assert_eq!(
+            namespace_delete_plan(
+                NamespaceDeletePolicy::Delete,
+                true,
+                DeletionPlan::RetainSnapshot
+            ),
+            DeletionPlan::RetainSnapshot
         );
     }
 

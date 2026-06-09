@@ -404,7 +404,7 @@
           "properties": {
             "backupStaleAfterSeconds": {
               "default": 172800,
-              "description": "Age (seconds) after which a BackupConfig's last success is \"stale\".",
+              "description": "Age (seconds) after which a SnapshotPolicy's last success is \"stale\".",
               "title": "backupStaleAfterSeconds",
               "type": "integer"
             },

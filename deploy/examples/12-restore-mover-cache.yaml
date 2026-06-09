@@ -4,7 +4,7 @@
 # must run as a UID/GID that can write there, may want a sized/warm kopia cache for
 # a large restore, and may want a retry/deadline policy. The `spec.mover`,
 # `spec.cache` (via the mover), and `spec.failurePolicy` surfaces mirror what a
-# BackupConfig gives a backup.
+# SnapshotPolicy gives a backup.
 #
 # Field shapes verified against crates/api:
 #   - spec.mover.securityContext       : core/v1 SecurityContext (container-level)
@@ -22,7 +22,7 @@ metadata:
   namespace: billing
 spec:
   source:
-    backupRef:
+    snapshotRef:
       name: postgres-data-20260523-021300
       namespace: billing
   target:
@@ -73,7 +73,7 @@ spec:
       contentCacheSizeMb: 10000 # kopia --content-cache-size-mb
       metadataCacheSizeMb: 2000 # kopia --metadata-cache-size-mb
       mode: Ephemeral
-  # ── Retry / deadline for the restore Job (mirrors Backup.spec.failurePolicy) ──
+  # ── Retry / deadline for the restore Job (mirrors Snapshot.spec.failurePolicy) ──
   failurePolicy:
     backoffLimit: 4 # retry the restore Job up to 4 times
     activeDeadlineSeconds: 7200 # hard wall-clock cap (2h) for a big restore

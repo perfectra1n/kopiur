@@ -2,8 +2,8 @@
 #
 # A platform team owns a cluster-scoped ClusterRepository; tenant namespaces
 # reference it without knowing the secret name or backend details. Identity
-# defaults are templated per consumer namespace (rendered at admission, pinned
-# to status — ADR §4.2).
+# defaults are CEL expressions evaluated per consumer namespace (at admission,
+# pinned to status — ADR §4.2 / ADR-0004 §5).
 #
 # REQUIRES the operator installed with installScope=cluster (ClusterRepository is
 # a cluster-scoped kind and is only reconciled in cluster scope).
@@ -49,10 +49,12 @@ spec:
       - payments
       - identity
       - media
-  # Jinja2-compatible templates rendered at admission (ADR §4.2).
+  # CEL expressions evaluated at admission, pinned to status (ADR-0004 §5). The
+  # CEL environment is `namespace`, `policyName`, `labels`, `annotations` (the
+  # consuming SnapshotPolicy's metadata). Each *Expr returns a string.
   identityDefaults:
-    hostnameTemplate: "{{ .Namespace }}"
-    usernameTemplate: "{{ .Namespace }}-{{ .ConfigName }}"
+    hostnameExpr: "namespace"
+    usernameExpr: "namespace + '-' + policyName"
   # Maintenance is default-managed here too. Because Maintenance is namespaced
   # but a ClusterRepository is not, `namespace` selects where the managed
   # Maintenance CR lands; it defaults to the operator's own namespace
@@ -62,7 +64,7 @@ spec:
 ---
 # In the tenant namespace — no need to know the secret name or platform details.
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupConfig
+kind: SnapshotPolicy
 metadata:
   name: postgres-data
   namespace: billing
@@ -84,7 +86,7 @@ spec:
 # recommended layout — one shared repository, many apps — covered in the
 # "How Kopia works" concepts page.
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupConfig
+kind: SnapshotPolicy
 metadata:
   name: jellyfin-config
   namespace: media

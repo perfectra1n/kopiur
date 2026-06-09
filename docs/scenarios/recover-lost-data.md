@@ -11,12 +11,12 @@ picked the wrong snapshot, the original is gone too.
 
 ## Step 1 — Pick the snapshot from before the incident
 
-Restore is "pick a row" — no timestamp math. List the candidate `Backup` CRs for
+Restore is "pick a row" — no timestamp math. List the candidate `Snapshot` CRs for
 the recipe, newest last, and choose the last one from _before_ things broke:
 
 ```console
-$ kubectl get backup -n billing \
-    -l kopiur.home-operations.com/backup-config=postgres-data \
+$ kubectl get snapshots -n billing \
+    -l kopiur.home-operations.com/snapshot-policy=postgres-data \
     --sort-by=.status.timing.startTime
 NAME                          PHASE       ORIGIN      SNAPSHOT    AGE
 postgres-data-20260522-021300 Succeeded   scheduled   k1a9...     2d
@@ -26,7 +26,7 @@ postgres-data-20260524-021300 Succeeded   scheduled   k2c4...     2h   # inciden
 
 ## Step 2 — Restore beside the original
 
-The bundle below restores the chosen `Backup` into a fresh PVC
+The bundle below restores the chosen `Snapshot` into a fresh PVC
 (`postgres-data-recovered`). The live `postgres-data` PVC is untouched. The
 in-place variant — for once you've _decided_ the live data is unrecoverable — is
 included as a commented block at the bottom of the file.

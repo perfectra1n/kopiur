@@ -30,7 +30,7 @@ helm install kopiur deploy/helm/kopiur \
 kubectl -n kopiur-system rollout status deploy/kopiur-controller
 kubectl -n kopiur-system rollout status deploy/kopiur-webhook
 
-# 4. Confirm the 7 CRDs are registered.
+# 4. Confirm the 8 CRDs are registered.
 kubectl get crd -l app.kubernetes.io/part-of=kopiur
 ```
 
@@ -86,16 +86,16 @@ Use **cluster** scope for a shared platform repository (`ClusterRepository`) ref
 
 ## CRD lifecycle
 
-`installCRDs: true` (default) installs the 7 CRDs as Helm **templates**, so the flag is honored and `helm upgrade` re-applies schema changes.
+`installCRDs: true` (default) installs the 8 CRDs as Helm **templates**, so the flag is honored and `helm upgrade` re-applies schema changes.
 
 > Caution: with templated CRDs, `helm uninstall kopiur` deletes the CRDs **and
-> every `kopiur.home-operations.com` object in the cluster** (Repositories, Backups, ...). For an
+> every `kopiur.home-operations.com` object in the cluster** (Repositories, Snapshots, ...). For an
 > alpha API this is the intended, predictable behavior. To decouple CRD lifecycle
 > from the release (e.g. GitOps), install with `--set installCRDs=false` and apply
 > the generated CRDs out of band:
 >
 > ```bash
-> # Server-side apply is required: the BackupConfig CRD embeds a full JobSpec
+> # Server-side apply is required: the SnapshotPolicy CRD embeds a full JobSpec
 > # (runJob hook) and is too large for the client-side last-applied annotation.
 > kubectl apply --server-side -f deploy/crds/all-crds.yaml
 > ```
@@ -108,7 +108,7 @@ After install, create a repository and start backing up a PVC. The smallest end-
 
 ```bash
 kubectl apply -f deploy/examples/01-single-pvc-scheduled.yaml
-kubectl get repositories,backupconfigs,backupschedules -n billing
+kubectl get repositories,snapshotpolicies,snapshotschedules -n billing
 ```
 
 Eight runnable walkthroughs live in `deploy/examples/`:
@@ -117,10 +117,10 @@ Eight runnable walkthroughs live in `deploy/examples/`:
 | ---------------------------------- | --------------------------------------------------- |
 | `01-single-pvc-scheduled.yaml`     | Single PVC, scheduled daily                         |
 | `02-cluster-repository.yaml`       | Shared platform `ClusterRepository` (cluster scope) |
-| `03-restore-by-backup.yaml`        | Restore by picking a `Backup`                       |
+| `03-restore-by-backup.yaml`        | Restore by picking a `Snapshot`                       |
 | `04-multi-pvc-selector.yaml`       | Multi-PVC label selector + group snapshot           |
 | `05-deploy-or-restore-gitops.yaml` | Deploy-or-restore (PVC `dataSourceRef`)             |
-| `06-manual-backup.yaml`            | Manual one-shot `Backup`                            |
+| `06-manual-backup.yaml`            | Manual one-shot `Snapshot`                            |
 | `07-restore-discovered.yaml`       | Restore a discovered / foreign snapshot             |
 | `08-maintenance.yaml`              | `kopia maintenance` schedule + ownership lease      |
 

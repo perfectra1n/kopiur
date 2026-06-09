@@ -19,6 +19,9 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .status.sourceKind
+      name: Source
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -29,8 +32,9 @@ spec:
         properties:
           spec:
             description: |-
-              A restore operation. `target` is optional: absence = passive populator mode,
-              consumed by a PVC's `spec.dataSourceRef`. ADR §3.6/§4.7.
+              A restore operation. `target` is **required** (ADR-0005 §9): explicit
+              `pvc`/`pvcRef`, or `populator: {}` for passive populator mode (consumed by a
+              PVC's `spec.dataSourceRef`). The empty-`target` form is removed. ADR §3.6/§4.7.
               Desired state of a [`Restore`]: where to read from, where to write to, and how
               to behave when the snapshot is missing. ADR §3.6/§4.6.
             properties:
@@ -53,7 +57,7 @@ spec:
               failurePolicy:
                 description: |-
                   Mover `Job` retry/deadline limits (`backoffLimit`, `activeDeadlineSeconds`),
-                  mirroring `Backup.spec.failurePolicy`. Absent uses the ADR defaults.
+                  mirroring `Snapshot.spec.failurePolicy`. Absent uses the ADR defaults.
                 nullable: true
                 properties:
                   activeDeadlineSeconds:
@@ -75,7 +79,7 @@ spec:
                 description: |-
                   Per-run mover overrides for this restore's Job — resource requests/limits,
                   kopia cache sizing, container `securityContext` (UID/GID match), `privilegedMode`,
-                  and `inheritSecurityContextFrom`. The same surface `BackupConfig.spec.mover`
+                  and `inheritSecurityContextFrom`. The same surface `SnapshotPolicy.spec.mover`
                   gives a backup. An elevated context is namespace-gated exactly like a backup's
                   (ADR §4.11/§G16); `securityContext` and `inheritSecurityContextFrom` are
                   mutually exclusive.
@@ -331,7 +335,8 @@ spec:
                   securityContext:
                     description: |-
                       Security context applied to the mover **container** (`runAsUser`/`runAsGroup`,
-                      capabilities, seccomp, …).
+                      capabilities, seccomp, …). Merged field-wise over `moverDefaults.securityContext`
+                      and the hardened base (ADR-0004 §2) — set only the fields you want to change.
                     nullable: true
                     properties:
                       allowPrivilegeEscalation:
@@ -435,6 +440,15 @@ spec:
                             type: string
                         type: object
                     type: object
+                  ttlSecondsAfterFinished:
+                    description: |-
+                      Per-recipe override of `moverDefaults.ttlSecondsAfterFinished` — the
+                      `Job.spec.ttlSecondsAfterFinished` for this recipe's mover Jobs so finished
+                      backup/restore Jobs self-GC. Recipe wins over the repo default; when neither
+                      is set a built-in default applies ([`DEFAULT_JOB_TTL_SECONDS`]). ADR-0005 §12.
+                    format: int64
+                    nullable: true
+                    type: integer
                 type: object
               options:
                 description: kopia restore behavior (file deletion, permission/atomicity handling). ADR §4.6.
@@ -506,28 +520,15 @@ spec:
                 description: Exactly one source mode; webhook-enforced. ADR §3.6.
                 oneOf:
                 - required:
-                  - backupRef
+                  - snapshotRef
                 - required:
-                  - fromConfig
+                  - fromPolicy
                 - required:
                   - identity
                 properties:
-                  backupRef:
-                    description: A `Backup` CR (scheduled, manual, or discovered — all the same kind). Default mode.
-                    properties:
-                      name:
-                        description: Name of the referenced object.
-                        type: string
-                      namespace:
-                        description: Namespace of the referenced object; absent = same namespace as the referrer.
-                        nullable: true
-                        type: string
-                    required:
-                    - name
-                    type: object
-                  fromConfig:
+                  fromPolicy:
                     description: |-
-                      A `BackupConfig` CR — resolves via identity even with no `Backup` CR present
+                      A `SnapshotPolicy` CR — resolves via identity even with no `Snapshot` CR present
                       (deploy-or-restore). Default `onMissingSnapshot: Continue`. ADR §4.6.
                     properties:
                       asOf:
@@ -535,16 +536,21 @@ spec:
                         nullable: true
                         type: string
                       name:
-                        description: Name of the `BackupConfig` whose identity selects the snapshot.
+                        description: Name of the `SnapshotPolicy` whose identity selects the snapshot.
                         type: string
                       namespace:
-                        description: Namespace of the `BackupConfig`; absent = the `Restore`'s own namespace.
+                        description: Namespace of the `SnapshotPolicy`; absent = the `Restore`'s own namespace.
                         nullable: true
                         type: string
                       offset:
-                        description: 0 = latest, 1 = previous, ... ADR §3.6.
+                        default: 0
+                        description: |-
+                          0 = latest, 1 = previous, ... ADR §3.6.
+
+                          Carries a real OpenAPI `default: 0` (ADR-0005 §1): unconditional, so it
+                          materializes into the stored object / `kubectl explain` and GitOps stops
+                          diff-thrashing. A bare `i64` (not `Option`) so the default is never dropped.
                         format: int64
-                        nullable: true
                         type: integer
                     required:
                     - name
@@ -581,16 +587,40 @@ spec:
                     - hostname
                     - username
                     type: object
+                  snapshotRef:
+                    description: A `Snapshot` CR (scheduled, manual, or discovered — all the same kind). Default mode.
+                    properties:
+                      name:
+                        description: Name of the referenced object.
+                        type: string
+                      namespace:
+                        description: Namespace of the referenced object; absent = same namespace as the referrer.
+                        nullable: true
+                        type: string
+                    required:
+                    - name
+                    type: object
                 type: object
               target:
-                description: Absence = passive populator mode. ADR §3.6/§4.7.
-                nullable: true
+                description: |-
+                  Where to restore to — **required** (ADR-0005 §9): `pvc` (operator creates),
+                  `pvcRef` (existing PVC), or `populator: {}` (passive populator mode, claimed
+                  via a PVC's `spec.dataSourceRef`). The former empty-`target` form is removed;
+                  a `Restore` with no `target` is now invalid (deserialization fails).
                 oneOf:
                 - required:
                   - pvc
                 - required:
                   - pvcRef
+                - required:
+                  - populator
                 properties:
+                  populator:
+                    description: |-
+                      Passive populator mode: no workload target at provision time — the restore is
+                      claimed by a PVC's `spec.dataSourceRef` (ADR-0005 §9). An (empty) sub-object so
+                      future populator knobs slot in without API breakage.
+                    type: object
                   pvc:
                     description: Operator creates the PVC.
                     properties:
@@ -629,7 +659,11 @@ spec:
                 type: object
             required:
             - source
+            - target
             type: object
+            x-kubernetes-validations:
+            - message: exactly one of target.pvc, target.pvcRef, target.populator
+              rule: '[has(self.target.pvc), has(self.target.pvcRef), has(self.target.populator)].filter(x, x).size() == 1'
           status:
             description: Observed state of a [`Restore`], written by the controller/mover. ADR §3.6 status.
             nullable: true
@@ -701,20 +735,6 @@ spec:
                 description: Pinned at admission; never re-resolved. ADR §3.6/§4.6.
                 nullable: true
                 properties:
-                  backupRef:
-                    description: The concrete `Backup` CR the source resolved to, when applicable.
-                    nullable: true
-                    properties:
-                      name:
-                        description: Name of the referenced object.
-                        type: string
-                      namespace:
-                        description: Namespace of the referenced object; absent = same namespace as the referrer.
-                        nullable: true
-                        type: string
-                    required:
-                    - name
-                    type: object
                   identity:
                     description: The resolved kopia identity (`username@hostname:path`) of the snapshot.
                     nullable: true
@@ -758,7 +778,28 @@ spec:
                     required:
                     - name
                     type: object
+                  snapshotRef:
+                    description: The concrete `Snapshot` CR the source resolved to, when applicable.
+                    nullable: true
+                    properties:
+                      name:
+                        description: Name of the referenced object.
+                        type: string
+                      namespace:
+                        description: Namespace of the referenced object; absent = same namespace as the referrer.
+                        nullable: true
+                        type: string
+                    required:
+                    - name
+                    type: object
                 type: object
+              sourceKind:
+                description: |-
+                  The pinned source kind (`RestoreSource::kind_str` — `SnapshotRef`/`FromPolicy`/
+                  `Identity`), set by the reconciler. Backs the `SOURCE` printer column so
+                  `kubectl get restores` shows where a restore reads from. ADR-0005 §3.
+                nullable: true
+                type: string
               target:
                 description: Resolved target details (the PVC written to / populator handshake).
                 nullable: true

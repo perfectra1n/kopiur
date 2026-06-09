@@ -1,12 +1,15 @@
 //! The `ClusterRepository` CRD — a cluster-scoped, shared kopia repository
 //! operated by a platform team. ADR-0001 §3.2, ADR-0003 §3.2.
 //!
-//! Same spec surface as `Repository` (backend/encryption/create/cacheDefaults/
+//! Same spec surface as `Repository` (backend/encryption/create/moverDefaults/
 //! catalog), plus a tenancy gate (`allowedNamespaces`) and per-namespace identity
-//! templating (`identityDefaults`).
+//! expressions (`identityDefaults`).
 
 use crate::backend::Backend;
-use crate::common::{CacheDefaults, CatalogBounds, CreateBehavior, Encryption};
+use crate::common::{
+    CatalogBounds, CreateBehavior, Encryption, MoverDefaults, NamespaceDeletePolicy,
+    RepositoryMode, default_namespace_delete_policy, default_repository_mode,
+};
 use crate::maintenance::RepositoryMaintenanceSpec;
 use crate::repository::{CatalogStatus, RepositoryPhase, StorageStats};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector};
@@ -32,6 +35,15 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"Namespaces","type":"integer","jsonPath":".status.allowedNamespaceCount"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
+// §7/§15: create-time-immutability transition rules (apiserver + CI), same set as
+// the namespaced Repository.
+#[schemars(extend("x-kubernetes-validations" = [
+    {"rule": "self.encryption == oldSelf.encryption", "message": "encryption is immutable after creation"},
+    {"rule": "!has(self.create) || !has(oldSelf.create) || self.create.splitter == oldSelf.create.splitter", "message": "create.splitter is immutable after creation"},
+    {"rule": "!has(self.create) || !has(oldSelf.create) || self.create.hash == oldSelf.create.hash", "message": "create.hash is immutable after creation"},
+    {"rule": "!has(self.create) || !has(oldSelf.create) || self.create.encryption == oldSelf.create.encryption", "message": "create.encryption is immutable after creation"},
+    {"rule": "!has(self.create) || !has(oldSelf.create) || self.create.ecc == oldSelf.create.ecc", "message": "create.ecc is immutable after creation"}
+]))]
 #[serde(rename_all = "camelCase")]
 pub struct ClusterRepositorySpec {
     /// Exactly one backend, enforced at the type level by the `Backend` enum. ADR §3.1.
@@ -43,25 +55,67 @@ pub struct ClusterRepositorySpec {
     /// `Repository.spec.create`. ADR §3.1/§3.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create: Option<CreateBehavior>,
-    /// Cache sizing inherited by consumer `Backup`/`Restore` movers unless overridden. ADR §3.1.
+    /// Mover defaults inherited by **every** mover this repository spawns — bootstrap,
+    /// consumer backup/restore, and maintenance — overridable per-recipe and merged
+    /// field-wise (ADR-0004 §1/§2). Absorbs the former `cacheDefaults`
+    /// (now `moverDefaults.cache`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_defaults: Option<CacheDefaults>,
-    /// Bounds materialization of `origin: discovered` `Backup` CRs from the kopia
-    /// catalog. For a shared repo this also picks where to land discovered backups
+    pub mover_defaults: Option<MoverDefaults>,
+    /// Bounds materialization of `origin: discovered` `Snapshot` CRs from the kopia
+    /// catalog. For a shared repo this also picks where to land discovered snapshots
     /// via `catalog.fallbackNamespace`. ADR §3.1/§3.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogBounds>,
     /// Tenancy gate — webhook-enforced on every consumer CR. ADR §3.2.
     pub allowed_namespaces: AllowedNamespaces,
-    /// Identity defaults applied when consumers don't override. ADR §3.2/§4.2.
+    /// Identity defaults (CEL `*Expr`) applied when consumers don't override.
+    /// ADR §3.2 / ADR-0004 §5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identity_defaults: Option<IdentityTemplate>,
+    pub identity_defaults: Option<IdentityDefaults>,
     /// Maintenance control. Default-managed: when absent or `enabled: true`, the
     /// reconciler creates and owns a `Maintenance` CR for this cluster repository.
     /// As `Maintenance` is namespaced, `maintenance.namespace` selects where it
     /// lands (defaulting to the operator's namespace). ADR §3.2/§3.7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<RepositoryMaintenanceSpec>,
+    /// What happens to this repository's snapshots when a consuming **namespace** is
+    /// deleted: `Orphan` (default — keep history) or `Delete` (cascade). BREAKING
+    /// default change in ADR-0005 §5. Carries a real OpenAPI `default: Orphan`.
+    #[serde(default = "default_namespace_delete_policy")]
+    #[schemars(default = "default_namespace_delete_policy")]
+    pub on_namespace_delete: NamespaceDeletePolicy,
+    /// Repository-owner gate for credential-Secret projection into a foreign consumer
+    /// namespace. **Default off** (`allowed: false`): a consumer's
+    /// `credentialProjection.enabled` is necessary but not sufficient — the
+    /// `ClusterRepository` owner must also allow it. BREAKING (ADR-0005 §8). A
+    /// namespaced `Repository` has no such gate (projection there is a same-namespace
+    /// no-op).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_projection: Option<ClusterRepoCredentialProjection>,
+    /// Access mode (ADR-0005 §11): `ReadWrite` (default) or `ReadOnly`. A `ReadOnly`
+    /// cluster repository serves restores only — backups and maintenance are refused.
+    /// Carries a real OpenAPI `default: ReadWrite`.
+    #[serde(default = "default_repository_mode")]
+    #[schemars(default = "default_repository_mode")]
+    pub mode: RepositoryMode,
+    /// Pause this cluster repository declaratively (ADR-0005 §14(e)): skips
+    /// connect/bootstrap and maintenance projection. Surfaced via a condition.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub suspend: bool,
+}
+
+/// The repository-OWNER side of credential projection on a `ClusterRepository`
+/// (ADR-0005 §8) — distinct from the consumer `credentialProjection.enabled` on a
+/// `SnapshotPolicy`/`Restore`. A sub-object (not a bare `bool`) so future knobs
+/// (allow-listed consumer namespaces, key remapping) slot in without API breakage.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterRepoCredentialProjection {
+    /// When `true`, the repository owner permits projecting this repository's
+    /// credential Secret(s) into a foreign consumer namespace (still requires the
+    /// consumer opt-in AND operator RBAC — fail-closed). Off by default.
+    #[serde(default)]
+    pub allowed: bool,
 }
 
 /// The set of namespaces permitted to reference this `ClusterRepository`. ADR §3.2.
@@ -100,19 +154,22 @@ impl AllowedNamespaces {
     }
 }
 
-/// Templates rendered (Jinja2-compatible) at admission to derive consumer identity
-/// when a `BackupConfig` doesn't override. ADR §3.2/§4.2.
+/// CEL expressions evaluated at admission to derive consumer identity when a
+/// `SnapshotPolicy` doesn't override (ADR-0004 §5). Each `*Expr` returns a string
+/// and is evaluated against the environment `namespace`, `policyName`, `labels`,
+/// `annotations` (the consuming `SnapshotPolicy`'s metadata). Sandboxed, no I/O;
+/// validated at admission so a typo/out-of-scope variable is rejected on apply.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct IdentityTemplate {
-    /// Tera/Jinja2 template for the kopia identity *hostname*, rendered at admission
-    /// (e.g. `{{ .Namespace }}`). ADR §3.2/§4.2.
+pub struct IdentityDefaults {
+    /// CEL expression for the kopia identity *hostname* (e.g. `"namespace"`).
+    /// Returns a string. ADR-0004 §5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hostname_template: Option<String>,
-    /// Tera/Jinja2 template for the kopia identity *username*, rendered at admission
-    /// (e.g. `{{ .Namespace }}-{{ .ConfigName }}`). ADR §3.2/§4.2.
+    pub hostname_expr: Option<String>,
+    /// CEL expression for the kopia identity *username*
+    /// (e.g. `"namespace + '-' + policyName"`). Returns a string. ADR-0004 §5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub username_template: Option<String>,
+    pub username_expr: Option<String>,
 }
 
 /// Mirrors `RepositoryStatus` (ADR §3.1) plus `allowedNamespaceCount`. ADR §3.2.
@@ -187,8 +244,8 @@ create:
 allowedNamespaces:
   list: [production, staging, billing]
 identityDefaults:
-  hostnameTemplate: "{{ .Namespace }}"
-  usernameTemplate: "{{ .Namespace }}-{{ .ConfigName }}"
+  hostnameExpr: "namespace"
+  usernameExpr: "namespace + '-' + policyName"
 catalog:
   retain:
     perIdentity: 50
@@ -208,7 +265,11 @@ catalog:
             other => panic!("expected List, got {}", other.kind_str()),
         }
         let id = spec.identity_defaults.as_ref().expect("identityDefaults");
-        assert_eq!(id.hostname_template.as_deref(), Some("{{ .Namespace }}"));
+        assert_eq!(id.hostname_expr.as_deref(), Some("namespace"));
+        assert_eq!(
+            id.username_expr.as_deref(),
+            Some("namespace + '-' + policyName")
+        );
         assert_eq!(
             spec.catalog.as_ref().unwrap().fallback_namespace.as_deref(),
             Some("kopia-system")

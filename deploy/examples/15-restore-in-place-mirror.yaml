@@ -20,7 +20,7 @@ metadata:
   namespace: billing
 spec:
   source:
-    backupRef:
+    snapshotRef:
       name: postgres-data-20260523-021300
   target:
     # Write into an EXISTING PVC (the live one, ideally with the app scaled to 0).

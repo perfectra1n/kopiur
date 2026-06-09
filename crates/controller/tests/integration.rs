@@ -23,7 +23,9 @@ use kube::{Api, Client, ResourceExt};
 
 use kopiur_api::backend::{Backend, FilesystemBackend};
 use kopiur_api::common::{Encryption, RepositoryKind, RepositoryRef, SecretKeyRef};
-use kopiur_api::{Backup, BackupConfig, BackupConfigSpec, BackupSpec, Repository, RepositorySpec};
+use kopiur_api::{
+    Repository, RepositorySpec, Snapshot, SnapshotPolicy, SnapshotPolicySpec, SnapshotSpec,
+};
 use kopiur_controller::consts::SNAPSHOT_CLEANUP_FINALIZER;
 
 /// Install the CRDs these tests exercise and wait for each to become
@@ -34,7 +36,7 @@ use kopiur_controller::consts::SNAPSHOT_CLEANUP_FINALIZER;
 async fn ensure_crds(client: &Client) {
     let api: Api<CustomResourceDefinition> = Api::all(client.clone());
     let pp = PatchParams::apply("kopiur-integration-test").force();
-    let crds = [Repository::crd(), BackupConfig::crd(), Backup::crd()];
+    let crds = [Repository::crd(), SnapshotPolicy::crd(), Snapshot::crd()];
     for crd in crds {
         let name = crd.name_any();
         api.patch(&name, &pp, &Patch::Apply(&crd))
@@ -83,18 +85,21 @@ fn sample_repository(name: &str) -> Repository {
                 },
             },
             create: None,
-            cache_defaults: None,
+            mover_defaults: None,
             catalog: None,
             maintenance: None,
+            on_namespace_delete: Default::default(),
+            mode: Default::default(),
+            suspend: false,
         },
     )
 }
 
-fn sample_backup_config(name: &str) -> BackupConfig {
-    use kopiur_api::backup_config::{PvcSource, Source};
-    BackupConfig::new(
+fn sample_backup_config(name: &str) -> SnapshotPolicy {
+    use kopiur_api::snapshot_policy::{PvcSource, Source};
+    SnapshotPolicy::new(
         name,
-        BackupConfigSpec {
+        SnapshotPolicySpec {
             repository: RepositoryRef {
                 kind: RepositoryKind::Repository,
                 name: "test-repo".into(),
@@ -110,12 +115,18 @@ fn sample_backup_config(name: &str) -> BackupConfig {
                 source_path_override: None,
                 source_path_strategy: None,
             }],
-            copy_method: None,
+            copy_method: Default::default(),
             volume_snapshot_class_name: None,
             group_by: None,
             retention: None,
             default_deletion_policy: None,
-            policy: None,
+            compression: None,
+            files: None,
+            extra_args: vec![],
+            error_handling: None,
+            upload: None,
+            verification: None,
+            suspend: false,
             hooks: None,
             mover: None,
             credential_projection: None,
@@ -132,9 +143,9 @@ async fn repository_and_backup_config_apply_cleanly() {
     ensure_crds(&client).await;
     let ns = "default";
     let repos: Api<Repository> = Api::namespaced(client.clone(), ns);
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), ns);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), ns);
 
-    // Apply a Repository + BackupConfig; assert they create without rejection.
+    // Apply a Repository + SnapshotPolicy; assert they create without rejection.
     let _ = repos
         .create(&PostParams::default(), &sample_repository("test-repo"))
         .await
@@ -142,7 +153,7 @@ async fn repository_and_backup_config_apply_cleanly() {
     let _ = configs
         .create(&PostParams::default(), &sample_backup_config("test-config"))
         .await
-        .expect("create BackupConfig");
+        .expect("create SnapshotPolicy");
 
     // Cleanup.
     let _ = repos.delete("test-repo", &DeleteParams::default()).await;
@@ -159,17 +170,18 @@ async fn backup_gets_finalizer_and_delete_path_removes_cr() {
     };
     ensure_crds(&client).await;
     let ns = "default";
-    let backups: Api<Backup> = Api::namespaced(client.clone(), ns);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), ns);
 
-    // Create a manual Backup with deletionPolicy: Orphan so the finalizer path
+    // Create a manual Snapshot with deletionPolicy: Orphan so the finalizer path
     // doesn't require a live repo (Orphan never contacts it).
-    let mut b = Backup::new(
+    let mut b = Snapshot::new(
         "it-backup",
-        BackupSpec {
-            config_ref: None,
+        SnapshotSpec {
+            policy_ref: None,
             tags: None,
             failure_policy: None,
             deletion_policy: Some(kopiur_api::DeletionPolicy::Orphan),
+            pin: false,
         },
     );
     b.finalizers_mut()
@@ -177,7 +189,7 @@ async fn backup_gets_finalizer_and_delete_path_removes_cr() {
     let created = backups
         .create(&PostParams::default(), &b)
         .await
-        .expect("create Backup");
+        .expect("create Snapshot");
     assert!(
         created
             .finalizers()

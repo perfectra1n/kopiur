@@ -101,7 +101,7 @@ pub fn build_mover_rolebinding(
 /// every mover Job so the SA is present in the workload namespace (else the Job
 /// `FailedCreate`s with `serviceaccount ... not found` and never schedules a pod).
 /// The objects are kopiur-managed and shared across all mover Jobs in the
-/// namespace (no owner reference, so deleting one Backup does not revoke them).
+/// namespace (no owner reference, so deleting one Snapshot does not revoke them).
 pub async fn ensure_mover_rbac(
     client: &kube::Client,
     ns: &str,
@@ -149,7 +149,7 @@ pub async fn namespace_allows_privileged_movers(client: &kube::Client, ns: &str)
 
 /// The actionable message for a privileged mover refused in a namespace that has
 /// not opted in (what / why / how-to-fix). Pure so the exact text is unit-asserted.
-/// `kind` is the owning resource's kind (e.g. `BackupConfig`, `Restore`) and `name`
+/// `kind` is the owning resource's kind (e.g. `SnapshotPolicy`, `Restore`) and `name`
 /// its name, so the message names the right object to fix.
 pub fn privileged_mover_message(kind: &str, name: &str, ns: &str, mover_sa: &str) -> String {
     format!(

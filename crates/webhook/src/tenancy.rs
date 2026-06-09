@@ -2,8 +2,8 @@
 //!
 //! The validating webhook is the single enforcement point for `allowedNamespaces`
 //! on a `ClusterRepository` — the controller never trusts that the API server
-//! pre-filtered cross-tenant references (ADR §3.2). Consumer CRs (`BackupConfig`,
-//! manual `Backup`, `Restore`, `Maintenance`) that reference a `ClusterRepository`
+//! pre-filtered cross-tenant references (ADR §3.2). Consumer CRs (`SnapshotPolicy`,
+//! manual `Snapshot`, `Restore`, `Maintenance`) that reference a `ClusterRepository`
 //! must have their namespace gated here.
 //!
 //! ## Pure core + thin IO (mirrors the api-crate pattern)

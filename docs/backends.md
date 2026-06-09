@@ -15,7 +15,7 @@ A **`Repository`** is _where_ snapshots live. It splits cleanly into two halves:
 - **Non-secret connection identifiers** — bucket, container, endpoint, host, path. These go in `spec.backend.<kind>`.
 - **Secrets** — backend access keys and the kopia encryption password. These live in a Kubernetes `Secret`, read by **well-known keys**, and are passed to kopia as environment variables (never on argv, never in status).
 
-`BackupConfig` / `Backup` / `Restore` never repeat any of this — they point at the `Repository` by name.
+`SnapshotPolicy` / `Snapshot` / `Restore` never repeat any of this — they point at the `Repository` by name.
 
 ///
 

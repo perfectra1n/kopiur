@@ -7,10 +7,10 @@ namespace, a migration changes the app's _coordinate_: a new namespace
 
 That coordinate change is the catch.
 
-/// warning | Why you can't just use `fromConfig` in the destination
+/// warning | Why you can't just use `fromPolicy` in the destination
 
 kopia stores each snapshot under `username@hostname:path`, and **`hostname`
-defaults to the source namespace**. In the destination namespace, a `fromConfig`
+defaults to the source namespace**. In the destination namespace, a `fromPolicy`
 restore would compute the _destination's_ identity and find nothing. So the
 one-time data carry restores by the **raw `source.identity`** (the source's
 `username` + `hostname`), which is exactly what `identity` mode is for.
@@ -27,18 +27,18 @@ flowchart LR
   subgraph dst[Destination — namespace payments]
     REPO[Repository<br/>same bucket, connect] --> RST[Restore<br/>by raw identity]
     RST --> PVC[PVC postgres-data]
-    BC[BackupConfig<br/>identity pinned to billing] --> SCH[BackupSchedule]
+    BC[SnapshotPolicy<br/>identity pinned to billing] --> SCH[SnapshotSchedule]
   end
   S -. restore by identity .-> RST
 ```
 
 Applied in the destination namespace, the bundle: connects a `Repository` to the
 same bucket, restores the source's latest snapshot by identity into a new PVC,
-then sets up a `BackupConfig` + `BackupSchedule` to protect the app going forward.
+then sets up a `SnapshotPolicy` + `SnapshotSchedule` to protect the app going forward.
 
 ## The decision that matters: continue or fork the lineage
 
-The new `BackupConfig`'s `identity` determines whether the destination's future
+The new `SnapshotPolicy`'s `identity` determines whether the destination's future
 snapshots **extend the original timeline** or **start a fresh one**:
 
 | Choice | How | Result |
@@ -79,7 +79,7 @@ existing data rather than re-uploading it.
 
 /// tip | Finding the source's exact identity
 
-If you're unsure what the source recorded, read it off a source `Backup`'s
+If you're unsure what the source recorded, read it off a source `Snapshot`'s
 status, or `kopia snapshot list` against the repo. For a PVC source it's
 `<config-name>@<namespace>:/pvc/<pvcName>` unless the source pinned a custom
 `identity`.

@@ -10,7 +10,7 @@ gated by `.Values.installCRDs`, so that:
   * `helm uninstall` removes them.
 
 Trade-off: because these are templates, a `helm uninstall` WILL delete the CRDs
-and therefore every Repository/BackupConfig/Backup/... object in the cluster.
+and therefore every Repository/SnapshotPolicy/Snapshot/... object in the cluster.
 That is acceptable for alpha and called out in docs/install.md. Teams that want
 CRD lifecycle decoupled from the release should set `installCRDs: false` and
 apply `deploy/crds/*.yaml` out of band (e.g. via GitOps).

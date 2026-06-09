@@ -10,7 +10,7 @@
 /// installs `--namespace` here (`with` `--create-namespace`).
 pub const OPERATOR_NS: &str = "kopiur-e2e";
 
-/// Workload namespace for the cross-namespace scenarios (a Backup/bootstrap in a
+/// Workload namespace for the cross-namespace scenarios (a Snapshot/bootstrap in a
 /// namespace separate from the operator's). Provisioned by `World` (`Need::WorkloadNs`).
 pub const WORKLOAD_NS: &str = "kopiur-e2e-xns";
 

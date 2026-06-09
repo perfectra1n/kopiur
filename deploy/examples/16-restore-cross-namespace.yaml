@@ -1,7 +1,7 @@
 # Example 16 — Cross-namespace clone restore (ADR-0003 §4.6)
 #
 # Restore a snapshot taken in one namespace INTO another — e.g. clone production data
-# into a `staging` namespace to reproduce a bug against real data. The `backupRef`
+# into a `staging` namespace to reproduce a bug against real data. The `snapshotRef`
 # carries the SOURCE namespace; the Restore (and its target PVC) live in the
 # DESTINATION namespace.
 #
@@ -10,7 +10,7 @@
 # `credentialProjection.enabled: true` to have the operator copy it in for you
 # (see example 17 / example 11).
 #
-# Field shapes verified against crates/api: source.backupRef = { name, namespace? }.
+# Field shapes verified against crates/api: source.snapshotRef = { name, namespace? }.
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
 kind: Restore
@@ -23,9 +23,9 @@ spec:
     name: postgres-primary
     namespace: billing # the prod repository (cross-namespace read)
   source:
-    backupRef:
+    snapshotRef:
       name: postgres-data-20260523-021300
-      namespace: billing # SOURCE — the prod namespace the Backup lives in
+      namespace: billing # SOURCE — the prod namespace the Snapshot lives in
   target:
     pvc:
       name: postgres-data-clone
