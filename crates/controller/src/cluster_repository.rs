@@ -149,6 +149,20 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
     // Same connect/create/status lifecycle as Repository. Cluster-scoped secret
     // refs MUST carry an explicit namespace (webhook-enforced).
     match &repo.spec.backend {
+        // A PVC/NFS-backed filesystem repo is NOT reachable from the controller
+        // in-process (the controller pod can't mount the repo volume), so — exactly
+        // like a namespaced Repository and like object stores — it bootstraps in a
+        // short mover Job that mounts the volume. WITHOUT this guard the in-process
+        // connect/create below runs in the CONTROLLER pod where the volume isn't
+        // mounted, "creates" the repo in the wrong place, and FALSELY reports `Ready`
+        // while the real PVC stays empty — so every consumer then fails far away with
+        // a cryptic `repository not initialized in the provided storage`. Routing
+        // through the mover Job also makes the status honest: a failed bootstrap Job
+        // surfaces `Failed`/`Degraded` + an actionable Event via
+        // `finalize_cluster_bootstrap`, never a misleading `Ready`.
+        Backend::Filesystem(fs) if fs.volume.is_some() => {
+            return bootstrap_cluster_via_mover(ctx, repo, &name, &api, &repo.spec.backend).await;
+        }
         Backend::Filesystem(fs) => {
             // Hard-stop: see the namespaced Repository reconciler for the rationale.
             // Once terminally Failed for this spec generation, don't re-read secrets
@@ -307,19 +321,21 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
             // §5.4). The Job runs in the credentials Secret's namespace (so its
             // `envFrom` resolves) and is owned by this cluster-scoped CR (a
             // namespaced dependent may have a cluster-scoped owner; GC works).
-            return bootstrap_cluster_object_store(ctx, repo, &name, &api, other).await;
+            return bootstrap_cluster_via_mover(ctx, repo, &name, &api, other).await;
         }
     }
 
     Ok(Action::requeue(Duration::from_secs(300)))
 }
 
-/// Drive the object-store bootstrap for a `ClusterRepository`. Mirrors the
-/// namespaced [`crate::repository::reconcile`] path, minus discovered-Snapshot
-/// materialization: cross-namespace catalog placement for a ClusterRepository is
-/// a separate concern (see [`placement_namespace`]), so `scanCatalog` is off and
-/// the bootstrap reports identity + snapshot count only.
-async fn bootstrap_cluster_object_store(
+/// Drive the mover-Job bootstrap for a `ClusterRepository` whose backend the
+/// controller cannot reach in-process — object stores AND volume-backed (PVC / inline
+/// NFS) filesystem repos (the Job mounts the repo volume). Mirrors the namespaced
+/// [`crate::repository::reconcile`] path, minus discovered-Snapshot materialization:
+/// cross-namespace catalog placement for a ClusterRepository is a separate concern
+/// (see [`placement_namespace`]), so `scanCatalog` is off and the bootstrap reports
+/// identity + snapshot count only.
+async fn bootstrap_cluster_via_mover(
     ctx: &Context,
     repo: &ClusterRepository,
     name: &str,
@@ -391,6 +407,15 @@ async fn bootstrap_cluster_object_store(
         None,
         None,
     );
+    // A volume-backed filesystem repo mounts its PVC / inline-NFS export read-write at
+    // the backend path so the mover can connect/create the kopia repo there. Object
+    // stores reach the backend over the network, so they mount nothing.
+    let repo_volume =
+        io::filesystem_repo_mount_source(backend).map(|source| jobs::VolumeMountSpec {
+            source,
+            mount_path: io::filesystem_repo_path(backend).unwrap_or_default(),
+            read_only: false,
+        });
     let inputs = MoverJobInputs {
         name: &job_name,
         namespace: &job_ns,
@@ -414,7 +439,7 @@ async fn bootstrap_cluster_object_store(
         affinity: resolved_mover.affinity.clone(),
         labels,
         source_volume: None,
-        repo_volume: None,
+        repo_volume,
         creds_secrets,
         result_configmap: Some(&job_name),
         service_account: ctx.mover_service_account.as_deref(),

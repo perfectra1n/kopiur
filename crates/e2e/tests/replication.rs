@@ -56,7 +56,13 @@ async fn repository_replication_mirrors_to_second_filesystem_repo() {
                 "metadata": { "name": name, "namespace": E2E_NAMESPACE },
                 "spec": {
                     "sourceRef": { "kind": "Repository", "name": "e2e-repl-src" },
-                    "destination": { "filesystem": { "path": consts::ISOLATED_REPO_PATH, "volume": { "pvc": { "name": consts::isolated_repo_pvc("repl-dst") } } } },
+                    // The destination uses a DISTINCT in-pod path from the source's
+                    // `/repo`: a replication mover mounts BOTH source and destination in
+                    // one Job, so they cannot share a mount path (the operator rejects a
+                    // same-path/same-target destination). kopia writes the repo at the
+                    // PVC root regardless of the mount path, so the `repl-dst` verifier
+                    // (which mounts the same PVC at `/repo`) still reads the mirror.
+                    "destination": { "filesystem": { "path": "/repo-dst", "volume": { "pvc": { "name": consts::isolated_repo_pvc("repl-dst") } } } },
                     "schedule": { "cron": "* * * * *" }
                 }
             })),

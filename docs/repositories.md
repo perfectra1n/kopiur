@@ -219,7 +219,7 @@ spec:
 
 ### `identityDefaults` — per-tenant identity (CEL)
 
-kopia records every snapshot under `username@hostname:path`. For a shared repo you usually want each tenant's snapshots distinguishable. As of ADR-0004 §5 these are **CEL expressions** (`*Expr`, the kromgo `valueExpr`/`colorExpr` convention), not Jinja2 templates. They are evaluated at admission and pinned to status; a consumer's explicit `spec.identity` always wins.
+kopia records every snapshot under `username@hostname:path`. For a shared repo you usually want each tenant's snapshots distinguishable. `identityDefaults` are **CEL expressions** (`*Expr`, the kromgo `valueExpr`/`colorExpr` convention), evaluated at admission and pinned to status; a consumer's explicit `spec.identity` always wins.
 
 ```yaml
 spec:

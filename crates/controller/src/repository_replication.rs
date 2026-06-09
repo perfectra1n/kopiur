@@ -185,6 +185,17 @@ async fn spawn_replication_job(
             mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
             read_only: false,
         });
+    // A filesystem DESTINATION needs its volume mounted too — `kopia repository
+    // sync-to` writes the mirror into it. Carried in the `source_volume` slot (the Job
+    // builder just turns it into a pod volume/mount at the destination's path, which
+    // the webhook guarantees differs from the source repo's path, so the two mounts
+    // never collide). Object-store destinations reach the backend over the network.
+    let dest_volume =
+        io::filesystem_repo_mount_source(&repl.spec.destination).map(|source| VolumeMountSpec {
+            source,
+            mount_path: io::filesystem_repo_path(&repl.spec.destination).unwrap_or_default(),
+            read_only: false,
+        });
     let owner = io::owner_ref_for(repl, "RepositoryReplication")?;
 
     if let Some(sa) = ctx.mover_service_account.as_deref() {
@@ -256,7 +267,7 @@ async fn spawn_replication_job(
         tolerations: resolved_mover.tolerations.clone(),
         affinity: resolved_mover.affinity.clone(),
         labels,
-        source_volume: None,
+        source_volume: dest_volume,
         repo_volume,
         creds_secrets,
         result_configmap: None,
