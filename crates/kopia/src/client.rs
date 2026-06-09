@@ -1129,7 +1129,10 @@ fn verify_args(opts: &VerifyOptions) -> Vec<String> {
 fn sync_to_args(destination: &ConnectSpec, delete_extra: bool) -> Vec<String> {
     let mut args = vec!["repository".into(), "sync-to".into()];
     args.extend(destination.backend_args());
-    args.push("--must-exist=false".into());
+    // `--must-exist` is a kopia (kingpin) BOOLEAN flag: present (`--must-exist`) or
+    // absent — `--must-exist=false` is a parse error (`unexpected false`). Its default
+    // is false (sync-to initializes the destination if it isn't yet a repository),
+    // exactly what a mirror wants, so omit it rather than emit an invalid `=false`.
     if delete_extra {
         args.push("--delete".into());
     }
@@ -1619,7 +1622,8 @@ mod tests {
 
     #[test]
     fn sync_to_args_builds_destination_and_flags() {
-        // ADR-0005 §13(d): destination backend args + must-exist=false (+ optional delete).
+        // ADR-0005 §13(d): destination backend args (+ optional --delete). `--must-exist`
+        // is OMITTED (its kopia default is false; `--must-exist=false` is a parse error).
         let dest = ConnectSpec::S3 {
             bucket: "mirror".into(),
             endpoint: Some("https://offsite".into()),
@@ -1640,8 +1644,13 @@ mod tests {
                 "https://offsite",
                 "--region",
                 "us-east-1",
-                "--must-exist=false"
             ]
+        );
+        // No `--must-exist=false` (it would fail kopia's flag parser).
+        assert!(
+            !sync_to_args(&dest, false)
+                .iter()
+                .any(|a| a.contains("must-exist"))
         );
         // delete_extra appends --delete (a true mirror).
         let fs = ConnectSpec::Filesystem {
@@ -1655,7 +1664,6 @@ mod tests {
                 "filesystem",
                 "--path",
                 "/mirror",
-                "--must-exist=false",
                 "--delete"
             ]
         );

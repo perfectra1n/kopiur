@@ -435,6 +435,20 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     let config_ctrl = Controller::new(config_api, cfg.clone())
         .owns(Api::<Job>::all(client.clone()), cfg.clone())
         .owns(Api::<ConfigMap>::all(client.clone()), cfg.clone())
+        // A produced `Snapshot` carries its owning policy in the config label. Watch
+        // Snapshots so GFS retention (ADR §4.4) reconciles PROMPTLY when one is created
+        // or deleted — without this the policy only re-runs on its periodic requeue, so
+        // a new snapshot's prune (and a pinned snapshot's exemption) lags by minutes.
+        .watches(
+            Api::<Snapshot>::all(client.clone()),
+            cfg.clone(),
+            |s: Snapshot| match (s.labels().get(crate::consts::CONFIG_LABEL), s.namespace()) {
+                (Some(policy), Some(ns)) => {
+                    Some(ObjectRef::<SnapshotPolicy>::new(policy).within(&ns))
+                }
+                _ => None,
+            },
+        )
         .run(
             snapshot_policy::reconcile,
             snapshot_policy::error_policy,

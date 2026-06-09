@@ -157,6 +157,11 @@ pub fn snapshot_policy_json(
 }
 
 /// A `Snapshot` referencing `policy` (default `deletionPolicy: Retain`).
+///
+/// Carries the `kopiur.home-operations.com/config=<policy>` label — the same label a
+/// `SnapshotSchedule` puts on the snapshots it creates — so the snapshot is visible to
+/// its policy's GFS retention (which lists by that label). A manually-created snapshot
+/// without it is outside retention by design.
 pub fn snapshot_json(
     ns: &str,
     name: &str,
@@ -167,7 +172,11 @@ pub fn snapshot_json(
         serde_json::json!({
             "apiVersion": "kopiur.home-operations.com/v1alpha1",
             "kind": "Snapshot",
-            "metadata": { "name": name, "namespace": ns },
+            "metadata": {
+                "name": name,
+                "namespace": ns,
+                "labels": { "kopiur.home-operations.com/config": policy }
+            },
             "spec": { "policyRef": { "name": policy }, "deletionPolicy": "Retain" }
         }),
         extra_spec,

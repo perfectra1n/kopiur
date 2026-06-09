@@ -38,7 +38,6 @@ async fn restore_populator_target_form_is_accepted() {
     .await;
 
     let restores: Api<Restore> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let jobs: Api<Job> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let name = "e2e-pop-restore";
     restores
         .create(
@@ -57,8 +56,15 @@ async fn restore_populator_target_form_is_accepted() {
         .await
         .expect("create Restore with target.populator:{} (the explicit populator form)");
 
-    // The controller accepts the populator target and builds a restore mover Job for it.
-    let _ = wait_for_job(&jobs, name).await;
+    // Populator mode is PASSIVE (ADR-0005 §9): the Restore is admitted and parks in
+    // `AwaitingClaim` until a PVC references it via `dataSourceRef` — it does NOT eagerly
+    // build a mover Job. Asserting it reaches `AwaitingClaim=True` proves the explicit
+    // `target.populator: {}` form is accepted and wired through to the populator machine.
+    wait_condition(&restores, name, "AwaitingClaim", "True")
+        .await
+        .expect(
+            "a populator Restore must reach AwaitingClaim=True (passive, awaiting a PVC claim)",
+        );
     let _ = restores.delete(name, &DeleteParams::default()).await;
 }
 
