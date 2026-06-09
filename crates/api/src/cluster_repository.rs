@@ -36,13 +36,17 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 // §7/§15: create-time-immutability transition rules (apiserver + CI), same set as
-// the namespaced Repository.
+// the namespaced Repository. Each `create.*` leaf is `has()`-guarded: CEL field
+// access on an absent optional key raises a "no such key" error that fails the whole
+// rule (→ 422 on *every* update, wedging the controller's finalizer/status writes),
+// so we compare presence first and only dereference when set — see the namespaced
+// `Repository` for the full rationale.
 #[schemars(extend("x-kubernetes-validations" = [
     {"rule": "self.encryption == oldSelf.encryption", "message": "encryption is immutable after creation"},
-    {"rule": "!has(self.create) || !has(oldSelf.create) || self.create.splitter == oldSelf.create.splitter", "message": "create.splitter is immutable after creation"},
-    {"rule": "!has(self.create) || !has(oldSelf.create) || self.create.hash == oldSelf.create.hash", "message": "create.hash is immutable after creation"},
-    {"rule": "!has(self.create) || !has(oldSelf.create) || self.create.encryption == oldSelf.create.encryption", "message": "create.encryption is immutable after creation"},
-    {"rule": "!has(self.create) || !has(oldSelf.create) || self.create.ecc == oldSelf.create.ecc", "message": "create.ecc is immutable after creation"}
+    {"rule": "!has(self.create) || !has(oldSelf.create) || (has(self.create.splitter) == has(oldSelf.create.splitter) && (!has(self.create.splitter) || self.create.splitter == oldSelf.create.splitter))", "message": "create.splitter is immutable after creation"},
+    {"rule": "!has(self.create) || !has(oldSelf.create) || (has(self.create.hash) == has(oldSelf.create.hash) && (!has(self.create.hash) || self.create.hash == oldSelf.create.hash))", "message": "create.hash is immutable after creation"},
+    {"rule": "!has(self.create) || !has(oldSelf.create) || (has(self.create.encryption) == has(oldSelf.create.encryption) && (!has(self.create.encryption) || self.create.encryption == oldSelf.create.encryption))", "message": "create.encryption is immutable after creation"},
+    {"rule": "!has(self.create) || !has(oldSelf.create) || (has(self.create.ecc) == has(oldSelf.create.ecc) && (!has(self.create.ecc) || self.create.ecc == oldSelf.create.ecc))", "message": "create.ecc is immutable after creation"}
 ]))]
 #[serde(rename_all = "camelCase")]
 pub struct ClusterRepositorySpec {

@@ -118,7 +118,7 @@ pub fn due_tier(
 }
 
 /// How long until the next verification slot (either tier), measured from
-/// `last_verified`. Floored at the running cadence, capped by [`REQUEUE_CAP`].
+/// `last_verified`. Floored at the running cadence, capped by `REQUEUE_CAP`.
 pub fn next_verify_wakeup(
     verification: &Verification,
     seed: &str,

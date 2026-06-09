@@ -348,11 +348,13 @@ pub struct Retention {
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
     /// Override the `username` portion of `username@hostname:path`; absent uses the
-    /// resolved default. Templated with `tera` and pinned at admission (ADR §4.2).
+    /// resolved default (the repository's `identityDefaults` CEL expression, or the
+    /// object name). Used verbatim and pinned at admission (ADR §4.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     /// Override the `hostname` portion of `username@hostname:path`; absent uses the
-    /// resolved default. Templated with `tera` and pinned at admission (ADR §4.2).
+    /// resolved default (the repository's `identityDefaults` CEL expression, or the
+    /// namespace). Used verbatim and pinned at admission (ADR §4.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
 }
@@ -638,7 +640,7 @@ fn merge_quantity_map(
 }
 
 /// Field-wise overlay of [`ResourceRequirements`]: `limits`/`requests` merge per-key
-/// (via [`merge_quantity_map`]); `claims` is taken from `over` when set, else `base`.
+/// (via `merge_quantity_map`); `claims` is taken from `over` when set, else `base`.
 pub fn merge_resources(
     base: &ResourceRequirements,
     over: &ResourceRequirements,

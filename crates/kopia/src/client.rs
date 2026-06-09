@@ -827,7 +827,7 @@ impl KopiaClient {
     /// (`kopia repository sync-to <destination> [flags]`), ADR-0005 §13(d). The
     /// caller must already be connected to the **source** repository; this copies
     /// its blobs to `destination`. The destination's backend args are built by
-    /// [`ConnectSpec::backend_args`] (the same builder connect/create use), so a new
+    /// `ConnectSpec::backend_args` (the same builder connect/create use), so a new
     /// backend variant is wired through automatically. `--must-exist=false` lets the
     /// first sync create the destination layout; `--delete` (when `delete_extra`)
     /// prunes blobs at the destination no longer present at the source (a true
@@ -1123,7 +1123,7 @@ fn verify_args(opts: &VerifyOptions) -> Vec<String> {
 
 /// Build the args for `kopia repository sync-to <destination> [flags]`. Pure so it
 /// is unit-testable without spawning kopia (ADR-0005 §13(d)). The destination's
-/// backend selection reuses [`ConnectSpec::backend_args`], so every backend is wired
+/// backend selection reuses `ConnectSpec::backend_args`, so every backend is wired
 /// through. `--must-exist=false` allows the first sync to create the destination
 /// layout; `--delete` prunes destination-only blobs for a true mirror.
 fn sync_to_args(destination: &ConnectSpec, delete_extra: bool) -> Vec<String> {

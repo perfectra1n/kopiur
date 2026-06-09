@@ -104,6 +104,15 @@ jobs:
           - shard: misc
             bins: "object_store cache_and_events terminal_failure webhook observability"
             backends: true
+          # ADR-0004/0005 reshape scenarios (Filesystem only). Split in two so the
+          # cron-driven verify/replication waits don't push one shard past the job
+          # timeout.
+          - shard: reshape-core
+            bins: "mover_config data_integrity repository_lifecycle tenancy"
+            backends: false
+          - shard: reshape-async
+            bins: "verification replication"
+            backends: false
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3

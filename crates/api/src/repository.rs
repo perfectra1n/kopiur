@@ -30,12 +30,18 @@ use serde::{Deserialize, Serialize};
 // §7/§15: create-time-immutability transition rules in the CRD schema (apiserver +
 // CI), complementing the webhook checks. `encryption` is required so it's always
 // present; the `create.*` rules only bite when `create` is present on both sides.
+// Each leaf is `has()`-guarded: CEL field access on an absent optional key raises a
+// "no such key" error (which fails the WHOLE rule → 422 on *every* update, blocking
+// the controller's finalizer/status writes), so we compare presence first and only
+// dereference when set — the common `create: {enabled: true}` case (no splitter/
+// hash/encryption/ecc) must reconcile, not wedge. Mirrors the webhook's None-vs-Some
+// semantics in `validate::diff_immutable_repo_fields`.
 #[schemars(extend("x-kubernetes-validations" = [
     {"rule": "self.encryption == oldSelf.encryption", "message": "encryption is immutable after creation"},
-    {"rule": "!has(self.create) || !has(oldSelf.create) || self.create.splitter == oldSelf.create.splitter", "message": "create.splitter is immutable after creation"},
-    {"rule": "!has(self.create) || !has(oldSelf.create) || self.create.hash == oldSelf.create.hash", "message": "create.hash is immutable after creation"},
-    {"rule": "!has(self.create) || !has(oldSelf.create) || self.create.encryption == oldSelf.create.encryption", "message": "create.encryption is immutable after creation"},
-    {"rule": "!has(self.create) || !has(oldSelf.create) || self.create.ecc == oldSelf.create.ecc", "message": "create.ecc is immutable after creation"}
+    {"rule": "!has(self.create) || !has(oldSelf.create) || (has(self.create.splitter) == has(oldSelf.create.splitter) && (!has(self.create.splitter) || self.create.splitter == oldSelf.create.splitter))", "message": "create.splitter is immutable after creation"},
+    {"rule": "!has(self.create) || !has(oldSelf.create) || (has(self.create.hash) == has(oldSelf.create.hash) && (!has(self.create.hash) || self.create.hash == oldSelf.create.hash))", "message": "create.hash is immutable after creation"},
+    {"rule": "!has(self.create) || !has(oldSelf.create) || (has(self.create.encryption) == has(oldSelf.create.encryption) && (!has(self.create.encryption) || self.create.encryption == oldSelf.create.encryption))", "message": "create.encryption is immutable after creation"},
+    {"rule": "!has(self.create) || !has(oldSelf.create) || (has(self.create.ecc) == has(oldSelf.create.ecc) && (!has(self.create.ecc) || self.create.ecc == oldSelf.create.ecc))", "message": "create.ecc is immutable after creation"}
 ]))]
 #[serde(rename_all = "camelCase")]
 pub struct RepositorySpec {
@@ -246,6 +252,39 @@ suspend: true
         assert!(has("self.create.splitter == oldSelf.create.splitter"));
         assert!(has("self.create.hash == oldSelf.create.hash"));
         assert!(has("self.create.ecc == oldSelf.create.ecc"));
+    }
+
+    #[test]
+    fn create_immutability_rules_guard_each_optional_leaf_with_has() {
+        // Regression (e2e): a `create.*` immutability rule that dereferences the leaf
+        // without a `has()` guard (`self.create.splitter == oldSelf.create.splitter`)
+        // raises a CEL "no such key" error whenever `create` is present but the
+        // optional leaf is absent — the common `create: {enabled: true}` case. That
+        // error fails the WHOLE rule → the apiserver 422s *every* update, so the
+        // controller can never add its finalizer or write status and the Repository
+        // wedges below Ready. Each `create.*` leaf must therefore be `has()`-guarded.
+        let crd = Repository::crd();
+        let json = serde_json::to_value(&crd).unwrap();
+        let rules = json["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["x-kubernetes-validations"]
+            .as_array()
+            .expect("spec.x-kubernetes-validations present");
+        for leaf in ["splitter", "hash", "encryption", "ecc"] {
+            let rule = rules
+                .iter()
+                .find_map(|r| {
+                    let s = r["rule"].as_str()?;
+                    s.contains(&format!("self.create.{leaf} == oldSelf.create.{leaf}"))
+                        .then_some(s)
+                })
+                .unwrap_or_else(|| panic!("missing create.{leaf} immutability rule"));
+            assert!(
+                rule.contains(&format!("has(self.create.{leaf})"))
+                    && rule.contains(&format!("has(oldSelf.create.{leaf})")),
+                "create.{leaf} immutability rule must `has()`-guard the leaf on BOTH sides \
+                 (else `create: {{enabled: true}}` 422s every update); got: {rule}"
+            );
+        }
     }
 
     #[test]

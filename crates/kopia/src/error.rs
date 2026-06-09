@@ -104,7 +104,7 @@ impl KopiaErrorClass {
     /// A **stable**, volatile-free one-line summary of what this class means and
     /// how to fix it, suitable for a status *condition message*.
     ///
-    /// Unlike [`KopiaError::to_string`] (which embeds the kopia stderr tail — and
+    /// Unlike `KopiaError::to_string` (which embeds the kopia stderr tail — and
     /// thus a per-attempt-random temp filename like `.shards.tmp.<hex>`), this is
     /// byte-identical across repeated failures of the same class. The controller
     /// uses it for the persisted condition so that re-writing an unchanged Failed

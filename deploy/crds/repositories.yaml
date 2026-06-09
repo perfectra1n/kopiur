@@ -2004,13 +2004,13 @@ spec:
             - message: encryption is immutable after creation
               rule: self.encryption == oldSelf.encryption
             - message: create.splitter is immutable after creation
-              rule: '!has(self.create) || !has(oldSelf.create) || self.create.splitter == oldSelf.create.splitter'
+              rule: '!has(self.create) || !has(oldSelf.create) || (has(self.create.splitter) == has(oldSelf.create.splitter) && (!has(self.create.splitter) || self.create.splitter == oldSelf.create.splitter))'
             - message: create.hash is immutable after creation
-              rule: '!has(self.create) || !has(oldSelf.create) || self.create.hash == oldSelf.create.hash'
+              rule: '!has(self.create) || !has(oldSelf.create) || (has(self.create.hash) == has(oldSelf.create.hash) && (!has(self.create.hash) || self.create.hash == oldSelf.create.hash))'
             - message: create.encryption is immutable after creation
-              rule: '!has(self.create) || !has(oldSelf.create) || self.create.encryption == oldSelf.create.encryption'
+              rule: '!has(self.create) || !has(oldSelf.create) || (has(self.create.encryption) == has(oldSelf.create.encryption) && (!has(self.create.encryption) || self.create.encryption == oldSelf.create.encryption))'
             - message: create.ecc is immutable after creation
-              rule: '!has(self.create) || !has(oldSelf.create) || self.create.ecc == oldSelf.create.ecc'
+              rule: '!has(self.create) || !has(oldSelf.create) || (has(self.create.ecc) == has(oldSelf.create.ecc) && (!has(self.create.ecc) || self.create.ecc == oldSelf.create.ecc))'
           status:
             description: |-
               Observed state of a [`Repository`]. Carries resolved values pinned by the
