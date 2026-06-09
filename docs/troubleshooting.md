@@ -65,13 +65,30 @@ $ kubectl get backup <name> -n <ns> \
 
 ### `MoverPermitted=False` — privileged mover not opted in
 
-The `BackupConfig` requests an elevated mover (root, `privileged`, escalation, added capabilities, or `privilegedMode`) but the namespace hasn't been granted it.
+The mover requests an elevated context but the namespace hasn't been granted it. This guards **`BackupConfig`, `Restore`, and `Maintenance` alike** — and the *effective* (resolved) context is what's checked, so it also fires for an elevated context **inherited** from a workload pod. The detector trips on any of: `runAsUser: 0`, `privileged: true`, `allowPrivilegeEscalation: true`, added Linux capabilities, `runAsNonRoot: false`, or `privilegedMode: true` — at **either** the container (`mover.securityContext`) **or** pod (`mover.podSecurityContext`) level.
 
 ```console
+# see the exact, actionable message (names the object + the annotation):
+$ kubectl get restore <name> -n <ns> \
+    -o jsonpath='{.status.conditions[?(@.type=="MoverPermitted")].message}'
+
+# opt the namespace in (a cluster-admin decision):
 $ kubectl annotate namespace <ns> kopiur.home-operations.com/privileged-movers=true
 ```
 
-…or drop the elevated `securityContext` from the `BackupConfig`. Full detail in [Movers → Privileged movers](movers.md#privileged-movers).
+…or drop the elevated `securityContext` / `podSecurityContext` / `privilegedMode` from the `spec.mover`. It clears to `MoverPermitted=True` on the next reconcile (~30s). Full detail in [Movers → Privileged movers](movers.md#privileged-movers).
+
+### `inheritSecurityContextFrom` can't resolve a workload pod
+
+When `mover.inheritSecurityContextFrom` is set, the controller reads the live workload pod's container **and** pod security contexts onto the mover. If it can't, the Backup/Restore is held (a `MissingDependency`-style condition + Event) with a message naming exactly what's wrong:
+
+| Message contains… | Cause | Fix |
+| --- | --- | --- |
+| `no pod matches` | The label selector matches no pod in the namespace (the workload is scaled to zero, or the labels are wrong). | Scale the workload up so its identity can be read, or fix `podSelector.matchLabels`. |
+| `has no container` | `inheritSecurityContextFrom.container` names a container the pod doesn't have. | Fix the `container` name (omit it to take the pod's first container). |
+| `sets no securityContext … to inherit` | The matched pod sets **neither** a container nor a pod-level `securityContext`. | Set one on the workload, or use an explicit `mover.securityContext` / `mover.podSecurityContext` instead. |
+
+`securityContext` (or `podSecurityContext`) and `inheritSecurityContextFrom` are **mutually exclusive** — setting both is rejected at admission by the webhook.
 
 ## Backup runs but `Failed`
 
@@ -97,6 +114,10 @@ $ kubectl describe restore <name> -n <ns>
 | Stuck `Resolving`                       | Waiting for the source snapshot to appear (`waitTimeout`).    | Confirm the snapshot exists; raise `policy.waitTimeout` if a schedule is about to produce it.                                                                   |
 | PVC stuck `Pending` (populator)         | Volume-populator handshake not completing.                    | Need Kubernetes ≥ 1.24; install `volume-data-source-validator` to see the real event. See [Restores → deploy-or-restore](restores.md#deploy-or-restore-gitops). |
 | `identity` source rejected at admission | `source.identity` requires an explicit `spec.repository`.     | Add `spec.repository`.                                                                                                                                          |
+| Stuck `Pending`, `MoverPermitted=False` | The restore mover requests an elevated context (root / `privilegedMode`, container- or pod-level, possibly inherited). | Annotate the namespace (above), or drop the elevation from `spec.mover`. |
+| Restored files **owned by `65532`** / unreadable by the app | The mover wrote them as its own UID (no `mover.securityContext`). | Set `Restore.spec.mover.securityContext.runAsUser/Group` to the app's UID (or `inheritSecurityContextFrom`). |
+| Mover pod `Pending`: **can't write the target volume** | A non-root mover can't write a freshly-provisioned PVC whose mount point is root-owned `0755`. | Add `Restore.spec.mover.podSecurityContext.fsGroup` (the app's GID) so the volume is group-writable; see [Restores → mover](restores.md#mover-cache--failure-policy). |
+| Mover pod `Pending`: cache PVC **unbound** | `mover.cache.mode: Persistent` (or a sized `Ephemeral` cache) requested a `storageClassName` the cluster can't provision (or `ReadWriteOnce` contention with an overlapping run). | Use a valid `cache.storageClassName`, or drop `mover.cache` to fall back to an `emptyDir`. Persistent cache assumes non-overlapping runs per owner. |
 
 ## Schedule isn't firing
 
