@@ -82,7 +82,15 @@ identityDefaults:
   usernameExpr: "namespace + '-' + configName"
 ```
 
-This drops the Jinja2 dependency / injection surface and gains conditionals + label access (`has(labels.team) ? labels.team : namespace`). It establishes the minimal CEL foundation: each `*Expr` documents its CEL **environment** (here `namespace`, `configName`, the policy's `labels`/`annotations`), validated at admission, with evaluation bounded by CEL's **cost budget**; CEL is sandboxed (no I/O, no arbitrary code). **Broader CEL uses — `successExpr`, `*MatchExpr` selectors, `x-kubernetes-validations` — are ADR-0005**, per the split rule: the foundation the identity rename needs is here; its further development is in 0005.
+A `SnapshotPolicy` named `atuin` in namespace `default` then resolves to the kopia identity `default-atuin@default:/pvc/atuin`. Conditionals and label access come for free:
+
+```yaml
+identityDefaults:
+  hostnameExpr: "'team' in labels ? labels['team'] : namespace"
+  usernameExpr: "namespace + '-' + configName + (labels['env'] == 'prod' ? '-prod' : '')"
+```
+
+This drops the Jinja2 dependency / injection surface. It establishes the minimal CEL foundation: each `*Expr` returns a typed value (here `string`) and documents its CEL **environment** — `namespace`, `configName`, the policy's `labels`/`annotations` — validated at admission so a typo or out-of-scope variable is rejected on `kubectl apply`, with evaluation bounded by CEL's **cost budget**; CEL is sandboxed (no I/O, no arbitrary code). **Broader CEL uses — `successExpr`, `*MatchExpr` selectors, `x-kubernetes-validations` — are ADR-0005**, per the split rule: the foundation the identity rename needs is here; its further development is in 0005.
 
 ## Breaking changes (single cut)
 

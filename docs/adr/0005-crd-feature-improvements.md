@@ -111,6 +111,64 @@ Building on the `cel-rust`/`*Expr` foundation established in **ADR-0004 §5** (s
 - **`pinExpr` / `whenExpr` / `tagsExpr`** — conditional pinning, hook gating, computed tags (speculative; ship on demand).
 - **`x-kubernetes-validations`** — operator-authored CEL in the CRD *schema* for cross-field invariants (exactly-one-of `{pvc,pvcSelector,nfs}`, `target.populator` XOR `target.pvc`) and §7 immutability via transition rules (`self.encryption == oldSelf.encryption`), validating in the apiserver and CI — which also shrinks the validating webhook and tightens §14's PR gate.
 
+**Worked examples.** Each `*Expr` is typed (predicates return `bool`, `tagsExpr` returns a `map`) and validated at admission against a documented environment:
+
+```yaml
+# successExpr (§4) — a verification passes only with clean, non-empty data
+kind: SnapshotPolicy
+spec:
+  verification:
+    schedule: { cron: "0 4 * * 0" }
+    successExpr: "stats.files > 0 && stats.errors == 0"
+---
+# pvcMatchExpr (§10) — select sources by more than labels
+kind: SnapshotPolicy
+spec:
+  sources:
+    - pvcMatchExpr: |
+        pvc.spec.storageClassName == 'ceph-block' &&
+        pvc.metadata.labels['backup'] == 'include' &&
+        !pvc.metadata.name.startsWith('media-')
+---
+# policyMatchExpr (§10) — one schedule drives many policies
+kind: SnapshotSchedule
+spec:
+  schedule: { cron: "H 2 * * *", jitter: 30m }
+  policyMatchExpr: "policy.metadata.labels['tier'] == 'critical'"
+---
+# pinExpr (§13c) — exempt snapshots from GFS retention
+kind: SnapshotPolicy
+spec:
+  pinExpr: "snapshot.tags['reason'] == 'pre-upgrade' || snapshot.timing.startTime.getDayOfMonth() == 1"
+---
+# tagsExpr — compute snapshot tags from workload metadata
+kind: SnapshotPolicy
+spec:
+  tagsExpr: "{'app': labels['app.kubernetes.io/name'], 'commit': annotations['git.sha']}"
+```
+
+`x-kubernetes-validations` is operator-authored in the CRD schema, not a user field:
+
+```yaml
+# Restore CRD, spec.x-kubernetes-validations:
+- rule: "[has(self.target.pvc), has(self.target.pvcRef), has(self.target.populator)].filter(x, x).size() == 1"
+  message: "exactly one of target.pvc, target.pvcRef, target.populator"
+- rule: "self.create.encryption == oldSelf.create.encryption"   # §7 immutability
+  message: "encryption is immutable after creation"
+```
+
+Environment per field:
+
+| Field | Returns | In scope |
+|---|---|---|
+| `successExpr` | bool | `stats{files,bytes,errors}`, `snapshot`, `restored{files,checksumMatches}` |
+| `pvcMatchExpr` | bool | `pvc` |
+| `namespaceMatchExpr` | bool | `namespace` (the Namespace object) |
+| `policyMatchExpr` | bool | `policy` (the SnapshotPolicy object) |
+| `pinExpr` | bool | `snapshot{tags,timing,stats}` |
+| `whenExpr` | bool | `workload`, `snapshot` |
+| `tagsExpr` | map | `namespace`, `configName`, `labels`, `annotations`, `snapshot` |
+
 ## Breaking changes (same single cut as ADR-0004)
 
 A handful of these features change defaults; they ride ADR-0004's cut:
