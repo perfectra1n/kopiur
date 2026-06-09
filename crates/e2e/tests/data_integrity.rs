@@ -68,6 +68,10 @@ async fn namespace_delete_scenario(
     .expect("place creds Secret in workload namespace");
     // And its own source PVC over the shared source hostPath dir.
     ensure_workload_source(client, &app_ns, &format!("nsdel-{label}")).await;
+    // A ClusterRepository's consumer backup mover runs in THIS workload namespace and
+    // mounts the repository's filesystem PVC by name — so the isolated repo PVC must
+    // also exist here (a second static PVC over the same hostPath repo dir).
+    ensure_repo_in_ns(client, subpath, &app_ns).await;
 
     let policies: Api<SnapshotPolicy> = Api::namespaced(client.clone(), &app_ns);
     let backups: Api<Snapshot> = Api::namespaced(client.clone(), &app_ns);
@@ -198,7 +202,10 @@ async fn pinned_snapshot_survives_gfs_prune() {
         .await
         .expect("create Repository");
     wait_phase(&repos, repo, "Ready").await.expect("repo Ready");
-    // keepLatest: 1 so any second snapshot prunes everything but the newest UNLESS pinned.
+    // keepLatest: 1 — only the single newest snapshot is kept; every older snapshot is
+    // pruned UNLESS pinned. With three snapshots (oldest→newest below), retention keeps
+    // the newest, prunes the oldest, and would prune the middle one too — except it is
+    // pinned. So the pruned set is exactly {oldest}, and the pinned middle survives.
     policies
         .create(
             &PostParams::default(),
@@ -213,64 +220,63 @@ async fn pinned_snapshot_survives_gfs_prune() {
         .await
         .expect("create SnapshotPolicy keepLatest=1");
 
-    // A PINNED first snapshot, and an UNPINNED second snapshot of the same policy.
-    backups
-        .create(
-            &PostParams::default(),
-            &cr(snapshot_json(
-                E2E_NAMESPACE,
-                "e2e-pin-keep",
-                policy,
-                serde_json::json!({ "pin": true, "deletionPolicy": "Delete" }),
-            )),
-        )
-        .await
-        .expect("create pinned Snapshot");
-    wait_phase(&backups, "e2e-pin-keep", "Succeeded")
-        .await
-        .expect("pinned Snapshot Succeeded");
-    backups
-        .create(
-            &PostParams::default(),
-            &cr(snapshot_json(
-                E2E_NAMESPACE,
-                "e2e-pin-prune",
-                policy,
-                serde_json::json!({ "deletionPolicy": "Delete" }),
-            )),
-        )
-        .await
-        .expect("create unpinned Snapshot");
-    wait_phase(&backups, "e2e-pin-prune", "Succeeded")
-        .await
-        .expect("unpinned Snapshot Succeeded");
+    // Three snapshots of the same policy, created oldest→newest:
+    //   e2e-pin-old   (unpinned, oldest)  → retention prunes it (proves retention runs)
+    //   e2e-pin-keep  (PINNED,   middle)  → retention would prune it, but pin exempts it
+    //   e2e-pin-new   (unpinned, newest)  → kept by keepLatest:1
+    for (name, pinned) in [
+        ("e2e-pin-old", false),
+        ("e2e-pin-keep", true),
+        ("e2e-pin-new", false),
+    ] {
+        let extra = if pinned {
+            serde_json::json!({ "pin": true, "deletionPolicy": "Delete" })
+        } else {
+            serde_json::json!({ "deletionPolicy": "Delete" })
+        };
+        backups
+            .create(
+                &PostParams::default(),
+                &cr(snapshot_json(E2E_NAMESPACE, name, policy, extra)),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("create Snapshot {name}: {e}"));
+        wait_phase(&backups, name, "Succeeded")
+            .await
+            .unwrap_or_else(|_| panic!("Snapshot {name} should reach Succeeded"));
+    }
 
-    // The unpinned older snapshot must be pruned by retention (keepLatest=1)...
+    // The unpinned OLDEST snapshot must be pruned by retention (keepLatest=1) — this is
+    // the control that proves GFS retention actually ran (not "nothing was pruned").
     wait_until(
-        "unpinned older Snapshot pruned by GFS retention",
-        Duration::from_secs(150),
+        "unpinned oldest Snapshot pruned by GFS retention",
+        Duration::from_secs(180),
         poll_interval(),
         || async {
-            match backups.get_opt("e2e-pin-prune").await? {
+            match backups.get_opt("e2e-pin-old").await? {
                 Some(_) => Ok(None),
                 None => Ok(Some(())),
             }
         },
     )
     .await
-    .expect("the unpinned Snapshot should be pruned by keepLatest=1 retention");
+    .expect("the unpinned oldest Snapshot should be pruned by keepLatest=1 retention");
 
-    // ...while the PINNED snapshot survives the same prune.
+    // ...while the PINNED snapshot — also older than the newest, so equally a prune
+    // candidate — SURVIVES the same prune because `spec.pin: true` exempts it (§13(c)).
     let pinned = backups
         .get_opt("e2e-pin-keep")
         .await
         .expect("get pinned Snapshot");
     assert!(
         pinned.is_some(),
-        "the pinned Snapshot must survive GFS retention that pruned the unpinned one"
+        "the pinned Snapshot must survive GFS retention that pruned the unpinned older one"
     );
 
     // Cleanup.
+    let _ = backups
+        .delete("e2e-pin-new", &DeleteParams::default())
+        .await;
     let _ = backups
         .delete("e2e-pin-keep", &DeleteParams::default())
         .await;

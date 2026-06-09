@@ -54,6 +54,27 @@ pub async fn ensure_repo(client: &Client, subpath: &str) {
         .unwrap_or_else(|e| panic!("provision isolated repo PV/PVC for subpath {subpath}: {e}"));
 }
 
+/// Provision the isolated per-`subpath` repo PVC in an arbitrary namespace `ns` (over
+/// the same hostPath repo dir as [`ensure_repo`]), so a consumer mover that runs in
+/// `ns` — a `ClusterRepository` backup runs in the CONSUMER namespace, where it mounts
+/// the repository's filesystem PVC by name — can mount the repo. The PV name is keyed
+/// by `ns` so multiple namespaces can each bind the shared hostPath (hostPath PVs bind
+/// 1:1 to a PVC). Idempotent.
+pub async fn ensure_repo_in_ns(client: &Client, subpath: &str, ns: &str) {
+    use kopiur_e2e::apply::{Fixture, apply_all};
+    use kopiur_e2e::builders;
+    let pv = format!("{}-{ns}", consts::isolated_repo_pv(subpath));
+    let pvc = consts::isolated_repo_pvc(subpath);
+    let host = consts::isolated_repo_hostpath(subpath);
+    let fixtures: Vec<Fixture> = vec![
+        builders::hostpath_pv(&pv, &host, "1Gi").into(),
+        builders::static_pvc(ns, &pvc, &pv, "1Gi").into(),
+    ];
+    apply_all(client, &fixtures)
+        .await
+        .unwrap_or_else(|e| panic!("provision repo PVC in ns {ns} for subpath {subpath}: {e}"));
+}
+
 /// A namespaced filesystem `Repository` over its OWN isolated repo hostPath (keyed by
 /// `subpath`), with the given extra `spec` fields merged in. Callers must
 /// [`ensure_repo`]`(subpath)` first.
