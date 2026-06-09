@@ -20,7 +20,7 @@ lefthook = "2.1.9"
 oxfmt = "0.53.0"
 zizmor = "1.25.2"
 helm = "4.2.0"
-cosign = "3.0.6"
+cosign = "3.1.1"
 kubectl = "1.36.1"
 # The shared pre-commit hooks (home-operations/.github lefthook config) run
 # `shellcheck` on staged *.sh files; pin it so the hook resolves a binary.
