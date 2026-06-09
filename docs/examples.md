@@ -87,9 +87,9 @@ Requires the operator installed with `installScope=cluster`. Because `ClusterRep
 Browse the catalog, then reference a specific `Snapshot` CR. No timestamp math — restore is "pick a row". `source` and `target` are externally-tagged (`target.pvc` creates a PVC; `target.pvcRef` writes into an existing one).
 
 ```console
-# list candidate snapshots for a config, newest last:
+# list candidate snapshots for a policy, newest last:
 $ kubectl get snapshots -n billing \
-    -l kopiur.home-operations.com/snapshot-policy=postgres-data \
+    -l kopiur.home-operations.com/config=postgres-data \
     --sort-by=.status.timing.startTime
 ```
 
@@ -111,7 +111,7 @@ Back up every PVC matching a label as one consistent group (one `VolumeGroupSnap
 
 ## Example 05 — Deploy-or-restore (GitOps)
 
-The headline GitOps pattern. Apply everything together: on a **fresh cluster against an existing repo**, the PVC restores the latest snapshot before the app starts; on a **fresh repo**, the PVC comes up empty and is backed up going forward. The trick is a **passive `Restore`** (no `target`, `source.fromPolicy`, `onMissingSnapshot: Continue`) consumed by a PVC's `dataSourceRef` as a volume populator.
+The headline GitOps pattern. Apply everything together: on a **fresh cluster against an existing repo**, the PVC restores the latest snapshot before the app starts; on a **fresh repo**, the PVC comes up empty and is backed up going forward. The trick is a **passive `Restore`** (`target.populator: {}`, `source.fromPolicy`, `onMissingSnapshot: Continue`) consumed by a PVC's `dataSourceRef` as a volume populator.
 
 /// note
 

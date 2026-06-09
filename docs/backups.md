@@ -118,27 +118,29 @@ identity:
 
 ### compression, files & extraArgs — kopia tuning and ignores
 
-These are **top-level** fields on the `SnapshotPolicy` spec (flattened in ADR-0004 §4 — there is no longer an inner `policy:` block, and the per-policy `splitter` is gone; the object splitter lives only on `Repository.create.splitter`):
+These map onto kopia's per-source policy and sit as **top-level** siblings of `retention` on the `SnapshotPolicy` spec:
 
 ```yaml
-# top-level siblings of `retention`, NOT nested under a `policy:` block
 compression:
     compressor: zstd
     neverCompress: ["*.zip", "*.gz", "*.mp4"] # skip already-compressed files
 files:
-    ignoreRules: ["*.tmp", "*/cache/*", "lost+found"] # was policy.ignore.paths
-    ignoreCacheDirs: true # honor CACHEDIR.TAG (was policy.ignore.cacheDirs)
-    ignoreIdenticalSnapshots: false
+    ignoreRules: ["*.tmp", "*/cache/*", "lost+found"] # paths kopia skips
+    ignoreCacheDirs: true # honor CACHEDIR.TAG
+    ignoreIdenticalSnapshots: false # take a new snapshot even if nothing changed
 extraArgs: [] # escape hatch for kopia flags not modeled above
 ```
 
-| Old (pre-ADR-0004) | New |
+| Field | What it does |
 | --- | --- |
-| `policy.compression` | `compression` (top-level) |
-| `policy.ignore.paths` | `files.ignoreRules` |
-| `policy.ignore.cacheDirs` | `files.ignoreCacheDirs` |
-| `policy.extraArgs` | `extraArgs` (top-level) |
-| `policy.splitter` | **removed** — set `Repository.create.splitter` instead |
+| `compression.compressor` | The kopia compressor (e.g. `zstd`, `gzip`, `s2`); omit to leave content uncompressed. |
+| `compression.neverCompress` | Globs to never attempt to compress — already-compressed media, archives. |
+| `files.ignoreRules` | `.gitignore`-style globs of paths to exclude from the snapshot. |
+| `files.ignoreCacheDirs` | Honor `CACHEDIR.TAG` markers (skip directories tagged as caches). |
+| `files.ignoreIdenticalSnapshots` | When `true`, kopia won't create a new snapshot if the source is byte-identical to the last one. |
+| `extraArgs` | Pass-through kopia flags for anything not modeled above. |
+
+The object **splitter** is not here — it is a repository property fixed at creation and lives on [`Repository.create.splitter`](repositories.md#encryption-and-repository-creation), where it applies repository-wide.
 
 ### errorHandling — let a snapshot complete with errors
 

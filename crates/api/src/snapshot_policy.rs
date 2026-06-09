@@ -39,7 +39,14 @@ pub struct SnapshotPolicySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<Identity>,
     /// What to back up. At least one source; webhook-enforced. ADR §3.3.
+    ///
+    /// `maxItems` is set so the apiserver can bound the cost of the per-item
+    /// `x-kubernetes-validations` exactly-one-of rule on [`Source`] (CEL rule cost is
+    /// `rule_cost × maxItems`; without a bound the apiserver assumes a huge array and
+    /// rejects the CRD as over budget). 100 sources per recipe is far past any real
+    /// use.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 100))]
     pub sources: Vec<Source>,
     /// How the source volume is captured before kopia reads it: `Snapshot`
     /// (point-in-time CSI snapshot, default), `Clone`, or `Direct`. ADR §3.3.
@@ -117,9 +124,13 @@ pub struct SnapshotPolicySpec {
 ///
 /// §15: an operator-authored `x-kubernetes-validations` rule enforces exactly-one-of
 /// in the apiserver + CI, complementing `validate_source`.
+// The exactly-one-of rule is written as an integer sum of `has()` ternaries rather
+// than `[...].filter(x,x).size()==1`: the apiserver estimates per-item CEL cost ×
+// `maxItems`, and a list-construction + lambda `filter` blows the budget on the
+// repeating `sources` list. The sum form is a cheap constant per item.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[schemars(extend("x-kubernetes-validations" = [{
-    "rule": "[has(self.pvc), has(self.pvcSelector), has(self.nfs)].filter(x, x).size() == 1",
+    "rule": "(has(self.pvc) ? 1 : 0) + (has(self.pvcSelector) ? 1 : 0) + (has(self.nfs) ? 1 : 0) == 1",
     "message": "exactly one of pvc, pvcSelector, nfs"
 }]))]
 #[serde(rename_all = "camelCase")]
@@ -138,7 +149,12 @@ pub struct Source {
     pub nfs: Option<NfsVolume>,
     /// What kopia records as the source path (default `/pvc/<name>` for a PVC, or
     /// the NFS export `path` for an NFS source). ADR §3.3/§4.2.
+    ///
+    /// `maxLength` bounds the per-item cost of the exactly-one-of CEL rule on this
+    /// struct (an unbounded string makes the apiserver assume a huge value and blow
+    /// the rule's cost budget). A filesystem path is far shorter than 4096.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 4096))]
     pub source_path_override: Option<String>,
     /// How a selector-matched PVC's source path is derived (`pvcName` vs
     /// `pvcNamespacedName`). Applies to `pvcSelector` sources. ADR §3.3/§4.2.

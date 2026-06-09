@@ -96,8 +96,9 @@ The mover Job ran and exhausted its retries (`failurePolicy.backoffLimit`). The 
 
 ```console
 $ kubectl get snapshots <name> -n <ns> -o jsonpath='{.status.logTail}'
-# full logs live in the Job's pod:
-$ kubectl logs -n <ns> -l kopiur.home-operations.com/backup=<name>
+# full logs live in the mover Job's pod (the Job name is on the Snapshot):
+$ JOB=$(kubectl get snapshot <name> -n <ns> -o jsonpath='{.status.job.name}')
+$ kubectl logs -n <ns> --selector=job-name="$JOB"
 ```
 
 Common causes: the source PVC's `VolumeSnapshotClass` is wrong/missing (for `copyMethod: Snapshot`), a `beforeSnapshot` hook failed (it aborts the backup unless `continueOnFailure: true`), or the repository became unreachable mid-run.
@@ -183,9 +184,11 @@ resource and the cert-manager logs, not the controller. See
 # conditions + events in one place (start here for anything):
 $ kubectl describe <kind> <name> -n <ns>
 
-# the mover Job + its pod for a backup/restore:
-$ kubectl get jobs,pods -n <ns> -l kopiur.home-operations.com/backup=<name>
-$ kubectl get jobs,pods -n <ns> -l kopiur.home-operations.com/restore=<name>
+# a Snapshot names its mover Job in status; a Restore's mover Job is named after the Restore.
+$ kubectl get snapshot <name> -n <ns> -o jsonpath='{.status.job.name}'   # Snapshot only
+$ kubectl get pods -n <ns> --selector=job-name=<job-name>                # job-name = above, or the Restore name
+# or list every mover Job/pod for a policy at once:
+$ kubectl get jobs,pods -n <ns> -l kopiur.home-operations.com/config=<policy-name>
 
 # confirm the mover RBAC was minted in the workload namespace:
 $ kubectl get serviceaccount,rolebinding -n <ns> -l app.kubernetes.io/component=mover

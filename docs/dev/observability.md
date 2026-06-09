@@ -60,6 +60,7 @@ All metrics are under the `kopiur_` namespace. The Prometheus exporter applies t
 | `kopiur_snapshot_size_bytes`                     | gauge       | `namespace`, `name`                        | Backup `status.stats.sizeBytes`                                                                                                                                                            |
 | `kopiur_snapshot_files`                          | gauge       | `namespace`, `name`                        | Backup file counts (absent when unknown)                                                                                                                                                   |
 | `kopiur_snapshot_duration_seconds`               | gauge       | `namespace`, `name`                        | Backup `status.timing.durationSeconds`                                                                                                                                                     |
+| `kopiur_snapshot_verified_timestamp`             | gauge       | `namespace`, `name`                        | SnapshotPolicy verification (ADR-0005 §4) → `status.lastVerified` of the most recent successful verify (quick or deep); alert on staleness like `last_success`                            |
 | `kopiur_orphaned_snapshots_total`              | counter     | `namespace`                                | Orphan policy / skip-cleanup escape hatch                                                                                                                                                  |
 | `kopiur_snapshot_deletion_failures_total`      | counter     | `namespace`                                | finalizer snapshot-delete failures                                                                                                                                                         |
 | `kopiur_schedule_snapshots_created_total`        | counter     | `namespace`, `name`                        | SnapshotSchedule fires                                                                                                                                                                       |
@@ -149,7 +150,3 @@ service:
 ```
 
 For most users the direct-scrape `ServiceMonitor` path is simpler; OTLP is for shops that already run a collector and want traces + logs alongside metrics.
-
-```
-
-```

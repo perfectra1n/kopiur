@@ -229,8 +229,10 @@ The hardened default satisfies the `restricted` PSA profile, so unprivileged mov
 After a run, confirm the mover's effective identity and that it actually moved data:
 
 ```console
-# the mover pod for this backup/restore:
-$ kubectl get pods -n app -l kopiur.home-operations.com/backup=<backup-name>
+# the mover Job's name is on the owning Snapshot/Restore; find its pod from that:
+$ kubectl get snapshot <snapshot-name> -n app -o jsonpath='{.status.job.name}'
+app-data-manual-abc12-snap
+$ kubectl get pods -n app --selector=job-name=app-data-manual-abc12-snap
 
 # the container's effective UID (sanity-check it matches the data owner):
 $ kubectl get pod <mover-pod> -n app \

@@ -16,7 +16,7 @@ the recipe, newest last, and choose the last one from _before_ things broke:
 
 ```console
 $ kubectl get snapshots -n billing \
-    -l kopiur.home-operations.com/snapshot-policy=postgres-data \
+    -l kopiur.home-operations.com/config=postgres-data \
     --sort-by=.status.timing.startTime
 NAME                          PHASE       ORIGIN      SNAPSHOT    AGE
 postgres-data-20260522-021300 Succeeded   scheduled   k1a9...     2d

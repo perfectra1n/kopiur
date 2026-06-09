@@ -184,10 +184,10 @@ spec:
 ```
 
 ```console
-$ kubectl create -f backup.yaml
-backup.kopiur.home-operations.com/app-data-manual-abc12 created
+$ kubectl create -f snapshot.yaml
+snapshot.kopiur.home-operations.com/app-data-manual-abc12 created
 
-$ kubectl -n demo get backup -w
+$ kubectl -n demo get snapshots -w
 NAME                    PHASE       ORIGIN   SNAPSHOT     AGE
 app-data-manual-abc12   Pending     manual                2s
 app-data-manual-abc12   Running     manual                6s
@@ -197,7 +197,7 @@ app-data-manual-abc12   Succeeded   manual   k8f3c1a90    41s
 `Succeeded` with a `SNAPSHOT` ID means the data is in your repository. Inspect the details:
 
 ```console
-$ kubectl -n demo get backup app-data-manual-abc12 -o jsonpath='{.status.stats}'
+$ kubectl -n demo get snapshot app-data-manual-abc12 -o jsonpath='{.status.stats}'
 {"sizeBytes":...,"bytesNew":...,"filesNew":...}
 ```
 

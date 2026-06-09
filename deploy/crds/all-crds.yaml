@@ -15273,7 +15273,14 @@ spec:
                     type: integer
                 type: object
               sources:
-                description: What to back up. At least one source; webhook-enforced. ADR §3.3.
+                description: |-
+                  What to back up. At least one source; webhook-enforced. ADR §3.3.
+
+                  `maxItems` is set so the apiserver can bound the cost of the per-item
+                  `x-kubernetes-validations` exactly-one-of rule on [`Source`] (CEL rule cost is
+                  `rule_cost × maxItems`; without a bound the apiserver assumes a huge array and
+                  rejects the CRD as over budget). 100 sources per recipe is far past any real
+                  use.
                 items:
                   description: |-
                     A single backup source. `pvc`, `pvcSelector`, and `nfs` are mutually exclusive
@@ -15368,6 +15375,11 @@ spec:
                       description: |-
                         What kopia records as the source path (default `/pvc/<name>` for a PVC, or
                         the NFS export `path` for an NFS source). ADR §3.3/§4.2.
+
+                        `maxLength` bounds the per-item cost of the exactly-one-of CEL rule on this
+                        struct (an unbounded string makes the apiserver assume a huge value and blow
+                        the rule's cost budget). A filesystem path is far shorter than 4096.
+                      maxLength: 4096
                       nullable: true
                       type: string
                     sourcePathStrategy:
@@ -15394,7 +15406,8 @@ spec:
                   type: object
                   x-kubernetes-validations:
                   - message: exactly one of pvc, pvcSelector, nfs
-                    rule: '[has(self.pvc), has(self.pvcSelector), has(self.nfs)].filter(x, x).size() == 1'
+                    rule: '(has(self.pvc) ? 1 : 0) + (has(self.pvcSelector) ? 1 : 0) + (has(self.nfs) ? 1 : 0) == 1'
+                maxItems: 100
                 type: array
               suspend:
                 description: |-

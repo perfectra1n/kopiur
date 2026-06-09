@@ -101,17 +101,19 @@ A complete, apply-ready example (Repository + SnapshotPolicy with this block, pl
 Re-run the backup and confirm it actually read files, rather than silently snapshotting an empty/partial tree:
 
 ```console
-# the mover Job and its pod for this backup:
-$ kubectl get pods -n app -l kopiur.home-operations.com/backup=<backup-name>
+# the mover Job's exact name lives on the Snapshot:
+$ kubectl get snapshot <snapshot-name> -n app -o jsonpath='{.status.job.name}'
+app-data-manual-abc12-snap
 
-# the mover container's effective identity (sanity-check it matches Step 1):
+# its pod (by the standard Job-managed pod label), then the container's effective UID:
+$ kubectl get pods -n app --selector=job-name=app-data-manual-abc12-snap
 $ kubectl get pod <mover-pod> -n app \
     -o jsonpath='{.spec.containers[0].securityContext.runAsUser}{"\n"}'
 1000
 
-# permission errors, if any, surface in the mover log and on the Backup status:
+# permission errors, if any, surface in the mover log and on the Snapshot status:
 $ kubectl logs <mover-pod> -n app | grep -i "permission denied"
-$ kubectl get snapshots <backup-name> -n app -o jsonpath='{.status.conditions}'
+$ kubectl get snapshot <snapshot-name> -n app -o jsonpath='{.status.conditions}'
 ```
 
 A healthy backup ends `Succeeded` with non-zero files/bytes in `status`. A backup that "succeeded" but shows **zero files** is the classic sign the mover couldn't read the data — recheck the UID.

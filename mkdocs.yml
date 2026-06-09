@@ -164,6 +164,7 @@ nav:
       - Permissions, UID & GID: permissions.md
       - Security context: security-context.md
       - Maintenance: maintenance.md
+      - GitOps (Flux / Argo): gitops.md
       - Examples: examples.md
       - Troubleshooting: troubleshooting.md
   # Scenarios = end-to-end, problem-driven walkthroughs (one apply-ready bundle
@@ -181,6 +182,7 @@ nav:
       - Point-in-time rollback: scenarios/point-in-time-rollback.md
       - Clone an app into another namespace: scenarios/clone-app-to-namespace.md
   - Reference:
+      - Field reference (all CRDs): field-reference.md
       - API reference (rustdoc): api-reference.md
   # Top-level entry → its own top-level item in the left sidebar, so the Rust API
   # docs are one click from the top of every page. Root-absolute link into the

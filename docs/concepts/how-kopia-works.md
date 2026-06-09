@@ -49,7 +49,7 @@ This is the mechanism that makes a single shared repository safe for many indepe
 By default Kopiur derives the identity from the backup's namespace, config name, and source path, and lets you override any part with `SnapshotPolicy.spec.identity`. On a shared [`ClusterRepository`](../repositories.md#clusterrepository-a-shared-repository), `identityDefaults` templates the identity per tenant namespace. The identity is **resolved once at admission and pinned to status**, so it never drifts if you re-apply the config:
 
 ```console
-$ kubectl -n billing get backup postgres-data-20260607 \
+$ kubectl -n billing get snapshot postgres-data-20260607 \
     -o jsonpath='{.status.resolved.identity}'
 billing-postgres-data@billing:/pvc/postgres-data
 ```

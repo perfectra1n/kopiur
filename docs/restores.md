@@ -37,7 +37,7 @@ To find candidates:
 
 ```console
 $ kubectl get snapshots -n billing \
-    -l kopiur.home-operations.com/snapshot-policy=postgres-data \
+    -l kopiur.home-operations.com/config=postgres-data \
     --sort-by=.status.timing.startTime
 ```
 

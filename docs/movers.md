@@ -192,9 +192,9 @@ The mover preconditions surface on the `Snapshot`/`Restore` status as conditions
 
 /// info | Where to look
 
-- `kubectl describe backup <name> -n <ns>` — conditions **and** Events in one place.
+- `kubectl describe snapshot <name> -n <ns>` (or `restore`/`maintenance`) — conditions **and** Events in one place.
 - `kubectl get serviceaccount,rolebinding -n <ns> -l app.kubernetes.io/component=mover` — confirm the mover RBAC was minted.
-- `kubectl get jobs,pods -n <ns> -l kopiur.home-operations.com/backup=<name>` — the mover Job and its pod.
+- Find the mover Job, then its pod. For a `Snapshot` the Job name is in its status: `kubectl get snapshot <name> -n <ns> -o jsonpath='{.status.job.name}'`. For a `Restore` the mover Job is named after the `Restore` itself. Either way, list the pod with the standard Job-managed selector: `kubectl get pods -n <ns> --selector=job-name=<job-name>`. To list **all** of a policy's snapshot mover Jobs/pods at once, use the policy label: `kubectl get jobs,pods -n <ns> -l kopiur.home-operations.com/config=<policy-name>`.
 
 ///
 

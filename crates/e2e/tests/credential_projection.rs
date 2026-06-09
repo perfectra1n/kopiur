@@ -51,8 +51,12 @@ fn cr<T: DeserializeOwned>(v: serde_json::Value) -> T {
 }
 
 /// A cluster-scoped S3 `ClusterRepository` whose creds live in the operator
-/// namespace, opened to all namespaces. (Projection is opt-in on the consuming
-/// `SnapshotPolicy`, not the repository.)
+/// namespace, opened to all namespaces. Cross-namespace credential projection is
+/// fail-closed (ADR-0005 §8): it requires BOTH the consumer opt-in
+/// (`spec.credentialProjection.enabled` on the `SnapshotPolicy`/`Restore`/
+/// `Maintenance`) AND this owner-side allow (`credentialProjection.allowed: true`).
+/// These scenarios exercise the projection-ON path, so the owner must allow it; the
+/// fail-closed (allowed=false) path is covered in `adr_0004_0005.rs`.
 fn s3_cluster_repository_json(name: &str, bucket: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
@@ -72,7 +76,8 @@ fn s3_cluster_repository_json(name: &str, bucket: &str) -> serde_json::Value {
                 }
             },
             "create": { "enabled": true },
-            "allowedNamespaces": { "all": true }
+            "allowedNamespaces": { "all": true },
+            "credentialProjection": { "allowed": true }
         }
     })
 }

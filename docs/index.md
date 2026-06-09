@@ -33,6 +33,8 @@ API group `kopiur.home-operations.com`, version `v1alpha1`. The CRD surface may 
 - **[Repositories & backends](repositories.md)** — point Kopiur at S3, Azure, GCS, B2, a NAS, or rclone.
 - **[Backups & schedules](backups.md)** and **[Restores](restores.md)** — the recipe/invocation/schedule model and reading data back.
 - **[Troubleshooting](troubleshooting.md)** — when something doesn't go green.
+- **[GitOps (Flux / Argo)](gitops.md)** — kstatus health, `kubectl wait`, managed-by/ownerRefs, drift-free applies.
+- **[Field reference](field-reference.md)** — every field of all 8 CRDs: type, default, immutability.
 - **[API reference (rustdoc)](api-reference.md)** — the generated Rust API docs for every crate in the workspace.
 - **[API conventions](dev/api-conventions.md)** and **[Observability](dev/observability.md)** — developer notes.
 - **[ADR-0003](adr/0003-kopiur-rust-operator.md)** — the canonical design document.

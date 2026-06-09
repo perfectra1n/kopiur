@@ -142,18 +142,18 @@ With creation disabled, a typo in `bucket`/`endpoint` surfaces as a connect fail
 
 ## `moverDefaults` — one place to configure every mover
 
-A repository spawns movers for **everything** — bootstrap (connect/create), backup, restore, maintenance. `moverDefaults` is the single base they all inherit (ADR-0004 §1); a per-recipe `mover` block (on `SnapshotPolicy`/`Restore`/`Maintenance`) overlays it **field-wise** (the recipe wins, the default fills, the hardened security baseline sits underneath — so a partial override can only tighten, never drop `drop:[ALL]`/seccomp). It replaces the old `cacheDefaults` (now `moverDefaults.cache`).
+A repository spawns movers for **everything** — bootstrap (connect/create), backup, restore, maintenance. `moverDefaults` is the single base they all inherit (ADR-0004 §1); a per-recipe `mover` block (on `SnapshotPolicy`/`Restore`/`Maintenance`) overlays it **field-wise** (the recipe wins, the default fills, the hardened security baseline sits underneath — so a partial override can only tighten, never drop `drop:[ALL]`/seccomp).
 
 ```yaml
 spec:
     moverDefaults:
         securityContext: # container SC — runAsUser/runAsGroup, caps, seccomp
-            runAsUser: 1000 # the PUID for every mover (replaces KOPIUR_PUID)
-            runAsGroup: 1000 # the PGID (replaces KOPIUR_PGID)
+            runAsUser: 1000 # the UID every mover runs as
+            runAsGroup: 1000 # the GID every mover runs as
         podSecurityContext: # pod SC — notably fsGroup
             fsGroup: 1000 # make fresh restore volumes group-writable, set once here
         resources: { requests: { cpu: 250m, memory: 512Mi } }
-        cache: # the former cacheDefaults
+        cache: # kopia cache backing every mover (capacity/class/budgets)
             capacity: 10Gi
             storageClassName: fast-ssd
         nodeSelector: { kubernetes.io/arch: amd64 }
@@ -165,9 +165,9 @@ spec:
             downloadBytesPerSecond: 10485760
 ```
 
-/// tip | The PUID / PGID story lives here now
+/// tip | Set the mover UID/GID once, for every mover
 
-The old `KOPIUR_PUID` / `KOPIUR_PGID` env vars are gone. Set the UID/GID **once** on `moverDefaults.securityContext.runAsUser/runAsGroup` (and `podSecurityContext.fsGroup`), and every mover the repository spawns — bootstrap included — inherits it. This also closes the old bootstrap-mover gap: a filesystem/NFS repo on a non-`65532`-owned directory is now bootstrappable with no special-case knob. See [example 09](examples.md#example-09--mover-uidgid--permissions) and [Permissions](permissions.md).
+Set the UID/GID **once** on `moverDefaults.securityContext.runAsUser/runAsGroup` (and `podSecurityContext.fsGroup`), and every mover the repository spawns — **including the bootstrap (connect/create) Job** — inherits it. That means a filesystem/NFS repository on a directory not owned by `65532` is bootstrappable with no special-case knob: the bootstrap mover runs as the UID you set here. A per-recipe `mover` block can still tighten any of these for an individual `SnapshotPolicy`/`Restore`/`Maintenance`. See [example 09](examples.md#example-09--mover-uidgid--permissions) and [Permissions](permissions.md).
 
 ///
 
@@ -247,14 +247,9 @@ identityDefaults:
     usernameExpr: "namespace + '-' + policyName + (labels['env'] == 'prod' ? '-prod' : '')"
 ```
 
-/// note | Migrating from Jinja2 templates
+/// note | How `*Expr` evaluation is bounded
 
-The old `hostnameTemplate`/`usernameTemplate` (Jinja2) are gone. Rewrite the values:
-
-- `"{{ .Namespace }}"` → `hostnameExpr: "namespace"`
-- `"{{ .Namespace }}-{{ .ConfigName }}"` → `usernameExpr: "namespace + '-' + policyName"`
-
-CEL is sandboxed (no I/O), validated at admission (a typo or out-of-scope variable is rejected on `kubectl apply`), and bounded by CEL's cost budget. Each expression is also capped at ~1 KiB.
+Each `*Expr` is a CEL expression returning a **string**. CEL is sandboxed (no I/O, no arbitrary code) and the expression is **validated at admission** — a syntax error, a wrong return type, or a reference to a variable outside the documented environment (`namespace`/`policyName`/`labels`/`annotations`) is rejected on `kubectl apply`, not discovered at backup time. Evaluation is bounded by CEL's cost budget, and each expression is capped at ~1 KiB.
 
 ///
 
@@ -292,7 +287,7 @@ A complete, apply-ready example is [`deploy/examples/02-cluster-repository.yaml`
 | `backend.s3.tls.disableTls`                            | Plain-HTTP endpoints (in-cluster MinIO/RustFS).   |
 | `allowedNamespaces` _(ClusterRepository)_              | Which namespaces may use the repo.                |
 | `identityDefaults` _(ClusterRepository)_               | Per-tenant snapshot identity (CEL `*Expr`).       |
-| `moverDefaults`                                        | Base SC/resources/cache for every mover (PUID/PGID). |
+| `moverDefaults`                                        | Base security context / resources / cache for every mover. |
 | `onNamespaceDelete`                                    | `Orphan` (default) / `Delete` on namespace delete.|
 | `mode`                                                 | `ReadWrite` (default) / `ReadOnly`.               |
 | `suspend`                                              | Pause connect/bootstrap + maintenance.            |
