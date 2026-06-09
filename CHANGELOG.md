@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.14](https://github.com/home-operations/kopiur/compare/0.1.13...0.1.14) (2026-06-09)
+
+
+### Features
+
+* **docs:** add some more docs too ([7308b9e](https://github.com/home-operations/kopiur/commit/7308b9ee08efb6d892bc7b41288a1c3e1d32c2db))
+* **docs:** also update docs for updated securityContext ([a778aad](https://github.com/home-operations/kopiur/commit/a778aadac6bb8c3c8ce08257abb4845b6cbbfad5))
+* **security-context:** make sure to update securityContext docs ([8f6aa32](https://github.com/home-operations/kopiur/commit/8f6aa32033de7e9f662a40edd31961ef9358a581))
+* **security:** implement fsGroup and more security context fun ([a352b57](https://github.com/home-operations/kopiur/commit/a352b57aa228d8ef0972a67ac7314a2d61eec521))
+* **tests:** update e2e values to test projection ([3d3fdbf](https://github.com/home-operations/kopiur/commit/3d3fdbf81a878e518e65c920441de3b0a777ecc0))
+
 ## [0.1.13](https://github.com/home-operations/kopiur/compare/0.1.12...0.1.13) (2026-06-08)
 
 
