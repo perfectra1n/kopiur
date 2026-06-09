@@ -145,6 +145,7 @@ nav:
   - User guide:
       - Getting started: getting-started.md
       - Installation: install.md
+      - Helm chart values: configuration.md
       - Repositories & backends: repositories.md
       - Backend configuration:
           - backends.md

@@ -150,5 +150,6 @@ helm uninstall kopiur -n kopiur-system                     # see CRD caution abo
 
 ## See also
 
+- Every chart value, walked through: [Helm chart values](configuration.md)
 - Design: [`docs/adr/0003-kopiur-rust-operator.md`](adr/0003-kopiur-rust-operator.md)
 - Chart values & modes: [`deploy/helm/kopiur/README.md`](https://github.com/home-operations/kopiur/blob/main/deploy/helm/kopiur/README.md)
