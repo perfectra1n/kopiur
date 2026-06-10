@@ -6,15 +6,15 @@
 
 ## The 7 CRDs (`kopiur.home-operations.com/v1alpha1`)
 
-| CRD | Scope | Layer | Purpose |
-|---|---|---|---|
-| `Repository` | Namespaced | Storage | A kopia repository owned by one namespace: backend, encryption, credentials. |
-| `ClusterRepository` | Cluster | Storage | A shared repository for platform teams, gated by `allowedNamespaces`. |
-| `BackupConfig` | Namespaced | Recipe | *What* to back up: PVC sources, identity, retention, policy, hooks. Idempotent. |
-| `Backup` | Namespaced | Invocation + Catalog | One kopia snapshot as a Kubernetes object. The universal trigger entry point. |
-| `BackupSchedule` | Namespaced | Cron | *When* it runs: cron + jitter + timezone; creates `Backup` CRs. |
-| `Restore` | Namespaced | Operation | Restore a snapshot to a PVC, or act as a passive volume-populator source. |
-| `Maintenance` | Namespaced | Lifecycle | Schedules `kopia maintenance` quick + full with an ownership lease. |
+| CRD                 | Scope      | Layer                | Purpose                                                                         |
+| ------------------- | ---------- | -------------------- | ------------------------------------------------------------------------------- |
+| `Repository`        | Namespaced | Storage              | A kopia repository owned by one namespace: backend, encryption, credentials.    |
+| `ClusterRepository` | Cluster    | Storage              | A shared repository for platform teams, gated by `allowedNamespaces`.           |
+| `BackupConfig`      | Namespaced | Recipe               | _What_ to back up: PVC sources, identity, retention, policy, hooks. Idempotent. |
+| `Backup`            | Namespaced | Invocation + Catalog | One kopia snapshot as a Kubernetes object. The universal trigger entry point.   |
+| `BackupSchedule`    | Namespaced | Cron                 | _When_ it runs: cron + jitter + timezone; creates `Backup` CRs.                 |
+| `Restore`           | Namespaced | Operation            | Restore a snapshot to a PVC, or act as a passive volume-populator source.       |
+| `Maintenance`       | Namespaced | Lifecycle            | Schedules `kopia maintenance` quick + full with an ownership lease.             |
 
 ## Quickstart
 
@@ -57,4 +57,3 @@ docs/adr/        Architecture Decision Records (0003 is canonical)
 ## License
 
 [AGPL-3.0-only](LICENSE)
-
