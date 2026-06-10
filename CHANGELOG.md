@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.3.0](https://github.com/home-operations/kopiur/compare/0.2.0...0.3.0) (2026-06-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **github-action:** Update GitHub Artifact Actions (v7.0.0 → v8.0.1) ([#68](https://github.com/home-operations/kopiur/issues/68))
+
+### Features
+
+* **github-release:** update release helm-unittest/helm-unittest (v1.0.3 → v1.1.1) ([#67](https://github.com/home-operations/kopiur/issues/67)) ([59b0f94](https://github.com/home-operations/kopiur/commit/59b0f94fb99f928f5de7c1412a56a95b9df9dbc4))
+* **mise:** update tool cosign (3.0.6 → 3.1.1) ([#76](https://github.com/home-operations/kopiur/issues/76)) ([0d04e85](https://github.com/home-operations/kopiur/commit/0d04e856addecb66a51c836d79eb2fca33bed332))
+* **mise:** update tool oxfmt (0.53.0 → 0.54.0) ([#70](https://github.com/home-operations/kopiur/issues/70)) ([07d528d](https://github.com/home-operations/kopiur/commit/07d528d2668ed157fa80095be453e5f22c83ceef))
+* **repository:** don't stunlock on encryption setting ([0357aa1](https://github.com/home-operations/kopiur/commit/0357aa1929af78ca0902d60f011ed05939a4b8d1))
+* **repository:** if a repo already exists, and we have correct creds - import state ([88a1719](https://github.com/home-operations/kopiur/commit/88a1719dfabd6ee3d3a3db82f5409a4fbc6ee2de))
+* **ux:** make sure to not make fields immutable that don't need to be ([f1772b5](https://github.com/home-operations/kopiur/commit/f1772b5fcb70e1f7a0f222d5648ba2a920149e3b))
+
+
+### Bug Fixes
+
+* **helm:** update the name of `crds.yaml` ([15e79ed](https://github.com/home-operations/kopiur/commit/15e79ed2f35ab11d4b51b0e04cbb3916e34411b6))
+* **tests:** have more clear errors and fix broken test ([73eea59](https://github.com/home-operations/kopiur/commit/73eea59e2d302ac6d71576d1cba7dffc4d762f04))
+
+
+### Continuous Integration
+
+* **github-action:** Update GitHub Artifact Actions (v7.0.0 → v8.0.1) ([#68](https://github.com/home-operations/kopiur/issues/68)) ([67d8cc4](https://github.com/home-operations/kopiur/commit/67d8cc4b117505921496be51df16c6eaa42c7b91))
+
 ## [0.2.0](https://github.com/home-operations/kopiur/compare/0.1.14...0.2.0) (2026-06-10)
 
 
