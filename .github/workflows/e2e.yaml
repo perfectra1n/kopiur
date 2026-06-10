@@ -2,12 +2,13 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
 name: E2E
 
-# End-to-end tests: build the three component images once, then fan out across a
-# matrix of test shards. Each shard loads the prebuilt images into its own
-# ephemeral kind cluster, installs the Helm chart, and drives a slice of the real
-# CRD lifecycle (Repository → Backup → Restore → Delete, schedule, maintenance,
-# backends) via the kopiur-e2e crate. Sharding keeps wall-clock down, gives a
-# per-scenario failure signal, and lets a single flaky shard be re-run on its own.
+# End-to-end tests: build the three component images in parallel (one matrix leg
+# each), then fan out across a matrix of test shards. Each shard loads the
+# prebuilt images into its own ephemeral kind cluster, installs the Helm chart,
+# and drives a slice of the real CRD lifecycle (Repository → Backup → Restore →
+# Delete, schedule, maintenance, backends) via the kopiur-e2e crate. Sharding
+# keeps wall-clock down, gives a per-scenario failure signal, and lets a single
+# flaky shard be re-run on its own.
 # Runs on every PR, on push to main, nightly, and on-demand.
 
 on:
@@ -34,15 +35,27 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # Compile the three component images once and hand them to the test shards as an
-  # artifact, so the expensive Rust release build is paid a single time (not once
-  # per matrix leg, which would also contend on the shared Rust cache).
+  # Build the three component images concurrently — one matrix leg per image — so
+  # the wall-clock for this stage is the single slowest image, not the sum of all
+  # three. Each leg saves its own :e2e image as a separate artifact for the test
+  # shards to load. Per-image Rust cache keys keep the legs from contending on one
+  # shared cache.
   build:
-    name: Build images
+    name: Build ${{ matrix.image }} image
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
+    strategy:
+      fail-fast: false # one image's failure shouldn't cancel the others
+      matrix:
+        include:
+          - image: controller
+            task: image-controller
+          - image: webhook
+            task: image-webhook
+          - image: mover
+            task: image-mover
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -58,20 +71,22 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: e2e-build
+          shared-key: e2e-build-${{ matrix.image }}
 
-      - name: Build component images
-        run: mise run //crates/e2e:images
+      - name: Build component image
+        env:
+          KOPIUR_IMAGE_PREFIX: kopiur
+          KOPIUR_IMAGE_TAG: e2e
+        run: mise run //:${{ matrix.task }}
 
-      # Save all three :e2e images into one tarball for the test shards to load.
-      - name: Save images
-        run: docker save kopiur/controller:e2e kopiur/webhook:e2e kopiur/mover:e2e -o images.tar
+      - name: Save image
+        run: docker save kopiur/${{ matrix.image }}:e2e -o image-${{ matrix.image }}.tar
 
-      - name: Upload images
+      - name: Upload image
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-images
-          path: images.tar
+          name: e2e-image-${{ matrix.image }}
+          path: image-${{ matrix.image }}.tar
           retention-days: 1
 
   # One leg per shard. Each leg owns its own kind cluster (separate runner, so the
@@ -133,13 +148,17 @@ jobs:
         with:
           shared-key: e2e-test
 
+      # Pull every per-image artifact (one per build matrix leg) into the workdir.
       - name: Download images
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: e2e-images
+          pattern: e2e-image-*
+          merge-multiple: true
 
       - name: Load images into docker
-        run: docker load -i images.tar
+        run: |
+          set -eu
+          for tar in image-*.tar; do docker load -i "$tar"; done
 
       - name: Create kind cluster
         run: mise run //crates/e2e:cluster-create
