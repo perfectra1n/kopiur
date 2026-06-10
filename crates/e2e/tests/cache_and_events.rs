@@ -239,10 +239,19 @@ async fn backend_failure_publishes_a_bounded_warning_event() {
         "Event note is {} bytes, exceeds the {EVENT_NOTE_MAX_BYTES}-byte apiserver limit: {note}",
         note.len()
     );
-    // The reason is the typed kopia error class — machine-readable, never empty.
+    // The connect found no repository and `create.enabled` is off, so the failure
+    // is the actionable `RepositoryNotInitialized` (a kopiur create-policy outcome),
+    // NOT a bare kopia `NotFound`. The reason is machine-readable and the note tells
+    // the operator exactly which field to flip.
+    assert_eq!(
+        ev.reason.as_deref(),
+        Some("RepositoryNotInitialized"),
+        "an uninitialized repo with create disabled must surface RepositoryNotInitialized, got {:?}",
+        ev.reason
+    );
     assert!(
-        ev.reason.as_deref().is_some_and(|r| !r.is_empty()),
-        "the Event must carry a machine-readable reason (the kopia error class)"
+        note.contains("spec.create.enabled: true"),
+        "the note must tell the operator how to initialize the repo, got: {note}"
     );
 }
 

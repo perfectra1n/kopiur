@@ -22,10 +22,10 @@
 
 use k8s_openapi::api::batch::v1::Job;
 use kube::Api;
-use kube::api::{ListParams, PostParams};
+use kube::api::{DeleteParams, ListParams, PostParams};
 use serde::de::DeserializeOwned;
 
-use kopiur_api::{Maintenance, Repository, Restore, Snapshot, SnapshotPolicy};
+use kopiur_api::{ClusterRepository, Maintenance, Repository, Restore, Snapshot, SnapshotPolicy};
 use kopiur_e2e::{E2E_NAMESPACE, Need, World, default_timeout, poll_interval, wait_until};
 
 /// Deserialize a CR from a JSON literal into its typed kube object.
@@ -131,6 +131,11 @@ fn condition_status(status: &serde_json::Value, type_: &str) -> Option<String> {
 /// error class (`AuthFailure`/`AccessDenied`/…), so it must be machine-readable.
 fn condition_reason(status: &serde_json::Value, type_: &str) -> Option<String> {
     condition_field(status, type_, "reason")
+}
+
+/// A status condition's human-readable `message` by `type`, or `None`.
+fn condition_message(status: &serde_json::Value, type_: &str) -> Option<String> {
+    condition_field(status, type_, "message")
 }
 
 fn condition_field(status: &serde_json::Value, type_: &str, field: &str) -> Option<String> {
@@ -445,4 +450,171 @@ async fn s3_maintenance_runs_in_a_mover_job() {
         Some("kopiur-e2e"),
         "ownership.owner must be the claimed lease holder, got {s}"
     );
+}
+
+/// A cluster-scoped S3 `ClusterRepository` pointing at the in-cluster MinIO. Being
+/// cluster-scoped, its Secret refs MUST carry an explicit namespace (the operator
+/// namespace where the credential Secret lives). `create` toggles
+/// `spec.create.enabled`; `secret` selects the credential Secret (good vs. wrong
+/// password).
+fn s3_cluster_repository_json(
+    name: &str,
+    bucket: &str,
+    secret: &str,
+    create: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "ClusterRepository",
+        "metadata": { "name": name },
+        "spec": {
+            "backend": { "s3": {
+                "bucket": bucket,
+                "endpoint": "minio.kopiur-e2e.svc.cluster.local:9000",
+                "region": "us-east-1",
+                "tls": { "disableTls": true },
+                "auth": { "secretRef": { "name": secret, "namespace": E2E_NAMESPACE } }
+            }},
+            "encryption": {
+                "passwordSecretRef": {
+                    "name": secret, "namespace": E2E_NAMESPACE, "key": "KOPIA_PASSWORD"
+                }
+            },
+            "create": { "enabled": create },
+            "allowedNamespaces": { "all": true }
+        }
+    })
+}
+
+/// ClusterRepository parity for the bootstrap safety properties — the cluster-scoped
+/// kind is the one that broke in production (a `ClusterRepository` pointing at an
+/// uninitialized bucket with `create.enabled` off failed with a bare, unactionable
+/// `NotFound`). Two cases, both on the SHARED mover bootstrap path:
+///
+/// A. **Not initialized, create disabled.** A `ClusterRepository` (`create: false`)
+///    against the always-empty `kopiur-guard` bucket ends `Failed` with an
+///    actionable `RepositoryNotInitialized` condition — reason + message naming
+///    `spec.create.enabled: true` — NOT a bare kopia `NotFound`.
+/// B. **Safe-create guard.** A wrong-password `ClusterRepository` against a bucket
+///    that already holds a repo ends `Failed` with reason `AuthFailure` and leaves
+///    the existing repository untouched (never recreates over it).
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
+async fn clusterrepository_not_initialized_and_safe_create_guard() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Minio])
+        .await
+        .expect("provision MinIO + buckets");
+    let client = world.client().clone();
+    let crepos: Api<ClusterRepository> = Api::all(client.clone());
+
+    // --- A. Not-initialized + create disabled → actionable RepositoryNotInitialized.
+    let not_init = "e2e-crepo-not-init";
+    crepos
+        .create(
+            &PostParams::default(),
+            &cr(s3_cluster_repository_json(
+                not_init,
+                "kopiur-guard",
+                "kopia-s3-creds",
+                false,
+            )),
+        )
+        .await
+        .expect("create connect-only ClusterRepository");
+    wait_phase(&crepos, not_init, "Failed")
+        .await
+        .expect("uninitialized ClusterRepository with create disabled must end Failed");
+    let ni = status_json(&crepos, not_init).await;
+    assert_eq!(
+        condition_status(&ni, "Bootstrapped").as_deref(),
+        Some("False"),
+        "must carry Bootstrapped=False, got {ni}"
+    );
+    // The whole point of the fix: a dedicated, actionable reason — not a bare kopia
+    // NotFound — on the cluster-scoped kind that actually broke in production.
+    assert_eq!(
+        condition_reason(&ni, "Bootstrapped").as_deref(),
+        Some("RepositoryNotInitialized"),
+        "uninitialized repo with create off must surface RepositoryNotInitialized, got {ni}"
+    );
+    let ni_msg = condition_message(&ni, "Bootstrapped").unwrap_or_default();
+    assert!(
+        ni_msg.contains("spec.create.enabled: true"),
+        "the condition must tell the operator how to fix it, got: {ni_msg}"
+    );
+
+    // --- B. Safe-create guard: initialize a dedicated bucket, then a wrong-password
+    //     ClusterRepository against it must Fail without recreating over the repo.
+    let good = "e2e-crepo-init";
+    crepos
+        .create(
+            &PostParams::default(),
+            &cr(s3_cluster_repository_json(
+                good,
+                "kopiur-crepo-guard",
+                "kopia-s3-creds",
+                true,
+            )),
+        )
+        .await
+        .expect("create initializing ClusterRepository");
+    wait_phase(&crepos, good, "Ready")
+        .await
+        .expect("ClusterRepository should bootstrap to Ready");
+    let good_uid = status_json(&crepos, good)
+        .await
+        .get("uniqueId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    assert!(
+        good_uid.as_deref().is_some_and(|s| !s.is_empty()),
+        "the initialized ClusterRepository must carry a real uniqueId"
+    );
+
+    let bad = "e2e-crepo-badpw";
+    crepos
+        .create(
+            &PostParams::default(),
+            &cr(s3_cluster_repository_json(
+                bad,
+                "kopiur-crepo-guard",
+                "kopia-s3-badpw",
+                true,
+            )),
+        )
+        .await
+        .expect("create wrong-password ClusterRepository");
+    wait_phase(&crepos, bad, "Failed")
+        .await
+        .expect("wrong-password ClusterRepository must end Failed (existing repo not recreated)");
+    let guard = status_json(&crepos, bad).await;
+    assert_eq!(
+        condition_reason(&guard, "Bootstrapped").as_deref(),
+        Some("AuthFailure"),
+        "wrong-password ClusterRepository must carry Bootstrapped reason=AuthFailure, got {guard}"
+    );
+    // The original repository is untouched: same uniqueId, still Ready.
+    let still = status_json(&crepos, good).await;
+    assert_eq!(
+        still.get("phase").and_then(|v| v.as_str()),
+        Some("Ready"),
+        "existing ClusterRepository must remain Ready after the wrong-password attempt, got {still}"
+    );
+    assert_eq!(
+        still
+            .get("uniqueId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        good_uid,
+        "the existing repository's uniqueId must be unchanged (never recreated), got {still}"
+    );
+
+    // Best-effort cleanup (cluster-scoped objects persist across reused clusters).
+    let _ = crepos.delete(not_init, &DeleteParams::default()).await;
+    let _ = crepos.delete(good, &DeleteParams::default()).await;
+    let _ = crepos.delete(bad, &DeleteParams::default()).await;
 }

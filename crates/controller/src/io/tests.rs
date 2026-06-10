@@ -18,7 +18,7 @@ use kopiur_kopia::KopiaErrorClass;
 
 use crate::consts::{
     API_VERSION, BOOTSTRAP_JOB_FAILED_REASON, CHECK_BACKEND_ACTION, CHECK_CREDENTIALS_ACTION,
-    CHECK_PERMISSIONS_ACTION, PRIVILEGED_MOVERS_ANNOTATION,
+    CHECK_PERMISSIONS_ACTION, PRIVILEGED_MOVERS_ANNOTATION, REPOSITORY_NOT_INITIALIZED_REASON,
 };
 use crate::jobs::MountSource;
 
@@ -179,6 +179,25 @@ fn bootstrap_failure_job_without_result_has_its_own_reason_and_actionable_messag
     assert!(
         msg.contains("kubectl logs"),
         "gives a concrete next step: {msg}"
+    );
+    assert!(!msg.is_empty());
+}
+
+#[test]
+fn bootstrap_failure_not_initialized_is_actionable_and_distinct() {
+    let f = BootstrapFailure::RepositoryNotInitialized;
+    // Its own reason — never a kopia class, never the result-less Job reason.
+    assert_eq!(f.reason(), REPOSITORY_NOT_INITIALIZED_REASON);
+    assert_ne!(f.reason(), BOOTSTRAP_JOB_FAILED_REASON);
+    assert_eq!(
+        KopiaErrorClass::from_label(f.reason()),
+        KopiaErrorClass::Unknown,
+        "the reason must not round-trip to a kopia class (it is a kopiur policy outcome)"
+    );
+    let msg = f.condition_message();
+    assert!(
+        msg.contains("spec.create.enabled: true"),
+        "message must tell the operator how to fix it: {msg}"
     );
     assert!(!msg.is_empty());
 }
@@ -1319,6 +1338,40 @@ mod bootstrap_outcomes {
                 assert!(message.contains("bootstrap failed"));
             }
             _ => panic!("expected Backend failure"),
+        }
+    }
+
+    #[test]
+    fn not_initialized_sentinel_maps_to_its_own_outcome_not_a_bare_notfound() {
+        // The mover's `BootstrapResult::not_initialized()` carries the sentinel
+        // class; the controller must lift it to `RepositoryNotInitialized` (checked
+        // BEFORE the generic Backend mapping) so the operator sees an actionable
+        // "enable create" reason, not a bare kopia NotFound.
+        let r = BootstrapResult::not_initialized();
+        match bootstrap_outcome(Some(r), false, "boot-x") {
+            BootstrapOutcome::Failed(BootstrapFailure::RepositoryNotInitialized) => {}
+            _ => panic!("expected RepositoryNotInitialized"),
+        }
+    }
+
+    #[test]
+    fn a_genuine_kopia_notfound_stays_a_backend_failure() {
+        // A real kopia `NotFound` (not the sentinel) must still map to Backend —
+        // the sentinel check keys on the exact label, not the NotFound class.
+        let mut bad = ok_result();
+        bad.success = false;
+        bad.failure = Some(FailureBlock {
+            kopia_error_class: KopiaErrorClass::NotFound.as_str().into(),
+            message: "not found".into(),
+            stderr_tail: None,
+            exit_code: Some(1),
+            retry_recommended: false,
+        });
+        match bootstrap_outcome(Some(bad), false, "boot-x") {
+            BootstrapOutcome::Failed(BootstrapFailure::Backend { class, .. }) => {
+                assert_eq!(class, KopiaErrorClass::NotFound);
+            }
+            _ => panic!("expected Backend NotFound"),
         }
     }
 }

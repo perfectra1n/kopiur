@@ -7,10 +7,10 @@ use kopiur_kopia::KopiaErrorClass;
 use crate::consts::{
     BOOTSTRAP_JOB_FAILED_REASON, CHECK_API_SERVER_ACTION, CHECK_BACKEND_ACTION,
     CHECK_CREDENTIALS_ACTION, CHECK_PERMISSIONS_ACTION, CHECK_REFERENCES_ACTION,
-    CHECK_WEBHOOK_CONFIGURATION_ACTION, FIX_SCHEDULE_ACTION, FIX_SPEC_ACTION,
+    CHECK_WEBHOOK_CONFIGURATION_ACTION, ENABLE_CREATE_ACTION, FIX_SCHEDULE_ACTION, FIX_SPEC_ACTION,
     INVALID_SCHEDULE_REASON, INVALID_SPEC_REASON, INVARIANT_VIOLATED_REASON, KUBE_API_ERROR_REASON,
     MISSING_CREDENTIALS_REASON, MISSING_DEPENDENCY_REASON, REPORT_ISSUE_ACTION,
-    SERIALIZATION_FAILED_REASON, WEBHOOK_SETUP_FAILED_REASON,
+    REPOSITORY_NOT_INITIALIZED_REASON, SERIALIZATION_FAILED_REASON, WEBHOOK_SETUP_FAILED_REASON,
 };
 use crate::context::Context;
 use crate::error::Error;
@@ -378,6 +378,13 @@ pub enum BootstrapFailure {
         /// The bootstrap Job's name, so the message can point an operator at it.
         job_name: String,
     },
+    /// The mover connected and found **no** repository at the backend, but
+    /// `spec.create.enabled` is `false`, so it declined to initialize one. Not a
+    /// kopia backend error — a kopiur create-policy outcome — so it gets its own
+    /// reason/message/action ("set spec.create.enabled: true") instead of a bare,
+    /// confusing `NotFound`. Signalled by the mover via
+    /// [`kopiur_mover::bootstrap::REPOSITORY_NOT_INITIALIZED_CLASS`].
+    RepositoryNotInitialized,
 }
 
 impl BootstrapFailure {
@@ -389,6 +396,7 @@ impl BootstrapFailure {
         match self {
             BootstrapFailure::Backend { class, .. } => class.as_str(),
             BootstrapFailure::JobFailedWithoutResult { .. } => BOOTSTRAP_JOB_FAILED_REASON,
+            BootstrapFailure::RepositoryNotInitialized => REPOSITORY_NOT_INITIALIZED_REASON,
         }
     }
 
@@ -400,6 +408,9 @@ impl BootstrapFailure {
             BootstrapFailure::Backend { message, .. } => message.clone(),
             BootstrapFailure::JobFailedWithoutResult { job_name } => {
                 bootstrap_job_failed_message(job_name)
+            }
+            BootstrapFailure::RepositoryNotInitialized => {
+                kopiur_mover::bootstrap::REPOSITORY_NOT_INITIALIZED_MESSAGE.to_string()
             }
         }
     }
@@ -424,6 +435,21 @@ impl BootstrapFailure {
                     name,
                     BOOTSTRAP_JOB_FAILED_REASON,
                     CHECK_BACKEND_ACTION,
+                    note,
+                )
+                .await;
+            }
+            BootstrapFailure::RepositoryNotInitialized => {
+                let note = truncate_for_note(
+                    kopiur_mover::bootstrap::REPOSITORY_NOT_INITIALIZED_MESSAGE,
+                    EVENT_NOTE_MAX_BYTES,
+                );
+                publish_warning(
+                    ctx,
+                    regarding,
+                    name,
+                    REPOSITORY_NOT_INITIALIZED_REASON,
+                    ENABLE_CREATE_ACTION,
                     note,
                 )
                 .await;
@@ -461,6 +487,17 @@ pub fn bootstrap_outcome(
         None => BootstrapOutcome::Failed(BootstrapFailure::JobFailedWithoutResult {
             job_name: job_name.to_string(),
         }),
+        // The mover declined to create an absent repo because `create.enabled` is
+        // off: a kopiur policy outcome, not a kopia class. Keyed on the shared
+        // sentinel label (checked before the generic Backend mapping) so it surfaces
+        // an actionable "enable create" reason, not a bare `NotFound`.
+        Some(r)
+            if !r.success
+                && r.failure.as_ref().map(|f| f.kopia_error_class.as_str())
+                    == Some(kopiur_mover::bootstrap::REPOSITORY_NOT_INITIALIZED_CLASS) =>
+        {
+            BootstrapOutcome::Failed(BootstrapFailure::RepositoryNotInitialized)
+        }
         Some(r) if !r.success => BootstrapOutcome::Failed(BootstrapFailure::Backend {
             class: r
                 .failure

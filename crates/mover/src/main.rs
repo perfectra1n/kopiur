@@ -356,8 +356,20 @@ async fn run_bootstrap(
     let mut created = false;
     if let Err(e) = client.repository_connect(&connect_spec, cache).await {
         if !should_attempt_create(op.auto_create, e.class()) {
-            // Either auto_create is off, or the failure means a repo already
-            // exists (auth/locked) — surface it, never recreate.
+            // We will NOT create. Two distinct decline reasons → two distinct,
+            // accurate messages:
+            //  - create opt-out (`auto_create` off) + a genuinely-absent repo
+            //    (`NotFound`) ⇒ actionable "set spec.create.enabled: true": the repo
+            //    just needs initializing. Scoped to `NotFound` only — an unreachable
+            //    backend (`RepositoryUnavailable`) or a denied bucket (`AccessDenied`)
+            //    is NOT "uninitialized", and telling the user to enable create there
+            //    would be wrong advice.
+            //  - everything else (a repo exists we can't open — auth/locked; an
+            //    access/permission problem; or auto_create on but blocked) ⇒ surface
+            //    the real kopia class; recreating would mask it or risk a 2nd repo.
+            if !op.auto_create && e.class() == KopiaErrorClass::NotFound {
+                return BootstrapResult::not_initialized();
+            }
             return BootstrapResult::failed(&e);
         }
         info!(class = %e.class(), "connect failed; attempting repository create");

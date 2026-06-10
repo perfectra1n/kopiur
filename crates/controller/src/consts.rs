@@ -172,6 +172,16 @@ pub const CHECK_PERMISSIONS_ACTION: &str = "CheckPermissions";
 /// `action` for any other backend failure: check the backend configuration.
 pub const CHECK_BACKEND_ACTION: &str = "CheckBackend";
 
+/// Machine-readable `reason` (condition + Warning Event) when a bootstrap connect
+/// found **no** repository at the backend and `spec.create.enabled` is `false`, so
+/// kopiur declined to initialize one. Distinct from a kopia error class so the
+/// "just needs `create.enabled: true`" case is never conflated with a real backend
+/// `NotFound` ([`crate::io::BootstrapFailure`]).
+pub const REPOSITORY_NOT_INITIALIZED_REASON: &str = "RepositoryNotInitialized";
+/// `action` (remediation hint) for [`REPOSITORY_NOT_INITIALIZED_REASON`]: enable
+/// repository creation (or point at an existing repository).
+pub const ENABLE_CREATE_ACTION: &str = "EnableRepositoryCreate";
+
 // Every reconcile error is surfaced as a Warning Event on the failing object
 // (via `error_policy_for` → `io::reconcile_failure_event`), so a failure is
 // visible in `kubectl get events`/`describe` for **every** CRD kind, not only

@@ -135,6 +135,9 @@ pub const MC_IMAGE: &str = "minio/mc:latest";
 pub const BUCKETS: &[&str] = &[
     "kopiur",
     "kopiur-guard",
+    // Cluster-scoped safe-create guard: initialized once, then a wrong-password
+    // ClusterRepository must NOT recreate over it.
+    "kopiur-crepo-guard",
     "kopiur-maint",
     "kopiur-xns-crepo",
     "kopiur-xns-repo",

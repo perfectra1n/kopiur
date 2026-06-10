@@ -27,6 +27,27 @@ pub const RESULT_CONFIGMAP_KEY: &str = "result.json";
 /// silent truncation).
 pub const MAX_RETURNED_SNAPSHOTS: usize = 1000;
 
+/// Sentinel [`FailureBlock::kopia_error_class`] the mover writes when connect found
+/// **no** repository at the backend and `spec.create.enabled` is `false`, so kopiur
+/// declined to initialize one. The controller keys on this exact label
+/// ([`crate::bootstrap`] is its single source of truth, shared with
+/// `kopiur-controller`) to surface a dedicated, actionable `RepositoryNotInitialized`
+/// condition rather than a bare kopia `NotFound`.
+///
+/// Deliberately **not** a [`kopiur_kopia::KopiaErrorClass`]: that enum classifies
+/// kopia's *stderr*, whereas "the repo is simply absent and create is opt-out" is a
+/// kopiur create-*policy* outcome, not a backend error.
+pub const REPOSITORY_NOT_INITIALIZED_CLASS: &str = "RepositoryNotInitialized";
+
+/// Stable, volatile-free actionable message for the
+/// [`REPOSITORY_NOT_INITIALIZED_CLASS`] case. The controller uses it verbatim as a
+/// condition message, so it must carry no per-attempt detail (no temp filenames):
+/// what failed, why, and the two concrete fixes.
+pub const REPOSITORY_NOT_INITIALIZED_MESSAGE: &str = "no kopia repository exists at this backend (connect returned NotFound) and \
+     spec.create.enabled is false, so kopiur did not initialize one; set \
+     spec.create.enabled: true to create a new repository here, or point the backend \
+     at an existing repository";
+
 /// The outcome of a bootstrap run, serialized into the work-spec `ConfigMap`.
 ///
 /// Constructed via [`BootstrapResult::ready`] (success) or
@@ -104,6 +125,31 @@ impl BootstrapResult {
             snapshots: Vec::new(),
             snapshots_truncated: false,
             failure: Some(FailureBlock::from(err)),
+        }
+    }
+
+    /// A terminal-failure outcome for "connect found no repository and
+    /// `spec.create.enabled` is false". Unlike [`BootstrapResult::failed`] (which
+    /// relays a kopia error class), this carries the
+    /// [`REPOSITORY_NOT_INITIALIZED_CLASS`] sentinel + a fixed actionable message so
+    /// the controller renders a dedicated `RepositoryNotInitialized` reason telling
+    /// the operator to enable create — not a bare, confusing `NotFound`. Never
+    /// retryable: it needs a spec change.
+    pub fn not_initialized() -> Self {
+        BootstrapResult {
+            success: false,
+            created: false,
+            unique_id: None,
+            snapshot_count: 0,
+            snapshots: Vec::new(),
+            snapshots_truncated: false,
+            failure: Some(FailureBlock {
+                kopia_error_class: REPOSITORY_NOT_INITIALIZED_CLASS.to_string(),
+                message: REPOSITORY_NOT_INITIALIZED_MESSAGE.to_string(),
+                stderr_tail: None,
+                exit_code: None,
+                retry_recommended: false,
+            }),
         }
     }
 }
@@ -204,5 +250,40 @@ mod tests {
         assert_eq!(back, f);
         assert!(!back.success);
         assert_eq!(back.failure.unwrap().kopia_error_class, "Unknown");
+    }
+
+    #[test]
+    fn not_initialized_is_an_actionable_non_retryable_failure() {
+        let r = BootstrapResult::not_initialized();
+        assert!(!r.success, "a not-initialized repo is a terminal failure");
+        let f = r.failure.expect("not_initialized carries a failure block");
+        // The sentinel class is what the controller keys on — it must be the shared
+        // const, NOT a kopia class label, so it never collides with `from_label`.
+        assert_eq!(f.kopia_error_class, REPOSITORY_NOT_INITIALIZED_CLASS);
+        assert_ne!(
+            f.kopia_error_class,
+            KopiaErrorClass::NotFound.as_str(),
+            "must not collapse back into a bare kopia NotFound"
+        );
+        // Actionable: the message names the exact field the operator must flip.
+        assert!(
+            f.message.contains("spec.create.enabled: true"),
+            "message must tell the operator how to fix it, got: {}",
+            f.message
+        );
+        // It needs a spec change, so the operator should not blindly retry.
+        assert!(!f.retry_recommended);
+    }
+
+    #[test]
+    fn not_initialized_roundtrips_via_serde() {
+        let r = BootstrapResult::not_initialized();
+        let back: BootstrapResult =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back, r);
+        assert_eq!(
+            back.failure.unwrap().kopia_error_class,
+            REPOSITORY_NOT_INITIALIZED_CLASS
+        );
     }
 }

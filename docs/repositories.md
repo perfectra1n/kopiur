@@ -140,7 +140,19 @@ The `encryption.passwordSecretRef` is **not** in this set: you may rename or rep
 
 With creation disabled, a typo in `bucket`/`endpoint` surfaces as a connect failure instead of silently spinning up a brand-new empty repository at the wrong address. Enable it for a genuinely new repo; leave it off to require that one already exists.
 
+If the backend holds **no** repository yet and `create.enabled` is off, the `Repository`/`ClusterRepository` goes `Failed` with a `Bootstrapped=False`, `reason: RepositoryNotInitialized` condition whose message tells you exactly what to do — set `create.enabled: true` to initialize it, or point the backend at an existing repository. (This is distinct from a wrong-password connect, which fails `AuthFailure` and **never** recreates over the existing data — see [Safe by construction](#safe-by-construction) below.)
+
 ///
+
+### Safe by construction
+
+`create.enabled: true` does **not** mean "always create". Every bootstrap **connects first** and only creates as a fallback, gated so that an existing repository is never overwritten:
+
+- **A repository already exists and the password is correct** → kopiur *connects and adopts* it (and materializes any snapshots already in the store as `discovered` Snapshots). No creation happens.
+- **A repository already exists but the password is wrong** → connect fails `AuthFailure`; kopiur **does not** create (that would risk a second repository or mask the wrong-password error). The `Repository` goes `Failed` and the existing repository is left untouched.
+- **No repository exists** → kopiur creates one (only because `create.enabled` is on). As a final backstop, kopia's own `repository create` refuses to overwrite an existing repository, so even a misclassified connect cannot clobber your data.
+
+So enabling `create.enabled` for a repository that turns out to already exist is safe: kopiur will adopt it, not re-initialize it.
 
 ## `moverDefaults` — one place to configure every mover
 
