@@ -33,6 +33,8 @@ A Kubernetes [`SecurityContext`](https://kubernetes.io/docs/tasks/configure-pod-
 
 `fsGroup` is a **pod-level** setting (`PodSecurityContext`). Set it via `spec.mover.podSecurityContext.fsGroup` (the same `PodSecurityContext` you'd put on any pod). On mount, the kubelet makes the volume group-owned by that GID and group-writable, and adds it to the mover's supplementary groups — so an **unprivileged** mover (`runAsUser: 1000`) can populate a **freshly-provisioned** volume on restore (whose mount point is otherwise root-owned `0755`) **without** a root mover.
 
+It already **defaults to `65532`** (the mover image's GID), so the *default* mover writes a fresh volume with no extra config. You only set `fsGroup` here when the mover runs as a **different** UID/GID (below) — match it to that identity:
+
 ```yaml
 spec:
     mover:
@@ -62,6 +64,19 @@ securityContext:
 ```
 
 This default is compatible with the Pod Security Admission **`restricted`** profile, so it runs in locked-down namespaces out of the box. What it can **read** is limited: files that are world-readable, or owned by UID `65532`. Most app images run as some other UID (`1000`, `1001`, `999`, …) and write files `0600`/`0640`, so the default mover gets **permission denied** on real app data. Whenever the source isn't world-readable, you'll set the context to match the data — read on.
+
+At the **pod** level, every mover (backup, restore, maintenance, **and** the bootstrap connect/create Job) also gets a hardened default `podSecurityContext`:
+
+```yaml
+podSecurityContext:
+  fsGroup: 65532 # the mover image's GID — makes mounted volumes group-writable by the mover
+  fsGroupChangePolicy: OnRootMismatch # only chown when the volume root doesn't already match
+```
+
+The `fsGroup` matches the mover image's GID so the operator-managed **kopia cache** is writable out of the box. Without it, a PVC-backed cache (`moverDefaults.cache.mode: Ephemeral`/`Persistent`) is created `root:root` and the unprivileged mover fails with `mkdir /var/cache/kopia/logs: permission denied`. `OnRootMismatch` keeps it cheap — a volume already owned by the group isn't re-chowned on every run. Because this is the lowest merge layer, `moverDefaults.podSecurityContext` and a recipe's `mover.podSecurityContext` override it field-wise (e.g. set `fsGroup` to your app's GID for a restore; the rest of the hardened defaults stay put).
+
+!!! warning "`fsGroup` cannot fix root-squashed NFS"
+    `fsGroup` works by having the kubelet chown the volume. On an **NFS** StorageClass with **root-squash** (e.g. TrueNAS / democratic-csi), that chown is denied, so a kopia cache on such a class stays `root:root` and the mover still gets `permission denied`. A content-addressed scratch cache has no business on networked storage anyway — leave `moverDefaults.cache` unset (the default is a node-local `emptyDir`, always writable) or point `cache.storageClass` at a block class (e.g. Ceph RBD) that honors `fsGroup`.
 
 ## How to decide what to set
 
@@ -218,7 +233,7 @@ The hardened default satisfies the `restricted` PSA profile, so unprivileged mov
 | --- | --- | --- |
 | The mover must… | **read** the source PVC | **write** the target PVC |
 | Set the UID/GID to… | an identity that can read the data | the identity that should **own** the restored files |
-| Default if unset | UID `65532` (reads world-readable / `65532`-owned only) | UID `65532` (files land owned by `65532`) |
+| Default if unset | UID `65532` (reads world-readable / `65532`-owned only), pod `fsGroup: 65532` | UID `65532` (files land owned by `65532`), pod `fsGroup: 65532` |
 | Preserve original ownership | n/a (kopia records it) | needs root + `privilegedMode: true` |
 | Inherit from workload | `SnapshotPolicy.spec.mover.inheritSecurityContextFrom` | `Restore.spec.mover.inheritSecurityContextFrom` |
 | Elevated context | namespace `privileged-movers` opt-in | same opt-in |
@@ -250,8 +265,8 @@ A backup that reports **`Succeeded` but zero files/bytes** is the classic sign t
 | Thing | Value |
 | --- | --- |
 | Where to set it | `spec.mover.securityContext` (container) + `spec.mover.podSecurityContext` (pod) on `SnapshotPolicy` / `Restore` / `Maintenance` |
-| `fsGroup` | `spec.mover.podSecurityContext.fsGroup` — make a fresh restore volume writable by an unprivileged mover |
-| Default | UID `65532`, `runAsNonRoot: true`, drop ALL caps, seccomp `RuntimeDefault`, no escalation |
+| `fsGroup` | `spec.mover.podSecurityContext.fsGroup` — make a fresh restore volume writable by an unprivileged mover. **Defaults to `65532`** so the kopia cache is writable; override for a restore that must own files as the app's GID |
+| Default | container: UID `65532`, `runAsNonRoot: true`, drop ALL caps, seccomp `RuntimeDefault`, no escalation. pod: `fsGroup: 65532`, `fsGroupChangePolicy: OnRootMismatch` |
 | Set the UID/GID | `securityContext.runAsUser` / `runAsGroup` (match the data owner) |
 | Inherit from a workload | `inheritSecurityContextFrom.podSelector` (+ optional `container`) — copies container **and** pod context (UID + fsGroup); mutually exclusive with `securityContext` **and** `podSecurityContext` |
 | Root / preserve ownership | `runAsUser: 0` + `runAsNonRoot: false` (+ `privilegedMode: true` for restore ownership) |

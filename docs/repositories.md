@@ -183,6 +183,8 @@ spec:
 
 Set the UID/GID **once** on `moverDefaults.securityContext.runAsUser/runAsGroup` (and `podSecurityContext.fsGroup`), and every mover the repository spawns — **including the bootstrap (connect/create) Job** — inherits it. That means a filesystem/NFS repository on a directory not owned by `65532` is bootstrappable with no special-case knob: the bootstrap mover runs as the UID you set here. A per-recipe `mover` block can still tighten any of these for an individual `SnapshotPolicy`/`Restore`/`Maintenance`. See [example 09](examples.md#example-09--mover-uidgid--permissions) and [Permissions](permissions.md).
 
+`podSecurityContext.fsGroup` already **defaults to `65532`** (the mover image's GID), so the operator-managed kopia cache is writable out of the box — you only set it here to match a non-default mover UID. Note `fsGroup` can't fix a root-squashed **NFS** cache StorageClass; keep `moverDefaults.cache` unset (node-local `emptyDir`) or use a block class for a sized cache (see [Security context](security-context.md#the-default-hardened-context)).
+
 ///
 
 ## `onNamespaceDelete` — what `kubectl delete ns` does to snapshots

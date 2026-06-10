@@ -519,6 +519,35 @@ pub fn hardened_security_context() -> SecurityContext {
     }
 }
 
+/// The nonroot UID/GID baked into the mover image (`docker/Dockerfile.mover`:
+/// `USER 65532:65532`, distroless `nonroot`). The hardened **pod** context defaults
+/// `fsGroup` to this so the kubelet group-owns every mounted volume to the gid the
+/// mover actually runs as — most importantly the operator-managed kopia cache, which
+/// is otherwise created `root:root` on PVC-backed storage and unwritable by the
+/// unprivileged mover. Centralized here (the single source of the hardened defaults)
+/// so the value can never drift from the image.
+pub const MOVER_NONROOT_ID: i64 = 65532;
+
+/// The restricted-PSA-compatible **hardened pod** security context — the pod-level
+/// peer of [`hardened_security_context`]. Defaults `fsGroup` to [`MOVER_NONROOT_ID`]
+/// so every mover pod's volumes (notably the cache) are writable by the unprivileged
+/// mover; `fsGroupChangePolicy: OnRootMismatch` skips the recursive chown when the
+/// volume root already matches, so it does not needlessly rewrite ownership on every
+/// run.
+///
+/// Same merge story as the container context (ADR-0004 §2): this is the LOWEST layer,
+/// overlaid field-wise by `repo.moverDefaults.podSecurityContext` then the recipe's
+/// `mover.podSecurityContext`, so any of `fsGroup`/`runAsUser`/… can be overridden
+/// (e.g. a restore that must own files as the app's UID) while unset fields keep the
+/// hardened default. Lives in `api` so the webhook and controller resolve it identically.
+pub fn hardened_pod_security_context() -> PodSecurityContext {
+    PodSecurityContext {
+        fs_group: Some(MOVER_NONROOT_ID),
+        fs_group_change_policy: Some("OnRootMismatch".to_string()),
+        ..Default::default()
+    }
+}
+
 /// Deep-merge two [`Capabilities`]: each of `add`/`drop` is taken from `over` when set,
 /// else from `base`. So an `over` that sets only `add` keeps `base.drop` — an add-only
 /// override never silently drops the hardened `drop:[ALL]` (the bug ADR-0004 §2 cites).
@@ -832,12 +861,25 @@ pub fn resolve_mover(
         Some(r) => merge_security_context(&sc_base, r),
         None => sc_base,
     };
+    // Pod context resolves identically to the container one (ADR-0004 §2): a hardened
+    // base (notably the `fsGroup` that makes the cache writable) overlaid by
+    // moverDefaults then the recipe. Always `Some` so every mover pod — bootstrap,
+    // backup, restore, maintenance, verification, replication — carries the same
+    // hardened fsGroup unless explicitly overridden.
+    let hardened_psc = hardened_pod_security_context();
+    // hardened ⊂ moverDefaults.podSecurityContext
+    let psc_base = match defaults.and_then(|d| d.pod_security_context.as_ref()) {
+        Some(d_psc) => merge_pod_security_context(&hardened_psc, d_psc),
+        None => hardened_psc,
+    };
+    // (hardened ⊂ moverDefaults) ⊂ recipe.podSecurityContext
+    let pod_security_context = Some(match recipe_psc {
+        Some(r) => merge_pod_security_context(&psc_base, r),
+        None => psc_base,
+    });
     ResolvedMover {
         security_context,
-        pod_security_context: merge_pod_security_context_opt(
-            defaults.and_then(|d| d.pod_security_context.as_ref()),
-            recipe_psc,
-        ),
+        pod_security_context,
         resources: merge_resources_opt(
             defaults.and_then(|d| d.resources.as_ref()),
             recipe_resources,
@@ -1340,9 +1382,58 @@ mod tests {
         assert_eq!(sc.allow_privilege_escalation, Some(false));
         assert_eq!(sc.capabilities.unwrap().drop.unwrap(), vec!["ALL"]);
         assert_eq!(sc.seccomp_profile.unwrap().type_, "RuntimeDefault");
-        assert!(m.pod_security_context.is_none());
+        // The pod context is now hardened too (not None): fsGroup matches the mover
+        // image's nonroot gid so the cache is writable on PVC-backed storage, with
+        // OnRootMismatch so an already-correct volume isn't re-chowned every run.
+        let psc = m
+            .pod_security_context
+            .expect("hardened pod context is always present");
+        assert_eq!(psc.fs_group, Some(MOVER_NONROOT_ID));
+        assert_eq!(
+            psc.fs_group_change_policy.as_deref(),
+            Some("OnRootMismatch")
+        );
         assert!(m.resources.is_none());
         assert!(m.cache.is_none());
+    }
+
+    #[test]
+    fn recipe_or_defaults_can_override_the_hardened_fsgroup() {
+        // The hardened fsGroup is a floor, not a ceiling: a moverDefaults fsGroup wins
+        // over it, and a recipe fsGroup wins over moverDefaults — while unset pod
+        // fields (here fsGroupChangePolicy) keep the hardened default. This is what
+        // lets a restore own files as the app's UID/GID.
+        let defaults = MoverDefaults {
+            pod_security_context: Some(PodSecurityContext {
+                fs_group: Some(1000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let recipe_psc = PodSecurityContext {
+            fs_group: Some(3000),
+            run_as_user: Some(3000),
+            ..Default::default()
+        };
+
+        // moverDefaults overrides the hardened fsGroup; change policy still inherited.
+        let only_defaults = resolve_mover(Some(&defaults), None, None, None, None, None);
+        let psc = only_defaults.pod_security_context.unwrap();
+        assert_eq!(psc.fs_group, Some(1000));
+        assert_eq!(
+            psc.fs_group_change_policy.as_deref(),
+            Some("OnRootMismatch")
+        );
+
+        // recipe wins over moverDefaults, which wins over hardened.
+        let m = resolve_mover(Some(&defaults), None, Some(&recipe_psc), None, None, None);
+        let psc = m.pod_security_context.unwrap();
+        assert_eq!(psc.fs_group, Some(3000), "recipe fsGroup must win");
+        assert_eq!(psc.run_as_user, Some(3000));
+        assert_eq!(
+            psc.fs_group_change_policy.as_deref(),
+            Some("OnRootMismatch")
+        );
     }
 
     #[test]

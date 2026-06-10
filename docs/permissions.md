@@ -186,11 +186,11 @@ See [Restores → Mover, cache & failure policy](restores.md#mover-cache--failur
 
 | Thing                            | Value                                                                               |
 | -------------------------------- | ----------------------------------------------------------------------------------- |
-| Default mover UID                | `65532` (distroless `nonroot`), `runAsNonRoot: true`                                |
+| Default mover UID                | `65532` (distroless `nonroot`), `runAsNonRoot: true`; pod `fsGroup: 65532` so the kopia cache is writable on PVC-backed storage |
 | Set the mover UID/GID            | `SnapshotPolicy.spec.mover.securityContext.runAsUser` / `runAsGroup` (same on `Restore.spec.mover` / `Maintenance.spec.mover`) |
 | Inherit UID/GID from a workload  | `spec.mover.inheritSecurityContextFrom.podSelector` (mutually exclusive with `securityContext`) — see [Security context](security-context.md#2-inherit-it-from-the-workload) |
 | Mover cache size / warm cache    | `spec.mover.cache` (`capacity`, `storageClassName`, `mode: Ephemeral`/`Persistent`, `content`/`metadataCacheSizeMb`); inherits `Repository.spec.moverDefaults.cache` |
-| `fsGroup`                        | `spec.mover.podSecurityContext.fsGroup` — make a fresh restore volume writable by an unprivileged mover |
+| `fsGroup`                        | `spec.mover.podSecurityContext.fsGroup` — **defaults to `65532`** (keeps the cache writable); override to make a fresh restore volume writable by a mover running as a different UID |
 | Root / preserve-ownership        | `runAsUser: 0` + `privilegedMode: true` (needs the namespace opt-in)                |
 | Privileged-mover opt-in          | `kubectl annotate namespace <ns> kopiur.home-operations.com/privileged-movers=true` |
 | Filesystem repo not writable     | Event prints `chown -R <uid> <path>` with the real operator UID                     |
