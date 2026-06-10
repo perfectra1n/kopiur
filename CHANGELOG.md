@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.0](https://github.com/home-operations/kopiur/compare/0.1.14...0.2.0) (2026-06-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **docs:** oops I don't know how to use semantic commits correctly
+
+### Features
+
+* **docs:** add to docs for helm chart ([99f9c5d](https://github.com/home-operations/kopiur/commit/99f9c5d02a93110a8c7fd2b869d4e5a596a67115))
+* **docs:** oops I don't know how to use semantic commits correctly ([90f28d6](https://github.com/home-operations/kopiur/commit/90f28d6816ef5dc251084f4afb8476a0e75bad27))
+
+
+### Documentation
+
+* add break and feature adrs ([3f8c0b2](https://github.com/home-operations/kopiur/commit/3f8c0b2b1e1935fc29c1cf90453a8dfc5437e9d3))
+* add more cel examples ([f5dc8ec](https://github.com/home-operations/kopiur/commit/f5dc8ec756a4cad6da3f501a43a22e53603adc8e))
+
 ## [0.1.14](https://github.com/home-operations/kopiur/compare/0.1.13...0.1.14) (2026-06-09)
 
 
