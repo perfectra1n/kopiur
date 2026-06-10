@@ -14,7 +14,7 @@
 //! launches a mover Job that connects/creates the S3 repository, the Repository
 //! reaches `Ready` with a real `uniqueId`, a full backup+restore round-trips, a
 //! second Repository *adopts* the existing repo (no recreate) and materializes a
-//! `discovered` Backup from the snapshot already in the store, and a
+//! `discovered` Snapshot from the snapshot already in the store, and a
 //! wrong-password Repository ends `Failed` (the safe-create guard) without
 //! recreating over the existing data.
 
@@ -25,7 +25,7 @@ use kube::Api;
 use kube::api::{ListParams, PostParams};
 use serde::de::DeserializeOwned;
 
-use kopiur_api::{Backup, BackupConfig, Maintenance, Repository, Restore};
+use kopiur_api::{Maintenance, Repository, Restore, Snapshot, SnapshotPolicy};
 use kopiur_e2e::{E2E_NAMESPACE, Need, World, default_timeout, poll_interval, wait_until};
 
 /// Deserialize a CR from a JSON literal into its typed kube object.
@@ -60,7 +60,7 @@ fn s3_repository_json(name: &str, bucket: &str, secret: &str, create: bool) -> s
 fn backup_config_json(name: &str, repo: &str, src_pvc: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupConfig",
+        "kind": "SnapshotPolicy",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
             "repository": { "kind": "Repository", "name": repo },
@@ -73,9 +73,9 @@ fn backup_config_json(name: &str, repo: &str, src_pvc: &str) -> serde_json::Valu
 fn backup_json(name: &str, config: &str, deletion_policy: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "Backup",
+        "kind": "Snapshot",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
-        "spec": { "configRef": { "name": config }, "deletionPolicy": deletion_policy }
+        "spec": { "policyRef": { "name": config }, "deletionPolicy": deletion_policy }
     })
 }
 
@@ -148,7 +148,7 @@ fn condition_field(status: &serde_json::Value, type_: &str, field: &str) -> Opti
 ///    `uniqueId` + `Bootstrapped=True`;
 /// 2. full backup → `Succeeded` (real snapshot id) → restore → `Completed`;
 /// 3. a second Repository on the same bucket (`create: false`) *adopts* the
-///    existing repo → `Ready`, and materializes a `discovered` Backup from the
+///    existing repo → `Ready`, and materializes a `discovered` Snapshot from the
 ///    snapshot already in the store (`catalog.discoveredBackupCount >= 1`);
 /// 4. a wrong-password Repository (`create: true`, same bucket) ends `Failed`
 ///    with `Bootstrapped=False` — the safe-create guard never recreates over the
@@ -165,8 +165,8 @@ async fn s3_bootstrap_backup_restore_adopt_and_guard() {
         .expect("provision MinIO + buckets");
     let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let restores: Api<Restore> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
     // 1. Bootstrap-create the S3 repository.
@@ -206,17 +206,17 @@ async fn s3_bootstrap_backup_restore_adopt_and_guard() {
             &cr(backup_config_json("e2e-s3-cfg", "e2e-s3", "e2e-src")),
         )
         .await
-        .expect("create BackupConfig");
+        .expect("create SnapshotPolicy");
     backups
         .create(
             &PostParams::default(),
             &cr(backup_json("e2e-s3-backup", "e2e-s3-cfg", "Retain")),
         )
         .await
-        .expect("create Backup");
+        .expect("create Snapshot");
     wait_phase(&backups, "e2e-s3-backup", "Succeeded")
         .await
-        .expect("S3-backed Backup should reach Succeeded");
+        .expect("S3-backed Snapshot should reach Succeeded");
     let bstatus = status_json(&backups, "e2e-s3-backup").await;
     let snap_id = bstatus
         .get("snapshot")
@@ -225,7 +225,7 @@ async fn s3_bootstrap_backup_restore_adopt_and_guard() {
         .unwrap_or("");
     assert!(
         !snap_id.is_empty(),
-        "S3-backed Backup must carry a real kopia snapshot id, got {bstatus}"
+        "S3-backed Snapshot must carry a real kopia snapshot id, got {bstatus}"
     );
 
     restores
@@ -237,7 +237,7 @@ async fn s3_bootstrap_backup_restore_adopt_and_guard() {
                 "metadata": { "name": "e2e-s3-restore", "namespace": E2E_NAMESPACE },
                 "spec": {
                     "repository": { "kind": "Repository", "name": "e2e-s3" },
-                    "source": { "backupRef": { "name": "e2e-s3-backup" } },
+                    "source": { "snapshotRef": { "name": "e2e-s3-backup" } },
                     "target": { "pvc": { "name": "e2e-dst" } }
                 }
             })),
@@ -249,7 +249,7 @@ async fn s3_bootstrap_backup_restore_adopt_and_guard() {
         .expect("S3-backed Restore should reach Completed");
 
     // 3. Adopt the existing repository (create: false) and materialize the
-    //    snapshot created above as a discovered Backup.
+    //    snapshot created above as a discovered Snapshot.
     repos
         .create(
             &PostParams::default(),
@@ -281,7 +281,7 @@ async fn s3_bootstrap_backup_restore_adopt_and_guard() {
     )
     .await
     .expect(
-        "adopting Repository should materialize a discovered Backup from the existing snapshot",
+        "adopting Repository should materialize a discovered Snapshot from the existing snapshot",
     );
 
     // 4. Safe-create guard: a wrong-password Repository against the SAME bucket

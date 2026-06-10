@@ -5,6 +5,13 @@
 //! API breakage. Leaf Kubernetes types (`LabelSelector`, `ResourceRequirements`,
 //! `PodSecurityContext`) are reused from `k8s-openapi` rather than re-invented.
 
+use std::collections::BTreeMap;
+
+use k8s_openapi::api::core::v1::{
+    Affinity, Capabilities, PodSecurityContext, ResourceRequirements, SeccompProfile,
+    SecurityContext, Toleration,
+};
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -119,7 +126,7 @@ pub enum RepositoryKind {
     ClusterRepository,
 }
 
-/// Discriminated reference from a consumer CR (`BackupConfig`, `Backup`,
+/// Discriminated reference from a consumer CR (`SnapshotPolicy`, `Snapshot`,
 /// `Restore`, `Maintenance`) to a `Repository` or `ClusterRepository`. ADR §3.2.
 ///
 /// When `kind == ClusterRepository`, `namespace` MUST be absent — enforced by the
@@ -194,6 +201,24 @@ pub struct CreateBehavior {
     /// kopia content hash algorithm for a freshly-created repository; creation-time only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
+    /// Reed-Solomon ECC parity guarding repo blobs against backend bit-rot
+    /// (`kopia repository create --ecc=... --ecc-overhead-percent=...`). Creation-time
+    /// only and immutable post-create (ADR-0005 §13(a), gated by §7). ADR-0005 §13(a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ecc: Option<Ecc>,
+}
+
+/// Reed-Solomon error-correcting-code parity for a freshly-created repository
+/// (ADR-0005 §13(a)). Both fields creation-time-fixed; immutable post-create (§7).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Ecc {
+    /// ECC algorithm, e.g. `REED-SOLOMON-CRC32` (`--ecc`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub algorithm: Option<String>,
+    /// Parity overhead as a percentage (`--ecc-overhead-percent`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overhead_percent: Option<i64>,
 }
 
 /// How a mover's kopia cache volume is provisioned. ADR §3.1.
@@ -209,7 +234,7 @@ pub enum CacheVolumeMode {
     Persistent,
 }
 
-/// Cache defaults inherited by `Backup`/`Restore` movers unless overridden. ADR §3.1.
+/// Cache defaults inherited by `Snapshot`/`Restore` movers unless overridden. ADR §3.1.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheDefaults {
@@ -263,12 +288,12 @@ impl CacheDefaults {
     }
 }
 
-/// Bounds on materialization of `origin: discovered` `Backup` CRs. ADR §3.1 `catalog`.
+/// Bounds on materialization of `origin: discovered` `Snapshot` CRs. ADR §3.1 `catalog`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogBounds {
-    /// How many discovered `Backup` CRs to keep materialized; bounds etcd footprint
-    /// for large repositories. Never deletes real snapshots (discovered backups are
+    /// How many discovered `Snapshot` CRs to keep materialized; bounds etcd footprint
+    /// for large repositories. Never deletes real snapshots (discovered snapshots are
     /// always `deletionPolicy: Retain`). ADR §3.1/§4.5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain: Option<CatalogRetain>,
@@ -276,20 +301,20 @@ pub struct CatalogBounds {
     /// (Go-style duration, e.g. `1h`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_interval: Option<String>,
-    /// Where to materialize discovered `Backup`s whose identity hostname does not
+    /// Where to materialize discovered `Snapshot`s whose identity hostname does not
     /// map to an allowed namespace (ClusterRepository only). ADR §3.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_namespace: Option<String>,
 }
 
-/// Bounds on the *number* of discovered `Backup` CRs kept materialized. ADR §3.1 `catalog.retain`.
+/// Bounds on the *number* of discovered `Snapshot` CRs kept materialized. ADR §3.1 `catalog.retain`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogRetain {
     /// Most-recent N per `username@hostname:path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_identity: Option<i64>,
-    /// Drop materialized discovered `Backup`s for snapshots older than this many days.
+    /// Drop materialized discovered `Snapshot`s for snapshots older than this many days.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age_days: Option<i64>,
 }
@@ -323,11 +348,13 @@ pub struct Retention {
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
     /// Override the `username` portion of `username@hostname:path`; absent uses the
-    /// resolved default. Templated with `tera` and pinned at admission (ADR §4.2).
+    /// resolved default (the repository's `identityDefaults` CEL expression, or the
+    /// object name). Used verbatim and pinned at admission (ADR §4.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     /// Override the `hostname` portion of `username@hostname:path`; absent uses the
-    /// resolved default. Templated with `tera` and pinned at admission (ADR §4.2).
+    /// resolved default (the repository's `identityDefaults` CEL expression, or the
+    /// namespace). Used verbatim and pinned at admission (ADR §4.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
 }
@@ -361,6 +388,11 @@ pub struct FailurePolicy {
 
 /// Per-recipe mover overrides (resources, cache, security context). ADR §3.3.
 ///
+/// These overlay the repository's [`MoverDefaults`] **field-wise** (recipe wins, the
+/// repo default fills, the hardened base underneath) via [`resolve_mover`] — they are
+/// merged, never replace-the-whole-context (ADR-0004 §2). A partial `securityContext`
+/// here can therefore only *tighten*; it never drops the hardened `drop:[ALL]`/seccomp.
+///
 /// Not `Eq`: embeds `k8s-openapi` types (`ResourceRequirements`, `SecurityContext`)
 /// which only implement `PartialEq`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, JsonSchema)]
@@ -373,7 +405,8 @@ pub struct MoverSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<CacheDefaults>,
     /// Security context applied to the mover **container** (`runAsUser`/`runAsGroup`,
-    /// capabilities, seccomp, …).
+    /// capabilities, seccomp, …). Merged field-wise over `moverDefaults.securityContext`
+    /// and the hardened base (ADR-0004 §2) — set only the fields you want to change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_context: Option<k8s_openapi::api::core::v1::SecurityContext>,
     /// Security context applied to the mover **pod** — notably `fsGroup`, which makes
@@ -389,6 +422,12 @@ pub struct MoverSpec {
     /// Opt-in: copy security context from a live workload pod. ADR §4.11.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherit_security_context_from: Option<PodSelector>,
+    /// Per-recipe override of `moverDefaults.ttlSecondsAfterFinished` — the
+    /// `Job.spec.ttlSecondsAfterFinished` for this recipe's mover Jobs so finished
+    /// backup/restore Jobs self-GC. Recipe wins over the repo default; when neither
+    /// is set a built-in default applies ([`DEFAULT_JOB_TTL_SECONDS`]). ADR-0005 §12.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds_after_finished: Option<i64>,
 }
 
 impl MoverSpec {
@@ -455,6 +494,369 @@ pub fn pod_security_context_is_elevated(
     psc.run_as_user == Some(0) || psc.run_as_non_root == Some(false)
 }
 
+/// The restricted-PSA-compatible **hardened** container security context (§4.11/G16):
+/// non-root, no privilege escalation, drop ALL caps, seccomp `RuntimeDefault`.
+///
+/// This is the LOWEST merge layer (ADR-0004 §2): `repo.moverDefaults.securityContext`
+/// then the recipe's `mover.securityContext` overlay it **field-wise**, so a partial
+/// override can only *tighten* — it never drops `capabilities.drop:[ALL]` /
+/// `seccompProfile`. Lives in `api` (not the controller) so the webhook and controller
+/// share one definition and both resolve the effective mover context identically.
+pub fn hardened_security_context() -> SecurityContext {
+    SecurityContext {
+        run_as_non_root: Some(true),
+        allow_privilege_escalation: Some(false),
+        read_only_root_filesystem: Some(false),
+        capabilities: Some(Capabilities {
+            drop: Some(vec!["ALL".to_string()]),
+            add: None,
+        }),
+        seccomp_profile: Some(SeccompProfile {
+            type_: "RuntimeDefault".to_string(),
+            localhost_profile: None,
+        }),
+        ..Default::default()
+    }
+}
+
+/// Deep-merge two [`Capabilities`]: each of `add`/`drop` is taken from `over` when set,
+/// else from `base`. So an `over` that sets only `add` keeps `base.drop` — an add-only
+/// override never silently drops the hardened `drop:[ALL]` (the bug ADR-0004 §2 cites).
+pub fn merge_capabilities(base: &Capabilities, over: &Capabilities) -> Capabilities {
+    Capabilities {
+        add: over.add.clone().or_else(|| base.add.clone()),
+        drop: over.drop.clone().or_else(|| base.drop.clone()),
+    }
+}
+
+/// Field-wise overlay of container [`SecurityContext`] `over` onto `base`: each `Some`
+/// field in `over` wins, unset fields inherit `base`; `capabilities` deep-merge via
+/// [`merge_capabilities`] (ADR-0004 §2).
+///
+/// The struct literal is **exhaustive** (no `..base` tail) on purpose: when the pinned
+/// k8s-openapi `SecurityContext` gains a field, this stops compiling until the new field
+/// is considered — the same discipline as the exhaustive-`match` enum thesis (§5.5).
+pub fn merge_security_context(base: &SecurityContext, over: &SecurityContext) -> SecurityContext {
+    SecurityContext {
+        allow_privilege_escalation: over
+            .allow_privilege_escalation
+            .or(base.allow_privilege_escalation),
+        app_armor_profile: over
+            .app_armor_profile
+            .clone()
+            .or_else(|| base.app_armor_profile.clone()),
+        capabilities: match (base.capabilities.as_ref(), over.capabilities.as_ref()) {
+            (Some(b), Some(o)) => Some(merge_capabilities(b, o)),
+            (b, o) => o.cloned().or_else(|| b.cloned()),
+        },
+        privileged: over.privileged.or(base.privileged),
+        proc_mount: over.proc_mount.clone().or_else(|| base.proc_mount.clone()),
+        read_only_root_filesystem: over
+            .read_only_root_filesystem
+            .or(base.read_only_root_filesystem),
+        run_as_group: over.run_as_group.or(base.run_as_group),
+        run_as_non_root: over.run_as_non_root.or(base.run_as_non_root),
+        run_as_user: over.run_as_user.or(base.run_as_user),
+        se_linux_options: over
+            .se_linux_options
+            .clone()
+            .or_else(|| base.se_linux_options.clone()),
+        seccomp_profile: over
+            .seccomp_profile
+            .clone()
+            .or_else(|| base.seccomp_profile.clone()),
+        windows_options: over
+            .windows_options
+            .clone()
+            .or_else(|| base.windows_options.clone()),
+    }
+}
+
+/// Field-wise overlay of pod [`PodSecurityContext`] `over` onto `base`. Exhaustive
+/// literal for the same reason as [`merge_security_context`].
+pub fn merge_pod_security_context(
+    base: &PodSecurityContext,
+    over: &PodSecurityContext,
+) -> PodSecurityContext {
+    PodSecurityContext {
+        app_armor_profile: over
+            .app_armor_profile
+            .clone()
+            .or_else(|| base.app_armor_profile.clone()),
+        fs_group: over.fs_group.or(base.fs_group),
+        fs_group_change_policy: over
+            .fs_group_change_policy
+            .clone()
+            .or_else(|| base.fs_group_change_policy.clone()),
+        run_as_group: over.run_as_group.or(base.run_as_group),
+        run_as_non_root: over.run_as_non_root.or(base.run_as_non_root),
+        run_as_user: over.run_as_user.or(base.run_as_user),
+        se_linux_change_policy: over
+            .se_linux_change_policy
+            .clone()
+            .or_else(|| base.se_linux_change_policy.clone()),
+        se_linux_options: over
+            .se_linux_options
+            .clone()
+            .or_else(|| base.se_linux_options.clone()),
+        seccomp_profile: over
+            .seccomp_profile
+            .clone()
+            .or_else(|| base.seccomp_profile.clone()),
+        supplemental_groups: over
+            .supplemental_groups
+            .clone()
+            .or_else(|| base.supplemental_groups.clone()),
+        supplemental_groups_policy: over
+            .supplemental_groups_policy
+            .clone()
+            .or_else(|| base.supplemental_groups_policy.clone()),
+        sysctls: over.sysctls.clone().or_else(|| base.sysctls.clone()),
+        windows_options: over
+            .windows_options
+            .clone()
+            .or_else(|| base.windows_options.clone()),
+    }
+}
+
+/// Per-key merge of two `limits`/`requests` quantity maps: `over` keys win, `base` keys
+/// fill. Returns `None` only when both are absent.
+fn merge_quantity_map(
+    base: Option<&BTreeMap<String, Quantity>>,
+    over: Option<&BTreeMap<String, Quantity>>,
+) -> Option<BTreeMap<String, Quantity>> {
+    match (base, over) {
+        (None, None) => None,
+        (Some(b), None) => Some(b.clone()),
+        (None, Some(o)) => Some(o.clone()),
+        (Some(b), Some(o)) => {
+            let mut merged = b.clone();
+            for (k, v) in o {
+                merged.insert(k.clone(), v.clone());
+            }
+            Some(merged)
+        }
+    }
+}
+
+/// Field-wise overlay of [`ResourceRequirements`]: `limits`/`requests` merge per-key
+/// (via `merge_quantity_map`); `claims` is taken from `over` when set, else `base`.
+pub fn merge_resources(
+    base: &ResourceRequirements,
+    over: &ResourceRequirements,
+) -> ResourceRequirements {
+    ResourceRequirements {
+        claims: over.claims.clone().or_else(|| base.claims.clone()),
+        limits: merge_quantity_map(base.limits.as_ref(), over.limits.as_ref()),
+        requests: merge_quantity_map(base.requests.as_ref(), over.requests.as_ref()),
+    }
+}
+
+/// `Option`-aware [`merge_security_context`] (handles the four `None`/`Some` cases).
+pub fn merge_security_context_opt(
+    base: Option<&SecurityContext>,
+    over: Option<&SecurityContext>,
+) -> Option<SecurityContext> {
+    match (base, over) {
+        (None, None) => None,
+        (Some(b), None) => Some(b.clone()),
+        (None, Some(o)) => Some(o.clone()),
+        (Some(b), Some(o)) => Some(merge_security_context(b, o)),
+    }
+}
+
+/// `Option`-aware [`merge_pod_security_context`].
+pub fn merge_pod_security_context_opt(
+    base: Option<&PodSecurityContext>,
+    over: Option<&PodSecurityContext>,
+) -> Option<PodSecurityContext> {
+    match (base, over) {
+        (None, None) => None,
+        (Some(b), None) => Some(b.clone()),
+        (None, Some(o)) => Some(o.clone()),
+        (Some(b), Some(o)) => Some(merge_pod_security_context(b, o)),
+    }
+}
+
+/// `Option`-aware [`merge_resources`].
+pub fn merge_resources_opt(
+    base: Option<&ResourceRequirements>,
+    over: Option<&ResourceRequirements>,
+) -> Option<ResourceRequirements> {
+    match (base, over) {
+        (None, None) => None,
+        (Some(b), None) => Some(b.clone()),
+        (None, Some(o)) => Some(o.clone()),
+        (Some(b), Some(o)) => Some(merge_resources(b, o)),
+    }
+}
+
+/// Repository-wide mover defaults inherited by **every** mover the repository spawns —
+/// bootstrap, backup, restore, maintenance — overridable per-recipe via `mover`
+/// (ADR-0004 §1). Replaces the former `cacheDefaults`: the cache lives at
+/// [`MoverDefaults::cache`] now.
+///
+/// `securityContext`/`podSecurityContext`/`resources`/`cache` resolve by **field-wise
+/// merge** (`hardened ⊂ moverDefaults ⊂ recipe`, ADR-0004 §2) via [`resolve_mover`];
+/// they are never replaced wholesale, so a repo-wide default composes with a partial
+/// per-recipe override. This is the single place a repository defines mover
+/// identity/hardening/resources/cache — closing the drift between maintenance and
+/// backup/restore movers and the bootstrap-mover gap (a filesystem/NFS repo on a
+/// non-`65532`-owned directory becomes bootstrappable with no special-case knob).
+///
+/// Not `Eq`: embeds `k8s-openapi` types (`SecurityContext`, `PodSecurityContext`,
+/// `ResourceRequirements`, `Toleration`, `Affinity`) which are `PartialEq` only.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MoverDefaults {
+    /// Container security-context base for every mover, merged *under* the recipe's
+    /// `mover.securityContext` and *over* the hardened default ([`hardened_security_context`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_context: Option<SecurityContext>,
+    /// Pod security-context base (notably `fsGroup`) for every mover, merged under the
+    /// recipe's `mover.podSecurityContext`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_security_context: Option<PodSecurityContext>,
+    /// Resource requests/limits base for the mover container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceRequirements>,
+    /// kopia cache defaults (the former repository `cacheDefaults`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheDefaults>,
+    /// Pod `nodeSelector` for every mover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_selector: Option<BTreeMap<String, String>>,
+    /// Pod tolerations for every mover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerations: Option<Vec<Toleration>>,
+    /// Pod affinity for every mover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affinity: Option<Affinity>,
+    /// `Job.spec.ttlSecondsAfterFinished` for every mover Job, so finished
+    /// backup/restore/maintenance Jobs self-GC (ADR-0005 §12). A recipe's
+    /// `mover` can override it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds_after_finished: Option<i64>,
+    /// Repository throttle limits (`kopia repository throttle set`) applied by every
+    /// mover after it connects, so a run doesn't saturate the link / hammer the
+    /// object store. ADR-0005 §13(e).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throttle: Option<Throttle>,
+}
+
+/// Built-in default `Job.spec.ttlSecondsAfterFinished` (1h) applied to a mover Job
+/// when neither `moverDefaults.ttlSecondsAfterFinished` nor the recipe's
+/// `mover.ttlSecondsAfterFinished` sets one, so finished backup/restore Jobs and
+/// their pods self-GC instead of lingering (ADR-0005 §12).
+pub const DEFAULT_JOB_TTL_SECONDS: i64 = 3600;
+
+/// Repository-wide throttling for a mover's kopia connection (ADR-0005 §13(e)).
+/// Each `None` leaves kopia's current limit. Maps to `kopia repository throttle set`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Throttle {
+    /// Cap upload throughput in bytes/sec (`--upload-bytes-per-second`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_bytes_per_second: Option<i64>,
+    /// Cap download throughput in bytes/sec (`--download-bytes-per-second`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_bytes_per_second: Option<i64>,
+    /// Cap read/list ops/sec (`--read-requests-per-second`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_ops_per_second: Option<i64>,
+    /// Cap write ops/sec (`--write-requests-per-second`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_ops_per_second: Option<i64>,
+}
+
+/// The fully-resolved mover configuration for a single run, after the 3-layer
+/// field-wise merge `hardened ⊂ repo.moverDefaults ⊂ recipe.mover` (ADR-0004 §1/§2).
+/// `security_context` is ALWAYS present (the hardened base guarantees it); the rest are
+/// `Some` only when some layer set them. The privileged-mover gate (§4.11/§G16) runs on
+/// `security_context`/`pod_security_context` *here* — the merged result — not on the raw
+/// recipe, so an elevation introduced by `moverDefaults` is still gated.
+pub struct ResolvedMover {
+    /// Merged container security context — always present (hardened base).
+    pub security_context: SecurityContext,
+    /// Merged pod security context, if any layer set one.
+    pub pod_security_context: Option<PodSecurityContext>,
+    /// Merged resource requirements, if any layer set them.
+    pub resources: Option<ResourceRequirements>,
+    /// Merged cache config, if any layer set it.
+    pub cache: Option<CacheDefaults>,
+    /// Pod node selector from `moverDefaults` (no per-recipe override surface today).
+    pub node_selector: Option<BTreeMap<String, String>>,
+    /// Pod tolerations from `moverDefaults`.
+    pub tolerations: Option<Vec<Toleration>>,
+    /// Pod affinity from `moverDefaults`.
+    pub affinity: Option<Affinity>,
+    /// Resolved Job TTL (recipe `mover.ttlSecondsAfterFinished` wins over
+    /// `moverDefaults.ttlSecondsAfterFinished`, falling back to
+    /// [`DEFAULT_JOB_TTL_SECONDS`]). Always `Some` so finished Jobs self-GC. §12.
+    pub ttl_seconds_after_finished: Option<i64>,
+    /// Resolved repository throttle (`moverDefaults.throttle`), if any. §13(e).
+    pub throttle: Option<Throttle>,
+}
+
+/// Resolve the effective mover configuration via the 3-layer field-wise merge
+/// `hardened ⊂ moverDefaults ⊂ recipe` (ADR-0004 §1/§2).
+///
+/// - `defaults`: the repository's `moverDefaults` (None when the repo sets none).
+/// - `recipe_sc`/`recipe_psc`: the recipe's **effective** container/pod context — the
+///   explicit `mover.securityContext`/`podSecurityContext`, OR the context the controller
+///   resolved from `inheritSecurityContextFrom`. Inheritance is mutually exclusive with
+///   explicit (webhook-enforced), so at most one is `Some`. Inherited context enters here
+///   as the *recipe layer*, NOT a whole-chain replacement — so the hardened base +
+///   `moverDefaults` still supply `drop:[ALL]`/seccomp and an inherited partial context
+///   can only tighten.
+/// - `recipe_resources`/`recipe_cache`: from `mover.resources` / `mover.cache`.
+///
+/// `node_selector`/`tolerations`/`affinity`/`ttl` flow from `moverDefaults` (no per-recipe
+/// surface for the first three today; TTL is overridable by the caller post-resolve).
+pub fn resolve_mover(
+    defaults: Option<&MoverDefaults>,
+    recipe_sc: Option<&SecurityContext>,
+    recipe_psc: Option<&PodSecurityContext>,
+    recipe_resources: Option<&ResourceRequirements>,
+    recipe_cache: Option<&CacheDefaults>,
+    recipe_ttl_seconds_after_finished: Option<i64>,
+) -> ResolvedMover {
+    let hardened = hardened_security_context();
+    // hardened ⊂ moverDefaults.securityContext
+    let sc_base = match defaults.and_then(|d| d.security_context.as_ref()) {
+        Some(d_sc) => merge_security_context(&hardened, d_sc),
+        None => hardened,
+    };
+    // (hardened ⊂ moverDefaults) ⊂ recipe.securityContext
+    let security_context = match recipe_sc {
+        Some(r) => merge_security_context(&sc_base, r),
+        None => sc_base,
+    };
+    ResolvedMover {
+        security_context,
+        pod_security_context: merge_pod_security_context_opt(
+            defaults.and_then(|d| d.pod_security_context.as_ref()),
+            recipe_psc,
+        ),
+        resources: merge_resources_opt(
+            defaults.and_then(|d| d.resources.as_ref()),
+            recipe_resources,
+        ),
+        cache: CacheDefaults::merge(defaults.and_then(|d| d.cache.as_ref()), recipe_cache),
+        node_selector: defaults.and_then(|d| d.node_selector.clone()),
+        tolerations: defaults.and_then(|d| d.tolerations.clone()),
+        affinity: defaults.and_then(|d| d.affinity.clone()),
+        // Recipe TTL wins over the repo default; a built-in default applies when
+        // neither sets one so every finished Job self-GCs (ADR-0005 §12).
+        ttl_seconds_after_finished: Some(
+            recipe_ttl_seconds_after_finished
+                .or_else(|| defaults.and_then(|d| d.ttl_seconds_after_finished))
+                .unwrap_or(DEFAULT_JOB_TTL_SECONDS),
+        ),
+        throttle: defaults.and_then(|d| d.throttle.clone()),
+    }
+}
+
 /// Selects workload pods by label. Reuses k8s-openapi `LabelSelector`. ADR §3.3 hooks.
 ///
 /// Not `Eq`: `LabelSelector` only implements `PartialEq`.
@@ -468,20 +870,20 @@ pub struct PodSelector {
     pub container: Option<String>,
 }
 
-/// Reference to a `BackupConfig` CR (used by `Backup.spec.configRef` and
-/// `BackupSchedule.spec.configRef`). May cross namespaces, subject to RBAC. ADR §3.4/§3.5.
+/// Reference to a `SnapshotPolicy` CR (used by `Snapshot.spec.policyRef` and
+/// `SnapshotSchedule.spec.policyRef`). May cross namespaces, subject to RBAC. ADR §3.4/§3.5.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ConfigRef {
-    /// Name of the referenced `BackupConfig`.
+pub struct PolicyRef {
+    /// Name of the referenced `SnapshotPolicy`.
     pub name: String,
-    /// Namespace of the `BackupConfig`; absent = same namespace as the referrer.
+    /// Namespace of the `SnapshotPolicy`; absent = same namespace as the referrer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
 }
 
-/// Generic name/namespace reference to another namespaced object — e.g. a `Backup`
-/// CR (`Restore.spec.source.backupRef`) or a PVC (`Restore.spec.target.pvcRef`). ADR §3.6.
+/// Generic name/namespace reference to another namespaced object — e.g. a `Snapshot`
+/// CR (`Restore.spec.source.snapshotRef`) or a PVC (`Restore.spec.target.pvcRef`). ADR §3.6.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectRef {
@@ -492,8 +894,8 @@ pub struct ObjectRef {
     pub namespace: Option<String>,
 }
 
-/// Lifecycle of the underlying kopia snapshot when its `Backup` CR is deleted.
-/// Shared by `BackupConfig.spec.defaultDeletionPolicy` and `Backup.spec.deletionPolicy`.
+/// Lifecycle of the underlying kopia snapshot when its `Snapshot` CR is deleted.
+/// Shared by `SnapshotPolicy.spec.defaultDeletionPolicy` and `Snapshot.spec.deletionPolicy`.
 /// ADR-0003 §4.5 / ADR-0001 §4.5.
 ///
 /// The reconciler distinguishes the three cases with an exhaustive `match` — Rust
@@ -517,12 +919,89 @@ pub enum DeletionPolicy {
     #[default]
     Delete,
     /// Default for `origin: discovered`. CR is removed; snapshot stays.
-    /// Forced via webhook for discovered backups; cannot be overridden.
+    /// Forced via webhook for discovered snapshots; cannot be overridden.
     Retain,
     /// CR is removed without contacting the repository at all (escape hatch
     /// for "the bucket is gone, just let me delete the CR"). Status records
     /// `orphaned: true` for the snapshot ID before removal.
     Orphan,
+}
+
+/// What happens to a repository's snapshots when a consuming **namespace** is
+/// deleted. Closed enum, default `Orphan` (fail-safe). ADR-0005 §5.
+///
+/// A `kubectl delete ns` must not silently destroy off-site backup history (and
+/// must not hang the namespace teardown on N `kopia snapshot delete` calls). So the
+/// repository owner opts *in* to cascade-delete; the default releases ownership
+/// (removes the finalizer) without touching the snapshots. This is distinct from a
+/// single `kubectl delete snapshot`, which still honors that `Snapshot`'s own
+/// `deletionPolicy`.
+///
+/// ```
+/// use kopiur_api::common::NamespaceDeletePolicy;
+///
+/// // Fail-safe: a deleted namespace orphans (keeps) snapshots by default.
+/// assert_eq!(NamespaceDeletePolicy::default(), NamespaceDeletePolicy::Orphan);
+/// // Bare PascalCase strings (plain unit enum).
+/// assert_eq!(serde_json::to_value(NamespaceDeletePolicy::Delete).unwrap(), "Delete");
+/// ```
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
+pub enum NamespaceDeletePolicy {
+    /// Release ownership (remove the `Snapshot` finalizers) without deleting the
+    /// underlying kopia snapshots. The fail-safe default — `kubectl delete ns` keeps
+    /// history.
+    #[default]
+    Orphan,
+    /// Cascade: when a namespace is deleted, the per-`Snapshot` `deletionPolicy`
+    /// applies (so produced snapshots are `kopia snapshot delete`d). Opt-in only.
+    Delete,
+}
+
+/// Repository access mode (ADR-0005 §11). A `ReadOnly` repository serves restores
+/// only — no backups, no maintenance — for decommissioning a backend or migrating
+/// between repositories without risking writes. Maps to kopia's read-only
+/// connection. Closed enum, default `ReadWrite`.
+///
+/// ```
+/// use kopiur_api::common::RepositoryMode;
+///
+/// assert_eq!(RepositoryMode::default(), RepositoryMode::ReadWrite);
+/// assert_eq!(serde_json::to_value(RepositoryMode::ReadOnly).unwrap(), "ReadOnly");
+/// // ReadOnly forbids writes (backups + maintenance); restores are allowed.
+/// assert!(!RepositoryMode::ReadOnly.allows_writes());
+/// assert!(RepositoryMode::ReadWrite.allows_writes());
+/// ```
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
+pub enum RepositoryMode {
+    /// Normal read-write repository (default): backups, restores, maintenance.
+    #[default]
+    ReadWrite,
+    /// Read-only: restores only. Backup Jobs and maintenance are refused. §11.
+    ReadOnly,
+}
+
+impl RepositoryMode {
+    /// Whether this mode permits write operations (backup Jobs + maintenance).
+    /// Pure + exhaustive so the single definition lives in one tested place.
+    pub fn allows_writes(&self) -> bool {
+        match self {
+            RepositoryMode::ReadWrite => true,
+            RepositoryMode::ReadOnly => false,
+        }
+    }
+}
+
+/// serde/schemars `default` for the repository `mode` field — `ReadWrite`
+/// (ADR-0005 §11). Named fn so it backs BOTH serde + schemars defaults.
+pub(crate) fn default_repository_mode() -> RepositoryMode {
+    RepositoryMode::ReadWrite
+}
+
+/// serde/schemars `default` for the repository `on_namespace_delete` field —
+/// `Orphan` (ADR-0005 §5). A named fn so it backs BOTH `#[serde(default = ...)]`
+/// and `#[schemars(default = ...)]`, emitting a real OpenAPI `default:`.
+pub(crate) fn default_namespace_delete_policy() -> NamespaceDeletePolicy {
+    NamespaceDeletePolicy::Orphan
 }
 
 /// A single cron entry with optional deterministic jitter. Shared by `Maintenance`'s
@@ -849,5 +1328,226 @@ mod tests {
         assert!(!security_context_is_elevated(&benign));
         assert!(pod_security_context_is_elevated(&pod_root));
         assert!(!pod_security_context_is_elevated(&fsgroup));
+    }
+
+    // --- moverDefaults field-wise merge (ADR-0004 §1/§2) ---
+
+    #[test]
+    fn resolve_mover_with_no_layers_is_the_hardened_default() {
+        let m = resolve_mover(None, None, None, None, None, None);
+        let sc = m.security_context;
+        assert_eq!(sc.run_as_non_root, Some(true));
+        assert_eq!(sc.allow_privilege_escalation, Some(false));
+        assert_eq!(sc.capabilities.unwrap().drop.unwrap(), vec!["ALL"]);
+        assert_eq!(sc.seccomp_profile.unwrap().type_, "RuntimeDefault");
+        assert!(m.pod_security_context.is_none());
+        assert!(m.resources.is_none());
+        assert!(m.cache.is_none());
+    }
+
+    #[test]
+    fn recipe_partial_override_only_tightens_keeping_hardening() {
+        // The de-hardening bug ADR-0004 §2 cites: a recipe that sets only runAsUser
+        // must NOT wipe the hardened drop:[ALL]/seccomp/escalation defaults.
+        let recipe = SecurityContext {
+            run_as_user: Some(1000),
+            ..Default::default()
+        };
+        let m = resolve_mover(None, Some(&recipe), None, None, None, None);
+        let sc = m.security_context;
+        assert_eq!(sc.run_as_user, Some(1000)); // recipe wins
+        assert_eq!(sc.run_as_non_root, Some(true)); // hardened preserved
+        assert_eq!(sc.allow_privilege_escalation, Some(false)); // hardened preserved
+        assert_eq!(sc.capabilities.unwrap().drop.unwrap(), vec!["ALL"]); // never lost
+        assert_eq!(sc.seccomp_profile.unwrap().type_, "RuntimeDefault");
+    }
+
+    #[test]
+    fn three_layer_precedence_hardened_then_defaults_then_recipe() {
+        let defaults = MoverDefaults {
+            security_context: Some(SecurityContext {
+                run_as_group: Some(568),
+                run_as_user: Some(568),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let recipe = SecurityContext {
+            run_as_user: Some(1000), // recipe overrides the moverDefaults runAsUser
+            ..Default::default()
+        };
+        let m = resolve_mover(Some(&defaults), Some(&recipe), None, None, None, None);
+        let sc = m.security_context;
+        assert_eq!(sc.run_as_user, Some(1000)); // recipe wins over defaults
+        assert_eq!(sc.run_as_group, Some(568)); // from moverDefaults
+        assert_eq!(sc.run_as_non_root, Some(true)); // from hardened base
+        assert_eq!(sc.capabilities.unwrap().drop.unwrap(), vec!["ALL"]);
+    }
+
+    #[test]
+    fn add_only_capabilities_override_keeps_hardened_drop_all() {
+        // Deep-merge: a recipe adding NET_BIND_SERVICE (with no `drop`) must keep the
+        // hardened drop:[ALL] (the precise bug ADR-0004 §2 calls out).
+        let recipe = SecurityContext {
+            capabilities: Some(Capabilities {
+                add: Some(vec!["NET_BIND_SERVICE".into()]),
+                drop: None,
+            }),
+            ..Default::default()
+        };
+        let m = resolve_mover(None, Some(&recipe), None, None, None, None);
+        let caps = m.security_context.capabilities.unwrap();
+        assert_eq!(caps.add.unwrap(), vec!["NET_BIND_SERVICE"]);
+        assert_eq!(caps.drop.unwrap(), vec!["ALL"]); // hardened drop survives
+    }
+
+    #[test]
+    fn pod_security_context_merges_fsgroup_from_defaults_with_recipe() {
+        let defaults = MoverDefaults {
+            pod_security_context: Some(PodSecurityContext {
+                fs_group: Some(568),
+                fs_group_change_policy: Some("OnRootMismatch".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let recipe_psc = PodSecurityContext {
+            run_as_user: Some(1000),
+            ..Default::default()
+        };
+        let m = resolve_mover(Some(&defaults), None, Some(&recipe_psc), None, None, None);
+        let psc = m.pod_security_context.unwrap();
+        assert_eq!(psc.fs_group, Some(568)); // from defaults
+        assert_eq!(
+            psc.fs_group_change_policy.as_deref(),
+            Some("OnRootMismatch")
+        );
+        assert_eq!(psc.run_as_user, Some(1000)); // from recipe
+    }
+
+    #[test]
+    fn resources_merge_per_key_with_recipe_winning() {
+        use std::collections::BTreeMap;
+        let defaults = MoverDefaults {
+            resources: Some(ResourceRequirements {
+                requests: Some(BTreeMap::from([
+                    ("cpu".to_string(), Quantity("100m".into())),
+                    ("memory".to_string(), Quantity("128Mi".into())),
+                ])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let recipe_res = ResourceRequirements {
+            requests: Some(BTreeMap::from([(
+                "cpu".to_string(),
+                Quantity("500m".into()),
+            )])),
+            ..Default::default()
+        };
+        let m = resolve_mover(Some(&defaults), None, None, Some(&recipe_res), None, None);
+        let req = m.resources.unwrap().requests.unwrap();
+        assert_eq!(req["cpu"].0, "500m"); // recipe wins
+        assert_eq!(req["memory"].0, "128Mi"); // defaults fills
+    }
+
+    #[test]
+    fn privileged_gate_fires_on_merged_root_from_defaults_but_not_benign() {
+        // moverDefaults setting runAsUser:0 produces a privileged merged context even
+        // with no recipe override — the gate must see the merged result.
+        let root_defaults = MoverDefaults {
+            security_context: Some(SecurityContext {
+                run_as_user: Some(0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let m = resolve_mover(Some(&root_defaults), None, None, None, None, None);
+        assert!(requires_privilege_resolved(
+            Some(&m.security_context),
+            m.pod_security_context.as_ref(),
+            None
+        ));
+
+        // A benign merge (hardened base only) must NOT trip the gate.
+        let benign = resolve_mover(None, None, None, None, None, None);
+        assert!(!requires_privilege_resolved(
+            Some(&benign.security_context),
+            benign.pod_security_context.as_ref(),
+            None
+        ));
+    }
+
+    #[test]
+    fn mover_defaults_flows_cache_node_selector_and_ttl() {
+        let defaults = MoverDefaults {
+            cache: Some(CacheDefaults {
+                capacity: Some("10Gi".into()),
+                ..Default::default()
+            }),
+            node_selector: Some(std::collections::BTreeMap::from([(
+                "disktype".to_string(),
+                "ssd".to_string(),
+            )])),
+            ttl_seconds_after_finished: Some(3600),
+            ..Default::default()
+        };
+        let m = resolve_mover(Some(&defaults), None, None, None, None, None);
+        assert_eq!(m.cache.unwrap().capacity.as_deref(), Some("10Gi"));
+        assert_eq!(m.node_selector.unwrap()["disktype"], "ssd");
+        assert_eq!(m.ttl_seconds_after_finished, Some(3600));
+    }
+
+    // --- §12 mover Job TTL precedence (recipe over default over built-in) ---
+
+    #[test]
+    fn ttl_precedence_recipe_over_default_over_builtin() {
+        // Built-in default when neither sets one (so finished Jobs always self-GC).
+        let none = resolve_mover(None, None, None, None, None, None);
+        assert_eq!(
+            none.ttl_seconds_after_finished,
+            Some(DEFAULT_JOB_TTL_SECONDS)
+        );
+
+        // moverDefaults sets it → used when the recipe doesn't override.
+        let defaults = MoverDefaults {
+            ttl_seconds_after_finished: Some(7200),
+            ..Default::default()
+        };
+        let from_default = resolve_mover(Some(&defaults), None, None, None, None, None);
+        assert_eq!(from_default.ttl_seconds_after_finished, Some(7200));
+
+        // Recipe override wins over the repo default.
+        let from_recipe = resolve_mover(Some(&defaults), None, None, None, None, Some(900));
+        assert_eq!(from_recipe.ttl_seconds_after_finished, Some(900));
+
+        // Recipe override alone (no repo default) also wins over the built-in.
+        let recipe_only = resolve_mover(None, None, None, None, None, Some(120));
+        assert_eq!(recipe_only.ttl_seconds_after_finished, Some(120));
+    }
+
+    // --- §13(e) throttle flows from moverDefaults into ResolvedMover ---
+
+    #[test]
+    fn resolve_mover_carries_throttle_from_defaults() {
+        let defaults = MoverDefaults {
+            throttle: Some(Throttle {
+                upload_bytes_per_second: Some(10_000_000),
+                download_bytes_per_second: None,
+                read_ops_per_second: Some(50),
+                write_ops_per_second: None,
+            }),
+            ..Default::default()
+        };
+        let m = resolve_mover(Some(&defaults), None, None, None, None, None);
+        let t = m.throttle.expect("throttle");
+        assert_eq!(t.upload_bytes_per_second, Some(10_000_000));
+        assert_eq!(t.read_ops_per_second, Some(50));
+        // Absent on a repo with no throttle.
+        assert!(
+            resolve_mover(None, None, None, None, None, None)
+                .throttle
+                .is_none()
+        );
     }
 }

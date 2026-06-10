@@ -23,7 +23,7 @@ Kopiur ships **three images** wired into **two Deployments** plus a per-Job imag
 - **controller** — the operator (reconcilers); serves `/metrics`, `/healthz`, `/readyz`.
 - **webhook** — a _separate_ axum admission Deployment (validating + mutating).
 - **mover** — not a Deployment. The controller stamps this image into every
-  `Backup` / `Restore` / `Maintenance` **Job** it creates.
+  `Snapshot` / `Restore` / `Maintenance` **Job** it creates.
 
 So the values file is organized top-down as: images → install scope → the two
 Deployments (`controller`, `webhook`) → cross-cutting concerns (metrics, OTLP,
@@ -94,14 +94,14 @@ tenant namespaces reference. `ClusterRepository` is a cluster-scoped kind, so a
 namespaced `Role` literally cannot reach it; that's why it's only reconciled in
 `cluster` scope.
 
-`installCRDs: true` renders the 7 CRDs as Helm **templates** (not via the special
+`installCRDs: true` renders the 8 CRDs as Helm **templates** (not via the special
 `crds/` directory), so the flag is honored and `helm upgrade` re-applies schema
 changes for the alpha API.
 
 /// warning | Templated CRDs are deleted on `helm uninstall`
 
 Because the CRDs are templates, `helm uninstall` removes them **and every
-`kopiur.home-operations.com` object in the cluster** (Repositories, Backups, …).
+`kopiur.home-operations.com` object in the cluster** (Repositories, Snapshots, …).
 For an alpha API this is the intended, predictable behavior. To decouple CRD
 lifecycle from the release (GitOps), set `installCRDs: false` and apply
 `deploy/crds/all-crds.yaml` out of band with `kubectl apply --server-side`. See
@@ -198,7 +198,7 @@ The webhook is a **separate** Deployment + Service (ADR §5.3); the Service maps
   states unrepresentable at admission time.
 - **`failurePolicy: Fail`** — fail-closed is the default and the right call for a
   backup operator (ADR §7.2): if the webhook is down, reject the write rather than
-  silently admit an unvalidated `Backup`.
+  silently admit an unvalidated `Snapshot`.
 - **`serviceMonitor`** — the webhook serves `/metrics` on its TLS port; scraping
   it needs `insecureSkipVerify` (it serves a self-signed cert by default).
 
@@ -236,7 +236,7 @@ Prometheus Operator and Grafana:
   Prometheus-Operator CRDs); set `.labels` to match your `serviceMonitorSelector`.
 - **`metrics.prometheusRule.enabled`** — ship the kopiur alert rules.
   `backupStaleAfterSeconds` (default 48h) is the age after which a
-  `BackupConfig`'s last success is considered stale.
+  `SnapshotPolicy`'s last success is considered stale.
 - **`grafanaDashboard.enabled`** — ship the dashboard. By default it's a
   sidecar-discoverable `ConfigMap` (source: `deploy/dashboards/kopiur.json`); flip
   `grafanaDashboard.grafanaOperator.enabled` to render a grafana-operator
@@ -292,7 +292,7 @@ itself.
 `podSecurityContext` / `securityContext` here govern the **controller and webhook
 pods**. The UID/GID that a **mover** Job runs as — which has to match the
 ownership of the data being backed up so it can read it — is configured
-per-`BackupConfig` / per-`Restore`, not here. See
+per-`SnapshotPolicy` / per-`Restore`, not here. See
 [Permissions, UID & GID](permissions.md) and [Security context](security-context.md).
 
 ///

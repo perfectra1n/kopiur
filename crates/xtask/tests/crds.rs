@@ -33,11 +33,12 @@ fn every_crd_roundtrips_with_expected_group_version_and_scope() {
     let expected = [
         ("repositories", "Namespaced"),
         ("clusterrepositories", "Cluster"),
-        ("backupconfigs", "Namespaced"),
-        ("backups", "Namespaced"),
-        ("backupschedules", "Namespaced"),
+        ("snapshotpolicies", "Namespaced"),
+        ("snapshots", "Namespaced"),
+        ("snapshotschedules", "Namespaced"),
         ("restores", "Namespaced"),
         ("maintenances", "Namespaced"),
+        ("repositoryreplications", "Namespaced"),
     ];
 
     for (plural, scope) in expected {
@@ -63,7 +64,7 @@ fn every_crd_roundtrips_with_expected_group_version_and_scope() {
 }
 
 #[test]
-fn bundle_contains_all_seven_crds() {
+fn bundle_contains_all_eight_crds() {
     let artifacts = xtask::crds::artifacts().expect("generate CRD artifacts");
     let bundle = artifacts
         .iter()
@@ -71,7 +72,7 @@ fn bundle_contains_all_seven_crds() {
         .expect("missing all-crds.yaml bundle");
 
     let docs: Vec<&str> = bundle.content.split("\n---\n").collect();
-    assert_eq!(docs.len(), 7, "bundle should hold 7 CRD documents");
+    assert_eq!(docs.len(), 8, "bundle should hold 8 CRD documents");
 
     // Every document parses as a CRD.
     for (i, doc) in docs.iter().enumerate() {

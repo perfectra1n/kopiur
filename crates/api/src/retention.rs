@@ -1,8 +1,8 @@
 //! Grandfather-father-son (GFS) retention selection (ADR §4.4).
 //!
-//! `BackupConfig.spec.retention` is the **only** successful-retention driver
+//! `SnapshotPolicy.spec.retention` is the **only** successful-retention driver
 //! (SKILL "Retention is GFS-only"). The operator periodically runs this selection
-//! over the `Backup` CRs for one `(identity, source)` tuple and deletes the CRs
+//! over the `Snapshot` CRs for one `(identity, source)` tuple and deletes the CRs
 //! that fall outside the kept set; each deleted CR's `deletionPolicy` then governs
 //! the snapshot (§4.5). This module is the pure selection kernel — no kube types,
 //! no clock — so it's unit-testable with lightweight fakes.
@@ -33,13 +33,20 @@ use crate::common::Retention;
 use chrono::{DateTime, Datelike, Utc};
 use std::collections::BTreeSet;
 
-/// Anything that can stand in for a `Backup` during retention selection. Kept tiny
-/// so tests use trivial fakes instead of constructing full `Backup` CRs.
-pub trait BackupLike {
+/// Anything that can stand in for a `Snapshot` during retention selection. Kept tiny
+/// so tests use trivial fakes instead of constructing full `Snapshot` CRs.
+pub trait SnapshotLike {
     /// The snapshot's completion time — the GFS bucketing key (ADR §4.4 step 2).
     fn end_time(&self) -> DateTime<Utc>;
     /// A stable identifier (kopia snapshot ID or CR name) used in the result sets.
     fn id(&self) -> &str;
+    /// Whether this snapshot is pinned (`Snapshot.spec.pin`, ADR-0005 §13(c)). A
+    /// pinned snapshot is exempt from GFS retention: [`select_kept`] never places it
+    /// in `delete`, regardless of the policy. Defaults `false` so existing impls
+    /// (and discovered snapshots) keep their behavior.
+    fn pinned(&self) -> bool {
+        false
+    }
 }
 
 /// The outcome of a GFS selection: which ids to keep and which to delete. Both are
@@ -109,12 +116,12 @@ where
 ///
 /// ```
 /// use chrono::{DateTime, TimeZone, Utc};
-/// use kopiur_api::{select_kept, BackupLike};
+/// use kopiur_api::{select_kept, SnapshotLike};
 /// use kopiur_api::common::Retention;
 ///
-/// // A trivial fake honoring BackupLike — no kube CRs needed for selection.
+/// // A trivial fake honoring SnapshotLike — no kube CRs needed for selection.
 /// struct Snap { id: String, end: DateTime<Utc> }
-/// impl BackupLike for Snap {
+/// impl SnapshotLike for Snap {
 ///     fn end_time(&self) -> DateTime<Utc> { self.end }
 ///     fn id(&self) -> &str { &self.id }
 /// }
@@ -132,7 +139,7 @@ where
 /// assert_eq!(kept.keep, vec!["d24", "d23"]); // newest-first
 /// assert_eq!(kept.delete, vec!["d22"]);
 /// ```
-pub fn select_kept<T: BackupLike>(backups: &[T], policy: &Retention) -> KeptSet {
+pub fn select_kept<T: SnapshotLike>(backups: &[T], policy: &Retention) -> KeptSet {
     if backups.is_empty() {
         return KeptSet::default();
     }
@@ -174,7 +181,10 @@ pub fn select_kept<T: BackupLike>(backups: &[T], policy: &Retention) -> KeptSet 
     let mut keep = Vec::new();
     let mut delete = Vec::new();
     for &idx in &order {
-        if keep_idx.contains(&idx) {
+        // A pinned snapshot is exempt from GFS retention (ADR-0005 §13(c)): it always
+        // survives a prune even when no bucket selected it — kopia would also refuse to
+        // expire it. Kept newest-first alongside bucket-kept ids.
+        if keep_idx.contains(&idx) || backups[idx].pinned() {
             keep.push(backups[idx].id().to_string());
         } else {
             delete.push(backups[idx].id().to_string());
@@ -188,17 +198,21 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    /// Minimal fake honoring `BackupLike` — no kube CRs in retention tests.
+    /// Minimal fake honoring `SnapshotLike` — no kube CRs in retention tests.
     struct Fake {
         id: String,
         end: DateTime<Utc>,
+        pinned: bool,
     }
-    impl BackupLike for Fake {
+    impl SnapshotLike for Fake {
         fn end_time(&self) -> DateTime<Utc> {
             self.end
         }
         fn id(&self) -> &str {
             &self.id
+        }
+        fn pinned(&self) -> bool {
+            self.pinned
         }
     }
 
@@ -209,6 +223,14 @@ mod tests {
         Fake {
             id: id.into(),
             end: t,
+            pinned: false,
+        }
+    }
+    fn pinned(id: &str, t: DateTime<Utc>) -> Fake {
+        Fake {
+            id: id.into(),
+            end: t,
+            pinned: true,
         }
     }
 
@@ -347,6 +369,31 @@ mod tests {
         let got = select_kept(&backups, &policy(None, None, None, None, Some(2), None));
         // keepMonthly:2 → newest of May (may-late) and newest of April (apr).
         assert_eq!(as_set(&got.keep), ["may-late", "apr"].into_iter().collect());
+    }
+
+    #[test]
+    fn pinned_snapshot_survives_a_prune_that_would_delete_it() {
+        // ADR-0005 §13(c): a pinned snapshot is exempt from GFS retention. With
+        // keepLatest:1, the two older snapshots would normally be deleted — but the
+        // pinned one must survive while the unpinned one is pruned.
+        let backups = vec![
+            fake("newest", at(2026, 5, 24, 2, 0)),
+            pinned("pinned-old", at(2026, 5, 20, 2, 0)),
+            fake("unpinned-old", at(2026, 5, 19, 2, 0)),
+        ];
+        let got = select_kept(&backups, &policy(Some(1), None, None, None, None, None));
+        let keep = as_set(&got.keep);
+        let del = as_set(&got.delete);
+        assert!(keep.contains("newest"), "keepLatest:1 keeps the newest");
+        assert!(
+            keep.contains("pinned-old"),
+            "a pinned snapshot must survive a prune that would otherwise delete it"
+        );
+        assert!(
+            del.contains("unpinned-old"),
+            "the unpinned older snapshot is pruned"
+        );
+        assert!(!del.contains("pinned-old"), "pinned is never in delete");
     }
 
     #[test]

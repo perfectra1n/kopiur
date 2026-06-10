@@ -1,6 +1,6 @@
 # ADR-0004 — Breaking CRD & Field Renames
 
-- **Status:** Proposed
+- **Status:** Accepted / Implemented
 - **Date:** 2026-06-09
 - **Deciders:** kopiur maintainers
 - **Supersedes:** ADR-0003 §3.1 (cache defaults), §4.2 (identity templating)
@@ -13,16 +13,16 @@
 
 Two reshape needs surfaced, independent of any new capability:
 
-- **Mover config is per-recipe, repetitive, and replace-not-merge.** `securityContext`/`podSecurityContext`/`resources`/`cache` are set on every `BackupConfig`/`Restore`/`Maintenance`, are identical per repository, and drift (observed: a maintenance mover with `seccompProfile`, a sibling restore mover without). The connect/create (bootstrap) Job has *no* override path (`Repository` exposes only `maintenance.mover`), so a filesystem/NFS repo on a non-`65532`-owned directory can't bootstrap. And `mover.securityContext` *replaces* the hardened default (`build_job` does `unwrap_or_else(default_security_context)`), so a partial override silently drops `capabilities.drop:[ALL]`/`seccompProfile` — the doc comment claims "merged," but the code doesn't.
+- **Mover config is per-recipe, repetitive, and replace-not-merge.** `securityContext`/`podSecurityContext`/`resources`/`cache` are set on every `SnapshotPolicy`/`Restore`/`Maintenance`, are identical per repository, and drift (observed: a maintenance mover with `seccompProfile`, a sibling restore mover without). The connect/create (bootstrap) Job has *no* override path (`Repository` exposes only `maintenance.mover`), so a filesystem/NFS repo on a non-`65532`-owned directory can't bootstrap. And `mover.securityContext` *replaces* the hardened default (`build_job` does `unwrap_or_else(default_security_context)`), so a partial override silently drops `capabilities.drop:[ALL]`/`seccompProfile` — the doc comment claims "merged," but the code doesn't.
 - **Names and field layout diverged from Kopia.** Three kinds already use Kopia's vocabulary (`Repository`/`Restore`/`Maintenance`); the `Backup*` kinds are generic. Reference fields (`configRef`/`backupRef`/`fromConfig`) name the old kinds. `BackupConfig` nests `compression`/`ignore`/`splitter` under an inner `policy` block (a future `policy.policy`) and carries a `policy.splitter` with no Kopia equivalent (the object splitter is repository-global). Identity templating uses a bespoke Jinja2 engine (ADR-0003 §4.2) rather than CEL.
 
 ## Decision
 
 ### A. Mover configuration restructure
 
-#### §1 — `moverDefaults` (rename `cacheDefaults` → `moverDefaults` + inheritable mover config)
+#### §1 — `moverDefaults` (rename `moverDefaults.cache` → `moverDefaults` + inheritable mover config)
 
-`Repository.spec.cacheDefaults` is **removed** and replaced by a `moverDefaults` block on `Repository`/`ClusterRepository`:
+`Repository.spec.moverDefaults.cache` is **removed** and replaced by a `moverDefaults` block on `Repository`/`ClusterRepository`:
 
 ```yaml
 spec:
@@ -30,11 +30,11 @@ spec:
     securityContext: {...}       # container
     podSecurityContext: {...}    # pod (fsGroup, …)
     resources: {...}
-    cache: {...}                 # the former cacheDefaults
+    cache: {...}                 # the former moverDefaults.cache
     nodeSelector / tolerations / affinity: {...}
 ```
 
-`moverDefaults` is the **base for every mover the repository spawns — bootstrap, backup, restore, maintenance** — overridable per-recipe via `mover`. This closes the bootstrap gap (the connect/create Job inherits it, so a filesystem repo on a non-`65532`-owned directory is bootstrappable with no special-case knob). It is the minimal feature the `cacheDefaults` rename requires to be meaningful; **further `moverDefaults` fields (throttle, upload parallelism) are ADR-0005.**
+`moverDefaults` is the **base for every mover the repository spawns — bootstrap, backup, restore, maintenance** — overridable per-recipe via `mover`. This closes the bootstrap gap (the connect/create Job inherits it, so a filesystem repo on a non-`65532`-owned directory is bootstrappable with no special-case knob). It is the minimal feature the `moverDefaults.cache` rename requires to be meaningful; **further `moverDefaults` fields (throttle, upload parallelism) are ADR-0005.**
 
 #### §2 — Layered, field-wise merge of mover security contexts
 
@@ -74,12 +74,12 @@ A full `api`-crate pass confirms most fields already match Kopia and **stay unch
 
 #### §5 — Identity templating moves to CEL (the `*Expr` convention)
 
-`ClusterRepository.identityDefaults.{hostnameTemplate, usernameTemplate}` (today Jinja2, ADR-0003 §4.2) become **`{hostnameExpr, usernameExpr}`** — CEL evaluated in-controller via [`cel-rust`](https://github.com/cel-rust/cel-rust), suffixed `*Expr` (the kromgo `valueExpr`/`colorExpr` convention):
+`ClusterRepository.identityDefaults.{hostnameExpr, usernameExpr}` (today Jinja2, ADR-0003 §4.2) become **`{hostnameExpr, usernameExpr}`** — CEL evaluated in-controller via [`cel-rust`](https://github.com/cel-rust/cel-rust), suffixed `*Expr` (the kromgo `valueExpr`/`colorExpr` convention):
 
 ```yaml
 identityDefaults:
   hostnameExpr: "namespace"
-  usernameExpr: "namespace + '-' + configName"
+  usernameExpr: "namespace + '-' + policyName"
 ```
 
 A `SnapshotPolicy` named `atuin` in namespace `default` then resolves to the kopia identity `default-atuin@default:/pvc/atuin`. Conditionals and label access come for free:
@@ -87,21 +87,21 @@ A `SnapshotPolicy` named `atuin` in namespace `default` then resolves to the kop
 ```yaml
 identityDefaults:
   hostnameExpr: "'team' in labels ? labels['team'] : namespace"
-  usernameExpr: "namespace + '-' + configName + (labels['env'] == 'prod' ? '-prod' : '')"
+  usernameExpr: "namespace + '-' + policyName + (labels['env'] == 'prod' ? '-prod' : '')"
 ```
 
-This drops the Jinja2 dependency / injection surface. It establishes the minimal CEL foundation: each `*Expr` returns a typed value (here `string`) and documents its CEL **environment** — `namespace`, `configName`, the policy's `labels`/`annotations` — validated at admission so a typo or out-of-scope variable is rejected on `kubectl apply`, with evaluation bounded by CEL's **cost budget**; CEL is sandboxed (no I/O, no arbitrary code). **Broader CEL uses — `successExpr`, `*MatchExpr` selectors, `x-kubernetes-validations` — are ADR-0005**, per the split rule: the foundation the identity rename needs is here; its further development is in 0005.
+This drops the Jinja2 dependency / injection surface. It establishes the minimal CEL foundation: each `*Expr` returns a typed value (here `string`) and documents its CEL **environment** — `namespace`, `policyName`, the policy's `labels`/`annotations` — validated at admission so a typo or out-of-scope variable is rejected on `kubectl apply`, with evaluation bounded by CEL's **cost budget**; CEL is sandboxed (no I/O, no arbitrary code). **Broader CEL uses — `successExpr`, `*MatchExpr` selectors, `x-kubernetes-validations` — are ADR-0005**, per the split rule: the foundation the identity rename needs is here; its further development is in 0005.
 
 ## Breaking changes (single cut)
 
 All land together; no aliases or fallbacks.
 
-- `cacheDefaults` removed → `moverDefaults.cache` (§1).
+- `moverDefaults.cache` removed → `moverDefaults.cache` (§1).
 - `mover.securityContext`/`podSecurityContext` now **merge** over the hardened baseline instead of replacing it (§2) — can only tighten.
 - Kinds renamed: `BackupConfig`/`Backup`/`BackupSchedule` → `SnapshotPolicy`/`Snapshot`/`SnapshotSchedule` (§3).
 - Reference fields renamed: `configRef → policyRef`, `source.backupRef → snapshotRef`, `source.fromConfig → fromPolicy` (§4).
 - `SnapshotPolicy` inner `policy` flattened: `compression`/`files`(was `ignore`: `paths→ignoreRules`, `cacheDirs→ignoreCacheDirs`)/`extraArgs` top-level; `policy.splitter` removed (§4).
-- Identity templating Jinja2 → CEL: `identityDefaults.{hostnameTemplate→hostnameExpr, usernameTemplate→usernameExpr}` (§5).
+- Identity templating Jinja2 → CEL: `identityDefaults.{hostnameExpr→hostnameExpr, usernameExpr→usernameExpr}` (§5).
 
 ## Consequences
 
@@ -109,11 +109,11 @@ All land together; no aliases or fallbacks.
 
 **Costs.** Everything here is breaking — acceptable pre-`v1`, landed in one cut. §5 adds a `cel-rust` dependency.
 
-**Neutral.** `moverDefaults` is structurally a generalization of `cacheDefaults`; recipes that set everything inline keep working (modulo the merge in §2).
+**Neutral.** `moverDefaults` is structurally a generalization of `moverDefaults.cache`; recipes that set everything inline keep working (modulo the merge in §2).
 
 ## Alternatives considered
 
 - **Keep per-recipe mover config / replace semantics + an admission warning.** Rejected — drift, the un-fixable bootstrap mover, and silent de-hardening are the motivation; merge makes the safe outcome the default.
-- **Deprecated aliases for `cacheDefaults`/the old kinds.** Rejected on the pre-release principle — break cleanly now rather than carry two spellings into `v1`.
+- **Deprecated aliases for `moverDefaults.cache`/the old kinds.** Rejected on the pre-release principle — break cleanly now rather than carry two spellings into `v1`.
 - **Bare `Policy`; fold schedule into the policy (Kopia-internal).** Rejected — `Policy` is overloaded; the recipe/invocation/schedule split is a deliberate improvement over Kopia.
 - **Keep Jinja2 identity templating.** Rejected — one sandboxed, k8s-native expression language (CEL) over a bespoke template engine.

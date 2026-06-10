@@ -9,16 +9,16 @@
 //! but, unlike the other workload namespaces, **no** credentials Secret — so a
 //! mover there can only run if the operator projects the repository's Secret in.
 //! `credentialProjection` is a consumer-side opt-in, so it is exercised on each of
-//! the three consumers (`BackupConfig`, `Restore`, `Maintenance`).
+//! the three consumers (`SnapshotPolicy`, `Restore`, `Maintenance`).
 //!
 //! Scenarios, asserting real operator output:
 //!
-//! 1. **BackupConfig projection ON → Backup succeeds where no creds Secret exists.**
+//! 1. **SnapshotPolicy projection ON → Snapshot succeeds where no creds Secret exists.**
 //!    The operator projects a kopiur-managed `<backup>-creds-0` Secret, owned by the
-//!    Backup; the mover runs and the Backup reaches `Succeeded` with a real snapshot.
-//! 2. **BackupConfig projection OFF → Backup blocks (guards the default).** The
-//!    Secret is absent, so the Backup stays `Pending` with `CredentialsAvailable=False`.
-//! 3. **Restore projection ON → Restore Completes.** A projection-on Backup seeds a
+//!    Snapshot; the mover runs and the Snapshot reaches `Succeeded` with a real snapshot.
+//! 2. **SnapshotPolicy projection OFF → Snapshot blocks (guards the default).** The
+//!    Secret is absent, so the Snapshot stays `Pending` with `CredentialsAvailable=False`.
+//! 3. **Restore projection ON → Restore Completes.** A projection-on Snapshot seeds a
 //!    snapshot; a projection-on `Restore` then restores it into the creds-less
 //!    namespace, projecting its own `<restore>-creds-0` Secret.
 //! 4. **Maintenance projection ON → creds projected.** A projection-on `Maintenance`
@@ -37,7 +37,7 @@ use serde::de::DeserializeOwned;
 use k8s_openapi::api::core::v1::{Secret, ServiceAccount};
 use k8s_openapi::api::rbac::v1::RoleBinding;
 
-use kopiur_api::{Backup, BackupConfig, ClusterRepository, Maintenance, Restore};
+use kopiur_api::{ClusterRepository, Maintenance, Restore, Snapshot, SnapshotPolicy};
 use kopiur_e2e::consts::{PROJECTION_NS, SECRET_S3_CREDS};
 use kopiur_e2e::{E2E_NAMESPACE, Need, World, default_timeout, poll_interval, wait_until};
 
@@ -51,8 +51,12 @@ fn cr<T: DeserializeOwned>(v: serde_json::Value) -> T {
 }
 
 /// A cluster-scoped S3 `ClusterRepository` whose creds live in the operator
-/// namespace, opened to all namespaces. (Projection is opt-in on the consuming
-/// `BackupConfig`, not the repository.)
+/// namespace, opened to all namespaces. Cross-namespace credential projection is
+/// fail-closed (ADR-0005 §8): it requires BOTH the consumer opt-in
+/// (`spec.credentialProjection.enabled` on the `SnapshotPolicy`/`Restore`/
+/// `Maintenance`) AND this owner-side allow (`credentialProjection.allowed: true`).
+/// These scenarios exercise the projection-ON path, so the owner must allow it; the
+/// fail-closed (allowed=false) path is covered in `adr_0004_0005.rs`.
 fn s3_cluster_repository_json(name: &str, bucket: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
@@ -72,17 +76,18 @@ fn s3_cluster_repository_json(name: &str, bucket: &str) -> serde_json::Value {
                 }
             },
             "create": { "enabled": true },
-            "allowedNamespaces": { "all": true }
+            "allowedNamespaces": { "all": true },
+            "credentialProjection": { "allowed": true }
         }
     })
 }
 
-/// A `BackupConfig` whose `credentialProjection.enabled = project` decides whether
+/// A `SnapshotPolicy` whose `credentialProjection.enabled = project` decides whether
 /// the operator copies the repo's creds into this namespace for its backup movers.
 fn backup_config_json(ns: &str, name: &str, repo_name: &str, project: bool) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupConfig",
+        "kind": "SnapshotPolicy",
         "metadata": { "name": name, "namespace": ns },
         "spec": {
             "repository": { "kind": "ClusterRepository", "name": repo_name },
@@ -96,9 +101,9 @@ fn backup_config_json(ns: &str, name: &str, repo_name: &str, project: bool) -> s
 fn backup_json(ns: &str, name: &str, config: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "Backup",
+        "kind": "Snapshot",
         "metadata": { "name": name, "namespace": ns },
-        "spec": { "configRef": { "name": config }, "deletionPolicy": "Retain" }
+        "spec": { "policyRef": { "name": config }, "deletionPolicy": "Retain" }
     })
 }
 
@@ -117,7 +122,7 @@ fn restore_json(
         "metadata": { "name": name, "namespace": ns },
         "spec": {
             "repository": { "kind": "ClusterRepository", "name": repo },
-            "source": { "backupRef": { "name": backup } },
+            "source": { "snapshotRef": { "name": backup } },
             "target": { "pvc": { "name": "e2e-dst" } },
             "credentialProjection": { "enabled": project }
         }
@@ -144,7 +149,7 @@ fn maintenance_json(ns: &str, name: &str, repo: &str, project: bool) -> serde_js
 /// Wait for a kopiur-managed projected credential Secret in `ns` that is
 /// controller-owned by the consuming CR `owner_kind`/`owner_name` and carries the
 /// password key. Matched by **ownerReference**, not by name: a projected Secret is
-/// named after the per-run mover Job, which is the CR name for a Backup/Restore but
+/// named after the per-run mover Job, which is the CR name for a Snapshot/Restore but
 /// `<cr>-<mode>-<slot>` for a Maintenance. The valid same-namespace controller
 /// ownerRef is the GC contract (Kubernetes reaps the copy with its owner).
 async fn assert_projected_owned_by(
@@ -252,9 +257,9 @@ async fn assert_mover_rbac_minted(client: &kube::Client, ns: &str) {
 }
 
 /// **Projection ON.** A `ClusterRepository` with `credentialProjection.enabled`
-/// backs a Backup in a namespace that has NO creds Secret. The operator projects a
-/// kopiur-managed copy there (owned by the Backup), the mover runs to `Succeeded`,
-/// and deleting the Backup garbage-collects the projected Secret.
+/// backs a Snapshot in a namespace that has NO creds Secret. The operator projects a
+/// kopiur-managed copy there (owned by the Snapshot), the mover runs to `Succeeded`,
+/// and deleting the Snapshot garbage-collects the projected Secret.
 #[tokio::test]
 #[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
 async fn projection_enables_backup_in_a_namespace_without_creds() {
@@ -267,8 +272,8 @@ async fn projection_enables_backup_in_a_namespace_without_creds() {
         .expect("provision MinIO + projection namespace (source PVC, no creds Secret)");
     let client = world.client().clone();
     let crepos: Api<ClusterRepository> = Api::all(client.clone());
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), PROJECTION_NS);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), PROJECTION_NS);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), PROJECTION_NS);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), PROJECTION_NS);
     let secrets: Api<Secret> = Api::namespaced(client.clone(), PROJECTION_NS);
 
     let crepo = "e2e-proj-crepo";
@@ -294,26 +299,26 @@ async fn projection_enables_backup_in_a_namespace_without_creds() {
         .await
         .expect("ClusterRepository should bootstrap to Ready");
 
-    // 2. BackupConfig (projection ON) + Backup in the creds-less projection namespace.
+    // 2. SnapshotPolicy (projection ON) + Snapshot in the creds-less projection namespace.
     configs
         .create(
             &PostParams::default(),
             &cr(backup_config_json(PROJECTION_NS, cfg, crepo, true)),
         )
         .await
-        .expect("create BackupConfig with projection");
+        .expect("create SnapshotPolicy with projection");
     backups
         .create(
             &PostParams::default(),
             &cr(backup_json(PROJECTION_NS, backup, cfg)),
         )
         .await
-        .expect("create Backup");
+        .expect("create Snapshot");
 
     assert_mover_rbac_minted(&client, PROJECTION_NS).await;
 
     // 3. The operator projected the credential Secret into the namespace, owned by
-    //    the Backup and labeled kopiur-managed, with the password key copied.
+    //    the Snapshot and labeled kopiur-managed, with the password key copied.
     let proj = wait_until(
         &format!("projected Secret {PROJECTION_NS}/{projected}"),
         default_timeout(),
@@ -326,8 +331,8 @@ async fn projection_enables_backup_in_a_namespace_without_creds() {
     assert!(
         owners
             .iter()
-            .any(|o| o.kind == "Backup" && o.name == backup),
-        "projected Secret must be owned by its Backup (valid same-namespace ownerRef for GC)"
+            .any(|o| o.kind == "Snapshot" && o.name == backup),
+        "projected Secret must be owned by its Snapshot (valid same-namespace ownerRef for GC)"
     );
     let labels = proj.metadata.labels.unwrap_or_default();
     assert_eq!(
@@ -344,13 +349,13 @@ async fn projection_enables_backup_in_a_namespace_without_creds() {
         "projected Secret must carry the repository password key"
     );
 
-    // 4. The Backup completes — proving the projected creds actually worked.
+    // 4. The Snapshot completes — proving the projected creds actually worked.
     wait_phase(&backups, backup, "Succeeded")
         .await
-        .expect("Backup using projected credentials should reach Succeeded");
+        .expect("Snapshot using projected credentials should reach Succeeded");
 
     // GC is guaranteed by the controller-ownerReference asserted in step 3, not
-    // re-verified here: a Backup carries the `snapshot-cleanup` finalizer, so it
+    // re-verified here: a Snapshot carries the `snapshot-cleanup` finalizer, so it
     // lingers `Terminating` until that clears, and Kubernetes only reaps the owned
     // Secret once the owner is actually removed from etcd. Racing that finalizer
     // would make this test flaky for a guarantee that is Kubernetes' to keep, not
@@ -358,12 +363,12 @@ async fn projection_enables_backup_in_a_namespace_without_creds() {
     backups
         .delete(backup, &DeleteParams::default())
         .await
-        .expect("delete Backup");
+        .expect("delete Snapshot");
     let _ = configs.delete(cfg, &DeleteParams::default()).await;
     let _ = crepos.delete(crepo, &DeleteParams::default()).await;
 }
 
-/// **Projection OFF (default).** Without `credentialProjection`, a Backup in a
+/// **Projection OFF (default).** Without `credentialProjection`, a Snapshot in a
 /// namespace lacking the creds Secret blocks on `CredentialsAvailable=False` and
 /// never launches a mover — the self-managed default is unchanged.
 #[tokio::test]
@@ -378,8 +383,8 @@ async fn without_projection_a_backup_blocks_on_missing_credentials() {
         .expect("provision MinIO + projection namespace");
     let client = world.client().clone();
     let crepos: Api<ClusterRepository> = Api::all(client.clone());
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), PROJECTION_NS);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), PROJECTION_NS);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), PROJECTION_NS);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), PROJECTION_NS);
 
     let crepo = "e2e-proj-off-crepo";
     let cfg = "e2e-proj-off-cfg";
@@ -398,23 +403,23 @@ async fn without_projection_a_backup_blocks_on_missing_credentials() {
         .await
         .expect("ClusterRepository should bootstrap to Ready");
 
-    // BackupConfig with projection OFF (the default), in the creds-less namespace.
+    // SnapshotPolicy with projection OFF (the default), in the creds-less namespace.
     configs
         .create(
             &PostParams::default(),
             &cr(backup_config_json(PROJECTION_NS, cfg, crepo, false)),
         )
         .await
-        .expect("create BackupConfig without projection");
+        .expect("create SnapshotPolicy without projection");
     backups
         .create(
             &PostParams::default(),
             &cr(backup_json(PROJECTION_NS, backup, cfg)),
         )
         .await
-        .expect("create Backup");
+        .expect("create Snapshot");
 
-    // The Backup blocks Pending with an actionable CredentialsAvailable=False — it
+    // The Snapshot blocks Pending with an actionable CredentialsAvailable=False — it
     // must NOT progress to Running/Succeeded without the Secret.
     wait_until(
         &format!("{backup} reports CredentialsAvailable=False"),
@@ -437,7 +442,7 @@ async fn without_projection_a_backup_blocks_on_missing_credentials() {
     )
     .await
     .expect(
-        "a non-projecting Backup must surface CredentialsAvailable=False when the Secret is absent",
+        "a non-projecting Snapshot must surface CredentialsAvailable=False when the Secret is absent",
     );
     let phase = status_json(&backups, backup)
         .await
@@ -447,11 +452,11 @@ async fn without_projection_a_backup_blocks_on_missing_credentials() {
         .to_string();
     assert_ne!(
         phase, "Succeeded",
-        "the blocked Backup must not have succeeded"
+        "the blocked Snapshot must not have succeeded"
     );
     assert_ne!(
         phase, "Running",
-        "the blocked Backup must not have launched a mover"
+        "the blocked Snapshot must not have launched a mover"
     );
 
     let _ = backups.delete(backup, &DeleteParams::default()).await;
@@ -462,7 +467,7 @@ async fn without_projection_a_backup_blocks_on_missing_credentials() {
 /// **Restore projection.** A `Restore` with `credentialProjection.enabled: true`
 /// restores a snapshot into the creds-less projection namespace: the operator
 /// projects the repo's creds for the restore mover, and the restore Completes. We
-/// first run a (projection-on) Backup to produce a snapshot to restore.
+/// first run a (projection-on) Snapshot to produce a snapshot to restore.
 #[tokio::test]
 #[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
 async fn projection_enables_restore_in_a_namespace_without_creds() {
@@ -475,8 +480,8 @@ async fn projection_enables_restore_in_a_namespace_without_creds() {
         .expect("provision MinIO + projection namespace (source + dest PVC, no creds)");
     let client = world.client().clone();
     let crepos: Api<ClusterRepository> = Api::all(client.clone());
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), PROJECTION_NS);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), PROJECTION_NS);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), PROJECTION_NS);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), PROJECTION_NS);
     let restores: Api<Restore> = Api::namespaced(client.clone(), PROJECTION_NS);
 
     let crepo = "e2e-proj-restore-crepo";
@@ -501,17 +506,17 @@ async fn projection_enables_restore_in_a_namespace_without_creds() {
             &cr(backup_config_json(PROJECTION_NS, cfg, crepo, true)),
         )
         .await
-        .expect("create BackupConfig with projection");
+        .expect("create SnapshotPolicy with projection");
     backups
         .create(
             &PostParams::default(),
             &cr(backup_json(PROJECTION_NS, backup, cfg)),
         )
         .await
-        .expect("create Backup");
+        .expect("create Snapshot");
     wait_phase(&backups, backup, "Succeeded")
         .await
-        .expect("seed Backup should Succeed");
+        .expect("seed Snapshot should Succeed");
 
     // The Restore (projection ON) into the creds-less namespace.
     restores

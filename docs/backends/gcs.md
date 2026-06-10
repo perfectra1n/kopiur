@@ -63,7 +63,7 @@ and points kopia at the path. The secret never lands on kopia's argv.
 - **`bucket` / `prefix`** — where snapshots land.
 - **`create.enabled`** — initialize the repository if missing. Creation-time
   algorithms are fixed forever — see [creation](../repositories.md#encryption-and-repository-creation).
-- **`cacheDefaults`** — mover cache sizing ([movers](../movers.md)).
+- **`moverDefaults.cache`** — mover cache sizing ([movers](../movers.md)).
 
 ## As a `ClusterRepository`
 
@@ -74,11 +74,11 @@ must exist where the movers run — see [Movers](../movers.md).
 
 ## Back up and restore against this repository
 
-The lifecycle is backend-independent. Once `Ready`, add a `BackupConfig` +
-`BackupSchedule` ([Backups & schedules](../backups.md),
+The lifecycle is backend-independent. Once `Ready`, add a `SnapshotPolicy` +
+`SnapshotSchedule` ([Backups & schedules](../backups.md),
 [Example 01](../examples.md#example-01--single-pvc-scheduled)) and restore by
-picking a `Backup` ([Restores](../restores.md),
-[Example 03](../examples.md#example-03--restore-by-picking-a-backup)).
+picking a `Snapshot` ([Restores](../restores.md),
+[Example 03](../examples.md#example-03--restore-by-picking-a-snapshot)).
 
 ## Troubleshooting
 

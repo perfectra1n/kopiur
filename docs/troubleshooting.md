@@ -8,10 +8,12 @@ Kopiur is built to **tell you why** something didn't happen rather than fail sil
 So the universal first move for any stuck resource is:
 
 ```console
-$ kubectl describe repository <name> -n <ns>   # or backupconfig / backup / restore / maintenance
+$ kubectl describe repository <name> -n <ns>   # or snapshotpolicy / snapshot / restore / maintenance
 ```
 
 Read the conditions and Events at the bottom. The messages are written to say **what** failed, **why**, and **how to fix it**.
+
+This holds for **every** kopiur kind: any reconcile failure — a missing referenced Repository, an invalid spec, an unparseable cron, a backend rejection — is published as a `Warning` Event on the failing object with a machine-readable reason (`MissingDependency`, `InvalidSpec`, `InvalidSchedule`, or the kopia error class). Repeats of the same failure aggregate into one Event with a climbing count, so `kubectl get events -n <ns>` stays readable.
 
 ## A map of the pipeline
 
@@ -25,7 +27,7 @@ flowchart LR
   Job --> Done[Succeeded / Completed]
 ```
 
-Work left to right: a `Backup`/`Restore` won't start until the `Repository` is `Ready`, the credential Secret is present, and (if elevated) the namespace has opted in.
+Work left to right: a `Snapshot`/`Restore` won't start until the `Repository` is `Ready`, the credential Secret is present, and (if elevated) the namespace has opted in.
 
 ## Repository never reaches `Ready`
 
@@ -56,16 +58,16 @@ The mover is blocked on a precondition. The two common ones, both surfaced as co
 The mover loads credentials with `envFrom`, which is **namespace-local**, so the credential Secret must exist in the namespace where the data (and the mover Job) live — not just where the repository is defined.
 
 ```console
-$ kubectl get backup <name> -n <ns> \
+$ kubectl get snapshots <name> -n <ns> \
     -o jsonpath='{.status.conditions[?(@.type=="CredentialsAvailable")].message}'
 ```
 
 - For a namespaced `Repository`, the repo and Secret are already together — nothing extra.
-- For a `ClusterRepository`, the credential Secret must reach each workload namespace. The easy fix: set [`credentialProjection.enabled: true`](movers.md#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos) on the `BackupConfig`/`Restore`/`Maintenance` that uses it, so Kopiur copies it for you (off by default). Otherwise replicate it yourself. See [Movers → the credentials Secret](movers.md#the-credentials-secret).
+- For a `ClusterRepository`, the credential Secret must reach each workload namespace. The easy fix: set [`credentialProjection.enabled: true`](movers.md#let-kopiur-project-the-credentials-secret-recommended-for-shared-repos) on the `SnapshotPolicy`/`Restore`/`Maintenance` that uses it, so Kopiur copies it for you (off by default). Otherwise replicate it yourself. See [Movers → the credentials Secret](movers.md#the-credentials-secret).
 
 ### `MoverPermitted=False` — privileged mover not opted in
 
-The mover requests an elevated context but the namespace hasn't been granted it. This guards **`BackupConfig`, `Restore`, and `Maintenance` alike** — and the *effective* (resolved) context is what's checked, so it also fires for an elevated context **inherited** from a workload pod. The detector trips on any of: `runAsUser: 0`, `privileged: true`, `allowPrivilegeEscalation: true`, added Linux capabilities, `runAsNonRoot: false`, or `privilegedMode: true` — at **either** the container (`mover.securityContext`) **or** pod (`mover.podSecurityContext`) level.
+The mover requests an elevated context but the namespace hasn't been granted it. This guards **`SnapshotPolicy`, `Restore`, and `Maintenance` alike** — and the *effective* (resolved) context is what's checked, so it also fires for an elevated context **inherited** from a workload pod. The detector trips on any of: `runAsUser: 0`, `privileged: true`, `allowPrivilegeEscalation: true`, added Linux capabilities, `runAsNonRoot: false`, or `privilegedMode: true` — at **either** the container (`mover.securityContext`) **or** pod (`mover.podSecurityContext`) level.
 
 ```console
 # see the exact, actionable message (names the object + the annotation):
@@ -92,12 +94,13 @@ When `mover.inheritSecurityContextFrom` is set, the controller reads the live wo
 
 ## Backup runs but `Failed`
 
-The mover Job ran and exhausted its retries (`failurePolicy.backoffLimit`). The error tail is on the `Backup`:
+The mover Job ran and exhausted its retries (`failurePolicy.backoffLimit`). The error tail is on the `Snapshot`:
 
 ```console
-$ kubectl get backup <name> -n <ns> -o jsonpath='{.status.logTail}'
-# full logs live in the Job's pod:
-$ kubectl logs -n <ns> -l kopiur.home-operations.com/backup=<name>
+$ kubectl get snapshots <name> -n <ns> -o jsonpath='{.status.logTail}'
+# full logs live in the mover Job's pod (the Job name is on the Snapshot):
+$ JOB=$(kubectl get snapshot <name> -n <ns> -o jsonpath='{.status.job.name}')
+$ kubectl logs -n <ns> --selector=job-name="$JOB"
 ```
 
 Common causes: the source PVC's `VolumeSnapshotClass` is wrong/missing (for `copyMethod: Snapshot`), a `beforeSnapshot` hook failed (it aborts the backup unless `continueOnFailure: true`), or the repository became unreachable mid-run.
@@ -110,7 +113,7 @@ $ kubectl describe restore <name> -n <ns>
 
 | Symptom                                 | Cause                                                         | Fix                                                                                                                                                             |
 | --------------------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Failed`, "no matching snapshot"        | The source resolved to nothing and `onMissingSnapshot: Fail`. | Verify the `backupRef`/identity; for deploy-or-restore use `fromConfig` (which defaults to `Continue`).                                                         |
+| `Failed`, "no matching snapshot"        | The source resolved to nothing and `onMissingSnapshot: Fail`. | Verify the `snapshotRef`/identity; for deploy-or-restore use `fromPolicy` (which defaults to `Continue`).                                                         |
 | Stuck `Resolving`                       | Waiting for the source snapshot to appear (`waitTimeout`).    | Confirm the snapshot exists; raise `policy.waitTimeout` if a schedule is about to produce it.                                                                   |
 | PVC stuck `Pending` (populator)         | Volume-populator handshake not completing.                    | Need Kubernetes ≥ 1.24; install `volume-data-source-validator` to see the real event. See [Restores → deploy-or-restore](restores.md#deploy-or-restore-gitops). |
 | `identity` source rejected at admission | `source.identity` requires an explicit `spec.repository`.     | Add `spec.repository`.                                                                                                                                          |
@@ -122,14 +125,14 @@ $ kubectl describe restore <name> -n <ns>
 ## Schedule isn't firing
 
 ```console
-$ kubectl get backupschedule <name> -n <ns> \
+$ kubectl get snapshotschedule <name> -n <ns> \
     -o jsonpath='{.spec.schedule.suspend}{"  next="}{.status.nextSchedule.at}{"\n"}'
 ```
 
 - `suspend: true` pauses all future firings.
 - `runOnCreate: false` (the default) means applying the schedule does **not** fire immediately — wait for `status.nextSchedule.at`, or set `runOnCreate: true`.
 - If the operator was down across a slot and `startingDeadlineSeconds` elapsed, that slot is skipped on purpose (no late stampede).
-- Repeated failures show up as `status.consecutiveFailures`; the failing `Backup` CRs (bounded by `failedJobsHistoryLimit`) carry the reason.
+- Repeated failures show up as `status.consecutiveFailures`; the failing `Snapshot` CRs (bounded by `failedJobsHistoryLimit`) carry the reason.
 
 ## Maintenance isn't running
 
@@ -183,9 +186,11 @@ resource and the cert-manager logs, not the controller. See
 # conditions + events in one place (start here for anything):
 $ kubectl describe <kind> <name> -n <ns>
 
-# the mover Job + its pod for a backup/restore:
-$ kubectl get jobs,pods -n <ns> -l kopiur.home-operations.com/backup=<name>
-$ kubectl get jobs,pods -n <ns> -l kopiur.home-operations.com/restore=<name>
+# a Snapshot names its mover Job in status; a Restore's mover Job is named after the Restore.
+$ kubectl get snapshot <name> -n <ns> -o jsonpath='{.status.job.name}'   # Snapshot only
+$ kubectl get pods -n <ns> --selector=job-name=<job-name>                # job-name = above, or the Restore name
+# or list every mover Job/pod for a policy at once:
+$ kubectl get jobs,pods -n <ns> -l kopiur.home-operations.com/config=<policy-name>
 
 # confirm the mover RBAC was minted in the workload namespace:
 $ kubectl get serviceaccount,rolebinding -n <ns> -l app.kubernetes.io/component=mover

@@ -17,7 +17,7 @@ A Kubernetes [`SecurityContext`](https://kubernetes.io/docs/tasks/configure-pod-
 
 | Kind | Field |
 | --- | --- |
-| `BackupConfig` | `spec.mover.securityContext` |
+| `SnapshotPolicy` | `spec.mover.securityContext` |
 | `Restore` | `spec.mover.securityContext` |
 | `Maintenance` | `spec.mover.securityContext` |
 
@@ -25,7 +25,7 @@ A Kubernetes [`SecurityContext`](https://kubernetes.io/docs/tasks/configure-pod-
 
 | Kind | Container-level | Pod-level |
 | --- | --- | --- |
-| `BackupConfig` | `spec.mover.securityContext` | `spec.mover.podSecurityContext` |
+| `SnapshotPolicy` | `spec.mover.securityContext` | `spec.mover.podSecurityContext` |
 | `Restore` | `spec.mover.securityContext` | `spec.mover.podSecurityContext` |
 | `Maintenance` | `spec.mover.securityContext` | `spec.mover.podSecurityContext` |
 
@@ -136,7 +136,7 @@ Two constraints to remember:
 - **Mutually exclusive with both `securityContext` and `podSecurityContext`.** Because inherit copies both levels, combining it with either explicit context is rejected by the admission webhook.
 - **Inheriting a *root* workload is still elevated.** The *resolved* contexts are what's evaluated — container **and** pod — so inheriting from a pod that runs as root (or with `runAsUser: 0` at either level, or added capabilities) trips the [privileged-mover gate](#privileged-and-root-movers) exactly like an explicit root context would.
 
-Full, apply-ready example (BackupConfig + the same knob on a `Restore`):
+Full, apply-ready example (SnapshotPolicy + the same knob on a `Restore`):
 
 ```yaml
 --8<-- "deploy/examples/18-inherit-security-context.yaml"
@@ -220,7 +220,7 @@ The hardened default satisfies the `restricted` PSA profile, so unprivileged mov
 | Set the UID/GID to… | an identity that can read the data | the identity that should **own** the restored files |
 | Default if unset | UID `65532` (reads world-readable / `65532`-owned only) | UID `65532` (files land owned by `65532`) |
 | Preserve original ownership | n/a (kopia records it) | needs root + `privilegedMode: true` |
-| Inherit from workload | `BackupConfig.spec.mover.inheritSecurityContextFrom` | `Restore.spec.mover.inheritSecurityContextFrom` |
+| Inherit from workload | `SnapshotPolicy.spec.mover.inheritSecurityContextFrom` | `Restore.spec.mover.inheritSecurityContextFrom` |
 | Elevated context | namespace `privileged-movers` opt-in | same opt-in |
 | Tolerate permission errors | fails on unreadable files | `spec.options.ignorePermissionErrors` (default `true`) reports instead of failing |
 
@@ -229,8 +229,10 @@ The hardened default satisfies the `restricted` PSA profile, so unprivileged mov
 After a run, confirm the mover's effective identity and that it actually moved data:
 
 ```console
-# the mover pod for this backup/restore:
-$ kubectl get pods -n app -l kopiur.home-operations.com/backup=<backup-name>
+# the mover Job's name is on the owning Snapshot/Restore; find its pod from that:
+$ kubectl get snapshot <snapshot-name> -n app -o jsonpath='{.status.job.name}'
+app-data-manual-abc12-snap
+$ kubectl get pods -n app --selector=job-name=app-data-manual-abc12-snap
 
 # the container's effective UID (sanity-check it matches the data owner):
 $ kubectl get pod <mover-pod> -n app \
@@ -247,7 +249,7 @@ A backup that reports **`Succeeded` but zero files/bytes** is the classic sign t
 
 | Thing | Value |
 | --- | --- |
-| Where to set it | `spec.mover.securityContext` (container) + `spec.mover.podSecurityContext` (pod) on `BackupConfig` / `Restore` / `Maintenance` |
+| Where to set it | `spec.mover.securityContext` (container) + `spec.mover.podSecurityContext` (pod) on `SnapshotPolicy` / `Restore` / `Maintenance` |
 | `fsGroup` | `spec.mover.podSecurityContext.fsGroup` — make a fresh restore volume writable by an unprivileged mover |
 | Default | UID `65532`, `runAsNonRoot: true`, drop ALL caps, seccomp `RuntimeDefault`, no escalation |
 | Set the UID/GID | `securityContext.runAsUser` / `runAsGroup` (match the data owner) |

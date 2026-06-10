@@ -34,10 +34,11 @@ webhooks:
         resources:
           - repositories
           - clusterrepositories
-          - backupconfigs
-          - backups
-          - backupschedules
+          - snapshotpolicies
+          - snapshots
+          - snapshotschedules
           - restores
           - maintenances
+          - repositoryreplications
         scope: "*"
 {{- end }}

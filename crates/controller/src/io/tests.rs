@@ -453,6 +453,75 @@ fn child_meta_omits_empty_labels() {
     assert!(m.labels.is_none());
 }
 
+// --- child_labels always carries managed-by (§14(c)) --------------------
+
+#[test]
+fn child_labels_always_includes_managed_by() {
+    // Empty extra → still has managed-by=kopiur.
+    let l = child_labels(&[]);
+    assert_eq!(
+        l.get(crate::consts::MANAGED_BY_LABEL).map(String::as_str),
+        Some("kopiur")
+    );
+    // Extra labels are merged in alongside managed-by.
+    let l2 = child_labels(&[("kopiur.home-operations.com/config", "pg")]);
+    assert_eq!(
+        l2.get(crate::consts::MANAGED_BY_LABEL).map(String::as_str),
+        Some("kopiur")
+    );
+    assert_eq!(
+        l2.get("kopiur.home-operations.com/config")
+            .map(String::as_str),
+        Some("pg")
+    );
+}
+
+// --- set_ready kstatus conditions (§2) ----------------------------------
+
+#[test]
+fn set_ready_emits_ready_reconciling_stalled_per_outcome() {
+    // Ready → Ready=True, Reconciling=False, Stalled=False, with observedGeneration.
+    let out = set_ready(&[], Some(7), ReadyOutcome::Ready, "Reconciled", "all good");
+    let find = |t: &str| out.iter().find(|c| c.type_ == t).unwrap();
+    assert_eq!(find("Ready").status, "True");
+    assert_eq!(find("Ready").observed_generation, Some(7));
+    assert_eq!(find("Reconciling").status, "False");
+    assert_eq!(find("Stalled").status, "False");
+
+    // Stalled (terminal) → Ready=False, Stalled=True.
+    let out = set_ready(&[], Some(7), ReadyOutcome::Stalled, "Failed", "bad creds");
+    let find = |t: &str| out.iter().find(|c| c.type_ == t).unwrap();
+    assert_eq!(find("Ready").status, "False");
+    assert_eq!(find("Stalled").status, "True");
+    assert_eq!(find("Reconciling").status, "False");
+}
+
+#[test]
+fn set_ready_preserves_transition_time_when_unchanged_and_flips_on_change() {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+    // Seed Ready=True with a fixed transition time.
+    let t0 = Time(k8s_openapi::jiff::Timestamp::from_second(1_700_000_000).unwrap());
+    let seeded = vec![Condition {
+        type_: "Ready".into(),
+        status: "True".into(),
+        reason: "Reconciled".into(),
+        message: "ok".into(),
+        last_transition_time: t0.clone(),
+        observed_generation: Some(1),
+    }];
+    // Still Ready → Ready's transition time is preserved (no flip).
+    let same = set_ready(&seeded, Some(2), ReadyOutcome::Ready, "Reconciled", "ok2");
+    let ready = same.iter().find(|c| c.type_ == "Ready").unwrap();
+    assert_eq!(ready.last_transition_time, t0, "Ready time moved on no-op");
+    assert_eq!(ready.observed_generation, Some(2));
+
+    // Flip to Stalled → Ready's status changes to False, so its time advances.
+    let flipped = set_ready(&seeded, Some(2), ReadyOutcome::Stalled, "Failed", "boom");
+    let ready = flipped.iter().find(|c| c.type_ == "Ready").unwrap();
+    assert_ne!(ready.last_transition_time, t0, "Ready time must flip");
+    assert_eq!(ready.status, "False");
+}
+
 // --- upsert_condition ---------------------------------------------------
 
 #[test]
@@ -958,9 +1027,9 @@ fn repo_kind_str_maps_both_variants() {
 
 #[test]
 fn privileged_mover_message_is_actionable() {
-    let msg = privileged_mover_message("BackupConfig", "trilium-rain", "trilium", "kopiur-mover");
+    let msg = privileged_mover_message("SnapshotPolicy", "trilium-rain", "trilium", "kopiur-mover");
     // What: the owning kind + name + namespace.
-    assert!(msg.contains("BackupConfig `trilium-rain`"));
+    assert!(msg.contains("SnapshotPolicy `trilium-rain`"));
     assert!(msg.contains("`trilium`"));
     // Why: tenant could reuse the minted SA at that privilege.
     assert!(msg.contains("kopiur-mover"));
@@ -971,7 +1040,7 @@ fn privileged_mover_message_is_actionable() {
     assert!(msg.contains("=true"));
     // Alternative fix: drop the elevated context, named for the right object.
     assert!(msg.contains("securityContext"));
-    assert!(msg.contains("from the BackupConfig `spec.mover`"));
+    assert!(msg.contains("from the SnapshotPolicy `spec.mover`"));
 }
 
 #[test]
@@ -1132,4 +1201,258 @@ fn inherit_errors_are_actionable() {
         err.to_string().contains("sets no securityContext")
             && err.to_string().contains("to inherit")
     );
+}
+
+// --- bootstrap_outcome: the (result, job state) pair classifies into an
+// exhaustive outcome whose success arm OWNS the result — the old code asserted
+// the "non-failure implies readable result" invariant with `.expect()`, which a
+// future refactor could silently break into a panic. ---
+
+mod bootstrap_outcomes {
+    use super::super::events::{BootstrapFailure, BootstrapOutcome, bootstrap_outcome};
+    use kopiur_kopia::KopiaErrorClass;
+    use kopiur_mover::bootstrap::BootstrapResult;
+    use kopiur_mover::status::FailureBlock;
+
+    fn ok_result() -> BootstrapResult {
+        BootstrapResult {
+            success: true,
+            created: true,
+            unique_id: Some("uid-1".into()),
+            snapshot_count: 0,
+            snapshots: vec![],
+            snapshots_truncated: false,
+            failure: None,
+        }
+    }
+
+    #[test]
+    fn four_way_mapping() {
+        // (None, job succeeded): the result ConfigMap hasn't propagated yet.
+        assert!(matches!(
+            bootstrap_outcome(None, true, "boot-x"),
+            BootstrapOutcome::ResultPending
+        ));
+
+        // (None, job failed): result-less terminal failure, names the Job.
+        match bootstrap_outcome(None, false, "boot-x") {
+            BootstrapOutcome::Failed(BootstrapFailure::JobFailedWithoutResult { job_name }) => {
+                assert_eq!(job_name, "boot-x");
+            }
+            _ => panic!("expected JobFailedWithoutResult"),
+        }
+
+        // (Some unsuccessful, _): backend rejection carrying the mover's class.
+        let mut bad = ok_result();
+        bad.success = false;
+        bad.failure = Some(FailureBlock {
+            kopia_error_class: "AuthFailure".into(),
+            message: "invalid repository password".into(),
+            stderr_tail: None,
+            exit_code: Some(1),
+            retry_recommended: false,
+        });
+        match bootstrap_outcome(Some(bad), false, "boot-x") {
+            BootstrapOutcome::Failed(BootstrapFailure::Backend { class, message }) => {
+                assert_eq!(class, KopiaErrorClass::AuthFailure);
+                assert_eq!(message, "invalid repository password");
+            }
+            _ => panic!("expected Backend failure"),
+        }
+
+        // (Some successful, _): the success arm owns the result.
+        match bootstrap_outcome(Some(ok_result()), true, "boot-x") {
+            BootstrapOutcome::Succeeded(r) => assert_eq!(r.unique_id.as_deref(), Some("uid-1")),
+            _ => panic!("expected Succeeded"),
+        }
+    }
+
+    #[test]
+    fn unsuccessful_result_without_a_failure_block_degrades_to_unknown() {
+        // A mover that wrote `success: false` but no failure block (a bug or a
+        // version skew) must still classify — Unknown, with a generic message —
+        // never panic or silently succeed.
+        let mut bad = ok_result();
+        bad.success = false;
+        match bootstrap_outcome(Some(bad), false, "boot-x") {
+            BootstrapOutcome::Failed(BootstrapFailure::Backend { class, message }) => {
+                assert_eq!(class, KopiaErrorClass::Unknown);
+                assert!(message.contains("bootstrap failed"));
+            }
+            _ => panic!("expected Backend failure"),
+        }
+    }
+}
+
+// --- reconcile_failure_event: every reconcile `Error` variant maps to a
+// Warning Event with a stable machine-readable reason, a remediation action,
+// and a what/why/fix note. The match is exhaustive (no `_ =>`), so these
+// tests pin the full reason/action table — a new Error variant shows up here.
+
+mod reconcile_failure_events {
+    use super::super::events::{
+        EVENT_NOTE_MAX_BYTES, TRUNCATION_MARKER, event_ref, reconcile_failure_event,
+    };
+    use crate::consts::{
+        CHECK_API_SERVER_ACTION, CHECK_CREDENTIALS_ACTION, CHECK_REFERENCES_ACTION,
+        CHECK_WEBHOOK_CONFIGURATION_ACTION, FIX_SCHEDULE_ACTION, FIX_SPEC_ACTION,
+        INVALID_SCHEDULE_REASON, INVALID_SPEC_REASON, INVARIANT_VIOLATED_REASON,
+        KUBE_API_ERROR_REASON, MISSING_DEPENDENCY_REASON, REPORT_ISSUE_ACTION,
+        SERIALIZATION_FAILED_REASON, WEBHOOK_SETUP_FAILED_REASON,
+    };
+    use crate::error::Error;
+    use kopiur_kopia::{KopiaError, KopiaErrorClass};
+
+    const TEST_UID: u32 = 65532;
+
+    fn kube_error() -> kube::Error {
+        kube::Error::Api(
+            kube::core::Status::failure(
+                "the server is currently unable to handle the request",
+                "ServiceUnavailable",
+            )
+            .boxed(),
+        )
+    }
+
+    fn serde_error() -> serde_json::Error {
+        serde_json::from_str::<serde_json::Value>("{not json").unwrap_err()
+    }
+
+    /// The full reason/action table, one row per `Error` variant. Constructing
+    /// every variant here means a new variant cannot ship without an explicit
+    /// row (mirroring the exhaustive `match` in `reconcile_failure_event`).
+    #[test]
+    fn every_error_variant_has_a_reason_action_and_actionable_note() {
+        let cases: Vec<(Error, &str, &str, &str)> = vec![
+            (
+                Error::Kube(kube_error()),
+                KUBE_API_ERROR_REASON,
+                CHECK_API_SERVER_ACTION,
+                "retries automatically",
+            ),
+            (
+                Error::Validation("spec.retention.daily must be >= 1".into()),
+                INVALID_SPEC_REASON,
+                FIX_SPEC_ACTION,
+                "fix the field",
+            ),
+            (
+                Error::MissingDependency("Repository apps/nas".into()),
+                MISSING_DEPENDENCY_REASON,
+                CHECK_REFERENCES_ACTION,
+                "create it, or fix the reference",
+            ),
+            (
+                Error::Serialization(serde_error()),
+                SERIALIZATION_FAILED_REASON,
+                REPORT_ISSUE_ACTION,
+                "report it",
+            ),
+            (
+                Error::InvalidSchedule("bad cron `* *`".into()),
+                INVALID_SCHEDULE_REASON,
+                FIX_SCHEDULE_ACTION,
+                "Fix the cron expression",
+            ),
+            (
+                Error::Invariant("Snapshot has no namespace".into()),
+                INVARIANT_VIOLATED_REASON,
+                REPORT_ISSUE_ACTION,
+                "report it",
+            ),
+            (
+                Error::WebhookSetup("no such webhook configuration".into()),
+                WEBHOOK_SETUP_FAILED_REASON,
+                CHECK_WEBHOOK_CONFIGURATION_ACTION,
+                "Admission stays untrusted",
+            ),
+            (
+                Error::WebhookCert(crate::webhook_tls::CertError::Generate(
+                    rcgen::Error::CouldNotParseCertificate,
+                )),
+                WEBHOOK_SETUP_FAILED_REASON,
+                CHECK_WEBHOOK_CONFIGURATION_ACTION,
+                "Admission stays untrusted",
+            ),
+        ];
+        for (err, reason, action, note_phrase) in cases {
+            let ev = reconcile_failure_event(&err, TEST_UID);
+            assert_eq!(ev.reason, reason, "reason for {err}");
+            assert_eq!(ev.action, action, "action for {err}");
+            assert!(
+                ev.note.contains(note_phrase),
+                "note for {err} should contain {note_phrase:?}: {}",
+                ev.note
+            );
+            // The note always leads with the error's own message.
+            assert!(
+                ev.note.contains(&err.to_string()),
+                "note for {err} should embed the error message"
+            );
+        }
+    }
+
+    #[test]
+    fn kopia_failures_reuse_the_class_reason_and_backend_remediation() {
+        // A kopia failure must surface exactly like the bootstrap-failure
+        // Events: reason = the kopia class label, note = the per-class
+        // remediation (here: credentials hint for AuthFailure).
+        let err = Error::Kopia(KopiaError::NonZeroExit {
+            args: "repository connect".into(),
+            code: Some(1),
+            class: KopiaErrorClass::AuthFailure,
+            stderr_tail: "invalid repository password".into(),
+        });
+        let ev = reconcile_failure_event(&err, TEST_UID);
+        assert_eq!(ev.reason, KopiaErrorClass::AuthFailure.as_str());
+        assert_eq!(ev.action, CHECK_CREDENTIALS_ACTION);
+        assert!(ev.note.contains("password was rejected"));
+        assert!(ev.note.contains("KOPIA_PASSWORD"));
+    }
+
+    #[test]
+    fn failure_notes_are_clamped_to_the_event_limit() {
+        // An unbounded upstream message (huge kube error / dependency list)
+        // must not blow the 1024-byte Event note cap, or the apiserver
+        // rejects the Event and the user sees nothing at all.
+        let err = Error::MissingDependency("x".repeat(5000));
+        let ev = reconcile_failure_event(&err, TEST_UID);
+        assert!(ev.note.len() <= EVENT_NOTE_MAX_BYTES);
+        assert!(ev.note.contains(TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn event_ref_strips_the_resource_version() {
+        // The Recorder's dedup-cache key hashes the reference WITHOUT
+        // resourceVersion but compares it WITH — a churning rv would mint a
+        // new Event object per repeat instead of aggregating series.count.
+        let mut m = kopiur_api::Maintenance::new(
+            "nas-maintenance",
+            kopiur_api::MaintenanceSpec {
+                repository: super::ref_of(
+                    kopiur_api::common::RepositoryKind::Repository,
+                    "nas",
+                    None,
+                ),
+                schedule: kopiur_api::maintenance::default_maintenance_schedule(),
+                ownership: kopiur_api::Ownership {
+                    owner: "lease".into(),
+                    takeover_policy: Default::default(),
+                },
+                mover: None,
+                failure_policy: None,
+                credential_projection: None,
+            },
+        );
+        m.metadata.namespace = Some("apps".into());
+        m.metadata.uid = Some("uid-1234".into());
+        m.metadata.resource_version = Some("987654".into());
+
+        let r = event_ref(&m);
+        assert_eq!(r.resource_version, None, "resourceVersion must be stripped");
+        assert_eq!(r.name.as_deref(), Some("nas-maintenance"));
+        assert_eq!(r.namespace.as_deref(), Some("apps"));
+        assert_eq!(r.uid.as_deref(), Some("uid-1234"));
+    }
 }

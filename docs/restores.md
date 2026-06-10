@@ -7,12 +7,12 @@ A `Restore` reads a snapshot back into a PVC. At its core it answers three quest
 ```yaml
 spec:
     source: { <one of three>: ... } # FROM: which snapshot
-    target: { <one of two>: ... } # TO: which PVC  (omit entirely = passive populator)
+    target: { <one of three>: ... } # TO: pvc | pvcRef | populator: {}  (REQUIRED)
     options: { ... } # HOW kopia writes (file deletion, permissions)
     policy: { ... } # what to do if the snapshot is missing
 ```
 
-`source` is required; everything else is optional with safe defaults.
+`source` **and** `target` are required (ADR-0005 §9); `options`/`policy` are optional with safe defaults.
 
 ///
 
@@ -22,13 +22,13 @@ Restore is "pick a row, write it somewhere" — there's no timestamp arithmetic 
 
 Exactly one of three modes (externally tagged — you set one key):
 
-### `backupRef` — restore a specific Backup (the default)
+### `snapshotRef` — restore a specific Snapshot (the default)
 
-You browsed the catalog and picked a `Backup` CR. No timestamps — just reference it. See [example 03](examples.md#example-03--restore-by-picking-a-backup).
+You browsed the catalog and picked a `Snapshot` CR. No timestamps — just reference it. See [example 03](examples.md#example-03--restore-by-picking-a-snapshot).
 
 ```yaml
 source:
-    backupRef:
+    snapshotRef:
         name: postgres-data-20260524-021300
         namespace: billing # optional; defaults to the Restore's namespace
 ```
@@ -36,18 +36,18 @@ source:
 To find candidates:
 
 ```console
-$ kubectl get backup -n billing \
-    -l kopiur.home-operations.com/backup-config=postgres-data \
+$ kubectl get snapshots -n billing \
+    -l kopiur.home-operations.com/config=postgres-data \
     --sort-by=.status.timing.startTime
 ```
 
-### `fromConfig` — resolve via a BackupConfig's identity
+### `fromPolicy` — resolve via a SnapshotPolicy's identity
 
-Restore the latest (or an offset/point-in-time) snapshot for a `BackupConfig`'s identity — **even when no `Backup` CR exists yet**. This is what powers deploy-or-restore (see below) and point-in-time rollback ([example 14](examples.md#example-14--point-in-time--offset-restore), [scenario 07](scenarios/point-in-time-rollback.md)). Defaults to `onMissingSnapshot: Continue`.
+Restore the latest (or an offset/point-in-time) snapshot for a `SnapshotPolicy`'s identity — **even when no `Snapshot` CR exists yet**. This is what powers deploy-or-restore (see below) and point-in-time rollback ([example 14](examples.md#example-14--point-in-time--offset-restore), [scenario 07](scenarios/point-in-time-rollback.md)). Defaults to `onMissingSnapshot: Continue`.
 
 ```yaml
 source:
-    fromConfig:
+    fromPolicy:
         name: postgres-data
         namespace: billing # optional; defaults to the Restore's namespace
         offset: 0 # 0 = latest, 1 = previous, ...
@@ -58,7 +58,7 @@ source:
 
 ### `identity` — a raw kopia identity
 
-For snapshots written by a foreign kopia client, or ones that have aged out of the catalog ([example 13](examples.md#example-13--restore-by-raw-kopia-identity)). You give the raw `username@hostname:path`. This mode **requires** an explicit `spec.repository` (there's no `Backup`/`BackupConfig` to infer it from).
+For snapshots written by a foreign kopia client, or ones that have aged out of the catalog ([example 13](examples.md#example-13--restore-by-raw-kopia-identity)). You give the raw `username@hostname:path`. This mode **requires** an explicit `spec.repository` (there's no `Snapshot`/`SnapshotPolicy` to infer it from).
 
 ```yaml
 repository: { kind: Repository, name: primary, namespace: backups }
@@ -93,9 +93,20 @@ target:
         name: postgres-data # an existing PVC in this namespace
 ```
 
-### No `target` — passive populator mode
+### `populator: {}` — passive populator mode
 
-Omit `target` entirely and the `Restore` becomes a **passive volume-populator source**: it doesn't act on its own; instead a PVC's `spec.dataSourceRef` points at it, and the snapshot is restored as that PVC is provisioned. This is the GitOps deploy-or-restore pattern (next section).
+Set `target.populator: {}` and the `Restore` becomes a **passive volume-populator source**: it doesn't act on its own; instead a PVC's `spec.dataSourceRef` points at it, and the snapshot is restored as that PVC is provisioned. This is the GitOps deploy-or-restore pattern (next section).
+
+```yaml
+target:
+    populator: {} # explicit passive-populator mode (ADR-0005 §9)
+```
+
+/// warning | `target` is required — the empty-`target` form is gone
+
+As of ADR-0005 §9, a `Restore` with **no** `target` is rejected by the webhook. Populator intent must be the **explicit** `target.populator: {}` (not an omitted `target`). Also, `inheritSecurityContextFrom` is invalid in populator mode — there's no workload pod at provision time, so the webhook rejects it and points you at `moverDefaults` / an explicit `securityContext`.
+
+///
 
 ## How to write — `options` and `policy`
 
@@ -119,14 +130,14 @@ By default a restore is **additive** — it writes the snapshot's files and leav
 
 | Value      | Behavior                                                                      | Default for                                  |
 | ---------- | ----------------------------------------------------------------------------- | -------------------------------------------- |
-| `Fail`     | No matching snapshot ⇒ the restore fails.                                     | `backupRef` / `identity` (explicit sources). |
-| `Continue` | No matching snapshot ⇒ proceed without restoring (the volume comes up empty). | `fromConfig`.                                |
+| `Fail`     | No matching snapshot ⇒ the restore fails.                                     | `snapshotRef` / `identity` (explicit sources). |
+| `Continue` | No matching snapshot ⇒ proceed without restoring (the volume comes up empty). | `fromPolicy`.                                |
 
 The defaults are the point: an _explicit_ restore that finds nothing is an error you want surfaced; a _deploy-or-restore_ that finds nothing should let the app start with a fresh volume.
 
 ## Mover, cache & failure policy
 
-A restore writes data **into** a PVC, so the mover that does the writing has the same concerns a backup's does. `Restore.spec.mover` is the same `MoverSpec` a `BackupConfig` exposes, and `Restore.spec.failurePolicy` mirrors `Backup.spec.failurePolicy`. See the full manifest in [example 12](examples.md#example-12--restore-mover-cache--failure-policy).
+A restore writes data **into** a PVC, so the mover that does the writing has the same concerns a backup's does. `Restore.spec.mover` is the same `MoverSpec` a `SnapshotPolicy` exposes, and `Restore.spec.failurePolicy` mirrors `Snapshot.spec.failurePolicy`. See the full manifest in [example 12](examples.md#example-12--restore-mover-cache--failure-policy).
 
 ```yaml
 spec:
@@ -143,7 +154,7 @@ spec:
 - **`mover.securityContext`** — run the restore mover (its **container**) as the UID/GID that should own the restored files. Without it the mover runs as the hardened default (UID 65532), which may write files the app can't read. This is the fix for "the restore mover had no UID control".
 - **`mover.podSecurityContext.fsGroup`** — a **pod**-level `fsGroup` that makes a freshly-provisioned target volume group-writable, so an **unprivileged** `runAsUser: 1000` mover can populate it on restore (instead of needing a root mover just to write the new volume). The headline case for restoring into a brand-new PVC as non-root. See [Security context → fsGroup](security-context.md).
 - **`mover.inheritSecurityContextFrom`** — instead of hard-coding them, copy **both** the container `securityContext` **and** the pod-level `securityContext` (so the restore mover gets the app's UID *and* its `fsGroup`) from a live workload pod (by label selector). Mutually exclusive with both `securityContext` and `podSecurityContext` (combining is webhook-rejected). See [Security context → Inherit it from the workload](security-context.md#2-inherit-it-from-the-workload) and [example 18](examples.md#example-18--inherit-the-mover-security-context-from-a-workload).
-- **`mover.cache`** — size the kopia cache for a large restore. `mode: Ephemeral` (default) gives a fresh per-run volume sized by `capacity` (or an `emptyDir` when unset); `mode: Persistent` keeps a controller-owned cache PVC and reuses it across runs for a warm cache. `contentCacheSizeMb` / `metadataCacheSizeMb` pass kopia's `--content/metadata-cache-size-mb` budgets. A repository's `cacheDefaults` are inherited and overlaid by `mover.cache`.
+- **`mover.cache`** — size the kopia cache for a large restore. `mode: Ephemeral` (default) gives a fresh per-run volume sized by `capacity` (or an `emptyDir` when unset); `mode: Persistent` keeps a controller-owned cache PVC and reuses it across runs for a warm cache. `contentCacheSizeMb` / `metadataCacheSizeMb` pass kopia's `--content/metadata-cache-size-mb` budgets. A repository's `moverDefaults.cache` are inherited and overlaid by `mover.cache`.
 - **`failurePolicy`** — the restore Job's `backoffLimit` and `activeDeadlineSeconds`. Absent uses the defaults (2 retries, no deadline).
 
 /// warning | An elevated restore mover needs the namespace to opt in
@@ -162,7 +173,7 @@ See [Permissions](permissions.md) for how to choose the UID/GID and when a privi
 
 The headline pattern: commit one bundle and apply it to **any** cluster. On a fresh cluster pointed at an existing repository, the PVC restores the latest snapshot before the app starts; on a brand-new repository, the PVC comes up empty and is backed up going forward. No "is this a new install or a recovery?" branching.
 
-The mechanism is a **passive `Restore`** (`source.fromConfig`, no `target`, `onMissingSnapshot: Continue`) consumed by a PVC's `dataSourceRef` as a volume populator. The full manifest is [example 05](examples.md#example-05--deploy-or-restore-gitops).
+The mechanism is a **passive `Restore`** (`source.fromPolicy`, `target.populator: {}`, `onMissingSnapshot: Continue`) consumed by a PVC's `dataSourceRef` as a volume populator. The full manifest is [example 05](examples.md#example-05--deploy-or-restore-gitops).
 
 /// note | Kubernetes ≥ 1.24
 
@@ -172,13 +183,13 @@ The volume-populator handshake relies on the `AnyVolumeDataSource` feature (GA f
 
 ## Restoring a snapshot Kopiur didn't create
 
-Snapshots written by a foreign kopia client, or predating your install, are materialized as **discovered** `Backup` CRs (`origin=discovered`, forced `deletionPolicy: Retain`) in the repository's namespace. Restore them two ways (see [example 07](examples.md#example-07--restore-a-discovered-backup)):
+Snapshots written by a foreign kopia client, or predating your install, are materialized as **discovered** `Snapshot` CRs (`origin=discovered`, forced `deletionPolicy: Retain`) in the repository's namespace. Restore them two ways (see [example 07](examples.md#example-07--restore-a-discovered-backup)):
 
-- **(A)** reference the discovered `Backup` CR with `source.backupRef` — same as any other backup; or
+- **(A)** reference the discovered `Snapshot` CR with `source.snapshotRef` — same as any other backup; or
 - **(B)** use `source.identity` with the raw kopia identity (requires `spec.repository`), for snapshots that aged out of the catalog.
 
 ```console
-$ kubectl get backup -n backups -l kopiur.home-operations.com/origin=discovered
+$ kubectl get snapshots -n backups -l kopiur.home-operations.com/origin=discovered
 ```
 
 ## Watching a restore
@@ -212,17 +223,17 @@ The full `Restore` surface, with the examples that exercise each. `source` is th
 
 | Field | What it does | When to set it |
 | --- | --- | --- |
-| `repository` | The repository to read from (`{ kind, name, namespace? }`). Inferred from `source` for `backupRef`/`fromConfig`; **required** for `identity`. | Cross-namespace / cluster restores, or any `identity` source. ([13](examples.md#example-13--restore-by-raw-kopia-identity), [16](examples.md#example-16--cross-namespace-clone-restore)) |
-| `source.backupRef` | Restore a specific `Backup` CR (`{ name, namespace? }`). | The common case — you picked a row from the catalog. ([03](examples.md#example-03--restore-by-picking-a-backup), [16](examples.md#example-16--cross-namespace-clone-restore)) |
-| `source.fromConfig` | Resolve via a `BackupConfig`'s identity (`{ name, namespace?, asOf?, offset? }`). | No `Backup` CR (deploy-or-restore), or point-in-time (`asOf`) / positional (`offset`) recovery. ([05](examples.md#example-05--deploy-or-restore-gitops), [14](examples.md#example-14--point-in-time--offset-restore)) |
+| `repository` | The repository to read from (`{ kind, name, namespace? }`). Inferred from `source` for `snapshotRef`/`fromPolicy`; **required** for `identity`. | Cross-namespace / cluster restores, or any `identity` source. ([13](examples.md#example-13--restore-by-raw-kopia-identity), [16](examples.md#example-16--cross-namespace-clone-restore)) |
+| `source.snapshotRef` | Restore a specific `Snapshot` CR (`{ name, namespace? }`). | The common case — you picked a row from the catalog. ([03](examples.md#example-03--restore-by-picking-a-snapshot), [16](examples.md#example-16--cross-namespace-clone-restore)) |
+| `source.fromPolicy` | Resolve via a `SnapshotPolicy`'s identity (`{ name, namespace?, asOf?, offset? }`). | No `Snapshot` CR (deploy-or-restore), or point-in-time (`asOf`) / positional (`offset`) recovery. ([05](examples.md#example-05--deploy-or-restore-gitops), [14](examples.md#example-14--point-in-time--offset-restore)) |
 | `source.identity` | Raw kopia identity (`{ username, hostname, sourcePath?, snapshotID?, asOf?, offset? }`). | Foreign / aged-out snapshots; needs `repository`. ([13](examples.md#example-13--restore-by-raw-kopia-identity)) |
-| `target.pvc` | Create a new PVC and restore into it (`{ name, storageClassName?, capacity?, accessModes? }`). | The safe default — restore beside the original, verify, cut over. ([03](examples.md#example-03--restore-by-picking-a-backup)) |
+| `target.pvc` | Create a new PVC and restore into it (`{ name, storageClassName?, capacity?, accessModes? }`). | The safe default — restore beside the original, verify, cut over. ([03](examples.md#example-03--restore-by-picking-a-snapshot)) |
 | `target.pvcRef` | Restore into an **existing** PVC (`{ name }`). | In-place restore (scale the app down first). ([15](examples.md#example-15--in-place-mirror-restore)) |
-| _(no `target`)_ | Passive volume-populator source. | GitOps deploy-or-restore via a PVC `dataSourceRef`. ([05](examples.md#example-05--deploy-or-restore-gitops)) |
+| `target.populator` | Explicit passive volume-populator source (`populator: {}`). | GitOps deploy-or-restore via a PVC `dataSourceRef`. ([05](examples.md#example-05--deploy-or-restore-gitops)) |
 | `options.enableFileDeletion` | Delete target files not in the snapshot (exact **mirror**). Default `false` (additive). | A faithful in-place restore — destructive, use deliberately. ([15](examples.md#example-15--in-place-mirror-restore)) |
 | `options.ignorePermissionErrors` | Complete and _report_ permission problems vs. fail hard. Default `true`. | `false` to fail-closed when exact permissions matter. |
 | `options.writeFilesAtomically` | Write via a temp file + rename. Default `true`. | Rarely changed. |
-| `policy.onMissingSnapshot` | `Fail` (explicit sources) vs `Continue` (fromConfig default). | `Fail` for deliberate recoveries; `Continue` for deploy-or-restore. |
+| `policy.onMissingSnapshot` | `Fail` (explicit sources) vs `Continue` (fromPolicy default). | `Fail` for deliberate recoveries; `Continue` for deploy-or-restore. |
 | `policy.waitTimeout` | How long to wait for the source snapshot to appear. | Sources that may lag behind the Restore being applied. |
 | `mover.securityContext` / `podSecurityContext` | Container UID/GID, and the pod-level `fsGroup` that makes a fresh target volume writable. | Own restored files as the app's UID; populate a fresh PVC as non-root (`fsGroup`). See [Mover, cache & failure policy](#mover-cache--failure-policy). ([12](examples.md#example-12--restore-mover-cache--failure-policy)) |
 | `mover.cache` / `resources` / `inheritSecurityContextFrom` | Cache sizing/mode, mover resources, inherit-from-pod. | Large-restore cache, resource limits, run-as-the-app. ([12](examples.md#example-12--restore-mover-cache--failure-policy)) |
@@ -235,4 +246,4 @@ The full `Restore` surface, with the examples that exercise each. `source` is th
 - [Repositories & backends](repositories.md) — where the snapshots live.
 - [Permissions](permissions.md) — choosing the mover's UID/GID and the privileged-movers opt-in (applies to restores too).
 - [Scenarios](scenarios/index.md) — [02 recover lost data](scenarios/recover-lost-data.md), [07 point-in-time rollback](scenarios/point-in-time-rollback.md), [08 clone to another namespace](scenarios/clone-app-to-namespace.md).
-- [Examples](examples.md) — [03 by Backup](examples.md#example-03--restore-by-picking-a-backup), [05 deploy-or-restore](examples.md#example-05--deploy-or-restore-gitops), [07 discovered](examples.md#example-07--restore-a-discovered-backup), [12 mover/cache/failure policy](examples.md#example-12--restore-mover-cache--failure-policy), [13 by identity](examples.md#example-13--restore-by-raw-kopia-identity), [14 point-in-time](examples.md#example-14--point-in-time--offset-restore), [15 in-place mirror](examples.md#example-15--in-place-mirror-restore), [16 cross-namespace](examples.md#example-16--cross-namespace-clone-restore), [17 shared-repo projection](examples.md#example-17--restore-from-a-shared-repo-projection).
+- [Examples](examples.md) — [03 by Snapshot](examples.md#example-03--restore-by-picking-a-snapshot), [05 deploy-or-restore](examples.md#example-05--deploy-or-restore-gitops), [07 discovered](examples.md#example-07--restore-a-discovered-backup), [12 mover/cache/failure policy](examples.md#example-12--restore-mover-cache--failure-policy), [13 by identity](examples.md#example-13--restore-by-raw-kopia-identity), [14 point-in-time](examples.md#example-14--point-in-time--offset-restore), [15 in-place mirror](examples.md#example-15--in-place-mirror-restore), [16 cross-namespace](examples.md#example-16--cross-namespace-clone-restore), [17 shared-repo projection](examples.md#example-17--restore-from-a-shared-repo-projection).

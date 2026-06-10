@@ -327,7 +327,8 @@ spec:
                   securityContext:
                     description: |-
                       Security context applied to the mover **container** (`runAsUser`/`runAsGroup`,
-                      capabilities, seccomp, …).
+                      capabilities, seccomp, …). Merged field-wise over `moverDefaults.securityContext`
+                      and the hardened base (ADR-0004 §2) — set only the fields you want to change.
                     nullable: true
                     properties:
                       allowPrivilegeEscalation:
@@ -431,6 +432,15 @@ spec:
                             type: string
                         type: object
                     type: object
+                  ttlSecondsAfterFinished:
+                    description: |-
+                      Per-recipe override of `moverDefaults.ttlSecondsAfterFinished` — the
+                      `Job.spec.ttlSecondsAfterFinished` for this recipe's mover Jobs so finished
+                      backup/restore Jobs self-GC. Recipe wins over the repo default; when neither
+                      is set a built-in default applies ([`DEFAULT_JOB_TTL_SECONDS`]). ADR-0005 §12.
+                    format: int64
+                    nullable: true
+                    type: integer
                 type: object
               ownership:
                 description: |-

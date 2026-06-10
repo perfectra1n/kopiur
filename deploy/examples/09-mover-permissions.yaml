@@ -3,11 +3,24 @@
 # The mover Job is what reads your PVC. It must run as a UID/GID that can READ the
 # data. By default movers run unprivileged as the image user (UID 65532) with a
 # hardened securityContext (runAsNonRoot, drop ALL caps, seccomp RuntimeDefault).
-# Override per-recipe via `spec.mover.securityContext` to match the UID/GID that
-# owns your data. See the Permissions guide for how to find those numbers.
 #
-# Field shapes verified against crates/api: `spec.mover.securityContext` is a
-# standard core/v1 SecurityContext (container-level).
+# WHERE to set the UID/GID — two layers (ADR-0004 §1/§2):
+#   * `Repository.spec.moverDefaults` — the SINGLE place to set PUID/PGID for the
+#     whole repository. Every mover it spawns (bootstrap, backup, restore,
+#     maintenance) inherits these. This is the new home of the old KOPIUR_PUID /
+#     KOPIUR_PGID env-var story: set runAsUser/runAsGroup on the container context
+#     and fsGroup on the pod context ONCE, here.
+#   * `SnapshotPolicy.spec.mover` / `Restore.spec.mover` — a per-recipe override.
+#     It MERGES field-wise over moverDefaults and the hardened base (it can only
+#     tighten — a partial override never drops drop:[ALL]/seccomp).
+#
+# This example sets both: a repository-wide default (1000:1000 + fsGroup 1000) and
+# a per-recipe tweak, to show the layering. See the Permissions guide for how to
+# find the right numbers.
+#
+# Field shapes verified against crates/api: `moverDefaults.{securityContext,
+# podSecurityContext}` and `spec.mover.securityContext` are standard core/v1
+# (Pod)SecurityContexts.
 ---
 apiVersion: v1
 kind: Secret
@@ -39,9 +52,30 @@ spec:
       key: KOPIA_PASSWORD
   create:
     enabled: true
+  # ── moverDefaults: the PUID/PGID story, set ONCE for the whole repository ─────
+  # Every mover this repository spawns (bootstrap, backup, restore, maintenance)
+  # inherits these. The old KOPIUR_PUID/KOPIUR_PGID env vars are gone — set the
+  # UID/GID here instead (ADR-0004 §1). Per-recipe `mover` blocks merge OVER this.
+  moverDefaults:
+    securityContext:
+      runAsUser: 1000 # PUID — the UID that owns the data on every PVC here
+      runAsGroup: 1000 # PGID
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+      seccompProfile:
+        type: RuntimeDefault
+    podSecurityContext:
+      fsGroup: 1000 # make freshly-provisioned restore volumes group-writable
+      fsGroupChangePolicy: OnRootMismatch
+    # Sized kopia cache shared by every mover (former cacheDefaults).
+    cache:
+      capacity: 10Gi
+      storageClassName: fast-ssd
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupConfig
+kind: SnapshotPolicy
 metadata:
   name: app-data
   namespace: app
@@ -54,23 +88,19 @@ spec:
   retention:
     keepDaily: 14
     keepWeekly: 4
-  # ── The permissions knob ──────────────────────────────────────────────────
-  # Run the mover as the SAME UID/GID that owns the files in the PVC, so it can
-  # read them. Here the app writes its data as 1000:1000.
+  # ── Per-recipe override (MERGES over moverDefaults) ─────────────────────────
+  # This SnapshotPolicy mostly inherits the repository's moverDefaults above. If
+  # THIS app's data is owned by a different UID, set just that field here — the
+  # rest (fsGroup, cache, the hardened base) still comes from moverDefaults. A
+  # partial override can only tighten; it never drops drop:[ALL]/seccomp.
   mover:
     securityContext:
-      runAsUser: 1000 # match the UID that owns the data
-      runAsGroup: 1000 # match the GID that owns the data
-      runAsNonRoot: true # keep the unprivileged guarantee
-      allowPrivilegeEscalation: false
-      capabilities:
-        drop: ["ALL"]
-      seccompProfile:
-        type: RuntimeDefault
+      runAsUser: 1000 # match the UID that owns THIS app's data (else inherit)
+      runAsGroup: 1000
     # ── Root mover (LAST RESORT) ──────────────────────────────────────────────
     # If the data is owned by assorted UIDs you cannot match (e.g. lost+found, or
     # an app that writes as root), a root mover reads everything. This is ELEVATED:
-    # the workload namespace must opt in first, or the Backup is refused:
+    # the workload namespace must opt in first, or the Snapshot is refused:
     #   kubectl annotate namespace app kopiur.home-operations.com/privileged-movers=true
     # securityContext:
     #   runAsUser: 0           # root — reads any file

@@ -184,7 +184,7 @@ mod tests {
     #[tokio::test]
     async fn router_echoes_uid_and_allows_valid_backup_config() {
         let body = review_body(
-            "BackupConfig",
+            "SnapshotPolicy",
             "billing",
             "uid-123",
             good_backup_config_spec(),
@@ -201,7 +201,7 @@ mod tests {
             "repository": { "kind": "ClusterRepository", "name": "shared", "namespace": "nope" },
             "sources": [ { "pvc": { "name": "data" } } ]
         });
-        let body = review_body("BackupConfig", "billing", "u", spec);
+        let body = review_body("SnapshotPolicy", "billing", "u", spec);
         let (_s, v) = post_review(body).await;
         assert_eq!(v["response"]["allowed"], false);
         let msg = v["response"]["status"]["message"].as_str().unwrap();
@@ -215,7 +215,7 @@ mod tests {
             "repository": { "kind": "ClusterRepository", "name": "shared" },
             "sources": [ { "pvc": { "name": "data" } } ]
         });
-        let body = review_body("BackupConfig", "billing", "u", spec);
+        let body = review_body("SnapshotPolicy", "billing", "u", spec);
         let (_s, v) = post_review(body).await;
         assert_eq!(v["response"]["allowed"], false);
         let msg = v["response"]["status"]["message"].as_str().unwrap();
@@ -228,7 +228,7 @@ mod tests {
             "repository": { "kind": "Repository", "name": "nas" },
             "sources": []
         });
-        let body = review_body("BackupConfig", "billing", "u", spec);
+        let body = review_body("SnapshotPolicy", "billing", "u", spec);
         let (_s, v) = post_review(body).await;
         assert_eq!(v["response"]["allowed"], false);
     }
@@ -236,10 +236,10 @@ mod tests {
     #[tokio::test]
     async fn backup_schedule_bad_cron_denied() {
         let spec = json!({
-            "configRef": { "name": "c" },
+            "policyRef": { "name": "c" },
             "schedule": { "cron": "totally bad" }
         });
-        let body = review_body("BackupSchedule", "billing", "u", spec);
+        let body = review_body("SnapshotSchedule", "billing", "u", spec);
         let (_s, v) = post_review(body).await;
         assert_eq!(v["response"]["allowed"], false);
         let msg = v["response"]["status"]["message"].as_str().unwrap();
@@ -247,37 +247,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backup_schedule_defaults_run_on_create_and_concurrency() {
+    async fn backup_schedule_emits_no_spec_mutating_default_patch() {
+        // ADR-0005 §1/§14(d): runOnCreate (false) and concurrencyPolicy (Forbid) now
+        // carry real OpenAPI defaults in the CRD schema, so the webhook NO LONGER
+        // patches them into spec (the status-only-write invariant). The schedule is
+        // allowed and the webhook emits no spec-mutating patch.
         let spec = json!({
-            "configRef": { "name": "c" },
+            "policyRef": { "name": "c" },
             "schedule": { "cron": "0 2 * * *" }
         });
-        let body = review_body("BackupSchedule", "billing", "u", spec);
+        let body = review_body("SnapshotSchedule", "billing", "u", spec);
         let (_s, v) = post_review(body).await;
         assert_eq!(v["response"]["allowed"], true);
-        let patch = decode_patch(&v);
-        let has_run = patch.iter().any(|op| {
-            op["op"] == "add" && op["path"] == "/spec/schedule/runOnCreate" && op["value"] == false
-        });
-        let has_conc = patch.iter().any(|op| {
-            op["op"] == "add"
-                && op["path"] == "/spec/schedule/concurrencyPolicy"
-                && op["value"] == "Forbid"
-        });
-        assert!(has_run, "expected runOnCreate default patch: {patch:?}");
-        assert!(
-            has_conc,
-            "expected concurrencyPolicy default patch: {patch:?}"
-        );
+        // No patch at all is expected; if one is present it must not touch spec.
+        if v["response"]["patch"].is_array() {
+            let patch = decode_patch(&v);
+            let touches_spec = patch
+                .iter()
+                .any(|op| op["path"].as_str().is_some_and(|p| p.starts_with("/spec")));
+            assert!(
+                !touches_spec,
+                "the webhook must not mutate SnapshotSchedule spec (defaults are OpenAPI): {patch:?}"
+            );
+        }
     }
 
     #[tokio::test]
     async fn manual_backup_defaults_delete_and_finalizer() {
         let body = review_body(
-            "Backup",
+            "Snapshot",
             "billing",
             "u",
-            json!({ "configRef": { "name": "c" } }),
+            json!({ "policyRef": { "name": "c" } }),
         );
         let (_s, v) = post_review(body).await;
         assert_eq!(v["response"]["allowed"], true);
@@ -299,13 +300,13 @@ mod tests {
         // Regression: the mutating webhook re-added the snapshot-cleanup finalizer
         // on EVERY admission, including the UPDATE the controller issues to REMOVE
         // it during deletion. That made removal a no-op, so the finalizer never
-        // cleared and the Backup CR was never garbage-collected. An object already
+        // cleared and the Snapshot CR was never garbage-collected. An object already
         // being deleted (deletionTimestamp set) must NOT get the finalizer re-added.
         let mut body = review_body(
-            "Backup",
+            "Snapshot",
             "billing",
             "u",
-            json!({ "configRef": { "name": "c" }, "deletionPolicy": "Delete" }),
+            json!({ "policyRef": { "name": "c" }, "deletionPolicy": "Delete" }),
         );
         body["request"]["operation"] = json!("UPDATE");
         body["request"]["object"]["metadata"]["deletionTimestamp"] = json!("2026-06-08T00:00:00Z");
@@ -325,7 +326,7 @@ mod tests {
             });
             assert!(
                 !touches_finalizers,
-                "a deleting Backup must not have its finalizer re-added: {patch:?}"
+                "a deleting Snapshot must not have its finalizer re-added: {patch:?}"
             );
         }
     }
@@ -333,7 +334,7 @@ mod tests {
     #[tokio::test]
     async fn discovered_backup_with_delete_is_denied() {
         let mut body = review_body(
-            "Backup",
+            "Snapshot",
             "billing",
             "u",
             json!({ "deletionPolicy": "Delete" }),
@@ -349,7 +350,7 @@ mod tests {
 
     #[tokio::test]
     async fn discovered_backup_defaults_retain() {
-        let mut body = review_body("Backup", "billing", "u", json!({}));
+        let mut body = review_body("Snapshot", "billing", "u", json!({}));
         body["request"]["object"]["metadata"]["labels"] =
             json!({ "kopiur.home-operations.com/origin": "discovered" });
         let (_s, v) = post_review(body).await;
@@ -367,7 +368,8 @@ mod tests {
     #[tokio::test]
     async fn restore_identity_without_repository_denied() {
         let spec = json!({
-            "source": { "identity": { "username": "u", "hostname": "h" } }
+            "source": { "identity": { "username": "u", "hostname": "h" } },
+            "target": { "pvcRef": { "name": "tgt" } }
         });
         let body = review_body("Restore", "billing", "u", spec);
         let (_s, v) = post_review(body).await;
@@ -379,9 +381,115 @@ mod tests {
     #[tokio::test]
     async fn restore_backup_ref_allowed() {
         let spec = json!({
-            "source": { "backupRef": { "name": "b" } }
+            "source": { "snapshotRef": { "name": "b" } },
+            "target": { "pvcRef": { "name": "tgt" } }
         });
         let body = review_body("Restore", "billing", "u", spec);
+        let (_s, v) = post_review(body).await;
+        assert_eq!(v["response"]["allowed"], true);
+    }
+
+    #[tokio::test]
+    async fn restore_without_target_is_denied() {
+        // ADR-0005 §9: a Restore with no `target` is invalid — the decode fails and
+        // the webhook denies with an actionable message.
+        let spec = json!({ "source": { "snapshotRef": { "name": "b" } } });
+        let body = review_body("Restore", "billing", "u", spec);
+        let (_s, v) = post_review(body).await;
+        assert_eq!(v["response"]["allowed"], false);
+        let msg = v["response"]["status"]["message"].as_str().unwrap();
+        assert!(msg.contains("target"), "msg was: {msg}");
+    }
+
+    #[tokio::test]
+    async fn restore_populator_allowed() {
+        // ADR-0005 §9: explicit passive-populator mode.
+        let spec = json!({
+            "source": { "fromPolicy": { "name": "pg" } },
+            "target": { "populator": {} }
+        });
+        let body = review_body("Restore", "billing", "u", spec);
+        let (_s, v) = post_review(body).await;
+        assert_eq!(v["response"]["allowed"], true);
+    }
+
+    #[tokio::test]
+    async fn restore_populator_with_inherit_security_context_is_denied() {
+        // ADR-0005 §9: no workload pod exists at provision time for a populator, so
+        // inheritSecurityContextFrom is rejected.
+        let spec = json!({
+            "source": { "fromPolicy": { "name": "pg" } },
+            "target": { "populator": {} },
+            "mover": { "inheritSecurityContextFrom": { "podSelector": { "matchLabels": { "app": "pg" } } } }
+        });
+        let body = review_body("Restore", "billing", "u", spec);
+        let (_s, v) = post_review(body).await;
+        assert_eq!(v["response"]["allowed"], false);
+        let msg = v["response"]["status"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("inheritSecurityContextFrom") && msg.contains("populator"),
+            "msg was: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_encryption_change_on_update_is_denied() {
+        // ADR-0005 §7: encryption is immutable after creation. An UPDATE that changes
+        // the password Secret ref is rejected with an actionable message.
+        let old_spec = json!({
+            "backend": { "filesystem": { "path": "/repo" } },
+            "encryption": { "passwordSecretRef": { "name": "pw-old" } }
+        });
+        let new_spec = json!({
+            "backend": { "filesystem": { "path": "/repo" } },
+            "encryption": { "passwordSecretRef": { "name": "pw-new" } }
+        });
+        let mut body = review_body("Repository", "billing", "u", new_spec);
+        body["request"]["operation"] = json!("UPDATE");
+        body["request"]["oldObject"] = json!({
+            "apiVersion": "kopiur.home-operations.com/v1alpha1",
+            "kind": "Repository",
+            "metadata": { "name": "nas", "namespace": "billing" },
+            "spec": old_spec,
+        });
+        let (_s, v) = post_review(body).await;
+        assert_eq!(v["response"]["allowed"], false);
+        let msg = v["response"]["status"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("encryption") && msg.contains("immutable"),
+            "msg was: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_unchanged_immutable_fields_on_update_allowed() {
+        // The same UPDATE with unchanged encryption/splitter/hash is accepted.
+        let spec = json!({
+            "backend": { "filesystem": { "path": "/repo" } },
+            "encryption": { "passwordSecretRef": { "name": "pw" } },
+            "create": { "enabled": true, "splitter": "FIXED-4M" }
+        });
+        let mut body = review_body("Repository", "billing", "u", spec.clone());
+        body["request"]["operation"] = json!("UPDATE");
+        body["request"]["oldObject"] = json!({
+            "apiVersion": "kopiur.home-operations.com/v1alpha1",
+            "kind": "Repository",
+            "metadata": { "name": "nas", "namespace": "billing" },
+            "spec": spec,
+        });
+        let (_s, v) = post_review(body).await;
+        assert_eq!(v["response"]["allowed"], true);
+    }
+
+    #[tokio::test]
+    async fn repository_immutable_field_change_on_create_is_allowed() {
+        // CREATE has no old object, so the immutability check does not run.
+        let spec = json!({
+            "backend": { "filesystem": { "path": "/repo" } },
+            "encryption": { "passwordSecretRef": { "name": "pw" } },
+            "create": { "enabled": true, "splitter": "DYNAMIC" }
+        });
+        let body = review_body("Repository", "billing", "u", spec);
         let (_s, v) = post_review(body).await;
         assert_eq!(v["response"]["allowed"], true);
     }
@@ -439,7 +547,7 @@ mod tests {
     async fn undecodable_spec_is_denied() {
         // sources should be a list; give a string to force a decode error.
         let spec = json!({ "repository": { "name": "nas" }, "sources": "not-a-list" });
-        let body = review_body("BackupConfig", "billing", "u", spec);
+        let body = review_body("SnapshotPolicy", "billing", "u", spec);
         let (_s, v) = post_review(body).await;
         assert_eq!(v["response"]["allowed"], false);
         let msg = v["response"]["status"]["message"].as_str().unwrap();

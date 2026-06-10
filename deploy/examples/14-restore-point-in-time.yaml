@@ -1,9 +1,9 @@
 # Example 14 — Point-in-time / offset restore (ADR-0003 §3.6/§4.6)
 #
 # Restore the snapshot a config had at (or before) a specific moment — "roll back to
-# Tuesday 2am" — without hunting for the exact Backup CR. `source.fromConfig`
-# resolves through the BackupConfig's identity, so it works even when the matching
-# Backup CR has aged out, and accepts:
+# Tuesday 2am" — without hunting for the exact Snapshot CR. `source.fromPolicy`
+# resolves through the SnapshotPolicy's identity, so it works even when the matching
+# Snapshot CR has aged out, and accepts:
 #   - asOf:   newest snapshot AT OR BEFORE an RFC3339 instant (point-in-time)
 #   - offset: 0 = latest, 1 = previous, 2 = the one before that, ...
 # (`offset` and `asOf` are alternatives — set one.)
@@ -11,7 +11,7 @@
 # Restore into a NEW, side-by-side PVC and compare before cutting over (see
 # scenario 07 — point-in-time rollback).
 #
-# Field shapes verified against crates/api: source.fromConfig is
+# Field shapes verified against crates/api: source.fromPolicy is
 # { name, namespace?, asOf?, offset? }.
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
@@ -21,8 +21,8 @@ metadata:
   namespace: billing
 spec:
   source:
-    fromConfig:
-      name: postgres-data # the BackupConfig whose identity selects the snapshot
+    fromPolicy:
+      name: postgres-data # the SnapshotPolicy whose identity selects the snapshot
       # newest snapshot at/before this instant — the point you want to roll back to:
       asOf: 2026-05-20T02:00:00Z
       # offset: 1          # ...or by position: the previous snapshot instead of asOf
@@ -34,7 +34,7 @@ spec:
       accessModes:
         - ReadWriteOnce
   policy:
-    # fromConfig defaults to Continue (deploy-or-restore); for a deliberate
+    # fromPolicy defaults to Continue (deploy-or-restore); for a deliberate
     # point-in-time recovery you usually want it to FAIL if nothing matches.
     onMissingSnapshot: Fail
     waitTimeout: 5m

@@ -1,6 +1,6 @@
 # Kopiur
 
-**Kopiur** (Kopia + Rust) is a Kopia-native Kubernetes backup operator written in Rust on [`kube-rs`](https://github.com/kube-rs/kube). It makes a kopia repository a first-class Kubernetes resource and separates the backup **recipe** from its **invocation** from its **schedule**, so backups can be triggered by cron, `kubectl create`, Argo Events, or a Helm hook — and a kopia snapshot's lifecycle is tied to its `Backup` CR by a finalizer + `deletionPolicy`.
+**Kopiur** (Kopia + Rust) is a Kopia-native Kubernetes backup operator written in Rust on [`kube-rs`](https://github.com/kube-rs/kube). It makes a kopia repository a first-class Kubernetes resource and separates the backup **recipe** from its **invocation** from its **schedule**, so backups can be triggered by cron, `kubectl create`, Argo Events, or a Helm hook — and a kopia snapshot's lifecycle is tied to its `Snapshot` CR by a finalizer + `deletionPolicy`.
 
 The whole CRD surface is modeled as Rust enums so invalid states are unrepresentable and reconcilers handle every variant at compile time. For the high-level mental model start with [Concepts](concepts/how-kopia-works.md); see [ADR-0003](adr/0003-kopiur-rust-operator.md) for the full design.
 
@@ -10,17 +10,18 @@ API group `kopiur.home-operations.com`, version `v1alpha1`. The CRD surface may 
 
 ///
 
-## The 7 CRDs (`kopiur.home-operations.com/v1alpha1`)
+## The 8 CRDs (`kopiur.home-operations.com/v1alpha1`)
 
 | CRD                 | Scope      | Layer                | Purpose                                                                         |
 | ------------------- | ---------- | -------------------- | ------------------------------------------------------------------------------- |
 | `Repository`        | Namespaced | Storage              | A kopia repository owned by one namespace: backend, encryption, credentials.    |
 | `ClusterRepository` | Cluster    | Storage              | A shared repository for platform teams, gated by `allowedNamespaces`.           |
-| `BackupConfig`      | Namespaced | Recipe               | _What_ to back up: PVC sources, identity, retention, policy, hooks. Idempotent. |
-| `Backup`            | Namespaced | Invocation + Catalog | One kopia snapshot as a Kubernetes object. The universal trigger entry point.   |
-| `BackupSchedule`    | Namespaced | Cron                 | _When_ it runs: cron + jitter + timezone; creates `Backup` CRs.                 |
+| `SnapshotPolicy`      | Namespaced | Recipe               | _What_ to back up: PVC sources, identity, retention, policy, hooks. Idempotent. |
+| `Snapshot`            | Namespaced | Invocation + Catalog | One kopia snapshot as a Kubernetes object. The universal trigger entry point.   |
+| `SnapshotSchedule`    | Namespaced | Cron                 | _When_ it runs: cron + jitter + timezone; creates `Snapshot` CRs.                 |
 | `Restore`           | Namespaced | Operation            | Restore a snapshot to a PVC, or act as a passive volume-populator source.       |
 | `Maintenance`       | Namespaced | Lifecycle            | Schedules `kopia maintenance` quick + full with an ownership lease.             |
+| `RepositoryReplication` | Namespaced | Durability        | Mirror a repository's blobs to a second backend on a schedule (the "2" in 3-2-1). |
 
 ## Where to next
 
@@ -32,6 +33,8 @@ API group `kopiur.home-operations.com`, version `v1alpha1`. The CRD surface may 
 - **[Repositories & backends](repositories.md)** — point Kopiur at S3, Azure, GCS, B2, a NAS, or rclone.
 - **[Backups & schedules](backups.md)** and **[Restores](restores.md)** — the recipe/invocation/schedule model and reading data back.
 - **[Troubleshooting](troubleshooting.md)** — when something doesn't go green.
+- **[GitOps (Flux / Argo)](gitops.md)** — kstatus health, `kubectl wait`, managed-by/ownerRefs, drift-free applies.
+- **[Field reference](field-reference.md)** — every field of all 8 CRDs: type, default, immutability.
 - **[API reference (rustdoc)](api-reference.md)** — the generated Rust API docs for every crate in the workspace.
 - **[API conventions](dev/api-conventions.md)** and **[Observability](dev/observability.md)** — developer notes.
 - **[ADR-0003](adr/0003-kopiur-rust-operator.md)** — the canonical design document.

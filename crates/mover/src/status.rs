@@ -1,33 +1,33 @@
-//! Status types the mover PATCHes onto the `Backup`/`Restore` `.status`
+//! Status types the mover PATCHes onto the `Snapshot`/`Restore` `.status`
 //! subresource, plus the **pure** mapping from kopia results/errors to those
 //! types.
 //!
 //! The pure mapping (`KopiaError → FailureBlock`, `SnapshotCreateResult →
-//! `kopiur_api::BackupStats`/`BackupTiming`) is unit-testable with no cluster.
+//! `kopiur_api::SnapshotStats`/`SnapshotTiming`) is unit-testable with no cluster.
 //! The stats/timing types are the CRD's own (not mover-local) so their field
 //! names cannot drift from the structural schema — a mismatch is silently pruned
 //! by the API server. The actual kube PATCH lives in a thin function gated so
 //! tests don't need a client.
 
 use chrono::{DateTime, Utc};
-use kopiur_api::backup::SnapshotInfo;
 use kopiur_api::common::ResolvedIdentity;
 use kopiur_api::restore::RestorePhase;
-use kopiur_api::{BackupStats, BackupTiming, PhaseLabel};
+use kopiur_api::snapshot::SnapshotInfo;
+use kopiur_api::{PhaseLabel, SnapshotStats, SnapshotTiming};
 use kopiur_kopia::{KopiaError, SnapshotCreateResult};
 use serde::{Deserialize, Serialize};
 
-/// Map a kopia create result to the CRD `status.stats` shape (`BackupStats`).
+/// Map a kopia create result to the CRD `status.stats` shape (`SnapshotStats`).
 ///
 /// We reuse the API type rather than a mover-local struct so the field names
-/// stay in lockstep with the `Backup` CRD's structural schema. They MUST match:
+/// stay in lockstep with the `Snapshot` CRD's structural schema. They MUST match:
 /// the API server **prunes unknown status fields**, so a drifting name (the old
 /// mover-local `totalBytes`/`fileCount`) is silently dropped and `status.stats`
-/// lands as `{}` — which is exactly the bug that left `kopiur_backup_size_bytes`
+/// lands as `{}` — which is exactly the bug that left `kopiur_snapshot_size_bytes`
 /// empty. kopia's snapshot-create summary reports the snapshot's total size and
 /// file count, mapped to `sizeBytes`/`filesNew`.
-fn stats_from_result(r: &SnapshotCreateResult) -> BackupStats {
-    BackupStats {
+fn stats_from_result(r: &SnapshotCreateResult) -> SnapshotStats {
+    SnapshotStats {
         size_bytes: Some(r.total_bytes() as i64),
         files_new: Some(r.file_count() as i64),
         ..Default::default()
@@ -54,8 +54,8 @@ fn snapshot_from_result(r: &SnapshotCreateResult) -> SnapshotInfo {
 }
 
 /// Map a kopia create result's start/end timestamps to the CRD `status.timing`.
-fn timing_from_result(r: &SnapshotCreateResult) -> BackupTiming {
-    BackupTiming {
+fn timing_from_result(r: &SnapshotCreateResult) -> SnapshotTiming {
+    SnapshotTiming {
         start_time: Some(r.start_time.to_rfc3339()),
         end_time: Some(r.end_time.to_rfc3339()),
         duration_seconds: Some((r.end_time - r.start_time).num_seconds()),
@@ -120,6 +120,51 @@ impl From<&KopiaError> for FailureBlock {
     }
 }
 
+impl From<&crate::error::MoverError> for FailureBlock {
+    /// Map a typed mover failure to the persisted block. The structured error
+    /// is stringified **only here**, at the status surface; a kopia-backed
+    /// failure carries its stderr tail and exit code through, and the class +
+    /// retry hint always come from [`MoverError::kopia_class`]
+    /// (`crate::error::MoverError::kopia_class`) so they cannot drift from the
+    /// message.
+    fn from(err: &crate::error::MoverError) -> Self {
+        use crate::error::MoverError;
+        let (stderr_tail, exit_code) = match err {
+            MoverError::Kopia { source, .. } => (
+                source.stderr_tail().map(str::to_string),
+                match source {
+                    KopiaError::NonZeroExit { code, .. } => *code,
+                    KopiaError::Spawn { .. }
+                    | KopiaError::Json { .. }
+                    | KopiaError::EmptyOutput { .. }
+                    | KopiaError::Timeout { .. } => None,
+                },
+            ),
+            MoverError::BootstrapFailed { .. }
+            | MoverError::WorkSpecPathMissing
+            | MoverError::WorkSpecRead { .. }
+            | MoverError::WorkSpecParse { .. }
+            | MoverError::CredentialStagingDir { .. }
+            | MoverError::CredentialWrite { .. }
+            | MoverError::VerifyNoSnapshot { .. }
+            | MoverError::SuccessExprFalse { .. }
+            | MoverError::SuccessExprEval { .. }
+            | MoverError::KubeClient { .. }
+            | MoverError::StatusPatch { .. }
+            | MoverError::ResultSerialize { .. }
+            | MoverError::ResultConfigMapPatch { .. }
+            | MoverError::Telemetry(_) => (None, None),
+        };
+        FailureBlock {
+            kopia_error_class: err.kopia_class().as_str().to_string(),
+            message: err.to_string(),
+            stderr_tail,
+            exit_code,
+            retry_recommended: err.retry_recommended(),
+        }
+    }
+}
+
 /// The phase a mover run reports.
 ///
 /// ```
@@ -180,10 +225,10 @@ pub struct StatusUpdate {
     pub snapshot: Option<SnapshotInfo>,
     /// Timing, on success (CRD `status.timing`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timing: Option<BackupTiming>,
+    pub timing: Option<SnapshotTiming>,
     /// Stats, on success (CRD `status.stats`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stats: Option<BackupStats>,
+    pub stats: Option<SnapshotStats>,
     /// Failure block, on terminal failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<FailureBlock>,
@@ -214,8 +259,8 @@ impl StatusUpdate {
         }
     }
 
-    /// A successful snapshot-delete update (Backup finalizer path) with no stats.
-    /// The Backup CRD's terminal success phase is `Succeeded`.
+    /// A successful snapshot-delete update (Snapshot finalizer path) with no stats.
+    /// The Snapshot CRD's terminal success phase is `Succeeded`.
     pub fn succeeded(observed_at: DateTime<Utc>) -> Self {
         StatusUpdate {
             phase: MoverPhase::Succeeded.as_str().to_string(),
@@ -228,7 +273,7 @@ impl StatusUpdate {
     }
 
     /// A successful restore update with no stats. The Restore CRD's terminal
-    /// success phase is `Completed` — NOT `Succeeded` (the Backup phase). Writing
+    /// success phase is `Completed` — NOT `Succeeded` (the Snapshot phase). Writing
     /// `Succeeded` here is rejected by the apiserver with a 422 (the enum forbids
     /// it), so the phase string is sourced from [`RestorePhase::Completed`] to
     /// stay locked to the CRD.
@@ -245,6 +290,20 @@ impl StatusUpdate {
 
     /// A terminal-failure update from a kopia error.
     pub fn failed(err: &KopiaError, observed_at: DateTime<Utc>) -> Self {
+        StatusUpdate {
+            phase: MoverPhase::Failed.as_str().to_string(),
+            observed_at,
+            snapshot: None,
+            timing: None,
+            stats: None,
+            failure: Some(FailureBlock::from(err)),
+        }
+    }
+
+    /// A terminal-failure update from a typed mover error — same JSON shape as
+    /// [`StatusUpdate::failed`], but the message names which operation failed
+    /// and non-kopia failures (work spec, credentials, …) are representable.
+    pub fn failed_mover(err: &crate::error::MoverError, observed_at: DateTime<Utc>) -> Self {
         StatusUpdate {
             phase: MoverPhase::Failed.as_str().to_string(),
             observed_at,
@@ -355,6 +414,52 @@ mod tests {
         let fb = FailureBlock::from(&err);
         assert_eq!(fb.kopia_error_class, "RepositoryUnavailable");
         assert!(fb.retry_recommended);
+    }
+
+    #[test]
+    fn failure_block_from_mover_kopia_matches_the_kopia_error_path() {
+        // The MoverError wrapper must not lose anything the bare-KopiaError
+        // mapping carried: class, stderr tail, exit code, retry hint all
+        // survive; only the message gains the "which op" prefix.
+        use crate::error::{KopiaOp, MoverError};
+        let kopia = KopiaError::NonZeroExit {
+            args: "snapshot create".into(),
+            code: Some(1),
+            class: KopiaErrorClass::RepositoryUnavailable,
+            stderr_tail: "dial tcp: connection refused".into(),
+        };
+        let bare = FailureBlock::from(&kopia);
+        let wrapped = FailureBlock::from(&MoverError::Kopia {
+            op: KopiaOp::SnapshotCreate,
+            source: kopia,
+        });
+        assert_eq!(wrapped.kopia_error_class, bare.kopia_error_class);
+        assert_eq!(wrapped.stderr_tail, bare.stderr_tail);
+        assert_eq!(wrapped.exit_code, bare.exit_code);
+        assert_eq!(wrapped.retry_recommended, bare.retry_recommended);
+        assert!(wrapped.message.starts_with("snapshot create failed"));
+    }
+
+    #[test]
+    fn failure_block_from_bootstrap_failed_keeps_class_and_retry_hint() {
+        use crate::error::MoverError;
+        let fb = FailureBlock::from(&MoverError::BootstrapFailed {
+            class: KopiaErrorClass::AuthFailure,
+            message: "invalid repository password".into(),
+        });
+        assert_eq!(fb.kopia_error_class, "AuthFailure");
+        assert!(!fb.retry_recommended);
+        assert!(fb.stderr_tail.is_none());
+    }
+
+    #[test]
+    fn failure_block_from_environmental_mover_error_is_unknown_non_retryable() {
+        use crate::error::MoverError;
+        let fb = FailureBlock::from(&MoverError::WorkSpecPathMissing);
+        assert_eq!(fb.kopia_error_class, "Unknown");
+        assert!(!fb.retry_recommended);
+        assert!(fb.exit_code.is_none());
+        assert!(fb.message.contains("KOPIUR_WORK_SPEC_PATH"));
     }
 
     #[test]

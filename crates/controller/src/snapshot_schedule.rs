@@ -1,10 +1,10 @@
-//! The `BackupSchedule` reconciler — *when* a backup runs (ADR §4.1).
+//! The `SnapshotSchedule` reconciler — *when* a backup runs (ADR §4.1).
 //!
 //! ## Timing: requeue-based, not a `tokio::interval` task (decision)
 //!
 //! We compute the next wall-clock slot during each reconcile and return
 //! `Action::requeue(time_until_slot)`. When that requeue fires, we check whether
-//! the slot is due and, if so, create a `Backup` CR; then we recompute and
+//! the slot is due and, if so, create a `Snapshot` CR; then we recompute and
 //! requeue again. This is **HA-safe and restart-safe**: there is no per-schedule
 //! background task to leak, leader-election is handled by the controller runtime
 //! (only the active replica reconciles), and a restart simply recomputes the
@@ -24,9 +24,12 @@ use kube::api::ListParams;
 use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
-use kopiur_api::backup::BackupSpec;
-use kopiur_api::common::ConfigRef;
-use kopiur_api::{Backup, BackupSchedule, ConcurrencyPolicy, ScheduleSpec, jitter, validate};
+use kopiur_api::common::PolicyRef;
+use kopiur_api::snapshot::SnapshotSpec;
+use kopiur_api::{
+    ConcurrencyPolicy, ScheduleSpec, Snapshot, SnapshotPolicy, SnapshotSchedule, jitter, validate,
+};
+use std::collections::BTreeMap;
 
 use crate::consts::ORIGIN_LABEL;
 use crate::context::Context;
@@ -112,7 +115,7 @@ pub fn concurrency_allows(policy: ConcurrencyPolicy, run_active: bool) -> bool {
     }
 }
 
-/// Whether the schedule should produce any `Backup` at all right now, combining
+/// Whether the schedule should produce any `Snapshot` at all right now, combining
 /// `suspend`, the slot being due, the deadline, and concurrency. Pure decision.
 pub fn should_create_backup(
     schedule: &ScheduleSpec,
@@ -132,6 +135,48 @@ pub fn should_create_backup(
     concurrency_allows(schedule.concurrency_policy, run_active)
 }
 
+/// Whether a `SnapshotPolicy` with the given `labels` matches a `policySelector`
+/// (ADR-0005 §10). Pure decision (the `Api::list` IO is the caller's). Implements
+/// `matchLabels` (every key must be present with the required value) plus the
+/// common `matchExpressions` operators (`In`/`NotIn`/`Exists`/`DoesNotExist`); an
+/// empty selector matches every policy. A suspended policy is the caller's concern.
+pub fn policy_matches_selector(
+    labels: &BTreeMap<String, String>,
+    selector: &k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector,
+) -> bool {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement;
+    if let Some(ml) = &selector.match_labels {
+        for (k, v) in ml {
+            if labels.get(k) != Some(v) {
+                return false;
+            }
+        }
+    }
+    if let Some(exprs) = &selector.match_expressions {
+        for LabelSelectorRequirement {
+            key,
+            operator,
+            values,
+        } in exprs
+        {
+            let vals = values.clone().unwrap_or_default();
+            let present = labels.get(key);
+            let ok = match operator.as_str() {
+                "In" => present.is_some_and(|v| vals.iter().any(|x| x == v)),
+                "NotIn" => present.is_none_or(|v| !vals.iter().any(|x| x == v)),
+                "Exists" => present.is_some(),
+                "DoesNotExist" => present.is_none(),
+                // Unknown operator: the schema constrains the set; treat as no constraint.
+                _ => true,
+            };
+            if !ok {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Whether a freshly-created schedule should fire one backup immediately on
 /// creation (`runOnCreate`), rather than waiting for the first cron slot. Pure
 /// decision: true only when `runOnCreate` is set, the schedule is not suspended,
@@ -142,17 +187,44 @@ pub fn should_run_on_create(schedule: &ScheduleSpec, already_ran: bool) -> bool 
     schedule.run_on_create && !schedule.suspend && !already_ran
 }
 
-/// Reconcile a `BackupSchedule`.
-#[tracing::instrument(skip(schedule, ctx), fields(kind = "BackupSchedule", namespace = %schedule.namespace().unwrap_or_default(), name = %schedule.name_any()))]
-pub async fn reconcile(schedule: Arc<BackupSchedule>, ctx: Arc<Context>) -> Result<Action> {
+/// The kstatus Ready conditions for a `SnapshotSchedule` (ADR-0005 §2). A schedule
+/// has no phase; it's `Ready` whenever it has reconciled — whether actively
+/// scheduling or correctly `suspend`ed (a paused schedule is healthy, not stalled).
+/// Returns the `conditions` + `observedGeneration` to merge into a status patch.
+/// Existing conditions are preserved by [`io::set_ready`]'s upsert.
+fn schedule_ready_status(schedule: &SnapshotSchedule) -> (serde_json::Value, i64) {
+    let existing = schedule
+        .status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default();
+    let generation = schedule.metadata.generation.unwrap_or(0);
+    let (reason, message) = if schedule.spec.schedule.suspend {
+        ("Suspended", "the schedule is suspended")
+    } else {
+        ("Scheduled", "the schedule is reconciled and active")
+    };
+    let conditions = io::set_ready(
+        &existing,
+        Some(generation),
+        io::ReadyOutcome::Ready,
+        reason,
+        message,
+    );
+    (serde_json::json!(conditions), generation)
+}
+
+/// Reconcile a `SnapshotSchedule`.
+#[tracing::instrument(skip(schedule, ctx), fields(kind = "SnapshotSchedule", namespace = %schedule.namespace().unwrap_or_default(), name = %schedule.name_any()))]
+pub async fn reconcile(schedule: Arc<SnapshotSchedule>, ctx: Arc<Context>) -> Result<Action> {
     let start = std::time::Instant::now();
     let result = reconcile_inner(&schedule, &ctx).await;
     ctx.metrics
-        .record_reconcile("BackupSchedule", start.elapsed().as_secs_f64());
+        .record_reconcile("SnapshotSchedule", start.elapsed().as_secs_f64());
     result
 }
 
-async fn reconcile_inner(schedule: &BackupSchedule, ctx: &Context) -> Result<Action> {
+async fn reconcile_inner(schedule: &SnapshotSchedule, ctx: &Context) -> Result<Action> {
     // Defensive re-validation (one validator, two callers — SKILL hard-rule 4).
     let errs = validate::validate_backup_schedule(&schedule.spec);
     if let Some(first) = errs.into_iter().next() {
@@ -161,9 +233,9 @@ async fn reconcile_inner(schedule: &BackupSchedule, ctx: &Context) -> Result<Act
 
     let namespace = schedule
         .namespace()
-        .ok_or_else(|| Error::Invariant("BackupSchedule has no namespace".into()))?;
+        .ok_or_else(|| Error::Invariant("SnapshotSchedule has no namespace".into()))?;
     let sched_name = schedule.name_any();
-    let api: Api<BackupSchedule> = Api::namespaced(ctx.client.clone(), &namespace);
+    let api: Api<SnapshotSchedule> = Api::namespaced(ctx.client.clone(), &namespace);
 
     let seed = schedule.uid().unwrap_or_else(|| schedule.name_any());
     let now = Utc::now();
@@ -186,19 +258,29 @@ async fn reconcile_inner(schedule: &BackupSchedule, ctx: &Context) -> Result<Act
         .map(|dt| dt.with_timezone(&Utc));
 
     if let Some(slot) = pinned_slot {
-        // Is a run currently active (an unfinished Backup owned by this schedule)?
+        // Is a run currently active (an unfinished Snapshot owned by this schedule)?
         let run_active = active_run_exists(ctx, &namespace, &sched_name).await?;
         if should_create_backup(&schedule.spec.schedule, slot, now, run_active) {
-            let backup_name = scheduled_backup_name(&sched_name, slot);
-            create_scheduled_backup(ctx, schedule, &namespace, &backup_name).await?;
+            // Fire one Snapshot per resolved policy (single policyRef, or each
+            // policySelector match — ADR-0005 §10). The single-ref form keeps the
+            // slot-stamped name for lastSchedule.snapshotRef.
+            fire_for_targets(ctx, schedule, &namespace, slot).await?;
+            let snapshot_ref = schedule
+                .spec
+                .policy_ref
+                .as_ref()
+                .map(|_| scheduled_backup_name(&sched_name, slot));
             let next = next_fire(&schedule.spec.schedule.cron, jitter_window, &seed, now)?;
+            let (conditions, generation) = schedule_ready_status(schedule);
             io::patch_status(
                 &api,
                 &sched_name,
                 serde_json::json!({
-                    "lastSchedule": { "at": slot.to_rfc3339(), "backupRef": { "name": backup_name } },
+                    "lastSchedule": { "at": slot.to_rfc3339(), "snapshotRef": snapshot_ref.map(|n| serde_json::json!({ "name": n })) },
                     "nextSchedule": { "at": next.to_rfc3339() },
                     "consecutiveFailures": 0,
+                    "observedGeneration": generation,
+                    "conditions": conditions,
                 }),
             )
             .await?;
@@ -217,7 +299,7 @@ async fn reconcile_inner(schedule: &BackupSchedule, ctx: &Context) -> Result<Act
     // first cron slot. The run is anchored to the schedule's creation time (not
     // `now`) so its deterministic name is stable across retries — if the status
     // patch below fails and we re-enter this branch, the server-side apply
-    // converges on the same Backup rather than creating a duplicate.
+    // converges on the same Snapshot rather than creating a duplicate.
     let already_ran = schedule
         .status
         .as_ref()
@@ -225,20 +307,27 @@ async fn reconcile_inner(schedule: &BackupSchedule, ctx: &Context) -> Result<Act
         .is_some();
     if should_run_on_create(&schedule.spec.schedule, already_ran) {
         // metadata.creationTimestamp is a k8s-openapi `Time` wrapping a jiff
-        // `Timestamp`; convert via unix seconds to chrono (matches backup_config).
+        // `Timestamp`; convert via unix seconds to chrono (matches snapshot_policy).
         let anchor = schedule
             .creation_timestamp()
             .and_then(|t| DateTime::<Utc>::from_timestamp(t.0.as_second(), 0))
             .unwrap_or(now);
-        let backup_name = scheduled_backup_name(&sched_name, anchor);
-        create_scheduled_backup(ctx, schedule, &namespace, &backup_name).await?;
+        fire_for_targets(ctx, schedule, &namespace, anchor).await?;
+        let snapshot_ref = schedule
+            .spec
+            .policy_ref
+            .as_ref()
+            .map(|_| scheduled_backup_name(&sched_name, anchor));
+        let (conditions, generation) = schedule_ready_status(schedule);
         io::patch_status(
             &api,
             &sched_name,
             serde_json::json!({
-                "lastSchedule": { "at": anchor.to_rfc3339(), "backupRef": { "name": backup_name } },
+                "lastSchedule": { "at": anchor.to_rfc3339(), "snapshotRef": snapshot_ref.map(|n| serde_json::json!({ "name": n })) },
                 "nextSchedule": { "at": next.to_rfc3339() },
                 "consecutiveFailures": 0,
+                "observedGeneration": generation,
+                "conditions": conditions,
             }),
         )
         .await?;
@@ -247,47 +336,93 @@ async fn reconcile_inner(schedule: &BackupSchedule, ctx: &Context) -> Result<Act
     }
 
     // No runOnCreate: pin the next slot without firing (GitOps-friendly default).
+    let (conditions, generation) = schedule_ready_status(schedule);
     io::patch_status(
         &api,
         &sched_name,
-        serde_json::json!({ "nextSchedule": { "at": next.to_rfc3339() } }),
+        serde_json::json!({
+            "nextSchedule": { "at": next.to_rfc3339() },
+            "observedGeneration": generation,
+            "conditions": conditions,
+        }),
     )
     .await?;
     let until = (next - now).to_std().unwrap_or(StdDuration::from_secs(60));
     Ok(Action::requeue(until.max(StdDuration::from_secs(1))))
 }
 
-/// A deterministic, slot-stamped Backup name so the same slot is idempotent
+/// A deterministic, slot-stamped Snapshot name so the same slot is idempotent
 /// across reconciles/replicas (`<schedule>-<YYYYmmddHHMMSS>`).
 fn scheduled_backup_name(schedule: &str, slot: DateTime<Utc>) -> String {
     format!("{schedule}-{}", slot.format("%Y%m%d%H%M%S"))
 }
 
-/// Whether an unfinished Backup created by this schedule still exists.
+/// Whether an unfinished Snapshot created by this schedule still exists.
 async fn active_run_exists(ctx: &Context, namespace: &str, schedule: &str) -> Result<bool> {
-    use kopiur_api::BackupPhase;
-    let api: Api<Backup> = Api::namespaced(ctx.client.clone(), namespace);
+    use kopiur_api::SnapshotPhase;
+    let api: Api<Snapshot> = Api::namespaced(ctx.client.clone(), namespace);
     let lp =
         ListParams::default().labels(&format!("kopiur.home-operations.com/schedule={schedule}"));
     let items = api.list(&lp).await?.items;
     Ok(items.iter().any(|b| {
         matches!(
             b.status.as_ref().and_then(|s| s.phase),
-            Some(BackupPhase::Pending) | Some(BackupPhase::Running) | None
+            Some(SnapshotPhase::Pending) | Some(SnapshotPhase::Running) | None
         ) && b.metadata.deletion_timestamp.is_none()
     }))
 }
 
-/// Create a scheduled Backup CR (owner-ref to the schedule, origin=scheduled,
-/// configRef to the schedule's config). Server-side applied so re-firing the
-/// same slot converges instead of erroring.
+/// Resolve the set of `SnapshotPolicy` targets a fire should create a `Snapshot`
+/// for (ADR-0005 §10). With `policyRef` it's the single named policy. With
+/// `policySelector` it lists `SnapshotPolicy`s in the schedule's namespace and
+/// returns each matching the selector (skipping suspended policies — §14(e)). The
+/// XOR is webhook-enforced and re-validated in `reconcile_inner`; here a schedule
+/// with neither yields an empty set (no fire).
+async fn target_policy_refs(
+    ctx: &Context,
+    schedule: &SnapshotSchedule,
+    namespace: &str,
+) -> Result<Vec<PolicyRef>> {
+    if let Some(pref) = &schedule.spec.policy_ref {
+        return Ok(vec![pref.clone()]);
+    }
+    let Some(selector) = &schedule.spec.policy_selector else {
+        return Ok(Vec::new());
+    };
+    // Fan-out: read SnapshotPolicies in the schedule's namespace and filter by the
+    // selector. (The schedule fires policies in its own namespace; a policyRef may
+    // still cross namespaces, but the selector form is namespace-local by design.)
+    let api: Api<SnapshotPolicy> = Api::namespaced(ctx.client.clone(), namespace);
+    let policies = api.list(&ListParams::default()).await?.items;
+    let refs = policies
+        .into_iter()
+        .filter(|p| {
+            // Skip suspended policies (§14(e)) and apply the selector match.
+            !p.spec.suspend
+                && policy_matches_selector(
+                    p.metadata.labels.as_ref().unwrap_or(&BTreeMap::new()),
+                    selector,
+                )
+        })
+        .map(|p| PolicyRef {
+            name: p.name_any(),
+            namespace: None,
+        })
+        .collect();
+    Ok(refs)
+}
+
+/// Create a scheduled Snapshot CR for `policy_ref` (owner-ref to the schedule,
+/// origin=scheduled). Server-side applied so re-firing the same slot converges
+/// instead of erroring. `backup_name` is the per-policy slot-stamped name.
 async fn create_scheduled_backup(
     ctx: &Context,
-    schedule: &BackupSchedule,
+    schedule: &SnapshotSchedule,
     namespace: &str,
     backup_name: &str,
+    policy_ref: &PolicyRef,
 ) -> Result<()> {
-    let owner = io::owner_ref_for(schedule, "BackupSchedule")?;
+    let owner = io::owner_ref_for(schedule, "SnapshotSchedule")?;
     let mut labels = std::collections::BTreeMap::new();
     labels.insert(ORIGIN_LABEL.to_string(), "scheduled".to_string());
     labels.insert(
@@ -296,34 +431,56 @@ async fn create_scheduled_backup(
     );
     labels.insert(
         crate::consts::CONFIG_LABEL.to_string(),
-        schedule.spec.config_ref.name.clone(),
+        policy_ref.name.clone(),
     );
 
-    let mut backup = Backup::new(
+    let mut backup = Snapshot::new(
         backup_name,
-        BackupSpec {
-            config_ref: Some(ConfigRef {
-                name: schedule.spec.config_ref.name.clone(),
-                namespace: schedule.spec.config_ref.namespace.clone(),
-            }),
+        SnapshotSpec {
+            policy_ref: Some(policy_ref.clone()),
             tags: None,
             failure_policy: None,
             deletion_policy: None,
+            pin: false,
         },
     );
     backup.metadata = io::child_meta(backup_name, namespace, labels, Some(owner));
 
-    let api: Api<Backup> = Api::namespaced(ctx.client.clone(), namespace);
+    let api: Api<Snapshot> = Api::namespaced(ctx.client.clone(), namespace);
     io::apply(&api, backup_name, &backup).await?;
     ctx.metrics
         .inc_schedule_backup_created(namespace, &schedule.name_any());
-    tracing::info!(schedule = %schedule.name_any(), backup = %backup_name, "created scheduled Backup");
+    tracing::info!(schedule = %schedule.name_any(), backup = %backup_name, policy = %policy_ref.name, "created scheduled Snapshot");
     Ok(())
 }
 
-/// `error_policy` for the `BackupSchedule` controller.
-pub fn error_policy(_obj: Arc<BackupSchedule>, err: &Error, ctx: Arc<Context>) -> Action {
-    error_policy_for("BackupSchedule", err, &ctx)
+/// Fire one `Snapshot` per resolved target policy for the slot `slot_name_part`
+/// (the slot-stamp). Each Snapshot's name is `<schedule>-<policy>-<slot>` for the
+/// fan-out form (so a multi-policy schedule doesn't collide), or `<schedule>-<slot>`
+/// for the single `policyRef` form (preserving the existing idempotent name).
+async fn fire_for_targets(
+    ctx: &Context,
+    schedule: &SnapshotSchedule,
+    namespace: &str,
+    slot: DateTime<Utc>,
+) -> Result<()> {
+    let targets = target_policy_refs(ctx, schedule, namespace).await?;
+    let single = schedule.spec.policy_ref.is_some();
+    let sched_name = schedule.name_any();
+    for pref in &targets {
+        let backup_name = if single {
+            scheduled_backup_name(&sched_name, slot)
+        } else {
+            format!("{sched_name}-{}-{}", pref.name, slot.format("%Y%m%d%H%M%S"))
+        };
+        create_scheduled_backup(ctx, schedule, namespace, &backup_name, pref).await?;
+    }
+    Ok(())
+}
+
+/// `error_policy` for the `SnapshotSchedule` controller.
+pub fn error_policy(obj: Arc<SnapshotSchedule>, err: &Error, ctx: Arc<Context>) -> Action {
+    error_policy_for("SnapshotSchedule", obj.as_ref(), err, &ctx)
 }
 
 #[cfg(test)]
@@ -459,6 +616,66 @@ mod tests {
         let slot = at(2026, 5, 24, 2, 0);
         let now = at(2026, 5, 24, 1, 30); // before the slot
         assert!(!should_create_backup(&spec, slot, now, false));
+    }
+
+    #[test]
+    fn policy_selector_match_decision() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
+            LabelSelector, LabelSelectorRequirement,
+        };
+        let labels = BTreeMap::from([
+            ("tier".to_string(), "critical".to_string()),
+            ("app".to_string(), "pg".to_string()),
+        ]);
+        // matchLabels: exact value present → match.
+        let ml = LabelSelector {
+            match_labels: Some(BTreeMap::from([(
+                "tier".to_string(),
+                "critical".to_string(),
+            )])),
+            ..Default::default()
+        };
+        assert!(policy_matches_selector(&labels, &ml));
+        // Wrong value → no match.
+        let ml_wrong = LabelSelector {
+            match_labels: Some(BTreeMap::from([("tier".to_string(), "low".to_string())])),
+            ..Default::default()
+        };
+        assert!(!policy_matches_selector(&labels, &ml_wrong));
+        // Empty selector matches everything.
+        assert!(policy_matches_selector(&labels, &LabelSelector::default()));
+        // matchExpressions: In / Exists / DoesNotExist.
+        let me = LabelSelector {
+            match_expressions: Some(vec![
+                LabelSelectorRequirement {
+                    key: "tier".into(),
+                    operator: "In".into(),
+                    values: Some(vec!["critical".into(), "high".into()]),
+                },
+                LabelSelectorRequirement {
+                    key: "app".into(),
+                    operator: "Exists".into(),
+                    values: None,
+                },
+                LabelSelectorRequirement {
+                    key: "deprecated".into(),
+                    operator: "DoesNotExist".into(),
+                    values: None,
+                },
+            ]),
+            ..Default::default()
+        };
+        assert!(policy_matches_selector(&labels, &me));
+        // NotIn that excludes the present value → no match.
+        let not_in = LabelSelector {
+            match_expressions: Some(vec![LabelSelectorRequirement {
+                key: "tier".into(),
+                operator: "NotIn".into(),
+                values: Some(vec!["critical".into()]),
+            }]),
+            ..Default::default()
+        };
+        assert!(!policy_matches_selector(&labels, &not_in));
     }
 
     #[test]

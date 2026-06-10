@@ -403,7 +403,7 @@ pub struct RestoreOptions {
 }
 
 /// Policy fields kopia applies via `kopia policy set`. Mirrors the operator's
-/// `BackupConfig.spec.policy` without depending on the api crate, so the kopia
+/// `SnapshotPolicy.spec.policy` without depending on the api crate, so the kopia
 /// crate stays controller-agnostic. The caller translates the CRD policy into
 /// this and the controller applies it before the first snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -416,8 +416,113 @@ pub struct PolicyArgs {
     pub ignore: Vec<String>,
     /// `--add-never-compress` glob patterns.
     pub never_compress: Vec<String>,
+    /// `--ignore-cache-dirs` tri-state (honor `CACHEDIR.TAG`). `None` leaves kopia's default.
+    pub ignore_cache_dirs: Option<bool>,
+    /// Backup-side error handling (`--ignore-file-errors`) tri-state. ADR-0005 §13(b).
+    pub ignore_file_errors: Option<bool>,
+    /// `--ignore-dir-errors` tri-state. ADR-0005 §13(b).
+    pub ignore_dir_errors: Option<bool>,
+    /// `--ignore-unknown-types` tri-state. ADR-0005 §13(b).
+    pub ignore_unknown_types: Option<bool>,
+    /// `--max-parallel-snapshots` upload parallelism. ADR-0005 §13(f).
+    pub max_parallel_snapshots: Option<u32>,
+    /// `--max-parallel-file-reads` upload parallelism. ADR-0005 §13(f).
+    pub max_parallel_file_reads: Option<u32>,
     /// Verbatim extra `policy set` flags (the CRD escape hatch).
     pub extra_args: Vec<String>,
+}
+
+/// Create-time-fixed repository options applied at `kopia repository create`
+/// (ADR-0005 §13(a)): the encryption/splitter/hash algorithms baked into the repo
+/// format, plus optional Reed-Solomon ECC parity guarding blobs against backend
+/// bit-rot. All fields are immutable post-create (webhook-enforced, §7); kopia only
+/// honors them at create time. Pure args builder so it's unit-testable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CreateOptions {
+    /// `--encryption` algorithm (e.g. `AES256-GCM-HMAC-SHA256`).
+    pub encryption: Option<String>,
+    /// `--object-splitter` algorithm.
+    pub splitter: Option<String>,
+    /// `--block-hash` content-hash algorithm.
+    pub hash: Option<String>,
+    /// `--ecc` Reed-Solomon algorithm (e.g. `REED-SOLOMON-CRC32`). ADR-0005 §13(a).
+    pub ecc: Option<String>,
+    /// `--ecc-overhead-percent` parity overhead. ADR-0005 §13(a).
+    pub ecc_overhead_percent: Option<i64>,
+}
+
+impl CreateOptions {
+    /// The create-time `--encryption`/`--object-splitter`/`--block-hash`/`--ecc`/
+    /// `--ecc-overhead-percent` args, in a stable order. Empty when nothing is set.
+    pub fn args(&self) -> Vec<String> {
+        let mut a = Vec::new();
+        if let Some(v) = &self.encryption {
+            a.push("--encryption".into());
+            a.push(v.clone());
+        }
+        if let Some(v) = &self.splitter {
+            a.push("--object-splitter".into());
+            a.push(v.clone());
+        }
+        if let Some(v) = &self.hash {
+            a.push("--block-hash".into());
+            a.push(v.clone());
+        }
+        if let Some(v) = &self.ecc {
+            a.push("--ecc".into());
+            a.push(v.clone());
+        }
+        if let Some(p) = self.ecc_overhead_percent {
+            a.push("--ecc-overhead-percent".into());
+            a.push(p.to_string());
+        }
+        a
+    }
+}
+
+/// Repository throttling limits applied via `kopia repository throttle set`
+/// (ADR-0005 §13(e)). Each `None` leaves kopia's current value untouched. Pure args
+/// builder so it's unit-testable; an all-`None` instance yields no flags.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThrottleArgs {
+    /// `--upload-bytes-per-second`.
+    pub upload_bytes_per_second: Option<i64>,
+    /// `--download-bytes-per-second`.
+    pub download_bytes_per_second: Option<i64>,
+    /// `--read-requests-per-second`.
+    pub read_ops_per_second: Option<i64>,
+    /// `--write-requests-per-second`.
+    pub write_ops_per_second: Option<i64>,
+}
+
+impl ThrottleArgs {
+    /// The `--*-per-second` flags for the set limits, in a stable order. Empty when
+    /// nothing is set (the caller then skips the `throttle set` invocation).
+    pub fn args(&self) -> Vec<String> {
+        let mut a = Vec::new();
+        if let Some(v) = self.upload_bytes_per_second {
+            a.push("--upload-bytes-per-second".into());
+            a.push(v.to_string());
+        }
+        if let Some(v) = self.download_bytes_per_second {
+            a.push("--download-bytes-per-second".into());
+            a.push(v.to_string());
+        }
+        if let Some(v) = self.read_ops_per_second {
+            a.push("--read-requests-per-second".into());
+            a.push(v.to_string());
+        }
+        if let Some(v) = self.write_ops_per_second {
+            a.push("--write-requests-per-second".into());
+            a.push(v.to_string());
+        }
+        a
+    }
+
+    /// Whether no limits are set (so `throttle set` is skipped).
+    pub fn is_empty(&self) -> bool {
+        self.args().is_empty()
+    }
 }
 
 /// Builder for [`KopiaClient`].
@@ -689,15 +794,51 @@ impl KopiaClient {
 
     /// Create a new repository (`kopia repository create <backend>`). `cache` sizes
     /// the creating connection's local cache; pass [`CacheTuning::default`] to leave
-    /// kopia's defaults.
+    /// kopia's defaults. `create_opts` carries the create-time-fixed knobs
+    /// (encryption/splitter/hash algorithms, ECC) baked into the repository format.
     pub async fn repository_create(
         &self,
         spec: &ConnectSpec,
         cache: CacheTuning,
+        create_opts: &CreateOptions,
     ) -> Result<(), KopiaError> {
         let mut args = vec!["repository".into(), "create".into()];
         args.extend(spec.backend_args());
         args.extend(cache.args());
+        args.extend(create_opts.args());
+        self.run_ok(&args).await.map(|_| ())
+    }
+
+    /// Set the repository's throttling limits (`kopia repository throttle set`).
+    /// Caps upload/download bytes-per-sec and read/list/upload ops-per-sec so a run
+    /// doesn't saturate a link or hammer an object store (ADR-0005 §13(e)). A no-op
+    /// (skips the call) when nothing is set.
+    pub async fn repository_throttle_set(&self, throttle: &ThrottleArgs) -> Result<(), KopiaError> {
+        let flags = throttle.args();
+        if flags.is_empty() {
+            return Ok(());
+        }
+        let mut args = vec!["repository".into(), "throttle".into(), "set".into()];
+        args.extend(flags);
+        self.run_ok(&args).await.map(|_| ())
+    }
+
+    /// Mirror the *connected* repository's blobs to a destination backend
+    /// (`kopia repository sync-to <destination> [flags]`), ADR-0005 §13(d). The
+    /// caller must already be connected to the **source** repository; this copies
+    /// its blobs to `destination`. The destination's backend args are built by
+    /// `ConnectSpec::backend_args` (the same builder connect/create use), so a new
+    /// backend variant is wired through automatically. `--must-exist=false` lets the
+    /// first sync create the destination layout; `--delete` (when `delete_extra`)
+    /// prunes blobs at the destination no longer present at the source (a true
+    /// mirror). Destination credentials are supplied via the environment, never on
+    /// argv, exactly like connect/create. Success is exit code 0.
+    pub async fn repository_sync_to(
+        &self,
+        destination: &ConnectSpec,
+        delete_extra: bool,
+    ) -> Result<(), KopiaError> {
+        let args = sync_to_args(destination, delete_extra);
         self.run_ok(&args).await.map(|_| ())
     }
 
@@ -801,7 +942,7 @@ impl KopiaClient {
 
     /// Add a pin to a snapshot so maintenance/expiration never deletes it
     /// (`kopia snapshot pin <id> --add <pin>`). Used to protect snapshots whose
-    /// `Backup` carries `deletionPolicy: Retain`.
+    /// `Snapshot` carries `deletionPolicy: Retain`.
     pub async fn snapshot_pin(&self, id: &str, pin: &str) -> Result<(), KopiaError> {
         let args = vec![
             "snapshot".into(),
@@ -846,7 +987,7 @@ impl KopiaClient {
 
     /// Apply a policy to `target` (an identity string, a path, or `--global`)
     /// via `kopia policy set`. The operator calls this before the first snapshot
-    /// so `BackupConfig.spec.policy` (compression/splitter/ignore) is honored.
+    /// so `SnapshotPolicy.spec.policy` (compression/splitter/ignore) is honored.
     pub async fn policy_set(&self, target: &str, policy: &PolicyArgs) -> Result<(), KopiaError> {
         let args = policy_set_args(target, policy);
         self.run_ok(&args).await.map(|_| ())
@@ -980,6 +1121,24 @@ fn verify_args(opts: &VerifyOptions) -> Vec<String> {
     args
 }
 
+/// Build the args for `kopia repository sync-to <destination> [flags]`. Pure so it
+/// is unit-testable without spawning kopia (ADR-0005 §13(d)). The destination's
+/// backend selection reuses `ConnectSpec::backend_args`, so every backend is wired
+/// through. `--must-exist=false` allows the first sync to create the destination
+/// layout; `--delete` prunes destination-only blobs for a true mirror.
+fn sync_to_args(destination: &ConnectSpec, delete_extra: bool) -> Vec<String> {
+    let mut args = vec!["repository".into(), "sync-to".into()];
+    args.extend(destination.backend_args());
+    // `--must-exist` is a kopia (kingpin) BOOLEAN flag: present (`--must-exist`) or
+    // absent — `--must-exist=false` is a parse error (`unexpected false`). Its default
+    // is false (sync-to initializes the destination if it isn't yet a repository),
+    // exactly what a mirror wants, so omit it rather than emit an invalid `=false`.
+    if delete_extra {
+        args.push("--delete".into());
+    }
+    args
+}
+
 /// Build the args for `kopia policy set <target>` plus flags. Pure.
 fn policy_set_args(target: &str, policy: &PolicyArgs) -> Vec<String> {
     let mut args = vec!["policy".into(), "set".into(), target.to_string()];
@@ -998,6 +1157,22 @@ fn policy_set_args(target: &str, policy: &PolicyArgs) -> Vec<String> {
     for pat in &policy.never_compress {
         args.push("--add-never-compress".into());
         args.push(pat.clone());
+    }
+    push_tristate(&mut args, "ignore-cache-dirs", policy.ignore_cache_dirs);
+    push_tristate(&mut args, "ignore-file-errors", policy.ignore_file_errors);
+    push_tristate(&mut args, "ignore-dir-errors", policy.ignore_dir_errors);
+    push_tristate(
+        &mut args,
+        "ignore-unknown-types",
+        policy.ignore_unknown_types,
+    );
+    if let Some(n) = policy.max_parallel_snapshots {
+        args.push("--max-parallel-snapshots".into());
+        args.push(n.to_string());
+    }
+    if let Some(n) = policy.max_parallel_file_reads {
+        args.push("--max-parallel-file-reads".into());
+        args.push(n.to_string());
     }
     args.extend(policy.extra_args.iter().cloned());
     args
@@ -1446,13 +1621,63 @@ mod tests {
     }
 
     #[test]
+    fn sync_to_args_builds_destination_and_flags() {
+        // ADR-0005 §13(d): destination backend args (+ optional --delete). `--must-exist`
+        // is OMITTED (its kopia default is false; `--must-exist=false` is a parse error).
+        let dest = ConnectSpec::S3 {
+            bucket: "mirror".into(),
+            endpoint: Some("https://offsite".into()),
+            prefix: None,
+            region: Some("us-east-1".into()),
+            disable_tls: false,
+            disable_tls_verification: false,
+        };
+        assert_eq!(
+            sync_to_args(&dest, false),
+            vec![
+                "repository",
+                "sync-to",
+                "s3",
+                "--bucket",
+                "mirror",
+                "--endpoint",
+                "https://offsite",
+                "--region",
+                "us-east-1",
+            ]
+        );
+        // No `--must-exist=false` (it would fail kopia's flag parser).
+        assert!(
+            !sync_to_args(&dest, false)
+                .iter()
+                .any(|a| a.contains("must-exist"))
+        );
+        // delete_extra appends --delete (a true mirror).
+        let fs = ConnectSpec::Filesystem {
+            path: "/mirror".into(),
+        };
+        assert_eq!(
+            sync_to_args(&fs, true),
+            vec![
+                "repository",
+                "sync-to",
+                "filesystem",
+                "--path",
+                "/mirror",
+                "--delete"
+            ]
+        );
+    }
+
+    #[test]
     fn policy_set_args_builds_flags() {
         let policy = PolicyArgs {
             compression: Some("zstd".into()),
             splitter: Some("DYNAMIC-4M-BUZHASH".into()),
             ignore: vec!["*.tmp".into(), "cache/".into()],
             never_compress: vec!["*.gz".into()],
-            extra_args: vec!["--ignore-cache-dirs".into(), "true".into()],
+            extra_args: vec!["--one-file-system".into()],
+            ..Default::default()
         };
         assert_eq!(
             policy_set_args("user@host:/p", &policy),
@@ -1470,8 +1695,7 @@ mod tests {
                 "cache/",
                 "--add-never-compress",
                 "*.gz",
-                "--ignore-cache-dirs",
-                "true"
+                "--one-file-system"
             ]
         );
         // Empty policy is just the bare command.
@@ -1488,5 +1712,91 @@ mod tests {
         push_tristate(&mut a, "flag", Some(false));
         push_tristate(&mut a, "flag", None);
         assert_eq!(a, vec!["--flag", "--no-flag"]);
+    }
+
+    #[test]
+    fn policy_set_args_builds_error_handling_and_upload_flags() {
+        // ADR-0005 §13(b)/§13(f): backup-side error handling + upload parallelism.
+        let policy = PolicyArgs {
+            ignore_cache_dirs: Some(true),
+            ignore_file_errors: Some(true),
+            ignore_dir_errors: Some(false),
+            ignore_unknown_types: Some(true),
+            max_parallel_snapshots: Some(4),
+            max_parallel_file_reads: Some(8),
+            ..Default::default()
+        };
+        assert_eq!(
+            policy_set_args("u@h:/p", &policy),
+            vec![
+                "policy",
+                "set",
+                "u@h:/p",
+                "--ignore-cache-dirs",
+                "--ignore-file-errors",
+                "--no-ignore-dir-errors",
+                "--ignore-unknown-types",
+                "--max-parallel-snapshots",
+                "4",
+                "--max-parallel-file-reads",
+                "8"
+            ]
+        );
+    }
+
+    #[test]
+    fn create_options_args_builds_ecc_and_algos() {
+        // ADR-0005 §13(a): ECC + create-time algorithms.
+        let opts = CreateOptions {
+            encryption: Some("AES256-GCM-HMAC-SHA256".into()),
+            splitter: Some("DYNAMIC-4M-BUZHASH".into()),
+            hash: Some("BLAKE2B-256".into()),
+            ecc: Some("REED-SOLOMON-CRC32".into()),
+            ecc_overhead_percent: Some(2),
+        };
+        assert_eq!(
+            opts.args(),
+            vec![
+                "--encryption",
+                "AES256-GCM-HMAC-SHA256",
+                "--object-splitter",
+                "DYNAMIC-4M-BUZHASH",
+                "--block-hash",
+                "BLAKE2B-256",
+                "--ecc",
+                "REED-SOLOMON-CRC32",
+                "--ecc-overhead-percent",
+                "2"
+            ]
+        );
+        // Empty options ⇒ no flags.
+        assert!(CreateOptions::default().args().is_empty());
+    }
+
+    #[test]
+    fn throttle_args_builds_per_second_flags_and_empties() {
+        // ADR-0005 §13(e).
+        let t = ThrottleArgs {
+            upload_bytes_per_second: Some(10_000_000),
+            download_bytes_per_second: Some(20_000_000),
+            read_ops_per_second: Some(50),
+            write_ops_per_second: Some(25),
+        };
+        assert_eq!(
+            t.args(),
+            vec![
+                "--upload-bytes-per-second",
+                "10000000",
+                "--download-bytes-per-second",
+                "20000000",
+                "--read-requests-per-second",
+                "50",
+                "--write-requests-per-second",
+                "25"
+            ]
+        );
+        assert!(!t.is_empty());
+        assert!(ThrottleArgs::default().is_empty());
+        assert!(ThrottleArgs::default().args().is_empty());
     }
 }

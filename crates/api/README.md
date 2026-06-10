@@ -7,15 +7,15 @@ the Kopia-native Kubernetes backup operator ([ADR-0003]).
 
 This crate holds the **7 CRD types** in API group `kopiur.home-operations.com`,
 version `v1alpha1` — [`Repository`] (ns), [`ClusterRepository`] (cluster),
-[`BackupConfig`], [`Backup`], [`BackupSchedule`], [`Restore`], and
+[`SnapshotPolicy`], [`Snapshot`], [`SnapshotSchedule`], [`Restore`], and
 [`Maintenance`] — together with the **shared pure logic** every consumer needs:
 validation ([`validate`]), identity resolution ([`resolve_identity`]), schedule
 jitter ([`jitter`]), and GFS retention ([`select_kept`]).
 
 It deliberately has **no controller-runtime dependencies** — no `kube::Client`,
 no `tokio`. Downstream tools (a custom backup-triggering controller, a CI linter
-for `BackupConfig` manifests, a dashboard) can depend on the API types and shared
-logic *alone*, without pulling in the async runtime or the cluster client
+for `SnapshotPolicy` manifests, a dashboard) can depend on the API types and shared
+logic _alone_, without pulling in the async runtime or the cluster client
 (ADR §5.1). The webhook and the controller both import the same `validate`/
 `identity`/`retention` functions, so validation and resolution behave identically
 across call sites ("one validator, two callers").
@@ -26,7 +26,7 @@ Every discriminated union in the CRD surface is a Rust `enum`:
 [`Backend`], [`AllowedNamespaces`], [`DeletionPolicy`],
 [`RestoreSource`], [`Hook`], and friends.
 
-A deserialized value is always *exactly one* variant — an invalid "two backends
+A deserialized value is always _exactly one_ variant — an invalid "two backends
 at once" or "no backend" state is unrepresentable — and reconcilers `match`
 exhaustively. A new variant added later **cannot compile** until every handler
 accounts for it. For backup software, where a silently-unhandled case can lose
@@ -37,24 +37,24 @@ this property in every change (prefer an `enum` + exhaustive `match` over
 
 ## Key types
 
-| Type | Purpose |
-| --- | --- |
-| [`Repository`] / [`ClusterRepository`] | The kopia repository as a first-class resource (namespaced / cluster-scoped). |
-| [`Backend`] | The storage backend union (`s3`, `azure`, `gcs`, `b2`, `filesystem`, `sftp`, `webDav`, `rclone`). |
-| [`BackupConfig`] | The backup *recipe* (sources, retention, hooks). |
-| [`Backup`] | A single backup *invocation*, owning its snapshot via finalizer. |
-| [`BackupSchedule`] | The *schedule* that emits `Backup`s on a cron. |
-| [`Restore`] | A restore request ([`RestoreSource`] / [`RestoreTarget`]). |
-| [`Maintenance`] | `kopia maintenance` as a first-class, default-managed concern. |
-| [`DeletionPolicy`] | `Delete` / `Retain` / `Orphan` — ties snapshot lifecycle to the CR. |
+| Type                                   | Purpose                                                                                           |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| [`Repository`] / [`ClusterRepository`] | The kopia repository as a first-class resource (namespaced / cluster-scoped).                     |
+| [`Backend`]                            | The storage backend union (`s3`, `azure`, `gcs`, `b2`, `filesystem`, `sftp`, `webDav`, `rclone`). |
+| [`SnapshotPolicy`]                     | The backup _recipe_ (sources, retention, hooks).                                                  |
+| [`Snapshot`]                           | A single backup _invocation_, owning its snapshot via finalizer.                                  |
+| [`SnapshotSchedule`]                   | The _schedule_ that emits `Snapshot`s on a cron.                                                  |
+| [`Restore`]                            | A restore request ([`RestoreSource`] / [`RestoreTarget`]).                                        |
+| [`Maintenance`]                        | `kopia maintenance` as a first-class, default-managed concern.                                    |
+| [`DeletionPolicy`]                     | `Delete` / `Retain` / `Orphan` — ties snapshot lifecycle to the CR.                               |
 
 Shared pure logic (no controller deps):
 
-| Function | Purpose |
-| --- | --- |
-| [`resolve_identity`] | Render the kopia `username@hostname:path` identity, pinned to status at admission. |
-| [`select_kept`] | GFS retention: decide which backups to keep. |
-| [`jitter_offset`] / [`substitute_h`] | Deterministic `H`/jitter from `(scheduleUID, slot)`. |
+| Function                             | Purpose                                                                            |
+| ------------------------------------ | ---------------------------------------------------------------------------------- |
+| [`resolve_identity`]                 | Render the kopia `username@hostname:path` identity, pinned to status at admission. |
+| [`select_kept`]                      | GFS retention: decide which backups to keep.                                       |
+| [`jitter_offset`] / [`substitute_h`] | Deterministic `H`/jitter from `(scheduleUID, slot)`.                               |
 
 ## Conventions
 
@@ -62,7 +62,7 @@ Before editing this crate, read [`docs/dev/api-conventions.md`]. The load-bearin
 rules:
 
 - **Discriminated unions are externally-tagged enums** (`backend: { s3: {...} }`),
-  *not* `#[serde(tag = "...")]` — internally-tagged enums break Kubernetes
+  _not_ `#[serde(tag = "...")]` — internally-tagged enums break Kubernetes
   structural-schema generation.
 - **No `Eq`** on structs that embed `k8s-openapi` types (`LabelSelector`,
   `ResourceRequirements`, `SecurityContext`, …) — they are `PartialEq` only.

@@ -11,8 +11,8 @@
 //! `crates/api/src/lib.rs::testutil` for why serde_yaml-direct is wrong here).
 
 use kopiur_api::{
-    BackupConfigSpec, BackupScheduleSpec, BackupSpec, ClusterRepositorySpec, MaintenanceSpec,
-    RepositorySpec, RestoreSpec,
+    ClusterRepositorySpec, MaintenanceSpec, RepositoryReplicationSpec, RepositorySpec, RestoreSpec,
+    SnapshotPolicySpec, SnapshotScheduleSpec, SnapshotSpec,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -93,11 +93,14 @@ fn all_examples_match_crd_field_shapes() {
             match kind {
                 "Repository" => check_spec::<RepositorySpec>(kind, &json, &file),
                 "ClusterRepository" => check_spec::<ClusterRepositorySpec>(kind, &json, &file),
-                "BackupConfig" => check_spec::<BackupConfigSpec>(kind, &json, &file),
-                "Backup" => check_spec::<BackupSpec>(kind, &json, &file),
-                "BackupSchedule" => check_spec::<BackupScheduleSpec>(kind, &json, &file),
+                "SnapshotPolicy" => check_spec::<SnapshotPolicySpec>(kind, &json, &file),
+                "Snapshot" => check_spec::<SnapshotSpec>(kind, &json, &file),
+                "SnapshotSchedule" => check_spec::<SnapshotScheduleSpec>(kind, &json, &file),
                 "Restore" => check_spec::<RestoreSpec>(kind, &json, &file),
                 "Maintenance" => check_spec::<MaintenanceSpec>(kind, &json, &file),
+                "RepositoryReplication" => {
+                    check_spec::<RepositoryReplicationSpec>(kind, &json, &file)
+                }
                 other => panic!("{file}: unexpected kopiur.home-operations.com kind {other}"),
             }
         }

@@ -28,7 +28,7 @@ use kube::Api;
 use kube::api::{ListParams, LogParams, PostParams};
 use serde::de::DeserializeOwned;
 
-use kopiur_api::Repository;
+use kopiur_api::{Maintenance, Repository};
 use kopiur_e2e::{E2E_NAMESPACE, Need, World, default_timeout, poll_interval, wait_until};
 
 /// The Kubernetes Event `note` byte limit the apiserver enforces.
@@ -243,5 +243,116 @@ async fn backend_failure_publishes_a_bounded_warning_event() {
     assert!(
         ev.reason.as_deref().is_some_and(|r| !r.is_empty()),
         "the Event must carry a machine-readable reason (the kopia error class)"
+    );
+}
+
+/// Every reconcile failure — for EVERY kind — must surface as a Warning Event on
+/// the failing object (`error_policy_for` → `reconcile_failure_event`), and
+/// repeats of the same failure must aggregate into ONE Event object via the
+/// Recorder series instead of flooding `kubectl get events`.
+///
+/// Regression guard: `Maintenance` (like SnapshotSchedule/SnapshotPolicy/
+/// RepositoryReplication) used to emit NO Events at all — a Maintenance pointing
+/// at a missing Repository failed silently into the controller log, invisible to
+/// `kubectl get events`. Pre-fix this test times out waiting for the Event.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
+async fn reconcile_failure_publishes_an_aggregated_missing_dependency_event() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision base fixtures");
+    let client = world.client().clone();
+    let maints: Api<Maintenance> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let events: Api<Event> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    // A Maintenance whose Repository does not exist → reconcile fails with
+    // MissingDependency on the transient (30 s) cadence.
+    let name = "e2e-evt-missing-dep";
+    maints
+        .create(
+            &PostParams::default(),
+            &cr(serde_json::json!({
+                "apiVersion": "kopiur.home-operations.com/v1alpha1",
+                "kind": "Maintenance",
+                "metadata": { "name": name, "namespace": E2E_NAMESPACE },
+                "spec": {
+                    "repository": { "kind": "Repository", "name": "does-not-exist" },
+                    "schedule": { "quick": { "cron": "*/5 * * * *" }, "full": { "cron": "0 3 * * 0" } },
+                    "ownership": { "owner": "kopiur-e2e-evt", "takeoverPolicy": "Force" }
+                }
+            })),
+        )
+        .await
+        .expect("create Maintenance referencing a nonexistent Repository");
+
+    let matching = |list: Vec<Event>| -> Vec<Event> {
+        list.into_iter()
+            .filter(|e| {
+                e.type_.as_deref() == Some("Warning")
+                    && e.reason.as_deref() == Some("MissingDependency")
+                    && e.regarding.as_ref().is_some_and(|r| {
+                        r.kind.as_deref() == Some("Maintenance") && r.name.as_deref() == Some(name)
+                    })
+            })
+            .collect()
+    };
+
+    // 1) The Event appears at all (pre-fix: never — Maintenance emitted nothing).
+    let ev = wait_until(
+        "a MissingDependency Warning Event regarding the Maintenance",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let list = events.list(&ListParams::default()).await?;
+            Ok(matching(list.items).into_iter().next())
+        },
+    )
+    .await
+    .expect("a failing Maintenance reconcile must publish a MissingDependency Warning Event");
+
+    // The note is the actionable what/why/fix message, within the apiserver cap.
+    let note = ev.note.unwrap_or_default();
+    assert!(
+        note.contains("does-not-exist") && note.contains("create it, or fix the reference"),
+        "the note must name the missing dependency and the fix: {note}"
+    );
+    assert!(note.len() <= EVENT_NOTE_MAX_BYTES);
+
+    // 2) Repeats AGGREGATE: the 30 s transient requeue re-fails; within the
+    // Recorder's dedup window that must become `series.count >= 2` on the SAME
+    // single Event object — not a new object per retry (the resourceVersion-in-
+    // the-dedup-key footgun event_ref guards against).
+    wait_until(
+        "the MissingDependency Event aggregates as a series (count >= 2)",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let list = events.list(&ListParams::default()).await?;
+            let found = matching(list.items)
+                .iter()
+                .any(|e| e.series.as_ref().is_some_and(|s| s.count >= 2));
+            Ok(found.then_some(()))
+        },
+    )
+    .await
+    .expect("repeated MissingDependency failures must aggregate into an Event series");
+
+    let all = matching(
+        events
+            .list(&ListParams::default())
+            .await
+            .expect("list events")
+            .items,
+    );
+    assert_eq!(
+        all.len(),
+        1,
+        "repeated identical reconcile failures must aggregate into exactly ONE \
+         Event object, got {}: a churning dedup key would flood kubectl get events",
+        all.len()
     );
 }

@@ -15,15 +15,15 @@ spec:
     - name: kopiur.rules
       rules:
         - alert: KopiurBackupConsecutiveFailures
-          expr: kopiur_backup_consecutive_failures >= 3
+          expr: kopiur_snapshot_consecutive_failures >= 3
           for: 15m
           labels:
             severity: warning
           annotations:
             summary: "Backups for {{`{{ $labels.namespace }}/{{ $labels.name }}`}} are failing"
-            description: "{{`{{ $value }}`}} consecutive backup failures (>=3) for BackupConfig {{`{{ $labels.namespace }}/{{ $labels.name }}`}}."
+            description: "{{`{{ $value }}`}} consecutive backup failures (>=3) for SnapshotPolicy {{`{{ $labels.namespace }}/{{ $labels.name }}`}}."
         - alert: KopiurBackupStale
-          expr: time() - kopiur_backup_last_success_timestamp_seconds > {{ .Values.metrics.prometheusRule.backupStaleAfterSeconds }}
+          expr: time() - kopiur_snapshot_last_success_timestamp_seconds > {{ .Values.metrics.prometheusRule.backupStaleAfterSeconds }}
           for: 30m
           labels:
             severity: warning
@@ -38,14 +38,14 @@ spec:
           annotations:
             summary: "Repository {{`{{ $labels.namespace }}/{{ $labels.name }}`}} is {{`{{ $labels.phase }}`}}"
             description: "A kopiur repository has been Degraded/Failed for 15m; backups to it will not run."
-        - alert: KopiurBackupFailed
-          expr: max by (namespace, name) (kopiur_resource_phase{kind="Backup", phase="Failed"}) == 1
+        - alert: KopiurSnapshotFailed
+          expr: max by (namespace, name) (kopiur_resource_phase{kind="Snapshot", phase="Failed"}) == 1
           for: 10m
           labels:
             severity: warning
           annotations:
-            summary: "Backup {{`{{ $labels.namespace }}/{{ $labels.name }}`}} failed"
-            description: "A Backup CR has been in phase=Failed for 10m."
+            summary: "Snapshot {{`{{ $labels.namespace }}/{{ $labels.name }}`}} failed"
+            description: "A Snapshot CR has been in phase=Failed for 10m."
         - alert: KopiurRestoreFailed
           expr: max by (namespace, name) (kopiur_resource_phase{kind="Restore", phase="Failed"}) == 1
           for: 10m

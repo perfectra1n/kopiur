@@ -1,14 +1,14 @@
-# Example 03 — Restore by picking a Backup (ADR-0001 §5.3)
+# Example 03 — Restore by picking a Snapshot (ADR-0001 §5.3)
 #
-# Browse the catalog, then reference a specific Backup CR. No timestamp math —
+# Browse the catalog, then reference a specific Snapshot CR. No timestamp math —
 # restore is "pick a row" (ADR §3.8 / G8).
 #
 #   # list candidate snapshots for a config, newest last:
-#   kubectl get backup -n billing \
-#     -l kopiur.home-operations.com/backup-config=postgres-data \
+#   kubectl get snapshots -n billing \
+#     -l kopiur.home-operations.com/snapshot-policy=postgres-data \
 #     --sort-by=.status.timing.startTime
 #
-# RestoreSource is externally-tagged: `source: { backupRef: {...} }`.
+# RestoreSource is externally-tagged: `source: { snapshotRef: {...} }`.
 # RestoreTarget is externally-tagged: `target: { pvc: {...} }` (operator creates
 # the PVC) or `target: { pvcRef: {...} }` (write into an existing PVC).
 ---
@@ -19,7 +19,7 @@ metadata:
   namespace: billing
 spec:
   source:
-    backupRef:
+    snapshotRef:
       name: postgres-data-20260523-021300
       namespace: billing
   target:

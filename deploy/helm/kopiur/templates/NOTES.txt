@@ -14,8 +14,9 @@ Webhook: {{ if .Values.webhook.enabled }}enabled (failurePolicy={{ .Values.webho
 2. Confirm the CRDs are registered:
 
    kubectl get crd -l app.kubernetes.io/part-of=kopiur
-   # repositories, clusterrepositories, backupconfigs, backups,
-   # backupschedules, restores, maintenances (all in group kopiur.home-operations.com)
+   # repositories, clusterrepositories, snapshotpolicies, snapshots,
+   # snapshotschedules, restores, maintenances, repositoryreplications
+   # (all in group kopiur.home-operations.com)
 
 {{- if .Values.webhook.enabled }}
 {{- if eq .Values.webhook.tls.mode "self" }}
@@ -62,12 +63,13 @@ Webhook: {{ if .Values.webhook.enabled }}enabled (failurePolicy={{ .Values.webho
      encryption: { passwordSecretRef: { name: nas-creds, key: KOPIA_PASSWORD } }
      create: { enabled: true }
 
-   See deploy/examples/ for 8 runnable walkthroughs (scheduled backup,
-   ClusterRepository, restore, deploy-or-restore GitOps, maintenance, ...).
+   See deploy/examples/ for runnable walkthroughs (scheduled backup,
+   ClusterRepository, restore, deploy-or-restore GitOps, maintenance,
+   repository replication, ...).
 
 4. Watch your resources:
 
-   kubectl get repositories,backupconfigs,backupschedules,backups,restores -A
-   kubectl get maintenances -A
+   kubectl get repositories,snapshotpolicies,snapshotschedules,snapshots,restores -A
+   kubectl get maintenances,repositoryreplications -A
 
 Docs: docs/install.md  |  Design: docs/adr/0003-kopiur-rust-operator.md

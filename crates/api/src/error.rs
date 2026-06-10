@@ -61,11 +61,11 @@ pub enum ValidationError {
         repo: String,
     },
 
-    /// A `Backup` with `origin: discovered` tried to set a `deletionPolicy` other
+    /// A `Snapshot` with `origin: discovered` tried to set a `deletionPolicy` other
     /// than `Retain`. Discovered snapshots are forced `Retain` so the operator
     /// never deletes data it did not create (ADR §4.5).
     #[error(
-        "origin: discovered backups must use deletionPolicy: Retain (got {got:?}); \
+        "origin: discovered snapshots must use deletionPolicy: Retain (got {got:?}); \
          the operator never deletes snapshots it did not create"
     )]
     DiscoveredMustRetain {
@@ -76,7 +76,7 @@ pub enum ValidationError {
     /// A `Restore` with `source.identity` did not set `spec.repository`. Identity
     /// sources cannot derive a repository, so it is required (ADR §3.6/§4.6).
     #[error(
-        "restore source.identity requires spec.repository to be set (no Backup/BackupConfig to derive it from)"
+        "restore source.identity requires spec.repository to be set (no Snapshot/SnapshotPolicy to derive it from)"
     )]
     RestoreSourceRepositoryRequired,
 
@@ -84,7 +84,7 @@ pub enum ValidationError {
     /// retention policy fields, which conflict with CR-driven GFS retention and
     /// risk double-deletion (ADR §4.4 exclusivity).
     #[error(
-        "inline kopia-side retention policy on a Repository spec is unsupported (field {field:?}); retention is driven exclusively by BackupConfig.spec.retention (ADR §4.4)"
+        "inline kopia-side retention policy on a Repository spec is unsupported (field {field:?}); retention is driven exclusively by SnapshotPolicy.spec.retention (ADR §4.4)"
     )]
     InlineRetentionForbidden {
         /// The offending repo-level retention field that was set.
@@ -110,7 +110,7 @@ pub enum ValidationError {
         a: String,
         /// The second of the two conflicting fields.
         b: String,
-        /// Where the conflict occurred (e.g. `"backup source"`), for the message.
+        /// Where the conflict occurred (e.g. `"snapshot source"`), for the message.
         context: String,
     },
 
@@ -125,18 +125,51 @@ pub enum ValidationError {
     /// not absolute). The schema can't express the constraint, so the webhook does.
     #[error("invalid value for {field}: {reason}")]
     InvalidFieldValue {
-        /// The offending field (e.g. `"backup source nfs.path"`).
+        /// The offending field (e.g. `"snapshot source nfs.path"`).
         field: String,
         /// What's wrong and how to fix it (e.g. `"must be an absolute path"`).
         reason: String,
     },
 
-    /// Rendering a `ClusterRepository.identityDefaults` template with `tera` failed
-    /// (ADR §4.2). Surfaced at admission so a bad template never reaches status.
-    #[error("failed to render identity template: {reason}")]
-    IdentityTemplateRender {
-        /// The underlying `tera` render error, surfaced for the user.
+    /// A `ClusterRepository.identityDefaults` CEL expression (`hostnameExpr` /
+    /// `usernameExpr`) failed to **compile** (a syntax error, or it exceeds the
+    /// length budget). Surfaced at admission so a bad expression never reaches
+    /// status (ADR-0004 §5).
+    #[error("identity CEL expression {expr:?} failed to compile: {reason} (check the CEL syntax)")]
+    IdentityExprCompile {
+        /// The offending CEL expression.
+        expr: String,
+        /// The parser's reason (or the length-budget message).
         reason: String,
+    },
+
+    /// A `ClusterRepository.identityDefaults` CEL expression referenced a variable
+    /// outside its environment (e.g. a typo), or otherwise failed to evaluate at
+    /// admission (ADR-0004 §5). The environment is `namespace`, `policyName`,
+    /// `labels`, `annotations`.
+    #[error(
+        "identity CEL expression {expr:?} failed to evaluate: {reason} \
+         (available variables: namespace, policyName, labels, annotations)"
+    )]
+    IdentityExprEval {
+        /// The offending CEL expression.
+        expr: String,
+        /// The evaluation error (e.g. an undeclared-variable reference).
+        reason: String,
+    },
+
+    /// A `ClusterRepository.identityDefaults` CEL expression evaluated to a
+    /// non-string value. `hostnameExpr`/`usernameExpr` must return a string
+    /// (ADR-0004 §5).
+    #[error(
+        "identity CEL expression {expr:?} must return a string, got {got} \
+         (hostnameExpr/usernameExpr must evaluate to a string)"
+    )]
+    IdentityExprType {
+        /// The offending CEL expression.
+        expr: String,
+        /// The CEL value type it returned instead of a string.
+        got: String,
     },
 
     /// A label selector was supplied as the tenancy gate but the caller could not
@@ -152,6 +185,82 @@ pub enum ValidationError {
         namespace: String,
         /// The `ClusterRepository` gating by label selector.
         repo: String,
+    },
+
+    /// An UPDATE changed a repository field that is fixed at repository-creation
+    /// time (`encryption`, `create.splitter`, `create.hash`, `create.encryption`).
+    /// Kopia bakes these into the repository's on-disk format, so they cannot change
+    /// after creation — the webhook rejects the edit rather than silently ignoring it
+    /// (ADR-0005 §7).
+    #[error(
+        "{field} is immutable after repository creation (it is fixed in the kopia repository \
+         format); create a new Repository/ClusterRepository instead of editing this field"
+    )]
+    Immutable {
+        /// The immutable field that an UPDATE attempted to change.
+        field: String,
+    },
+
+    /// A `SnapshotPolicy`'s resolved kopia identity (`username@hostname[:path]`)
+    /// collides with an already-admitted `SnapshotPolicy`'s identity in the **same**
+    /// repository. Two recipes interleaving snapshots into one kopia identity corrupts
+    /// the snapshot history, so the webhook rejects the second one (ADR-0005 §6).
+    #[error(
+        "resolved identity {identity:?} collides with existing SnapshotPolicy {conflict:?} in the \
+         same repository; two policies must not share a kopia identity (give this policy a distinct \
+         spec.identity, or target a different repository)"
+    )]
+    IdentityCollision {
+        /// The resolved `username@hostname[:path]` identity that collided.
+        identity: String,
+        /// `namespace/name` of the already-admitted conflicting `SnapshotPolicy`.
+        conflict: String,
+    },
+
+    /// A verification `successExpr` (ADR-0005 §4/§15) failed to **compile** (a
+    /// syntax error, or it exceeds the length budget). Surfaced at admission.
+    #[error("successExpr {expr:?} failed to compile: {reason} (check the CEL syntax)")]
+    SuccessExprCompile {
+        /// The offending CEL expression.
+        expr: String,
+        /// The parser's reason (or the length-budget message).
+        reason: String,
+    },
+
+    /// A verification `successExpr` referenced a variable outside its environment
+    /// (e.g. a typo), or otherwise failed to evaluate (ADR-0005 §4/§15). The
+    /// environment is `stats{files,bytes,errors}`, `snapshot`, `restored`.
+    #[error(
+        "successExpr {expr:?} failed to evaluate: {reason} \
+         (available variables: stats, snapshot, restored)"
+    )]
+    SuccessExprEval {
+        /// The offending CEL expression.
+        expr: String,
+        /// The evaluation error (e.g. an undeclared-variable reference).
+        reason: String,
+    },
+
+    /// A verification `successExpr` evaluated to a non-bool value. A `successExpr`
+    /// is a pass/fail predicate and must return a bool (ADR-0005 §4/§15).
+    #[error("successExpr {expr:?} must return a bool, got {got} (it is a pass/fail predicate)")]
+    SuccessExprType {
+        /// The offending CEL expression.
+        expr: String,
+        /// The CEL value type it returned instead of a bool.
+        got: String,
+    },
+
+    /// A `RepositoryReplication`'s `destination` backend is identical to its
+    /// source repository's backend (ADR-0005 §13(d)) — replicating a repository to
+    /// itself is a no-op (or worse, a loop). The webhook rejects it.
+    #[error(
+        "RepositoryReplication destination must differ from the source repository's backend \
+         (both resolved to the same {backend} target); pick a distinct destination backend"
+    )]
+    ReplicationDestinationSameAsSource {
+        /// The backend kind that both source and destination resolved to.
+        backend: String,
     },
 
     /// A namespaced `Repository` set `spec.maintenance.namespace`, which only

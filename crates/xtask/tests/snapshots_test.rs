@@ -1,6 +1,6 @@
 //! insta snapshot tests on generated CRD YAML.
 //!
-//! These pin the exact generated schema for `Repository` and `Backup` so any
+//! These pin the exact generated schema for `Repository` and `Snapshot` so any
 //! accidental schema drift (a field rename, a removed validation, a changed
 //! default) shows up as a reviewable snapshot diff rather than silently shipping.
 
@@ -25,7 +25,18 @@ fn snapshot_repository_crd() {
 }
 
 #[test]
-fn snapshot_backup_crd() {
+fn snapshot_snapshot_crd() {
     let artifacts = xtask::crds::artifacts().expect("generate CRDs");
-    insta::assert_snapshot!("backup_crd", body(&artifacts, "backups"));
+    insta::assert_snapshot!("snapshot_crd", body(&artifacts, "snapshots"));
+}
+
+#[test]
+fn snapshot_repository_replication_crd() {
+    // ADR-0005 §13(d): pin the generated schema for the net-new CRD so any
+    // accidental drift in its fields shows up as a reviewable snapshot diff.
+    let artifacts = xtask::crds::artifacts().expect("generate CRDs");
+    insta::assert_snapshot!(
+        "repository_replication_crd",
+        body(&artifacts, "repositoryreplications")
+    );
 }

@@ -107,7 +107,7 @@ Disable the webhook entirely with `webhook.enabled=false` (validation then falls
 | logging.level | string | `""` | Log level / filter directive (RUST_LOG style: error|warn|info|debug|trace; per-target works too, e.g. "info,kopia=debug" to see kopia's own progress in mover logs). When empty, falls back to the deprecated `controller.logLevel`. |
 | metrics.enabled | bool | `true` | Expose a Service for the controller's /metrics endpoint. |
 | metrics.port | int | `8080` | Service port for /metrics. |
-| metrics.prometheusRule.backupStaleAfterSeconds | int | `172800` | Age (seconds) after which a BackupConfig's last success is "stale". |
+| metrics.prometheusRule.backupStaleAfterSeconds | int | `172800` | Age (seconds) after which a SnapshotPolicy's last success is "stale". |
 | metrics.prometheusRule.enabled | bool | `false` | Create a Prometheus-Operator PrometheusRule with kopiur alerts. |
 | metrics.prometheusRule.labels | object | `{}` | Extra labels (e.g. to match your Prometheus ruleSelector). |
 | metrics.serviceMonitor.enabled | bool | `false` | Create a Prometheus-Operator ServiceMonitor. Requires the CRD to exist. |

@@ -2,14 +2,15 @@
 #![doc = include_str!("../README.md")]
 
 pub mod backend;
-pub mod backup;
-pub mod backup_config;
-pub mod backup_schedule;
 pub mod cluster_repository;
 pub mod common;
 pub mod maintenance;
 pub mod repository;
+pub mod repository_replication;
 pub mod restore;
+pub mod snapshot;
+pub mod snapshot_policy;
+pub mod snapshot_schedule;
 
 // Shared pure-logic modules (no controller-runtime deps). The webhook and the
 // controller both import these, so validation/resolution behavior is identical
@@ -18,41 +19,51 @@ pub mod error;
 pub mod identity;
 pub mod jitter;
 pub mod retention;
+pub mod success_expr;
 pub mod validate;
 
 pub use backend::{Backend, NfsVolume, PvcVolume, RepoVolume};
-pub use backup::{
-    Backup, BackupPhase, BackupSpec, BackupStats, BackupStatus, BackupTiming, Origin,
-};
-pub use backup_config::{
-    BackupConfig, BackupConfigSpec, BackupConfigStatus, CopyMethod, GroupBy, Hook,
-    SourcePathStrategy,
-};
-pub use backup_schedule::{
-    BackupSchedule, BackupScheduleSpec, BackupScheduleStatus, ConcurrencyPolicy, ScheduleSpec,
-};
 pub use cluster_repository::{
-    AllowedNamespaces, ClusterRepository, ClusterRepositorySpec, ClusterRepositoryStatus,
-    IdentityTemplate,
+    AllowedNamespaces, ClusterRepoCredentialProjection, ClusterRepository, ClusterRepositorySpec,
+    ClusterRepositoryStatus, IdentityDefaults,
 };
 pub use common::{
-    CacheDefaults, CacheVolumeMode, ConfigRef, CronSpec, DeletionPolicy, ObjectRef, PhaseLabel,
+    CacheDefaults, CacheVolumeMode, CronSpec, DeletionPolicy, MoverDefaults, NamespaceDeletePolicy,
+    ObjectRef, PhaseLabel, PolicyRef, ResolvedMover, hardened_security_context,
+    merge_pod_security_context, merge_resources, merge_security_context, resolve_mover,
 };
 pub use maintenance::{
     LeaseAction, Maintenance, MaintenanceSchedule, MaintenanceSpec, MaintenanceStatus, Ownership,
     RepositoryMaintenanceSpec, TakeoverPolicy, default_maintenance_schedule, lease_action,
 };
 pub use repository::{Repository, RepositoryPhase, RepositorySpec, RepositoryStatus};
+pub use repository_replication::{
+    RepositoryReplication, RepositoryReplicationPhase, RepositoryReplicationSpec,
+    RepositoryReplicationStatus,
+};
 pub use restore::{
-    OnMissingSnapshot, Restore, RestorePhase, RestoreSource, RestoreSpec, RestoreStatus,
-    RestoreTarget,
+    OnMissingSnapshot, PopulatorTarget, Restore, RestorePhase, RestoreSource, RestoreSpec,
+    RestoreStatus, RestoreTarget,
+};
+pub use snapshot::{
+    Origin, Snapshot, SnapshotPhase, SnapshotSpec, SnapshotStats, SnapshotStatus, SnapshotTiming,
+};
+pub use snapshot_policy::{
+    CopyMethod, DeepVerification, GroupBy, Hook, SnapshotPolicy, SnapshotPolicySpec,
+    SnapshotPolicyStatus, SourcePathStrategy, Verification,
+};
+pub use snapshot_schedule::{
+    ConcurrencyPolicy, ScheduleSpec, SnapshotSchedule, SnapshotScheduleSpec, SnapshotScheduleStatus,
 };
 
 // Shared logic re-exports.
 pub use error::{ValidationError, ValidationResult};
-pub use identity::{IdentityInputs, identity_string, resolve_identity};
+pub use identity::{IdentityInputs, identity_string, resolve_identity, validate_identity_expr};
 pub use jitter::{offset as jitter_offset, substitute_h};
-pub use retention::{BackupLike, KeptSet, select_kept};
+pub use retention::{KeptSet, SnapshotLike, select_kept};
+pub use success_expr::{
+    RestoredStats, SuccessExprInputs, VerifyStats, eval_success_expr, validate_success_expr,
+};
 
 /// The CRD API group for all kopiur resources.
 pub const GROUP: &str = "kopiur.home-operations.com";
@@ -177,8 +188,8 @@ create:
 
     #[test]
     fn backup_config_nfs_source_roundtrips() {
-        use crate::BackupConfigSpec;
-        let spec: BackupConfigSpec = from_yaml(
+        use crate::SnapshotPolicySpec;
+        let spec: SnapshotPolicySpec = from_yaml(
             "repository:\n  name: repo\nsources:\n  - nfs:\n      server: expanse.internal\n      path: /mnt/eros/Media\n",
         );
         let src = &spec.sources[0];

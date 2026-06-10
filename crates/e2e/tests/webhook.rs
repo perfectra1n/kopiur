@@ -26,7 +26,7 @@ use k8s_openapi::api::admissionregistration::v1::{
 };
 use k8s_openapi::api::core::v1::Secret;
 
-use kopiur_api::{BackupConfig, Repository};
+use kopiur_api::{Repository, SnapshotPolicy};
 use kopiur_e2e::{E2E_NAMESPACE, World, default_timeout, poll_interval, wait_until};
 
 /// Names the chart renders for release "kopiur" (the e2e release).
@@ -50,14 +50,14 @@ fn valid_repository(name: &str) -> Repository {
     .expect("valid Repository JSON deserializes")
 }
 
-/// A BackupConfig whose single source names NEITHER a pvc NOR a selector. This
+/// A SnapshotPolicy whose single source names NEITHER a pvc NOR a selector. This
 /// passes the CRD structural schema (both are optional) but the shared
 /// `api::validate` validator the webhook runs rejects it — so it exercises the
 /// admission *logic*, not just the cert plumbing.
-fn invalid_backup_config(name: &str) -> BackupConfig {
+fn invalid_backup_config(name: &str) -> SnapshotPolicy {
     serde_json::from_value(serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupConfig",
+        "kind": "SnapshotPolicy",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
             "repository": { "kind": "Repository", "name": "any" },
@@ -65,17 +65,17 @@ fn invalid_backup_config(name: &str) -> BackupConfig {
             "retention": { "keepLatest": 5 }
         }
     }))
-    .expect("BackupConfig JSON deserializes")
+    .expect("SnapshotPolicy JSON deserializes")
 }
 
-/// A BackupConfig whose mover sets BOTH `securityContext` and
+/// A SnapshotPolicy whose mover sets BOTH `securityContext` and
 /// `inheritSecurityContextFrom` — structurally valid, but the shared `validate_mover`
 /// rejects it (they're mutually exclusive). Exercises the mover-validation path
 /// through admission.
-fn mover_mutually_exclusive_backup_config(name: &str) -> BackupConfig {
+fn mover_mutually_exclusive_backup_config(name: &str) -> SnapshotPolicy {
     serde_json::from_value(serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupConfig",
+        "kind": "SnapshotPolicy",
         "metadata": { "name": name, "namespace": E2E_NAMESPACE },
         "spec": {
             "repository": { "kind": "Repository", "name": "any" },
@@ -87,7 +87,7 @@ fn mover_mutually_exclusive_backup_config(name: &str) -> BackupConfig {
             }
         }
     }))
-    .expect("BackupConfig JSON deserializes")
+    .expect("SnapshotPolicy JSON deserializes")
 }
 
 #[tokio::test]
@@ -143,7 +143,7 @@ async fn self_managed_webhook_tls_bootstraps_and_gates_admission() {
     let _ = repos.delete(name, &DeleteParams::default()).await;
 
     // 4. An invalid CR is rejected BY THE WEBHOOK (admission logic runs).
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let bad = "webhook-deny";
     let _ = configs.delete(bad, &DeleteParams::default()).await;
     let err = configs

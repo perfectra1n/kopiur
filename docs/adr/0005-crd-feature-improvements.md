@@ -1,6 +1,6 @@
 # ADR-0005 — CRD Feature Improvements
 
-- **Status:** Proposed
+- **Status:** Accepted / Implemented
 - **Date:** 2026-06-09
 - **Deciders:** kopiur maintainers
 - **Builds on:** ADR-0004 (renamed surface — `SnapshotPolicy`/`Snapshot`/`SnapshotSchedule`, `policyRef`, `moverDefaults`, the `cel-rust`/`*Expr` foundation)

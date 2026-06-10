@@ -77,7 +77,7 @@ async fn operator_binaries_emit_logs() {
         "controller produced ZERO stdout — the tracing subscriber is silent"
     );
 
-    // Mover: a backup Job's pod carries the per-Backup mover label. Any mover pod
+    // Mover: a backup Job's pod carries the per-Snapshot mover label. Any mover pod
     // (from the lifecycle scenarios) carries the origin label, proving the mover
     // binary logs to stdout too. Best-effort: only assert when one exists, so
     // this test does not depend on run ordering or Job GC — but if a mover pod IS

@@ -15,9 +15,9 @@ Each scenario is backed by a single apply-ready bundle under
 Kopiur splits one job into separate resources so each can change independently:
 
 - a **`Repository`** is _where_ snapshots live (an S3 bucket, a NAS, B2…);
-- a **`BackupConfig`** is the **recipe** — _what_ to back up. It runs nothing on its own;
-- a **`Backup`** is one **invocation** — a single snapshot as a Kubernetes object;
-- a **`BackupSchedule`** is the **cron** — _when_ the recipe runs;
+- a **`SnapshotPolicy`** is the **recipe** — _what_ to back up. It runs nothing on its own;
+- a **`Snapshot`** is one **invocation** — a single snapshot as a Kubernetes object;
+- a **`SnapshotSchedule`** is the **cron** — _when_ the recipe runs;
 - a **`Restore`** reads a snapshot back into a PVC;
 - a **`Maintenance`** reclaims space in the repository.
 

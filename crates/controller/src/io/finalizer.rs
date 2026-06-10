@@ -89,16 +89,24 @@ where
     Ok(())
 }
 
-/// Standard kopiur labels for a child object (origin/config/snapshot).
+/// Standard kopiur labels for a child object (origin/config/snapshot). ALWAYS
+/// includes `app.kubernetes.io/managed-by=kopiur` (ADR-0005 §14(c)) so every
+/// operator-created object is recognized as controller-owned by Argo/Flux (and so
+/// is never pruned / reported `OutOfSync`). `extra` overlays additional labels.
 pub fn child_labels(extra: &[(&str, &str)]) -> BTreeMap<String, String> {
-    extra
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect()
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        crate::consts::MANAGED_BY_LABEL.to_string(),
+        crate::consts::MANAGED_BY_VALUE.to_string(),
+    );
+    for (k, v) in extra {
+        labels.insert(k.to_string(), v.to_string());
+    }
+    labels
 }
 
 /// Build a bare [`ObjectMeta`] with name+namespace+labels+owner (helper for
-/// reconcilers creating child CRs like scheduled/discovered Backups).
+/// reconcilers creating child CRs like scheduled/discovered Snapshots).
 pub fn child_meta(
     name: &str,
     namespace: &str,
@@ -151,4 +159,71 @@ pub fn upsert_condition(
         .cloned()
         .chain(std::iter::once(updated))
         .collect()
+}
+
+/// The kstatus outcome a reconcile reports via [`set_ready`] (ADR-0005 §2).
+/// Closed enum so the Ready/Reconciling/Stalled mapping is exhaustive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadyOutcome {
+    /// The resource reached its desired state: `Ready=True`, `Reconciling=False`,
+    /// `Stalled=False`.
+    Ready,
+    /// A reconcile is in progress (not yet Ready, but not stuck): `Ready=False`,
+    /// `Reconciling=True`, `Stalled=False`.
+    Reconciling,
+    /// A terminal error: the resource won't progress without a spec change
+    /// (mapped from `ErrorClass::Terminal`). `Ready=False`, `Reconciling=False`,
+    /// `Stalled=True`.
+    Stalled,
+}
+
+/// Upsert the standard kstatus conditions (`Ready`, `Reconciling`, `Stalled`) for
+/// `outcome` onto `existing`, preserving each condition's transition time when its
+/// status is unchanged and flipping it on a real change (delegating to
+/// [`upsert_condition`]). This is what makes `kubectl wait --for=condition=Ready`
+/// and Flux/Argo health checks work against every kopiur CRD (ADR-0005 §2). The
+/// `observedGeneration` is stamped on each condition. `reason`/`message` describe
+/// the current state for humans (and machine-readable `reason`).
+///
+/// Every reconciled CRD calls this at the end of a reconcile with the outcome
+/// derived from its phase (where one exists) or its domain conditions.
+pub fn set_ready(
+    existing: &[Condition],
+    generation: Option<i64>,
+    outcome: ReadyOutcome,
+    reason: &str,
+    message: &str,
+) -> Vec<Condition> {
+    let (ready, reconciling, stalled) = match outcome {
+        ReadyOutcome::Ready => (true, false, false),
+        ReadyOutcome::Reconciling => (false, true, false),
+        ReadyOutcome::Stalled => (false, false, true),
+    };
+    use crate::consts::{READY_CONDITION, RECONCILING_CONDITION, STALLED_CONDITION};
+    // Reason strings for the non-headline conditions are derived from the outcome so
+    // they're always non-empty (the Condition contract requires a reason).
+    let conds = upsert_condition(
+        existing,
+        READY_CONDITION,
+        ready,
+        reason,
+        message,
+        generation,
+    );
+    let conds = upsert_condition(
+        &conds,
+        RECONCILING_CONDITION,
+        reconciling,
+        if reconciling { reason } else { "Settled" },
+        message,
+        generation,
+    );
+    upsert_condition(
+        &conds,
+        STALLED_CONDITION,
+        stalled,
+        if stalled { reason } else { "NotStalled" },
+        message,
+        generation,
+    )
 }

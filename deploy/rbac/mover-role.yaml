@@ -10,11 +10,13 @@ rules:
 - apiGroups:
   - kopiur.home-operations.com
   resources:
-  - backups/status
+  - snapshots/status
   - restores/status
   - repositories/status
   - clusterrepositories/status
   - maintenances/status
+  - snapshotpolicies/status
+  - repositoryreplications/status
   verbs:
   - get
   - patch

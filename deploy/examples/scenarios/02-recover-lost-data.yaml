@@ -8,12 +8,12 @@
 #
 # First, pick the snapshot from BEFORE the incident (restore is "pick a row"):
 #
-#   kubectl get backup -n billing \
-#     -l kopiur.home-operations.com/backup-config=postgres-data \
+#   kubectl get snapshots -n billing \
+#     -l kopiur.home-operations.com/snapshot-policy=postgres-data \
 #     --sort-by=.status.timing.startTime
 #
 # Field shapes verified against crates/api: source/target are externally tagged
-# (source.backupRef, target.pvc creates a PVC / target.pvcRef writes an existing
+# (source.snapshotRef, target.pvc creates a PVC / target.pvcRef writes an existing
 # one). Explicit sources default to onMissingSnapshot: Fail (fail-closed).
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
@@ -23,8 +23,8 @@ metadata:
   namespace: billing
 spec:
   source:
-    backupRef:
-      # The specific Backup CR you picked from the list above — the last good one.
+    snapshotRef:
+      # The specific Snapshot CR you picked from the list above — the last good one.
       name: postgres-data-20260523-021300
       namespace: billing
   target:
@@ -58,7 +58,7 @@ spec:
 #   namespace: billing
 # spec:
 #   source:
-#     backupRef:
+#     snapshotRef:
 #       name: postgres-data-20260523-021300
 #   target:
 #     pvcRef:

@@ -213,8 +213,7 @@ pub async fn ensure(client: &Client, cfg: &WebhookTlsConfig) -> Result<()> {
 
     let now = chrono::Utc::now().timestamp();
     let dns = service_dns_names(&cfg.service_name, &cfg.namespace);
-    let material = resolve_material(existing.as_ref(), &dns, now)
-        .map_err(|e| Error::WebhookSetup(e.to_string()))?;
+    let material = resolve_material(existing.as_ref(), &dns, now)?;
 
     if material.write {
         let secret = build_tls_secret(

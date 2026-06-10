@@ -5,16 +5,16 @@
 # (`payments`) or a new cluster — while reusing the same repository. The catch is
 # kopia's identity model: a snapshot is stored under `username@hostname:path`,
 # and hostname defaults to the SOURCE namespace. So in the destination you cannot
-# resolve the source's snapshots by `fromConfig` (its identity would compute the
+# resolve the source's snapshots by `fromPolicy` (its identity would compute the
 # DESTINATION namespace). You restore by the RAW identity instead.
 #
 # This bundle, applied in the destination namespace, does the move:
 #   1. Repository — connects to the SAME bucket the source wrote to.
 #   2. Restore    — by source.identity (the source's username@hostname:path) into
 #                   a new PVC in the destination. This is the one-time data carry.
-#   3. BackupConfig + BackupSchedule — protect the app going forward.
+#   3. SnapshotPolicy + SnapshotSchedule — protect the app going forward.
 #
-# IDENTITY CHOICE for the new BackupConfig (the important decision):
+# IDENTITY CHOICE for the new SnapshotPolicy (the important decision):
 #   * To CONTINUE the original snapshot lineage (keep dedup history, one logical
 #     timeline), pin `identity` to the ORIGINAL username/hostname — done below.
 #   * To start a FRESH lineage under the new coordinate, delete the `identity`
@@ -24,7 +24,7 @@
 # clusters writing the SAME identity concurrently corrupts the snapshot timeline.
 #
 # Field shapes verified against crates/api. source.identity REQUIRES an explicit
-# spec.repository (there's no Backup/BackupConfig to infer it from).
+# spec.repository (there's no Backup/SnapshotPolicy to infer it from).
 ---
 apiVersion: v1
 kind: Secret
@@ -72,7 +72,7 @@ spec:
     name: postgres-primary
   source:
     identity:
-      username: postgres-data # the SOURCE BackupConfig name
+      username: postgres-data # the SOURCE SnapshotPolicy name
       hostname: billing # the SOURCE namespace (NOT payments)
       sourcePath: /pvc/postgres-data # PVC sources record /pvc/<pvcName>
       # snapshotID: k1f1ec0a8        # pin an exact snapshot, or omit for latest
@@ -87,7 +87,7 @@ spec:
     onMissingSnapshot: Fail # the snapshot must be there — this is the migration
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupConfig
+kind: SnapshotPolicy
 metadata:
   name: postgres-data
   namespace: payments
@@ -108,12 +108,12 @@ spec:
     keepWeekly: 6
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupSchedule
+kind: SnapshotSchedule
 metadata:
   name: postgres-data-nightly
   namespace: payments
 spec:
-  configRef:
+  policyRef:
     name: postgres-data
   schedule:
     cron: "H 2 * * *"

@@ -48,7 +48,7 @@ spec:
     enabled: true
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupConfig
+kind: SnapshotPolicy
 metadata:
   name: app-data
   namespace: app
@@ -85,7 +85,7 @@ spec:
 #   namespace: app
 # spec:
 #   source:
-#     backupRef:
+#     snapshotRef:
 #       name: app-data-20260601-020000
 #   target:
 #     pvcRef:

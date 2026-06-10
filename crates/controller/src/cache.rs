@@ -12,14 +12,18 @@ use crate::error::Result;
 use crate::io::ResolvedRepository;
 use crate::jobs::CacheVolume;
 
-/// The mover's **effective** cache config: the repository's `cacheDefaults`
+/// The mover's **effective** cache config: the repository's `moverDefaults.cache`
 /// (inherited base) overlaid field-by-field by the run's `mover.cache` (override).
-/// `None` when neither sets anything.
+/// `None` when neither sets anything. Equivalent to `resolve_mover(...).cache`
+/// (ADR-0004 §1) — kept as the single cache resolver for backup/restore/maintenance.
 pub fn effective_cache(
     repo: &ResolvedRepository,
     mover_cache: Option<&CacheDefaults>,
 ) -> Option<CacheDefaults> {
-    CacheDefaults::merge(repo.cache_defaults.as_ref(), mover_cache)
+    CacheDefaults::merge(
+        repo.mover_defaults.as_ref().and_then(|m| m.cache.as_ref()),
+        mover_cache,
+    )
 }
 
 /// The kopia connect-time cache budgets (`--content/metadata-cache-size-mb`) from an
@@ -41,8 +45,8 @@ pub fn cache_tuning(effective: Option<&CacheDefaults>) -> CacheTuning {
 /// - `mode: Persistent` with a `capacity` → a controller-owned PVC reused across the
 ///   owner's runs ([`CacheVolume::Pvc`]), provisioned here (owner-referenced for GC).
 ///
-/// `cache_owner` owns a persistent cache PVC (e.g. the `BackupConfig` for backups, so
-/// the warm cache survives individual `Backup` CRs); `claim_name` is its stable name.
+/// `cache_owner` owns a persistent cache PVC (e.g. the `SnapshotPolicy` for backups, so
+/// the warm cache survives individual `Snapshot` CRs); `claim_name` is its stable name.
 pub async fn resolve_cache_volume(
     client: &kube::Client,
     ns: &str,
@@ -89,6 +93,10 @@ mod tests {
                 path: "/repo".into(),
                 volume: None,
             }),
+            mover_defaults: cache.map(|c| kopiur_api::common::MoverDefaults {
+                cache: Some(c),
+                ..Default::default()
+            }),
             encryption: Encryption {
                 password_secret_ref: SecretKeyRef {
                     name: "creds".into(),
@@ -97,7 +105,11 @@ mod tests {
                 },
             },
             repo_namespace: Some("ns".into()),
-            cache_defaults: cache,
+            identity_defaults: None,
+            on_namespace_delete: Default::default(),
+            mode: Default::default(),
+            credential_projection_allowed: false,
+            owner_ref: Default::default(),
         }
     }
 

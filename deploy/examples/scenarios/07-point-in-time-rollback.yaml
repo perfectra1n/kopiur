@@ -1,16 +1,16 @@
 # Scenario 07 — Point-in-time rollback (roll an app back to a known-good moment)
 #
 # A bad deploy at 14:30 corrupted the data over the next hour. You don't want
-# "yesterday" and you don't want to hunt for the exact Backup CR — you want
+# "yesterday" and you don't want to hunt for the exact Snapshot CR — you want
 # "whatever the data looked like at 14:00, just before it went wrong."
 #
-# `source.fromConfig` resolves through the BackupConfig's IDENTITY (not a specific
-# Backup CR), so it works even if that Backup has aged out of the catalog. `asOf`
+# `source.fromPolicy` resolves through the SnapshotPolicy's IDENTITY (not a specific
+# Snapshot CR), so it works even if that Backup has aged out of the catalog. `asOf`
 # picks the newest snapshot AT OR BEFORE an instant; `offset` picks by position
 # (0 = latest, 1 = previous, ...). Restore into a NEW PVC and compare before cutting
 # over — never overwrite the live volume on the first attempt.
 #
-# Field shapes verified against crates/api: source.fromConfig =
+# Field shapes verified against crates/api: source.fromPolicy =
 # { name, namespace?, asOf?, offset? }; target.pvc creates a new PVC.
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
@@ -20,8 +20,8 @@ metadata:
   namespace: billing
 spec:
   source:
-    fromConfig:
-      name: postgres-data # the BackupConfig protecting the live volume
+    fromPolicy:
+      name: postgres-data # the SnapshotPolicy protecting the live volume
       asOf: 2026-05-20T14:00:00Z # the last good moment, just before the bad deploy
       # offset: 1                # ...or by position instead of a timestamp
   target:
@@ -32,7 +32,7 @@ spec:
       accessModes:
         - ReadWriteOnce
   policy:
-    # fromConfig DEFAULTS to Continue (deploy-or-restore). For a deliberate rollback
+    # fromPolicy DEFAULTS to Continue (deploy-or-restore). For a deliberate rollback
     # you want it to FAIL loudly if nothing matches that instant.
     onMissingSnapshot: Fail
     waitTimeout: 5m
@@ -45,6 +45,6 @@ spec:
 # clone PVC, or do an in-place mirror restore into the live PVC (example 15):
 #
 #   spec:
-#     source: { fromConfig: { name: postgres-data, asOf: 2026-05-20T14:00:00Z } }
+#     source: { fromPolicy: { name: postgres-data, asOf: 2026-05-20T14:00:00Z } }
 #     target: { pvcRef: { name: postgres-data } }   # the EXISTING live PVC
 #     options: { enableFileDeletion: true }          # exact mirror of the snapshot

@@ -11,8 +11,8 @@ bytes are not just crash-consistent but application-consistent.
 /// info | What you'll deploy
 
 A `Secret` (backend creds + repo password), a `Repository` (a new S3 repo for
-this app), a `BackupConfig` (the recipe — source PVC, copy method, hooks,
-retention), and a `BackupSchedule` (the nightly cron). All in the app's
+this app), a `SnapshotPolicy` (the recipe — source PVC, copy method, hooks,
+retention), and a `SnapshotSchedule` (the nightly cron). All in the app's
 namespace, because that's where the mover Job runs.
 
 ///
@@ -23,10 +23,10 @@ namespace, because that's where the mover Job runs.
 | --- | --- | --- |
 | `backend.s3.bucket` / `prefix` / `endpoint` / `region` | `Repository` | Points at your object store. |
 | `KOPIA_PASSWORD` | the `Secret` | Encrypts the repository. **Lose it, lose the backups.** |
-| `sources[].pvc.name` | `BackupConfig` | The PVC to back up. |
-| `hooks.*.workloadExec` | `BackupConfig` | The commands that quiesce/unquiesce your app. Swap the Postgres ones for your database's equivalents. |
-| `retention.keep*` | `BackupConfig` | The GFS window — how many daily/weekly/monthly snapshots to keep. |
-| `schedule.cron` / `jitter` | `BackupSchedule` | When it runs. `H` picks a stable minute for you. |
+| `sources[].pvc.name` | `SnapshotPolicy` | The PVC to back up. |
+| `hooks.*.workloadExec` | `SnapshotPolicy` | The commands that quiesce/unquiesce your app. Swap the Postgres ones for your database's equivalents. |
+| `retention.keep*` | `SnapshotPolicy` | The GFS window — how many daily/weekly/monthly snapshots to keep. |
+| `schedule.cron` / `jitter` | `SnapshotSchedule` | When it runs. `H` picks a stable minute for you. |
 
 /// tip | Why hooks instead of just a snapshot?
 
@@ -55,19 +55,19 @@ postgres-primary   Ready   30s
 
 $ kubectl create -f - <<'EOF'
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: Backup
+kind: Snapshot
 metadata: { generateName: postgres-data-test-, namespace: billing }
-spec: { configRef: { name: postgres-data } }
+spec: { policyRef: { name: postgres-data } }
 EOF
 
-$ kubectl get backup -n billing -w
+$ kubectl get snapshots -n billing -w
 NAME                       PHASE       ORIGIN   SNAPSHOT    AGE
 postgres-data-test-x9f     Running     manual               7s
 postgres-data-test-x9f     Succeeded   manual   k1f1ec0a8   44s
 ```
 
 A `SNAPSHOT` id on a `Succeeded` backup means the data is in the repository. From
-here the `BackupSchedule` takes over nightly.
+here the `SnapshotSchedule` takes over nightly.
 
 ## See also
 

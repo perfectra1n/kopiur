@@ -10,7 +10,7 @@
 /// installs `--namespace` here (`with` `--create-namespace`).
 pub const OPERATOR_NS: &str = "kopiur-e2e";
 
-/// Workload namespace for the cross-namespace scenarios (a Backup/bootstrap in a
+/// Workload namespace for the cross-namespace scenarios (a Snapshot/bootstrap in a
 /// namespace separate from the operator's). Provisioned by `World` (`Need::WorkloadNs`).
 pub const WORKLOAD_NS: &str = "kopiur-e2e-xns";
 
@@ -33,6 +33,53 @@ pub const PV_SRC_XNS: &str = "kopiur-e2e-src-xns";
 /// hostPath PV over `/kopiur-e2e/src` for the projection namespace (1:1 PV↔PVC, so
 /// it needs its own PV over the same source dir). See [`PROJECTION_NS`].
 pub const PV_SRC_PROJ: &str = "kopiur-e2e-src-proj";
+
+// --- Per-scenario isolated repo dirs (ADR-0004/0005 scenarios) -----------------
+// The operator mounts a filesystem repo's PVC at `backend.path` AND runs kopia at
+// `--path=backend.path`, so the PVC *root* is the kopia repo — a `path` subdir under
+// one shared PVC gives NO isolation (every repo collides on the PVC root). The
+// ADR-0004/0005 scenarios that need an independent repo (distinct snapshot counts,
+// pin-vs-prune, namespace-delete cascade, replication source/dest) therefore each get
+// their OWN hostPath dir + PV + PVC, keyed by a short scenario `subpath`. These dirs
+// are seeded 0777 by the mise `e2e-node-seed` task (mirrored below) so the 65532
+// mover can write the repo into them. Verifier/reader repos reuse the same `subpath`
+// to connect to the same dir.
+/// Node-side parent under which each scenario's isolated repo dir lives. Seeded by
+/// `e2e-node-seed`; per-`subpath` children are created there at 0777.
+pub const HOSTPATH_REPOS_ROOT: &str = "/kopiur-e2e/repos";
+/// Every scenario repo `subpath` the ADR-0004/0005 e2e file uses (and the verifiers
+/// that reuse them). The mise `e2e-node-seed` task creates `HOSTPATH_REPOS_ROOT/<s>`
+/// at 0777 for each — keep the two lists in lockstep.
+pub const REPO_SUBPATHS: &[&str] = &[
+    "moverdefaults",
+    "nsdel-orphan",
+    "nsdel-delete",
+    "pin",
+    "populator",
+    "readonly",
+    "kstatus",
+    "verify",
+    "repl-src",
+    "repl-dst",
+    "projgate",
+];
+/// The in-pod mount path for an isolated per-scenario repo: the PVC root is mounted
+/// here and `kopia --path` points here, so the kopia repo IS this dir (one repo per
+/// PVC ⇒ true isolation). A fixed path is fine because each scenario binds a
+/// different PVC.
+pub const ISOLATED_REPO_PATH: &str = "/repo";
+/// The PV name for a scenario's isolated repo dir (`subpath`).
+pub fn isolated_repo_pv(subpath: &str) -> String {
+    format!("kopiur-e2e-repo-{subpath}")
+}
+/// The PVC name (operator namespace) for a scenario's isolated repo dir (`subpath`).
+pub fn isolated_repo_pvc(subpath: &str) -> String {
+    format!("kopiur-e2e-repo-{subpath}")
+}
+/// The node-side hostPath dir backing a scenario's isolated repo (`subpath`).
+pub fn isolated_repo_hostpath(subpath: &str) -> String {
+    format!("{HOSTPATH_REPOS_ROOT}/{subpath}")
+}
 
 // --- PersistentVolumeClaims ----------------------------------------------------
 /// Repo PVC in the operator namespace (binds `PV_REPO`).

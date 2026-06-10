@@ -43,14 +43,18 @@ const MOVER_CLUSTERROLE_NAME: &str = "kopiur-mover";
 const MOVER_ROLE_NAME: &str = "kopiur-mover";
 
 /// CRD plurals whose `.status` the mover PATCHes (the dynamic `targetRef` kinds).
-/// Deliberately excludes `backupconfigs`/`backupschedules`, which the mover never
-/// touches.
+/// Deliberately excludes `snapshotschedules`, which the mover never touches.
 const MOVER_STATUS_CRDS: &[&str] = &[
-    "backups",
+    "snapshots",
     "restores",
     "repositories",
     "clusterrepositories",
     "maintenances",
+    // The replication mover PATCHes RepositoryReplication/status (ADR-0005 §13(d)),
+    // and the verify mover PATCHes snapshotpolicies/status (ADR-0005 §4) — both
+    // covered here.
+    "snapshotpolicies",
+    "repositoryreplications",
 ];
 
 const KOPIA_GROUP: &str = "kopiur.home-operations.com";
@@ -64,14 +68,15 @@ const WEBHOOK_VALIDATING_CONFIG: &str = "kopiur-validating";
 const WEBHOOK_MUTATING_CONFIG: &str = "kopiur-mutating";
 const WEBHOOK_TLS_SECRET: &str = "kopiur-webhook-tls";
 
-/// All 7 CRD plurals in `kopiur.home-operations.com`. `clusterrepositories` is cluster-scoped.
+/// All 8 CRD plurals in `kopiur.home-operations.com`. `clusterrepositories` is cluster-scoped.
 const NAMESPACED_CRDS: &[&str] = &[
     "repositories",
-    "backupconfigs",
-    "backups",
-    "backupschedules",
+    "snapshotpolicies",
+    "snapshots",
+    "snapshotschedules",
     "restores",
     "maintenances",
+    "repositoryreplications",
 ];
 const CLUSTER_CRDS: &[&str] = &["clusterrepositories"];
 

@@ -4,9 +4,9 @@ Backing up is three resources, not one — and keeping them separate is the whol
 
 /// tip | Recipe / invocation / schedule
 
-- **`BackupConfig`** = the **recipe**. _What_ to back up, how long to keep it, how to capture it. It is **idempotent and runs nothing on its own** — applying it just records intent.
-- **`Backup`** = one **invocation**. A single kopia snapshot represented as a Kubernetes object. It is the **universal trigger**: a schedule creates one, or you `kubectl create` one, or Argo Events / Tekton / a Helm hook does.
-- **`BackupSchedule`** = the **cron**. _When_ the recipe runs. It creates `Backup` CRs for you on a cadence.
+- **`SnapshotPolicy`** = the **recipe**. _What_ to back up, how long to keep it, how to capture it. It is **idempotent and runs nothing on its own** — applying it just records intent.
+- **`Snapshot`** = one **invocation**. A single kopia snapshot represented as a Kubernetes object. It is the **universal trigger**: a schedule creates one, or you `kubectl create` one, or Argo Events / Tekton / a Helm hook does.
+- **`SnapshotSchedule`** = the **cron**. _When_ the recipe runs. It creates `Snapshot` CRs for you on a cadence.
 
 Why split them? So you can re-run a recipe on demand without touching the schedule, pause a schedule without losing the recipe, and trigger backups from anything that can create a Kubernetes object — without three slightly-different copies of "what to back up".
 
@@ -14,13 +14,13 @@ Why split them? So you can re-run a recipe on demand without touching the schedu
 
 All three are namespaced and live in the same namespace as the PVCs they back up (that's where the mover Job runs — see [Movers, RBAC & credentials](movers.md)).
 
-## BackupConfig — the recipe
+## SnapshotPolicy — the recipe
 
 A minimal recipe is a repository, a source, and a retention policy:
 
 ```yaml
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupConfig
+kind: SnapshotPolicy
 metadata:
     name: postgres-data
     namespace: billing
@@ -84,7 +84,7 @@ When a selector matches several PVCs, `groupBy` defaults to `VolumeGroupSnapshot
 
 ### Retention — how long backups are kept (GFS)
 
-Retention is **grandfather-father-son** and is the **only** thing that prunes _successful_ backups. Kopiur enforces it by deleting `Backup` CRs outside the window (which, with the default `deletionPolicy`, deletes the underlying snapshots too).
+Retention is **grandfather-father-son** and is the **only** thing that prunes _successful_ backups. Kopiur enforces it by deleting `Snapshot` CRs outside the window (which, with the default `deletionPolicy`, deletes the underlying snapshots too).
 
 ```yaml
 retention:
@@ -96,13 +96,13 @@ retention:
     keepAnnual: 3
 ```
 
-Set only the buckets you care about; omit the rest. There is deliberately **no** `successfulJobsHistoryLimit` — successful retention is GFS, full stop. (Failed runs are bounded separately by `failedJobsHistoryLimit` on the `BackupSchedule`.)
+Set only the buckets you care about; omit the rest. There is deliberately **no** `successfulJobsHistoryLimit` — successful retention is GFS, full stop. (Failed runs are bounded separately by `failedJobsHistoryLimit` on the `SnapshotSchedule`.)
 
 ### Identity — what kopia records (`username@hostname:path`)
 
 kopia stores every snapshot under an identity. Kopiur resolves it **once at admission** and pins it to status; it is never re-rendered. The defaults:
 
-- `username` ← the `BackupConfig` name
+- `username` ← the `SnapshotPolicy` name
 - `hostname` ← the namespace
 - `sourcePath` ← `/pvc/<pvcName>` for a PVC source, or the export `path` for an `nfs` source
 
@@ -114,20 +114,75 @@ identity:
     hostname: billing
 ```
 
-(For a shared `ClusterRepository`, the repo can supply identity _templates_ so tenants get distinct identities automatically — see [Repositories → identityDefaults](repositories.md#identitydefaults--per-tenant-identity). An explicit `identity` here always wins.)
+(For a shared `ClusterRepository`, the repo can supply identity _CEL expressions_ so tenants get distinct identities automatically — see [Repositories → identityDefaults](repositories.md#identitydefaults--per-tenant-identity-cel). An explicit `identity` here always wins.)
 
-### policy — kopia tuning and ignores
+### compression, files & extraArgs — kopia tuning and ignores
+
+These map onto kopia's per-source policy and sit as **top-level** siblings of `retention` on the `SnapshotPolicy` spec:
 
 ```yaml
-policy:
-    compression:
-        compressor: zstd
-        neverCompress: ["*.zip", "*.gz", "*.mp4"] # skip already-compressed files
-    ignore:
-        paths: ["*.tmp", "*/cache/*", "lost+found"]
-        cacheDirs: true # honor CACHEDIR.TAG
-    extraArgs: [] # escape hatch for kopia flags not modeled above
+compression:
+    compressor: zstd
+    neverCompress: ["*.zip", "*.gz", "*.mp4"] # skip already-compressed files
+files:
+    ignoreRules: ["*.tmp", "*/cache/*", "lost+found"] # paths kopia skips
+    ignoreCacheDirs: true # honor CACHEDIR.TAG
+    ignoreIdenticalSnapshots: false # take a new snapshot even if nothing changed
+extraArgs: [] # escape hatch for kopia flags not modeled above
 ```
+
+| Field | What it does |
+| --- | --- |
+| `compression.compressor` | The kopia compressor (e.g. `zstd`, `gzip`, `s2`); omit to leave content uncompressed. |
+| `compression.neverCompress` | Globs to never attempt to compress — already-compressed media, archives. |
+| `files.ignoreRules` | `.gitignore`-style globs of paths to exclude from the snapshot. |
+| `files.ignoreCacheDirs` | Honor `CACHEDIR.TAG` markers (skip directories tagged as caches). |
+| `files.ignoreIdenticalSnapshots` | When `true`, kopia won't create a new snapshot if the source is byte-identical to the last one. |
+| `extraArgs` | Pass-through kopia flags for anything not modeled above. |
+
+The object **splitter** is not here — it is a repository property fixed at creation and lives on [`Repository.create.splitter`](repositories.md#encryption-and-repository-creation), where it applies repository-wide.
+
+### errorHandling — let a snapshot complete with errors
+
+The backup-side analog of restore's `ignorePermissionErrors` (ADR-0005 §13(b)). Each flag is off by default (kopia fails on the error); turn one on to let the snapshot finish anyway:
+
+```yaml
+errorHandling:
+    ignoreFileErrors: true # --ignore-file-errors: skip unreadable files
+    ignoreDirErrors: false # --ignore-dir-errors: skip unreadable directories
+    ignoreUnknownTypes: true # --ignore-unknown-types: skip sockets/devices/...
+```
+
+### upload — parallelism
+
+kopia's upload policy (ADR-0005 §13(f)); both knobs optional (absent leaves kopia's default):
+
+```yaml
+upload:
+    maxParallelSnapshots: 4 # --max-parallel-snapshots: concurrent sources
+    maxParallelFileReads: 8 # --max-parallel-file-reads: file-read concurrency
+```
+
+### verification — prove the snapshots are restorable
+
+Opt-in (ADR-0005 §4). When absent, nothing runs. When set, the operator runs a frequent blob-level `kopia snapshot verify` (`quick`) and/or a rarer scratch-restore test (`deep`) on a cron, surfaces `status.lastVerified`, and (with `successExpr`) asserts the result is good:
+
+```yaml
+verification:
+    quick: { cron: "0 4 * * *", jitter: 30m } # blob-level verify, often
+    deep: # scratch-restore the latest snapshot into an ephemeral PVC, rarely
+        schedule: { cron: "0 5 * * 0", jitter: 1h }
+        capacity: 100Gi
+        storageClassName: fast-ssd
+    successExpr: "stats.files > 0 && stats.errors == 0" # CEL pass/fail predicate
+    verifyFilesPercent: 10 # how much of each file `quick` reads fully
+```
+
+`successExpr` is a CEL predicate (returns `bool`) over the verify result — environment `stats{files,bytes,errors}`, `snapshot`, and (deep only) `restored{files,checksumMatches}`. It is validated at admission, so a typo is rejected on `kubectl apply`. See the [verification-drill scenario](scenarios/verification-drills.md).
+
+### suspend — pause a recipe
+
+`suspend: true` makes the operator skip this `SnapshotPolicy` entirely — no retention prune, no backups created by schedules, no verification — without deleting it. Surfaced in the `SUSPENDED` printer column. (`suspend` is now also available on `Repository`/`ClusterRepository`/`RepositoryReplication`, ADR-0005 §14(e).)
 
 ### hooks — quiesce the app around the snapshot
 
@@ -174,7 +229,7 @@ mover:
     # inheritSecurityContextFrom:   # ...OR copy the securityContext from a live pod
     #   podSelector: { matchLabels: { app: postgres } }
     #   container: postgres          # optional; defaults to the pod's first container
-    cache: # kopia cache for this recipe (overrides the repository's cacheDefaults)
+    cache: # kopia cache for this recipe (overrides the repository's moverDefaults.cache)
         capacity: 16Gi # size of the cache volume
         storageClassName: fast-ssd # cache volume's StorageClass (omit = cluster default)
         mode: Ephemeral # Ephemeral (default) | Persistent (warm cache across runs)
@@ -194,26 +249,26 @@ mover:
 | `cache.contentCacheSizeMb` / `metadataCacheSizeMb` | kopia's content/metadata cache budgets (MiB). | Tune kopia's memory/disk cache footprint independently of the volume size. |
 | `privilegedMode` | An opt-in elevation that also preserves original UID/GID ownership on **restore**. | Only when matching a single UID isn't enough (mixed ownership, `lost+found`). Namespace-gated — see below. |
 
-A repository can set `cacheDefaults` that every mover inherits; `mover.cache` overlays them field-by-field (so you can, e.g., bump only `capacity` per recipe). See [Repositories → cacheDefaults](repositories.md).
+A repository can set `moverDefaults.cache` that every mover inherits; `mover.cache` overlays them field-by-field (so you can, e.g., bump only `capacity` per recipe). See [Repositories → moverDefaults.cache](repositories.md).
 
 /// warning | A privileged mover needs namespace opt-in
 
-If the mover's **effective** securityContext runs as root (`runAsUser: 0`), sets `privileged: true`, allows escalation, adds capabilities, sets `runAsNonRoot: false`, or sets `privilegedMode: true` — **including a context inherited from a root workload pod** — the namespace must opt in with the `kopiur.home-operations.com/privileged-movers` annotation or the `Backup`/`Restore` is refused with a `MoverPermitted=False` condition. See [Movers → Privileged movers](movers.md#privileged-movers).
+If the mover's **effective** securityContext runs as root (`runAsUser: 0`), sets `privileged: true`, allows escalation, adds capabilities, sets `runAsNonRoot: false`, or sets `privilegedMode: true` — **including a context inherited from a root workload pod** — the namespace must opt in with the `kopiur.home-operations.com/privileged-movers` annotation or the `Snapshot`/`Restore` is refused with a `MoverPermitted=False` condition. See [Movers → Privileged movers](movers.md#privileged-movers).
 
 ///
 
-## Backup — one snapshot, the universal trigger
+## Snapshot — one snapshot, the universal trigger
 
-You usually let a `BackupSchedule` create `Backup` CRs. To run one **now** — first-time test, ad-hoc snapshot before a risky change, or from external automation — create one yourself (see [example 06](examples.md#example-06--manual-one-shot-backup)):
+You usually let a `SnapshotSchedule` create `Snapshot` CRs. To run one **now** — first-time test, ad-hoc snapshot before a risky change, or from external automation — create one yourself (see [example 06](examples.md#example-06--manual-one-shot-backup)):
 
 ```yaml
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: Backup
+kind: Snapshot
 metadata:
     generateName: postgres-data-manual- # API server appends a unique suffix
     namespace: billing
 spec:
-    configRef:
+    policyRef:
         name: postgres-data # which recipe to run
     tags:
         reason: pre-upgrade # arbitrary kopia snapshot tags
@@ -222,34 +277,44 @@ spec:
 Watch it move through its phases:
 
 ```console
-$ kubectl get backup -n billing -w
+$ kubectl get snapshots -n billing -w
 NAME                       PHASE       ORIGIN   SNAPSHOT    AGE
 postgres-data-manual-x9f   Pending     manual               2s
 postgres-data-manual-x9f   Running     manual               7s
 postgres-data-manual-x9f   Succeeded   manual   k1f1ec0a8   44s
 ```
 
-`ORIGIN` tells you where a `Backup` came from: `scheduled` (a `BackupSchedule`), `manual` (you / automation), or `discovered` (materialized from snapshots Kopiur didn't create — see [Restores → discovered](restores.md#restoring-a-snapshot-kopiur-didnt-create)).
+`ORIGIN` tells you where a `Snapshot` came from: `scheduled` (a `SnapshotSchedule`), `manual` (you / automation), or `discovered` (materialized from snapshots Kopiur didn't create — see [Restores → discovered](restores.md#restoring-a-snapshot-kopiur-didnt-create)).
 
 ### `deletionPolicy` — what happens to the snapshot
 
-A `Backup` CR **owns** its kopia snapshot via a finalizer. What happens to the snapshot when the CR is deleted is governed by `deletionPolicy`:
+A `Snapshot` CR **owns** its kopia snapshot via a finalizer. What happens to the snapshot when the CR is deleted is governed by `deletionPolicy`:
 
-| Policy   | On `Backup` deletion                                                                                 | Default for                                                                |
+| Policy   | On `Snapshot` deletion                                                                                 | Default for                                                                |
 | -------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | `Delete` | Finalizer runs `kopia snapshot delete`, then removes the CR.                                         | `scheduled` / `manual` backups.                                            |
 | `Retain` | CR is removed; the snapshot **stays** in the repository.                                             | `discovered` backups (forced — Kopiur won't delete what it didn't create). |
 | `Orphan` | CR is removed **without contacting the repository** — escape hatch for "the bucket is already gone". | —                                                                          |
 
-Set it per-`Backup` (`spec.deletionPolicy`) or set the recipe-wide default with `BackupConfig.spec.defaultDeletionPolicy`. This is also how retention pruning reclaims space: pruned `Backup` CRs use `Delete`, so the snapshots go with them.
+Set it per-`Snapshot` (`spec.deletionPolicy`) or set the recipe-wide default with `SnapshotPolicy.spec.defaultDeletionPolicy`. This is also how retention pruning reclaims space: pruned `Snapshot` CRs use `Delete`, so the snapshots go with them.
 
-### `failurePolicy` — retry & deadline for the mover Job
+### `pin` — exempt a snapshot from retention
 
-`Backup.spec.failurePolicy` controls the mover `Job`'s retry and wall-clock limits (the same surface a [`Restore`](restores.md#mover-cache--failure-policy) has):
+`Snapshot.spec.pin: true` pins the underlying kopia snapshot so GFS retention **never** expires it (ADR-0005 §13(c)) — for a pre-migration or compliance hold. The reconciler applies a `kopia snapshot pin`; clearing the field removes the pin. `pin` is independent of `deletionPolicy`: `pin` governs **retention expiry**, `deletionPolicy` governs what happens to the snapshot when **this CR** is deleted.
 
 ```yaml
 spec:
-    configRef: { name: postgres-data }
+    policyRef: { name: postgres-data }
+    pin: true # GFS retention will skip this snapshot until you clear pin
+```
+
+### `failurePolicy` — retry & deadline for the mover Job
+
+`Snapshot.spec.failurePolicy` controls the mover `Job`'s retry and wall-clock limits (the same surface a [`Restore`](restores.md#mover-cache--failure-policy) has):
+
+```yaml
+spec:
+    policyRef: { name: postgres-data }
     failurePolicy:
         backoffLimit: 2 # retry the mover Job this many times before marking it failed (default 2)
         activeDeadlineSeconds: 3600 # kill a still-running backup after this many seconds (default: none)
@@ -260,20 +325,20 @@ spec:
 | `backoffLimit` | `Job.spec.backoffLimit` — retries before the run is marked failed. | Lower to fail fast on a flaky source; raise to ride out transient backend blips. |
 | `activeDeadlineSeconds` | `Job.spec.activeDeadlineSeconds` — a hard wall-clock cap. | Set a ceiling so a wedged backup doesn't run forever; size it above your largest expected run. |
 
-Failed `Backup` CRs from a schedule are bounded by `failedJobsHistoryLimit` (below); successful ones are pruned by GFS retention.
+Failed `Snapshot` CRs from a schedule are bounded by `failedJobsHistoryLimit` (below); successful ones are pruned by GFS retention.
 
-## BackupSchedule — the cron
+## SnapshotSchedule — the cron
 
-A schedule binds a recipe to a cadence and creates `Backup` CRs (see [example 01](examples.md#example-01--single-pvc-scheduled)):
+A schedule binds a recipe to a cadence and creates `Snapshot` CRs (see [example 01](examples.md#example-01--single-pvc-scheduled)):
 
 ```yaml
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupSchedule
+kind: SnapshotSchedule
 metadata:
     name: postgres-data-nightly
     namespace: billing
 spec:
-    configRef:
+    policyRef:
         name: postgres-data
     schedule:
         cron: "H 2 * * *" # see "H" below
@@ -296,7 +361,24 @@ spec:
 | `schedule.suspend`                 | `true` pauses future firings (in-flight and past runs are untouched).                                                                        |
 | `schedule.concurrencyPolicy`       | What to do if a run is still in flight: `Forbid` (default, skip), `Allow` (run anyway), `Replace` (cancel the old one).                      |
 | `schedule.startingDeadlineSeconds` | If a slot is missed by more than this (operator was down), skip it rather than fire late.                                                    |
-| `failedJobsHistoryLimit`           | How many **failed** `Backup` CRs from this schedule to keep. Successful retention is GFS on the `BackupConfig`.                              |
+| `failedJobsHistoryLimit`           | How many **failed** `Snapshot` CRs from this schedule to keep. Successful retention is GFS on the `SnapshotPolicy`.                              |
+
+### `policyRef` or `policySelector` — one recipe or many
+
+A schedule targets recipes one of two **mutually exclusive** ways (exactly one is required, webhook-enforced — ADR-0005 §10):
+
+- `policyRef: { name: postgres-data }` — a single `SnapshotPolicy` (the common case, shown above).
+- `policySelector` — a label selector over `SnapshotPolicy` objects in the schedule's namespace. Each matching policy gets a `Snapshot` per firing. "Back up everything tagged `tier=critical` nightly" becomes one object:
+
+```yaml
+spec:
+    # mutually exclusive with policyRef
+    policySelector:
+        matchLabels: { tier: critical }
+    schedule:
+        cron: "H 2 * * *"
+        jitter: 30m
+```
 
 /// tip | What `H` means
 
@@ -307,11 +389,11 @@ spec:
 Inspect what the controller has computed:
 
 ```console
-$ kubectl get backupschedule -n billing
+$ kubectl get snapshotschedule -n billing
 NAME                    CONFIG          SCHEDULE    SUSPENDED   AGE
 postgres-data-nightly   postgres-data   H 2 * * *   false       6d
 
-$ kubectl get backupschedule postgres-data-nightly -n billing \
+$ kubectl get snapshotschedule postgres-data-nightly -n billing \
     -o jsonpath='{.status.nextSchedule.at}{"\n"}{.status.consecutiveFailures}{"\n"}'
 ```
 
@@ -319,14 +401,14 @@ $ kubectl get backupschedule postgres-data-nightly -n billing \
 
 ```mermaid
 flowchart LR
-  R[Repository<br/>where] --> BC[BackupConfig<br/>recipe: what]
-  BC --> BS[BackupSchedule<br/>cron: when]
-  BS -->|creates| B[Backup<br/>one snapshot]
+  R[Repository<br/>where] --> BC[SnapshotPolicy<br/>recipe: what]
+  BC --> BS[SnapshotSchedule<br/>cron: when]
+  BS -->|creates| B[Snapshot<br/>one snapshot]
   kubectl[kubectl / automation] -->|creates| B
   B -->|finalizer + deletionPolicy| snap[(kopia snapshot)]
 ```
 
-A `BackupConfig` describes the work; a `BackupSchedule` (or you) turns it into `Backup` CRs; each `Backup` owns one snapshot for its lifetime. Retention prunes old `Backup` CRs, and (via `deletionPolicy: Delete`) their snapshots, keeping the repository in the GFS window.
+A `SnapshotPolicy` describes the work; a `SnapshotSchedule` (or you) turns it into `Snapshot` CRs; each `Snapshot` owns one snapshot for its lifetime. Retention prunes old `Snapshot` CRs, and (via `deletionPolicy: Delete`) their snapshots, keeping the repository in the GFS window.
 
 ## See also
 

@@ -6,7 +6,8 @@
 #   1. EVERY Secret reference must carry an explicit `namespace:` (webhook-enforced
 #      — a cluster-scoped CR has no namespace of its own to default to).
 #   2. `allowedNamespaces` gates which namespaces may reference it, and
-#      `identityDefaults` templates each consumer's kopia identity at admission.
+#      `identityDefaults` derives each consumer's kopia identity from CEL
+#      expressions evaluated at admission.
 #
 # REQUIRES the operator installed with installScope=cluster.
 #
@@ -48,10 +49,11 @@ spec:
     list:
       - billing
       - payments
-  # Jinja2-compatible templates rendered at admission, pinned to status (ADR §4.2).
+  # CEL expressions evaluated at admission, pinned to status (ADR-0004 §5). The
+  # CEL environment is `namespace`, `policyName`, `labels`, `annotations`.
   identityDefaults:
-    hostnameTemplate: "{{ .Namespace }}"
-    usernameTemplate: "{{ .Namespace }}-{{ .ConfigName }}"
+    hostnameExpr: "namespace"
+    usernameExpr: "namespace + '-' + policyName"
   # Maintenance is default-managed. Maintenance is namespaced but a
   # ClusterRepository is not, so `namespace` picks where the managed Maintenance
   # CR lands (defaults to the operator's namespace when omitted).

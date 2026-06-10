@@ -7,7 +7,7 @@ the enforcement point for the cross-field rules the type system can't express.
 
 `kopiur-webhook` is the admission half of the operator (ADR-0003 §5.3). Kopiur's
 core thesis is that "exactly one of" surfaces are Rust `enum`s, so most invalid
-states are unrepresentable. The webhook covers the remainder — the *cross-field*
+states are unrepresentable. The webhook covers the remainder — the _cross-field_
 rules a structural schema cannot encode (ADR §2.2 principle 8):
 mutually-exclusive fields, malformed cron, `ClusterRepository` tenancy, and
 origin-aware `deletionPolicy`.
@@ -53,7 +53,7 @@ let _ = router; // serve it with axum + rustls in real deployments.
 
 Because the webhook shares the controller's validators, the actual admission
 logic is pure and runs without a cluster. Here is the cron check that backs the
-`BackupSchedule` handler:
+`SnapshotSchedule` handler:
 
 ```rust
 use kopiur_api::validate::validate_cron;

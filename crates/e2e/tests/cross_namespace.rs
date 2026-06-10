@@ -1,5 +1,5 @@
 //! End-to-end cross-namespace lifecycle: the full **bootstrap → repository →
-//! Backup** path exercised in a workload namespace SEPARATE from the operator's.
+//! Snapshot** path exercised in a workload namespace SEPARATE from the operator's.
 //!
 //! Gated by `#[cfg(feature = "e2e")]` + `#[ignore]`, skipping gracefully without a
 //! cluster. Driven by `mise run //crates/e2e:test`, which stands up MinIO, the
@@ -13,22 +13,22 @@
 //!
 //! These assert real operator output for the two cross-namespace shapes:
 //!
-//! 1. **ClusterRepository → Backup in another namespace.** A cluster-scoped
+//! 1. **ClusterRepository → Snapshot in another namespace.** A cluster-scoped
 //!    `ClusterRepository` (its Secret pinned to the operator namespace) bootstraps
-//!    against S3, then a `BackupConfig` + `Backup` in the WORKLOAD namespace drive
+//!    against S3, then a `SnapshotPolicy` + `Snapshot` in the WORKLOAD namespace drive
 //!    a mover Job there. The controller must mint the least-privilege mover
-//!    `ServiceAccount` + `RoleBinding` in the workload namespace and the Backup
+//!    `ServiceAccount` + `RoleBinding` in the workload namespace and the Snapshot
 //!    must reach `Succeeded` with a real kopia snapshot id.
-//! 2. **Namespaced Repository → Backup, both in a non-operator namespace.** A
+//! 2. **Namespaced Repository → Snapshot, both in a non-operator namespace.** A
 //!    `Repository` living entirely in the workload namespace bootstraps against S3
-//!    (its bootstrap Job runs there as the minted mover SA), then a Backup in the
+//!    (its bootstrap Job runs there as the minted mover SA), then a Snapshot in the
 //!    same namespace reaches `Succeeded`.
 //!
 //! 3. **Maintenance mints mover RBAC.** Regression guard for the bug where the
 //!    maintenance path was the one mover-Job path that did NOT mint the mover SA,
 //!    so a maintenance Job in a fresh namespace `FailedCreate`d with
 //!    `serviceaccount "kopiur-mover" not found`. A `Maintenance` in a brand-new
-//!    namespace (where no Backup ran) must still get the mover SA minted there.
+//!    namespace (where no Snapshot ran) must still get the mover SA minted there.
 
 #![cfg(all(unix, feature = "e2e"))]
 
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use k8s_openapi::api::core::v1::ServiceAccount;
 use k8s_openapi::api::rbac::v1::RoleBinding;
 
-use kopiur_api::{Backup, BackupConfig, ClusterRepository, Maintenance, Repository};
+use kopiur_api::{ClusterRepository, Maintenance, Repository, Snapshot, SnapshotPolicy};
 use kopiur_e2e::{
     E2E_NAMESPACE, Need, World, default_timeout, ensure_namespace, poll_interval, wait_until,
 };
@@ -110,13 +110,13 @@ fn s3_repository_json(ns: &str, name: &str, bucket: &str) -> serde_json::Value {
     })
 }
 
-/// A `BackupConfig` in `ns` referencing a repository by (`repo_kind`, `repo_name`).
+/// A `SnapshotPolicy` in `ns` referencing a repository by (`repo_kind`, `repo_name`).
 /// A `ClusterRepository` ref carries no namespace (the whole point); a `Repository`
 /// ref resolves in `ns`.
 fn backup_config_json(ns: &str, name: &str, repo_kind: &str, repo_name: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "BackupConfig",
+        "kind": "SnapshotPolicy",
         "metadata": { "name": name, "namespace": ns },
         "spec": {
             "repository": { "kind": repo_kind, "name": repo_name },
@@ -129,9 +129,9 @@ fn backup_config_json(ns: &str, name: &str, repo_kind: &str, repo_name: &str) ->
 fn backup_json(ns: &str, name: &str, config: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kopiur.home-operations.com/v1alpha1",
-        "kind": "Backup",
+        "kind": "Snapshot",
         "metadata": { "name": name, "namespace": ns },
-        "spec": { "configRef": { "name": config }, "deletionPolicy": "Retain" }
+        "spec": { "policyRef": { "name": config }, "deletionPolicy": "Retain" }
     })
 }
 
@@ -208,7 +208,7 @@ async fn assert_mover_rbac_minted(client: &kube::Client, ns: &str) {
     );
 }
 
-/// Assert a Succeeded Backup carries a real (non-empty) kopia snapshot id.
+/// Assert a Succeeded Snapshot carries a real (non-empty) kopia snapshot id.
 fn assert_real_snapshot(status: &serde_json::Value, what: &str) {
     let snap_id = status
         .get("snapshot")
@@ -221,10 +221,10 @@ fn assert_real_snapshot(status: &serde_json::Value, what: &str) {
     );
 }
 
-/// **ClusterRepository → Backup in a different namespace.** The cluster-scoped repo
-/// bootstraps against S3 (its Secret in the operator namespace); a Backup in the
+/// **ClusterRepository → Snapshot in a different namespace.** The cluster-scoped repo
+/// bootstraps against S3 (its Secret in the operator namespace); a Snapshot in the
 /// workload namespace then drives a mover Job there, the controller mints the mover
-/// RBAC in that namespace, and the Backup reaches `Succeeded` with a real snapshot.
+/// RBAC in that namespace, and the Snapshot reaches `Succeeded` with a real snapshot.
 #[tokio::test]
 #[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
 async fn clusterrepository_bootstrap_then_cross_namespace_backup_succeeds() {
@@ -237,8 +237,8 @@ async fn clusterrepository_bootstrap_then_cross_namespace_backup_succeeds() {
         .expect("provision MinIO + workload namespace");
     let client = world.client().clone();
     let crepos: Api<ClusterRepository> = Api::all(client.clone());
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), XNS);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), XNS);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), XNS);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), XNS);
 
     let crepo = "e2e-xns-full-crepo";
     let cfg = "e2e-xns-full-cfg";
@@ -256,29 +256,29 @@ async fn clusterrepository_bootstrap_then_cross_namespace_backup_succeeds() {
         .await
         .expect("S3 ClusterRepository should bootstrap to Ready");
 
-    // 2. BackupConfig + Backup in the WORKLOAD namespace.
+    // 2. SnapshotPolicy + Snapshot in the WORKLOAD namespace.
     configs
         .create(
             &PostParams::default(),
             &cr(backup_config_json(XNS, cfg, "ClusterRepository", crepo)),
         )
         .await
-        .expect("create BackupConfig in workload namespace");
+        .expect("create SnapshotPolicy in workload namespace");
     backups
         .create(&PostParams::default(), &cr(backup_json(XNS, backup, cfg)))
         .await
-        .expect("create Backup in workload namespace");
+        .expect("create Snapshot in workload namespace");
 
     // 3. The controller mints the mover SA + RoleBinding in the workload namespace.
     assert_mover_rbac_minted(&client, XNS).await;
 
-    // 4. The Backup completes with a real snapshot id.
+    // 4. The Snapshot completes with a real snapshot id.
     wait_phase(&backups, backup, "Succeeded")
         .await
-        .expect("cross-namespace ClusterRepository Backup should reach Succeeded");
+        .expect("cross-namespace ClusterRepository Snapshot should reach Succeeded");
     assert_real_snapshot(
         &status_json(&backups, backup).await,
-        "cross-namespace ClusterRepository Backup",
+        "cross-namespace ClusterRepository Snapshot",
     );
 
     // Cleanup: the cluster-scoped repo (the namespaced CRs persist with the shared
@@ -286,9 +286,9 @@ async fn clusterrepository_bootstrap_then_cross_namespace_backup_succeeds() {
     let _ = crepos.delete(crepo, &DeleteParams::default()).await;
 }
 
-/// **Namespaced Repository → Backup, both in a non-operator namespace.** A
+/// **Namespaced Repository → Snapshot, both in a non-operator namespace.** A
 /// `Repository` living entirely in the workload namespace bootstraps against S3
-/// (its bootstrap Job runs there as the minted mover SA), then a Backup in the same
+/// (its bootstrap Job runs there as the minted mover SA), then a Snapshot in the same
 /// namespace reaches `Succeeded` — proving the operator reconciles namespaced
 /// Repositories in arbitrary namespaces and mints the mover RBAC there.
 #[tokio::test]
@@ -303,8 +303,8 @@ async fn repository_bootstrap_then_backup_in_workload_namespace_succeeds() {
         .expect("provision MinIO + workload namespace");
     let client = world.client().clone();
     let repos: Api<Repository> = Api::namespaced(client.clone(), XNS);
-    let configs: Api<BackupConfig> = Api::namespaced(client.clone(), XNS);
-    let backups: Api<Backup> = Api::namespaced(client.clone(), XNS);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), XNS);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), XNS);
 
     let repo = "e2e-xns-repo";
     let cfg = "e2e-xns-repo-cfg";
@@ -325,35 +325,35 @@ async fn repository_bootstrap_then_backup_in_workload_namespace_succeeds() {
     // 2. The bootstrap Job ran in the workload namespace, so the mover RBAC is there.
     assert_mover_rbac_minted(&client, XNS).await;
 
-    // 3. BackupConfig + Backup in the same namespace → Succeeded with a real snapshot.
+    // 3. SnapshotPolicy + Snapshot in the same namespace → Succeeded with a real snapshot.
     configs
         .create(
             &PostParams::default(),
             &cr(backup_config_json(XNS, cfg, "Repository", repo)),
         )
         .await
-        .expect("create BackupConfig in workload namespace");
+        .expect("create SnapshotPolicy in workload namespace");
     backups
         .create(&PostParams::default(), &cr(backup_json(XNS, backup, cfg)))
         .await
-        .expect("create Backup in workload namespace");
+        .expect("create Snapshot in workload namespace");
     wait_phase(&backups, backup, "Succeeded")
         .await
-        .expect("workload-namespace Repository Backup should reach Succeeded");
+        .expect("workload-namespace Repository Snapshot should reach Succeeded");
     assert_real_snapshot(
         &status_json(&backups, backup).await,
-        "workload-namespace Repository Backup",
+        "workload-namespace Repository Snapshot",
     );
 
-    // Cleanup the namespaced Repository (its Backup/Config GC with it / the ns).
+    // Cleanup the namespaced Repository (its Snapshot/Config GC with it / the ns).
     let _ = repos.delete(repo, &DeleteParams::default()).await;
 }
 
 /// **Maintenance mints mover RBAC (regression).** The maintenance path was the one
 /// mover-Job path that did NOT mint the per-namespace mover SA, so a maintenance Job
-/// in a namespace where no Backup had run `FailedCreate`d with `serviceaccount
+/// in a namespace where no Snapshot had run `FailedCreate`d with `serviceaccount
 /// "kopiur-mover" not found` and never scheduled a pod. A `Maintenance` created in a
-/// brand-new namespace (no Backup there) must still get the mover SA minted there —
+/// brand-new namespace (no Snapshot there) must still get the mover SA minted there —
 /// the controller mints it before launching the Job, and a first-ever reconcile is
 /// due immediately, so the SA appears without waiting for a cron slot.
 #[tokio::test]
@@ -367,7 +367,7 @@ async fn maintenance_in_fresh_namespace_mints_mover_rbac() {
         .await
         .expect("provision MinIO + buckets");
     let client = world.client().clone();
-    // A namespace dedicated to this scenario where NO Backup ever runs, so only the
+    // A namespace dedicated to this scenario where NO Snapshot ever runs, so only the
     // maintenance path can mint the mover SA here.
     const MAINT_NS: &str = "kopiur-e2e-maint-xns";
     ensure_namespace(&client, MAINT_NS)

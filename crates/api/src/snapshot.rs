@@ -1,12 +1,12 @@
-//! The `Backup` CRD — a single kopia snapshot as a Kubernetes object.
+//! The `Snapshot` CRD — a single kopia snapshot as a Kubernetes object.
 //! ADR-0001 §3.4, ADR-0003 §4.5.
 //!
 //! Three origins (canonical value lives in `status.origin`):
-//! - `scheduled` — created by a `BackupSchedule`; spec carries `configRef`.
-//! - `manual`    — created by `kubectl create` / external automation; spec carries `configRef`.
+//! - `scheduled` — created by a `SnapshotSchedule`; spec carries `policyRef`.
+//! - `manual`    — created by `kubectl create` / external automation; spec carries `policyRef`.
 //! - `discovered`— materialized by the catalog scan; spec is empty/absent.
 
-use crate::common::{ConfigRef, DeletionPolicy, FailurePolicy, RepositoryRef, ResolvedIdentity};
+use crate::common::{DeletionPolicy, FailurePolicy, PolicyRef, RepositoryRef, ResolvedIdentity};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -15,16 +15,16 @@ use std::collections::BTreeMap;
 
 /// A single kopia snapshot represented as a Kubernetes object. ADR §3.4.
 ///
-/// For `scheduled`/`manual` backups the spec carries `configRef` (+ optional
+/// For `scheduled`/`manual` backups the spec carries `policyRef` (+ optional
 /// overrides). For `discovered` backups the spec is empty — every field is optional.
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[kube(
     group = "kopiur.home-operations.com",
     version = "v1alpha1",
-    kind = "Backup",
+    kind = "Snapshot",
     namespaced,
-    status = "BackupStatus",
-    shortname = "kopiabak",
+    status = "SnapshotStatus",
+    shortname = "kopiasnap",
     category = "kopiur",
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Origin","type":"string","jsonPath":".status.origin"}"#,
@@ -32,10 +32,10 @@ use std::collections::BTreeMap;
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
-pub struct BackupSpec {
+pub struct SnapshotSpec {
     /// The recipe to run. Absent for `discovered` backups. ADR §3.4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_ref: Option<ConfigRef>,
+    pub policy_ref: Option<PolicyRef>,
     /// Arbitrary kopia snapshot tags (e.g. `reason: scheduled-nightly`). ADR §3.4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<BTreeMap<String, String>>,
@@ -46,9 +46,15 @@ pub struct BackupSpec {
     /// default (§4.5): `Delete` for scheduled/manual, forced `Retain` for discovered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletion_policy: Option<DeletionPolicy>,
+    /// Pin this snapshot to exempt it from GFS retention (ADR-0005 §13(c)). When
+    /// `true` the reconciler applies a kopia snapshot pin and the GFS pruner never
+    /// selects it for deletion — for pre-migration / compliance holds. Clearing it
+    /// removes the pin. Default `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pin: bool,
 }
 
-/// How a `Backup` came to exist. Canonical value mirrored from the `kopiur.home-operations.com/origin`
+/// How a `Snapshot` came to exist. Canonical value mirrored from the `kopiur.home-operations.com/origin`
 /// label. Closed enum. ADR §3.4.
 ///
 /// Origin drives the deletion-policy default (ADR §4.5): `discovered` backups are
@@ -64,29 +70,29 @@ pub struct BackupSpec {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum Origin {
-    /// Created by a `BackupSchedule`; spec carries `configRef`. ADR §3.4.
+    /// Created by a `SnapshotSchedule`; spec carries `policyRef`. ADR §3.4.
     #[default]
     Scheduled,
-    /// Created by `kubectl create` / external automation; spec carries `configRef`. ADR §3.4.
+    /// Created by `kubectl create` / external automation; spec carries `policyRef`. ADR §3.4.
     Manual,
     /// Materialized by the catalog scan for a snapshot kopiur didn't produce;
     /// spec is empty and `deletionPolicy` is forced to `Retain`. ADR §3.4/§4.5.
     Discovered,
 }
 
-/// Lifecycle phase of a `Backup`. Closed enum. ADR §3.4 status.
+/// Lifecycle phase of a `Snapshot`. Closed enum. ADR §3.4 status.
 ///
 /// ```
-/// use kopiur_api::{BackupPhase, PhaseLabel};
+/// use kopiur_api::{SnapshotPhase, PhaseLabel};
 ///
-/// assert_eq!(BackupPhase::default(), BackupPhase::Pending);
+/// assert_eq!(SnapshotPhase::default(), SnapshotPhase::Pending);
 /// // `PhaseLabel::label` gives the stable string used in status/metrics.
-/// assert_eq!(BackupPhase::Succeeded.label(), "Succeeded");
+/// assert_eq!(SnapshotPhase::Succeeded.label(), "Succeeded");
 /// // Every variant is enumerated for metric reset.
-/// assert_eq!(BackupPhase::ALL.len(), 6);
+/// assert_eq!(SnapshotPhase::ALL.len(), 6);
 /// ```
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
-pub enum BackupPhase {
+pub enum SnapshotPhase {
     /// Admitted, not yet started (also the default). ADR §3.4 status.
     #[default]
     Pending,
@@ -102,7 +108,7 @@ pub enum BackupPhase {
     Discovered,
 }
 
-impl crate::common::PhaseLabel for BackupPhase {
+impl crate::common::PhaseLabel for SnapshotPhase {
     const ALL: &'static [Self] = &[
         Self::Pending,
         Self::Running,
@@ -123,13 +129,13 @@ impl crate::common::PhaseLabel for BackupPhase {
     }
 }
 
-/// Observed state of a [`Backup`]. ADR §3.4 status.
+/// Observed state of a [`Snapshot`]. ADR §3.4 status.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct BackupStatus {
+pub struct SnapshotStatus {
     /// Current lifecycle phase. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<BackupPhase>,
+    pub phase: Option<SnapshotPhase>,
     /// Canonical origin (also mirrored to the `origin` label). ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<Origin>,
@@ -141,16 +147,16 @@ pub struct BackupStatus {
     pub snapshot: Option<SnapshotInfo>,
     /// Start/end/duration of the snapshot run. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timing: Option<BackupTiming>,
+    pub timing: Option<SnapshotTiming>,
     /// Byte/file counts parsed from kopia's JSON output. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stats: Option<BackupStats>,
+    pub stats: Option<SnapshotStats>,
     /// Present for scheduled/manual; absent for discovered. ADR §3.4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<JobStatus>,
     /// Frozen recipe values at run time (scheduled/manual). ADR §3.4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolved: Option<ResolvedBackup>,
+    pub resolved: Option<ResolvedSnapshot>,
     /// Standard Kubernetes conditions (e.g. `SourcesQuiesced`, `SnapshotCreated`).
     /// ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -158,9 +164,16 @@ pub struct BackupStatus {
     /// Capped at ~4KB; full logs live in the Job pod. ADR §3.4/§4.10.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_tail: Option<String>,
+    /// The observed kopia-side pin state (ADR-0005 §13(c)): `Some(true)` once the
+    /// operator has applied the pin, `Some(false)` once it has removed it, `None`
+    /// before any pin reconcile. The reconciler compares `spec.pin` against this to
+    /// decide whether to issue a `kopia snapshot pin`/`unpin`, so a redundant op is
+    /// never spawned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
 }
 
-/// Identifies the kopia snapshot a [`Backup`] CR owns. ADR §3.4.
+/// Identifies the kopia snapshot a [`Snapshot`] CR owns. ADR §3.4.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotInfo {
@@ -177,7 +190,7 @@ pub struct SnapshotInfo {
 /// Timing of a snapshot run. ADR §3.4 status.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct BackupTiming {
+pub struct SnapshotTiming {
     /// RFC3339 start time of the run. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_time: Option<String>,
@@ -192,7 +205,7 @@ pub struct BackupTiming {
 /// Stats populated from kopia's JSON output. ADR §3.4.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct BackupStats {
+pub struct SnapshotStats {
     /// Total logical size of the snapshot in bytes. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<i64>,
@@ -210,7 +223,7 @@ pub struct BackupStats {
     pub files_unchanged: Option<i64>,
 }
 
-/// The mover Job backing a scheduled/manual `Backup`; absent for discovered. ADR §3.4 status.
+/// The mover Job backing a scheduled/manual `Snapshot`; absent for discovered. ADR §3.4 status.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JobStatus {
@@ -225,7 +238,7 @@ pub struct JobStatus {
 /// Frozen recipe values pinned at run time. ADR §3.4.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ResolvedBackup {
+pub struct ResolvedSnapshot {
     /// The repository this run targeted, frozen at run time. ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<RepositoryRef>,
@@ -258,22 +271,22 @@ mod tests {
         // Guards the enumerate-and-reset contract: every variant is in ALL with
         // a unique, non-empty label. A new variant added without updating ALL
         // makes this fail (and `label`'s exhaustive match won't compile at all).
-        let labels: Vec<&str> = BackupPhase::ALL.iter().map(|p| p.label()).collect();
-        assert_eq!(BackupPhase::ALL.len(), 6);
+        let labels: Vec<&str> = SnapshotPhase::ALL.iter().map(|p| p.label()).collect();
+        assert_eq!(SnapshotPhase::ALL.len(), 6);
         assert!(labels.iter().all(|l| !l.is_empty()));
         let mut sorted = labels.clone();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), labels.len(), "phase labels must be unique");
         // Default is reachable through ALL.
-        assert!(BackupPhase::ALL.contains(&BackupPhase::default()));
+        assert!(SnapshotPhase::ALL.contains(&SnapshotPhase::default()));
     }
 
     #[test]
     fn backup_crd_metadata_is_correct() {
-        let crd = Backup::crd();
+        let crd = Snapshot::crd();
         assert_eq!(crd.spec.group, "kopiur.home-operations.com");
-        assert_eq!(crd.spec.names.kind, "Backup");
+        assert_eq!(crd.spec.names.kind, "Snapshot");
         assert_eq!(crd.spec.scope, "Namespaced");
         assert_eq!(crd.spec.versions[0].name, "v1alpha1");
     }
@@ -282,7 +295,7 @@ mod tests {
     fn backup_manual_roundtrip_matches_adr_shape() {
         // Mirrors ADR-0001 §3.4 spec block + §5.6.
         let yaml = r#"
-configRef: { name: postgres-data }
+policyRef: { name: postgres-data }
 tags:
   reason: "scheduled-nightly"
 failurePolicy:
@@ -290,22 +303,22 @@ failurePolicy:
   activeDeadlineSeconds: 7200
 deletionPolicy: Delete
 "#;
-        let spec: BackupSpec = from_yaml(yaml);
-        assert_eq!(spec.config_ref.as_ref().unwrap().name, "postgres-data");
+        let spec: SnapshotSpec = from_yaml(yaml);
+        assert_eq!(spec.policy_ref.as_ref().unwrap().name, "postgres-data");
         assert_eq!(spec.tags.as_ref().unwrap()["reason"], "scheduled-nightly");
         assert_eq!(spec.failure_policy.as_ref().unwrap().backoff_limit, Some(2));
         assert_eq!(spec.deletion_policy, Some(DeletionPolicy::Delete));
 
         let json = serde_json::to_value(&spec).expect("serialize");
-        let reparsed: BackupSpec = serde_json::from_value(json).expect("reparse");
+        let reparsed: SnapshotSpec = serde_json::from_value(json).expect("reparse");
         assert_eq!(spec, reparsed);
     }
 
     #[test]
     fn backup_discovered_spec_is_empty() {
         // Discovered backups carry no spec fields.
-        let spec: BackupSpec = from_yaml("{}\n");
-        assert!(spec.config_ref.is_none());
+        let spec: SnapshotSpec = from_yaml("{}\n");
+        assert!(spec.policy_ref.is_none());
         assert!(spec.deletion_policy.is_none());
         // Empty spec serializes to an empty object (all fields skip).
         assert_eq!(serde_json::to_value(&spec).unwrap(), serde_json::json!({}));
@@ -343,11 +356,11 @@ deletionPolicy: Delete
             "discovered"
         );
         assert_eq!(
-            serde_json::to_value(BackupPhase::Succeeded).unwrap(),
+            serde_json::to_value(SnapshotPhase::Succeeded).unwrap(),
             "Succeeded"
         );
         assert_eq!(
-            serde_json::to_value(BackupPhase::Deleting).unwrap(),
+            serde_json::to_value(SnapshotPhase::Deleting).unwrap(),
             "Deleting"
         );
     }
@@ -379,8 +392,8 @@ resolved:
       sourcePath: /data
 logTail: "Snapshot created: k1f1ec0a8"
 "#;
-        let status: BackupStatus = from_yaml(yaml);
-        assert_eq!(status.phase, Some(BackupPhase::Succeeded));
+        let status: SnapshotStatus = from_yaml(yaml);
+        assert_eq!(status.phase, Some(SnapshotPhase::Succeeded));
         assert_eq!(status.origin, Some(Origin::Scheduled));
         assert_eq!(
             status.snapshot.as_ref().unwrap().kopia_snapshot_id,
@@ -389,7 +402,7 @@ logTail: "Snapshot created: k1f1ec0a8"
         assert_eq!(status.stats.as_ref().unwrap().size_bytes, Some(4321098765));
 
         let json = serde_json::to_value(&status).unwrap();
-        let reparsed: BackupStatus = serde_json::from_value(json).unwrap();
+        let reparsed: SnapshotStatus = serde_json::from_value(json).unwrap();
         assert_eq!(status, reparsed);
     }
 }

@@ -5,17 +5,19 @@
 # comes up empty and gets backed up going forward. Same manifests either way.
 #
 # The pieces:
-#   * BackupConfig   — the recipe.
-#   * BackupSchedule — nightly backups going forward (runOnCreate: false).
-#   * Restore        — PASSIVE (no `target`): source.fromConfig + onMissingSnapshot:
-#                      Continue. A passive Restore is consumed by a PVC's
-#                      dataSourceRef as a volume populator (ADR §4.7).
+#   * SnapshotPolicy   — the recipe.
+#   * SnapshotSchedule — nightly backups going forward (runOnCreate: false).
+#   * Restore        — PASSIVE populator: source.fromPolicy + target.populator: {}
+#                      + onMissingSnapshot: Continue. A populator Restore is consumed
+#                      by a PVC's dataSourceRef as a volume populator (ADR §4.7,
+#                      ADR-0005 §9 — `target` is REQUIRED; populator intent is the
+#                      explicit empty `target.populator: {}`).
 #   * PVC            — references the passive Restore via spec.dataSourceRef.
 #
-# `onMissingSnapshot: Continue` is the DEFAULT for fromConfig; shown explicitly.
+# `onMissingSnapshot: Continue` is the DEFAULT for fromPolicy; shown explicitly.
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupConfig
+kind: SnapshotPolicy
 metadata:
   name: postgres-data
   namespace: billing
@@ -28,12 +30,12 @@ spec:
         name: postgres-data
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupSchedule
+kind: SnapshotSchedule
 metadata:
   name: postgres-data-nightly
   namespace: billing
 spec:
-  configRef:
+  policyRef:
     name: postgres-data
   schedule:
     cron: "H 2 * * *"
@@ -47,12 +49,15 @@ metadata:
   namespace: billing
 spec:
   source:
-    fromConfig:
+    fromPolicy:
       name: postgres-data
-      offset: 0                # 0 = latest, 1 = previous, ...
+      offset: 0 # 0 = latest, 1 = previous, ...
+  # Explicit PASSIVE populator mode (ADR-0005 §9): no workload target at provision
+  # time — the PVC below claims this Restore via spec.dataSourceRef.
+  target:
+    populator: {}
   policy:
-    onMissingSnapshot: Continue   # default for fromConfig — explicit for clarity
-  # No `target` — PASSIVE populator mode. The PVC below references this Restore.
+    onMissingSnapshot: Continue # default for fromPolicy — explicit for clarity
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

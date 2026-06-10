@@ -17,7 +17,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 croner = { workspace = true }
-tera = { workspace = true }
+cel = { workspace = true }
 
 [dev-dependencies]
 serde_yaml = { workspace = true }

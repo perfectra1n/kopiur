@@ -5,7 +5,7 @@
 //! reports the outcome back via a [`BootstrapResult`] written into the work-spec
 //! `ConfigMap` (key [`RESULT_CONFIGMAP_KEY`]). The controller — the single writer
 //! of the `Repository` status — reads it and patches `phase`/`uniqueId`/
-//! `storageStats`, then materializes `origin: discovered` Backup CRs.
+//! `storageStats`, then materializes `origin: discovered` Snapshot CRs.
 //!
 //! This module is **pure data + serde** plus the create-gate decision; the kopia
 //! subprocess calls and the kube `ConfigMap` PATCH live in `main.rs`.
@@ -61,7 +61,7 @@ pub struct BootstrapResult {
     /// returned-entries cap).
     #[serde(default)]
     pub snapshot_count: i64,
-    /// Snapshot entries for the controller to materialize as discovered Backups.
+    /// Snapshot entries for the controller to materialize as discovered Snapshots.
     /// Empty when `scanCatalog` was off, or capped to [`MAX_RETURNED_SNAPSHOTS`].
     #[serde(default)]
     pub snapshots: Vec<SnapshotListEntry>,

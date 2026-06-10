@@ -9,7 +9,7 @@
 # `groupBy` is a closed enum: `VolumeGroupSnapshot` (default) | `None`.
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
-kind: BackupConfig
+kind: SnapshotPolicy
 metadata:
   name: app-bundle
   namespace: billing

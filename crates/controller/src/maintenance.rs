@@ -4,7 +4,7 @@
 //! and object-store alike), consistent with backup/restore/bootstrap. The
 //! controller is the *scheduler*: each reconcile it decides whether a quick or
 //! full pass is due (croner + deterministic jitter via
-//! [`crate::backup_schedule::next_fire`], full subsumes quick), then spawns at
+//! [`crate::snapshot_schedule::next_fire`], full subsumes quick), then spawns at
 //! most one per-slot mover Job and tracks it to terminal state. The lease
 //! decision ([`kopiur_api::lease_action`]) lives in the mover, because reading
 //! the current holder (`kopia maintenance info`) needs repo access the
@@ -32,8 +32,7 @@ use kopiur_mover::workspec::{
     MaintenanceOp, MoverOptions, MoverWorkSpec, Operation, ResolvedIdentity, TargetRef,
 };
 
-use crate::backup::{backend_to_repository_connect, job_terminal_state, mover_pull_policy_pub};
-use crate::backup_schedule::{next_fire, parse_go_duration};
+use crate::config;
 use crate::consts::{
     API_VERSION, COMPONENT_LABEL, MAINTENANCE_COMPONENT, MAINTENANCE_INSTANCE_LABEL,
     MAINTENANCE_SLOT_ANNOTATION,
@@ -42,6 +41,8 @@ use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
 use crate::io;
 use crate::jobs::{self, JobLimits, MoverJobInputs, VolumeMountSpec};
+use crate::snapshot::{backend_to_repository_connect, job_terminal_state, mover_pull_policy_pub};
+use crate::snapshot_schedule::{next_fire, parse_go_duration};
 
 /// How long a finished maintenance Job lingers before the TTL controller reaps
 /// it (G2). Long enough that the controller reliably observes the terminal state
@@ -74,7 +75,7 @@ pub async fn reconcile(
 }
 
 /// Mirror the last full-maintenance reclaimed-bytes gauge from the freshest
-/// status on success (Maintenance has no phase gauge to clear). See the Backup
+/// status on success (Maintenance has no phase gauge to clear). See the Snapshot
 /// equivalent for why the status is re-read rather than taken from the cache copy.
 async fn record_maintenance_status_metrics(maint: &Maintenance, ctx: &Context, ok: bool) {
     let (Some(ns), name) = (maint.namespace(), maint.name_any()) else {
@@ -129,6 +130,12 @@ async fn reconcile_inner(maint: &Maintenance, ctx: &Context) -> Result<Action> {
 
     let now = Utc::now();
     let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), &namespace);
+
+    // The repository is Ready and we got this far: mark Maintenance Ready (ADR-0005
+    // §2) so `kubectl wait --for=condition=Ready` works. Transition-guarded so it
+    // does not hot-loop on its own status. The mover still owns the `LeaseOwned`
+    // condition; `set_ready` upserts Ready/Reconciling/Stalled without clobbering it.
+    set_ready_if_changed(&api, &name, maint).await?;
 
     // Nothing due → sleep until the earliest next slot (capped).
     let Some((mode, slot)) = due_mode(maint, now) else {
@@ -225,6 +232,8 @@ async fn spawn_maintenance_job(
         hook_plan: Default::default(),
         options: MoverOptions::default(),
         cache,
+        // Apply the repo throttle to the maintenance connection too (§13(e)).
+        throttle: io::throttle_spec(repo.mover_defaults.as_ref()),
     };
 
     let mut labels = BTreeMap::new();
@@ -253,7 +262,7 @@ async fn spawn_maintenance_job(
     // (e.g. a ClusterRepository's Secret is absent here and projection is off).
     // The SA is a prerequisite independent of creds; minting it first means a
     // missing-creds retry still leaves the RBAC in place, and every other mover
-    // path (Backup/Restore/bootstrap) establishes this too. Without it the Job
+    // path (Snapshot/Restore/bootstrap) establishes this too. Without it the Job
     // FailedCreates with `serviceaccount ... not found` and never schedules a pod
     // (ADR §4.12).
     if let Some(sa) = ctx.mover_service_account.as_deref() {
@@ -302,6 +311,48 @@ async fn spawn_maintenance_job(
         effective_cache.as_ref(),
     )
     .await?;
+
+    // Resolve the maintenance mover's effective security context (explicit or inherited)
+    // and merge the repository's moverDefaults under it (`hardened ⊂ moverDefaults ⊂
+    // recipe`, ADR-0004 §1/§2). Previously the maintenance mover passed its raw
+    // securityContext and ran NO privileged gate — both fixed here so a maintenance
+    // mover is hardened/gated exactly like backup/restore (and inherits moverDefaults,
+    // closing the drift the ClusterRepository hardcoded-context bug caused).
+    let (effective_sc, effective_pod_sc) =
+        io::resolve_mover_security_contexts(&ctx.client, namespace, maint.spec.mover.as_ref())
+            .await?;
+    let resolved_mover = kopiur_api::common::resolve_mover(
+        repo.mover_defaults.as_ref(),
+        effective_sc.as_ref(),
+        effective_pod_sc.as_ref(),
+        maint.spec.mover.as_ref().and_then(|m| m.resources.as_ref()),
+        maint.spec.mover.as_ref().and_then(|m| m.cache.as_ref()),
+        maint
+            .spec
+            .mover
+            .as_ref()
+            .and_then(|m| m.ttl_seconds_after_finished),
+    );
+    let privileged_mode = maint.spec.mover.as_ref().and_then(|m| m.privileged_mode);
+    if kopiur_api::common::requires_privilege_resolved(
+        Some(&resolved_mover.security_context),
+        resolved_mover.pod_security_context.as_ref(),
+        privileged_mode,
+    ) && !io::namespace_allows_privileged_movers(&ctx.client, namespace).await?
+    {
+        let sa = ctx
+            .mover_service_account
+            .as_deref()
+            .unwrap_or(config::DEFAULT_MOVER_NAME);
+        let msg = io::privileged_mover_message("Maintenance", cr_name, namespace, sa);
+        tracing::warn!(maintenance = %cr_name, namespace = %namespace, "{msg}; skipping maintenance run");
+        return Ok(());
+    }
+
+    let mut limits = maintenance_job_limits(maint);
+    if let Some(ttl) = resolved_mover.ttl_seconds_after_finished {
+        limits.ttl_seconds_after_finished = Some(ttl);
+    }
     let inputs = MoverJobInputs {
         name: job_name,
         namespace,
@@ -309,18 +360,13 @@ async fn spawn_maintenance_job(
         work_spec: &work_spec,
         image: &ctx.mover_image,
         image_pull_policy: mover_pull_policy_pub(),
-        limits: maintenance_job_limits(maint),
-        resources: maint.spec.mover.as_ref().and_then(|m| m.resources.clone()),
-        security_context: maint
-            .spec
-            .mover
-            .as_ref()
-            .and_then(|m| m.security_context.clone()),
-        pod_security_context: maint
-            .spec
-            .mover
-            .as_ref()
-            .and_then(|m| m.pod_security_context.clone()),
+        limits,
+        resources: resolved_mover.resources.clone(),
+        security_context: resolved_mover.security_context.clone(),
+        pod_security_context: resolved_mover.pod_security_context.clone(),
+        node_selector: resolved_mover.node_selector.clone(),
+        tolerations: resolved_mover.tolerations.clone(),
+        affinity: resolved_mover.affinity.clone(),
         labels,
         source_volume: None,
         repo_volume,
@@ -529,13 +575,55 @@ async fn patch_condition_if_changed(
     Ok(())
 }
 
+/// Upsert the kstatus `Ready` conditions (ADR-0005 §2) for a `Maintenance` that has
+/// reached a healthy reconciled state (its repository is Ready), but only when the
+/// `Ready` condition actually changes — so the controller does not hot-loop on its
+/// own status writes (G6). Preserves the mover-owned `LeaseOwned` condition via
+/// [`io::set_ready`]'s upsert.
+async fn set_ready_if_changed(
+    api: &Api<Maintenance>,
+    name: &str,
+    maint: &Maintenance,
+) -> Result<()> {
+    let existing: Vec<_> = maint
+        .status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default();
+    let already_ready = existing
+        .iter()
+        .find(|c| c.type_ == "Ready")
+        .is_some_and(|c| c.status == "True");
+    if already_ready {
+        return Ok(());
+    }
+    let observed_gen = maint.metadata.generation.unwrap_or(0);
+    let conditions = io::set_ready(
+        &existing,
+        Some(observed_gen),
+        io::ReadyOutcome::Ready,
+        "Reconciled",
+        "maintenance is reconciled; the repository is Ready",
+    );
+    io::patch_status(
+        api,
+        name,
+        serde_json::json!({
+            "observedGeneration": observed_gen,
+            "conditions": conditions,
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
 /// `error_policy` for the `Maintenance` controller.
 pub fn error_policy(
-    _obj: std::sync::Arc<Maintenance>,
+    obj: std::sync::Arc<Maintenance>,
     err: &Error,
     ctx: std::sync::Arc<Context>,
 ) -> Action {
-    error_policy_for("Maintenance", err, &ctx)
+    error_policy_for("Maintenance", obj.as_ref(), err, &ctx)
 }
 
 #[cfg(test)]

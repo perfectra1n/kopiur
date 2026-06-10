@@ -22,9 +22,9 @@ spec:
     kind: ClusterRepository # cluster-scoped, shared across namespaces
     name: platform-shared
   source:
-    fromConfig:
+    fromPolicy:
       name: app-data
-      namespace: apps # the BackupConfig's namespace (its identity selects the snapshot)
+      namespace: apps # the SnapshotPolicy's namespace (its identity selects the snapshot)
   target:
     pvc:
       name: app-data-restored
