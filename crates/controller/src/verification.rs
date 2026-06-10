@@ -613,6 +613,7 @@ mod tests {
             identity_defaults: None,
             on_namespace_delete: Default::default(),
             credential_projection_allowed: false,
+            owner_ref: Default::default(),
             mode: RepositoryMode::ReadWrite,
         }
     }

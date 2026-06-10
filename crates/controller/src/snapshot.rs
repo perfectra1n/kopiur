@@ -18,12 +18,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use k8s_openapi::api::batch::v1::Job;
+use k8s_openapi::api::core::v1::ConfigMap;
+use kube::api::DeleteParams;
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType};
 use kube::{Api, Resource, ResourceExt};
 
 use kopiur_api::backend::Backend;
-use kopiur_api::common::{NamespaceDeletePolicy, ResolvedIdentity as ApiResolvedIdentity};
+use kopiur_api::common::{
+    NamespaceDeletePolicy, RepositoryKind, RepositoryRef, ResolvedIdentity as ApiResolvedIdentity,
+};
 use kopiur_api::snapshot::SnapshotPhase;
 use kopiur_api::{DeletionPolicy, Origin, Snapshot, SnapshotPolicy};
 use kopiur_mover::workspec::{
@@ -108,6 +112,156 @@ pub fn namespace_delete_plan(
         NamespaceDeletePolicy::Orphan => DeletionPlan::OrphanSnapshot,
         NamespaceDeletePolicy::Delete => base_plan,
     }
+}
+
+/// Where a `SnapshotDelete` Job may run. The Kubernetes `NamespaceLifecycle`
+/// admission plugin rejects *creating* anything in a terminating namespace, so
+/// the namespace-deletion cascade (ADR-0005 §5) can never run its delete Job in
+/// the `Snapshot`'s own namespace — it must run where the repository's
+/// credentials live, or fall back to orphaning (never wedge the namespace).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteJobPlacement {
+    /// Create/poll the delete Job in this (non-terminating) namespace.
+    RunIn(String),
+    /// No surviving namespace can host the Job — orphan the snapshot instead
+    /// (fail-safe: release the finalizer, keep the kopia snapshot, say why).
+    OrphanFallback {
+        /// Human-readable why + fix, surfaced in the `SnapshotOrphaned` event.
+        reason: String,
+    },
+}
+
+/// Decide where the `SnapshotDelete` Job runs. Pure, so the placement matrix is
+/// unit-tested without a cluster:
+///
+/// - Namespace NOT terminating → the `Snapshot`'s own namespace (status quo).
+/// - Terminating + namespaced `Repository` in a *different* namespace → the
+///   repository's namespace (its credential Secret and any repo PVC live there).
+/// - Terminating + `ClusterRepository` → the operator's namespace (where a
+///   `ClusterRepository`'s canonical credential Secret lives, and where its
+///   maintenance Jobs already run — ADR §3.7).
+/// - Terminating + the repository (or operator) namespace IS the terminating
+///   namespace, or the operator namespace is unknown → [`OrphanFallback`]:
+///   nothing survivable can host the Job, and an uncreatable Job must not wedge
+///   namespace deletion forever.
+///
+/// [`OrphanFallback`]: DeleteJobPlacement::OrphanFallback
+pub fn delete_job_placement(
+    ns_terminating: bool,
+    snapshot_ns: &str,
+    repo_namespace: Option<&str>,
+    operator_namespace: Option<&str>,
+) -> DeleteJobPlacement {
+    if !ns_terminating {
+        return DeleteJobPlacement::RunIn(snapshot_ns.to_string());
+    }
+    match repo_namespace {
+        Some(rns) if rns != snapshot_ns => DeleteJobPlacement::RunIn(rns.to_string()),
+        Some(_) => DeleteJobPlacement::OrphanFallback {
+            reason: format!(
+                "the Repository lives in `{snapshot_ns}`, the same namespace being deleted, so no \
+                 surviving namespace can host the snapshot-delete Job; the kopia snapshot is \
+                 orphaned instead — delete it manually with `kopia snapshot delete` if unwanted"
+            ),
+        },
+        None => match operator_namespace {
+            Some(op) if op != snapshot_ns => DeleteJobPlacement::RunIn(op.to_string()),
+            Some(op) => DeleteJobPlacement::OrphanFallback {
+                reason: format!(
+                    "the operator namespace `{op}` is itself the namespace being deleted, so it \
+                     cannot host the snapshot-delete Job; the kopia snapshot is orphaned instead"
+                ),
+            },
+            None => DeleteJobPlacement::OrphanFallback {
+                reason: "the operator namespace is unknown (KOPIUR_NAMESPACE is unset), so there \
+                         is nowhere to run the ClusterRepository snapshot-delete Job during \
+                         namespace deletion; set KOPIUR_NAMESPACE on the controller Deployment — \
+                         the kopia snapshot is orphaned instead"
+                    .to_string(),
+            },
+        },
+    }
+}
+
+/// Normalize a recipe's `repository` ref for pinning into
+/// `status.resolved.repository` (ADR §3.4, frozen at run time): a namespaced
+/// `Repository` ref pins the namespace it actually resolved against (the
+/// recipe's own namespace when unset) so the deletion path can re-resolve it
+/// after the recipe is gone; a `ClusterRepository` ref pins none (the webhook
+/// forbids one). Exhaustive over [`RepositoryKind`] (ADR §5.5).
+pub fn pinned_repository_ref(r: &RepositoryRef, config_ns: &str) -> RepositoryRef {
+    match r.kind {
+        RepositoryKind::Repository => RepositoryRef {
+            kind: RepositoryKind::Repository,
+            name: r.name.clone(),
+            namespace: Some(r.namespace.clone().unwrap_or_else(|| config_ns.to_string())),
+        },
+        RepositoryKind::ClusterRepository => RepositoryRef {
+            kind: RepositoryKind::ClusterRepository,
+            name: r.name.clone(),
+            namespace: None,
+        },
+    }
+}
+
+/// Cap a generated object name at the 63-character DNS-label limit while keeping
+/// it unique and deterministic: long names keep their leading 46 characters plus
+/// a stable FNV-1a hash of the full name. A cross-namespace cascade-delete Job
+/// embeds the source namespace in its name (two namespaces can each hold a
+/// `Snapshot` of the same name), which can exceed the limit.
+pub fn capped_name(full: &str) -> String {
+    if full.len() <= 63 {
+        return full.to_string();
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in full.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let prefix: String = full.chars().take(46).collect();
+    format!("{}-{h:016x}", prefix.trim_end_matches('-'))
+}
+
+/// Build the `status.resolved` body frozen at run time (ADR §3.4): the
+/// normalized repository ref ([`pinned_repository_ref`]) plus the concrete
+/// source (PVC, when the recipe names one, and the kopia source path the work
+/// spec actually snapshots). Pure — unit-tested without a cluster.
+pub fn resolved_run_status(
+    config: &SnapshotPolicy,
+    namespace: &str,
+    work_spec: &MoverWorkSpec,
+) -> kopiur_api::snapshot::ResolvedSnapshot {
+    let config_ns = config.namespace().unwrap_or_else(|| namespace.to_string());
+    let pvc = config
+        .spec
+        .sources
+        .first()
+        .and_then(|s| s.pvc.as_ref())
+        .map(|p| format!("{namespace}/{}", p.name));
+    kopiur_api::snapshot::ResolvedSnapshot {
+        repository: Some(pinned_repository_ref(&config.spec.repository, &config_ns)),
+        sources: vec![kopiur_api::snapshot::ResolvedSource {
+            pvc,
+            source_path: Some(work_spec.identity.source_path.clone()),
+        }],
+    }
+}
+
+/// The mover identity pinned into `status.snapshot.identity` when the snapshot
+/// succeeded — the identity the snapshot was actually recorded under. The
+/// deletion path prefers it over re-deriving from a recipe that may since have
+/// been edited or deleted (ADR §4.2: identity is resolved once, never
+/// re-rendered).
+fn pinned_mover_identity(backup: &Snapshot) -> Option<MoverIdentity> {
+    let id = &backup.status.as_ref()?.snapshot.as_ref()?.identity;
+    Some(MoverIdentity {
+        username: id.username.clone(),
+        hostname: id.hostname.clone(),
+        source_path: id
+            .source_path
+            .clone()
+            .unwrap_or_else(|| "/data".to_string()),
+    })
 }
 
 /// Map a `Snapshot` phase to its kstatus [`io::ReadyOutcome`] (ADR-0005 §2), so
@@ -676,7 +830,15 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
     io::patch_status(
         &api,
         &name,
-        serde_json::json!({ "phase": "Running", "origin": origin_str(origin) }),
+        serde_json::json!({
+            "phase": "Running",
+            "origin": origin_str(origin),
+            // Freeze the run's resolved values (ADR §3.4). The deletion path
+            // reads `resolved.repository` so cleanup still works once the
+            // recipe is gone — the namespace-deletion cascade usually reaps the
+            // SnapshotPolicy (no finalizer) before this Snapshot's finalizer runs.
+            "resolved": resolved_run_status(&config, &namespace, &work_spec),
+        }),
     )
     .await?;
     tracing::info!(backup = %name, "created mover Job for backup");
@@ -708,25 +870,35 @@ async fn handle_deletion(
     // Namespace-deletion cascade (ADR-0005 §5): if the owning namespace is being torn
     // down, the repository's `onNamespaceDelete` decides. Default `Orphan` keeps
     // off-site history (a `kubectl delete ns` must not be a data-loss event); only an
-    // explicit `Delete` cascades to the per-Snapshot plan. Resolving the repo policy
-    // needs the recipe; if it can't be resolved (repo/recipe already gone), fail safe
-    // to `Orphan`. A non-terminating namespace leaves `base_plan` unchanged, so a lone
-    // `kubectl delete snapshot` still honors the Snapshot's own deletionPolicy.
-    let plan = match io::namespace_is_terminating(&ctx.client, namespace).await {
-        Ok(false) => base_plan,
-        Ok(true) => {
-            let ns_policy = resolve_recipe(ctx, backup, namespace)
-                .await
-                .map(|(_, repo)| repo.on_namespace_delete)
-                .unwrap_or(NamespaceDeletePolicy::Orphan);
-            namespace_delete_plan(ns_policy, true, base_plan)
-        }
-        // Transient read error: don't guess. Fall back to the per-Snapshot plan so a
-        // single delete still works; the namespace-cascade case re-evaluates on the
-        // next pass once the read succeeds.
-        Err(_) => base_plan,
+    // explicit `Delete` cascades to the per-Snapshot plan. On a transient read error
+    // fall back to the per-Snapshot plan: a single delete still works, and the
+    // namespace-cascade case re-evaluates on the next pass once the read succeeds.
+    let ns_terminating = io::namespace_is_terminating(&ctx.client, namespace)
+        .await
+        .unwrap_or(false);
+
+    // Resolve the repository once for the whole deletion path — preferring the
+    // ref pinned into `status.resolved.repository` over the live recipe, which
+    // the namespace reaper usually deletes (no finalizer) before this finalizer
+    // runs. Only needed when the cascade policy must be consulted or a delete
+    // Job must be built; Retain/Orphan of a lone CR stays IO-free.
+    let resolved = if ns_terminating || matches!(base_plan, DeletionPlan::DeleteSnapshot) {
+        Some(resolve_repo_for_deletion(ctx, backup, namespace).await)
+    } else {
+        None
     };
-    tracing::info!(?plan, backup = %name, "executing backup deletion plan");
+
+    let plan = if ns_terminating {
+        match resolved.as_ref() {
+            Some(Ok((_, repo))) => namespace_delete_plan(repo.on_namespace_delete, true, base_plan),
+            // The repository itself can no longer be resolved (already gone):
+            // fail safe to Orphan — never guess Delete with history at stake.
+            _ => DeletionPlan::OrphanSnapshot,
+        }
+    } else {
+        base_plan
+    };
+    tracing::info!(?plan, backup = %name, ns_terminating, "executing backup deletion plan");
 
     match plan {
         DeletionPlan::DeleteSnapshot => {
@@ -741,7 +913,30 @@ async fn handle_deletion(
                     io::remove_finalizer(api, backup, SNAPSHOT_CLEANUP_FINALIZER).await?;
                     Ok(Action::await_change())
                 }
-                Some(id) => delete_snapshot_via_job(backup, ctx, api, namespace, name, &id).await,
+                Some(id) => {
+                    let (repo_ref, repo) = match resolved {
+                        Some(r) => r?,
+                        // Unreachable by construction (plan=Delete implies the
+                        // resolution above ran); resolve again rather than panic.
+                        None => resolve_repo_for_deletion(ctx, backup, namespace).await?,
+                    };
+                    match delete_job_placement(
+                        ns_terminating,
+                        namespace,
+                        repo.repo_namespace.as_deref(),
+                        ctx.operator_namespace.as_deref(),
+                    ) {
+                        DeleteJobPlacement::RunIn(job_ns) => {
+                            delete_snapshot_via_job(
+                                backup, ctx, api, namespace, &job_ns, name, &id, &repo_ref, &repo,
+                            )
+                            .await
+                        }
+                        DeleteJobPlacement::OrphanFallback { reason } => {
+                            orphan_snapshot(backup, ctx, api, namespace, name, &reason).await
+                        }
+                    }
+                }
             }
         }
         DeletionPlan::RetainSnapshot => {
@@ -749,46 +944,124 @@ async fn handle_deletion(
             Ok(Action::await_change())
         }
         DeletionPlan::OrphanSnapshot => {
-            ctx.metrics.inc_orphaned_snapshot(namespace);
-            let _ = ctx
-                .recorder
-                .publish(
-                    &Event {
-                        type_: EventType::Normal,
-                        reason: "SnapshotOrphaned".into(),
-                        note: Some(format!(
-                            "snapshot for backup {name} orphaned (policy/escape-hatch); finalizer removed without contacting the repository"
-                        )),
-                        action: "Orphan".into(),
-                        secondary: None,
-                    },
-                    &backup.object_ref(&()),
-                )
-                .await;
-            io::remove_finalizer(api, backup, SNAPSHOT_CLEANUP_FINALIZER).await?;
-            Ok(Action::await_change())
+            orphan_snapshot(
+                backup,
+                ctx,
+                api,
+                namespace,
+                name,
+                &format!(
+                    "snapshot for backup {name} orphaned (policy/escape-hatch); finalizer removed \
+                     without contacting the repository"
+                ),
+            )
+            .await
         }
     }
 }
 
-/// Drive a SnapshotDelete mover Job for the deletion path. Creates the Job if
-/// absent; on terminal success removes the finalizer; on failure records a
-/// Deleting phase, bumps the failure metric, and requeues.
-async fn delete_snapshot_via_job(
+/// Release the finalizer WITHOUT contacting the repository: record the orphan
+/// metric, emit a `SnapshotOrphaned` event carrying `note` (why, and how to clean
+/// up manually if unwanted), and remove the finalizer.
+async fn orphan_snapshot(
     backup: &Snapshot,
     ctx: &Context,
     api: &Api<Snapshot>,
     namespace: &str,
     name: &str,
-    snapshot_id: &str,
+    note: &str,
 ) -> Result<Action> {
-    let job_name = format!("{name}-delete");
-    let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), namespace);
+    tracing::info!(backup = %name, note, "orphaning snapshot; releasing finalizer");
+    ctx.metrics.inc_orphaned_snapshot(namespace);
+    let _ = ctx
+        .recorder
+        .publish(
+            &Event {
+                type_: EventType::Normal,
+                reason: "SnapshotOrphaned".into(),
+                note: Some(note.to_string()),
+                action: "Orphan".into(),
+                secondary: None,
+            },
+            &backup.object_ref(&()),
+        )
+        .await;
+    io::remove_finalizer(api, backup, SNAPSHOT_CLEANUP_FINALIZER).await?;
+    Ok(Action::await_change())
+}
+
+/// Resolve the repository the deletion path must talk to WITHOUT requiring the
+/// recipe to still exist: prefer the ref pinned into `status.resolved.repository`
+/// at run time (ADR §3.4), falling back to the live recipe for a `Snapshot` that
+/// never ran. The namespace-deletion cascade depends on this — resolving via the
+/// recipe alone silently degraded an opted-in `onNamespaceDelete: Delete` to an
+/// orphan whenever the namespace reaper got to the `SnapshotPolicy` first.
+async fn resolve_repo_for_deletion(
+    ctx: &Context,
+    backup: &Snapshot,
+    namespace: &str,
+) -> Result<(RepositoryRef, ResolvedRepository)> {
+    if let Some(pinned) = backup
+        .status
+        .as_ref()
+        .and_then(|s| s.resolved.as_ref())
+        .and_then(|r| r.repository.as_ref())
+    {
+        let repo = io::resolve_repository_ref(&ctx.client, pinned, namespace).await?;
+        return Ok((pinned.clone(), repo));
+    }
+    let (config, repo) = resolve_recipe(ctx, backup, namespace).await?;
+    let config_ns = config.namespace().unwrap_or_else(|| namespace.to_string());
+    Ok((
+        pinned_repository_ref(&config.spec.repository, &config_ns),
+        repo,
+    ))
+}
+
+/// Drive a SnapshotDelete mover Job for the deletion path. Creates the Job if
+/// absent; on terminal success removes the finalizer; on failure records a
+/// Deleting phase, bumps the failure metric, and requeues.
+///
+/// `job_ns` is where the Job runs (decided by [`delete_job_placement`]); it is
+/// the `Snapshot`'s own namespace except during the namespace-deletion cascade,
+/// where creating anything in the terminating namespace is rejected by the API
+/// server. Everything the Job needs is preferred from values pinned at run time
+/// (`status.snapshot.identity`, the resolved `repo`), so it works after the
+/// recipe is gone.
+#[allow(clippy::too_many_arguments)]
+async fn delete_snapshot_via_job(
+    backup: &Snapshot,
+    ctx: &Context,
+    api: &Api<Snapshot>,
+    namespace: &str,
+    job_ns: &str,
+    name: &str,
+    snapshot_id: &str,
+    repo_ref: &RepositoryRef,
+    repo: &ResolvedRepository,
+) -> Result<Action> {
+    let cross_namespace = job_ns != namespace;
+    // A cross-namespace Job embeds the source namespace: two namespaces can each
+    // hold a `Snapshot` of the same name, and both cascades may target `job_ns`.
+    let job_name = if cross_namespace {
+        capped_name(&format!("{namespace}-{name}-delete"))
+    } else {
+        format!("{name}-delete")
+    };
+    let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), job_ns);
 
     if let Some(job) = job_api.get_opt(&job_name).await? {
         match job_terminal_state(&job) {
             Some(true) => {
                 io::remove_finalizer(api, backup, SNAPSHOT_CLEANUP_FINALIZER).await?;
+                // A cross-namespace Job is not GC'd with the Snapshot (its owner
+                // is the longer-lived repository CR) — reap it and its work-spec
+                // ConfigMap now; best-effort, the owner ref is the backstop.
+                if cross_namespace {
+                    let _ = job_api.delete(&job_name, &DeleteParams::background()).await;
+                    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), job_ns);
+                    let _ = cm_api.delete(&job_name, &DeleteParams::default()).await;
+                }
                 tracing::info!(backup = %name, %snapshot_id, "snapshot deleted; finalizer removed");
                 return Ok(Action::await_change());
             }
@@ -802,33 +1075,60 @@ async fn delete_snapshot_via_job(
         }
     }
 
-    // Create the SnapshotDelete Job. We need the recipe to know how to connect
-    // and authenticate to the repository.
-    let (config, repo) = resolve_recipe(ctx, backup, namespace).await?;
-    let identity = resolve_identity_for(&config, namespace, repo.identity_defaults.as_ref())?;
-    let owner = io::owner_ref_for(backup, "Snapshot")?;
+    // Create the SnapshotDelete Job. The recipe is OPTIONAL here: identity is
+    // preferred from the value pinned at success time, and the repository was
+    // already resolved by the caller — so deletion (including the namespace
+    // cascade) still works when the SnapshotPolicy has already been deleted.
+    let config = resolve_recipe(ctx, backup, namespace)
+        .await
+        .ok()
+        .map(|(c, _)| c);
+    let identity = match pinned_mover_identity(backup) {
+        Some(identity) => identity,
+        None => {
+            let config = config.as_ref().ok_or_else(|| {
+                Error::MissingDependency(format!(
+                    "Snapshot {namespace}/{name} has no pinned identity \
+                     (status.snapshot.identity) and its SnapshotPolicy is gone; cannot build \
+                     the snapshot-delete Job — re-create the SnapshotPolicy, or use the \
+                     skip-snapshot-cleanup annotation to release the CR without deleting"
+                ))
+            })?;
+            resolve_identity_for(config, namespace, repo.identity_defaults.as_ref())?
+        }
+    };
+    // In the Snapshot's own namespace the Job is owned by (and GC'd with) the
+    // Snapshot. A cross-namespace cascade Job cannot be (cross-namespace owner
+    // references are invalid) — the repository CR, which outlives the namespace,
+    // owns it instead.
+    let owner = if cross_namespace {
+        repo.owner_ref.clone()
+    } else {
+        io::owner_ref_for(backup, "Snapshot")?
+    };
     // Resolve (and, when `spec.credentialProjection` is enabled, project) the mover's
-    // credential Secret(s) into this namespace before building the Job. Errors
+    // credential Secret(s) into the Job's namespace before building the Job. Errors
     // propagate as MissingDependency (Transient) — this is the delete path, so we
-    // requeue rather than surface a CredentialsAvailable condition.
+    // requeue rather than surface a CredentialsAvailable condition. The cascade
+    // placements need no projection by construction (the Job runs where the
+    // repository's canonical Secret lives), so a gone recipe defaulting the
+    // consumer opt-in to `false` is correct.
     let creds = io::resolve_mover_creds_for(
         &ctx.client,
-        namespace,
+        job_ns,
         &job_name,
         &owner,
-        &repo,
+        repo,
         config
-            .spec
-            .credential_projection
             .as_ref()
+            .and_then(|c| c.spec.credential_projection.as_ref())
             .is_some_and(|p| p.enabled),
-        io::repo_kind_str(config.spec.repository.kind),
-        &config.spec.repository.name,
+        io::repo_kind_str(repo_ref.kind),
+        &repo_ref.name,
     )
     .await?;
     if creds.projected > 0 {
-        ctx.metrics
-            .inc_secrets_projected(namespace, creds.projected);
+        ctx.metrics.inc_secrets_projected(job_ns, creds.projected);
     }
     let creds_secrets = creds.names;
     let work_spec = MoverWorkSpec {
@@ -837,7 +1137,7 @@ async fn delete_snapshot_via_job(
             snapshot_id: snapshot_id.to_string(),
         }),
         identity,
-        repository: repository_connect(&repo)?,
+        repository: repository_connect(repo)?,
         target_ref: TargetRef {
             api_version: API_VERSION.to_string(),
             kind: "Snapshot".to_string(),
@@ -851,7 +1151,22 @@ async fn delete_snapshot_via_job(
         throttle: Default::default(),
     };
 
-    let mut labels = run_labels(&config, resolve_origin(backup));
+    // Recipe labels when it still exists; otherwise reconstruct from the
+    // Snapshot itself (origin + the policyRef name it was produced from).
+    let mut labels = match config.as_ref() {
+        Some(config) => run_labels(config, resolve_origin(backup)),
+        None => {
+            let mut labels = BTreeMap::new();
+            labels.insert(
+                ORIGIN_LABEL.to_string(),
+                origin_str(resolve_origin(backup)).to_string(),
+            );
+            if let Some(policy_ref) = backup.spec.policy_ref.as_ref() {
+                labels.insert(CONFIG_LABEL.to_string(), policy_ref.name.clone());
+            }
+            labels
+        }
+    };
     labels.insert(
         "kopiur.home-operations.com/op".to_string(),
         "snapshot-delete".to_string(),
@@ -879,7 +1194,7 @@ async fn delete_snapshot_via_job(
     };
     let inputs = MoverJobInputs {
         name: &job_name,
-        namespace,
+        namespace: job_ns,
         owner,
         work_spec: &work_spec,
         image: &ctx.mover_image,
@@ -902,12 +1217,12 @@ async fn delete_snapshot_via_job(
         // A one-shot finalizer delete: an ephemeral emptyDir cache is fine.
         cache_volume: Default::default(),
     };
-    // The SnapshotDelete Job runs in this namespace too: mint the mover SA before
-    // launching it (its credential Secret(s) were resolved/projected above).
+    // Mint the mover SA in the Job's namespace before launching (its credential
+    // Secret(s) were resolved/projected above).
     if let Some(sa) = ctx.mover_service_account.as_deref() {
         io::ensure_mover_rbac(
             &ctx.client,
-            namespace,
+            job_ns,
             sa,
             &ctx.mover_role_kind,
             &ctx.mover_clusterrole,
@@ -916,9 +1231,9 @@ async fn delete_snapshot_via_job(
     }
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
-    io::apply_mover_objects(&ctx.client, namespace, &job_name, &cm, &job).await?;
+    io::apply_mover_objects(&ctx.client, job_ns, &job_name, &cm, &job).await?;
     io::patch_status(api, name, serde_json::json!({ "phase": "Deleting" })).await?;
-    tracing::info!(backup = %name, %snapshot_id, "created SnapshotDelete Job");
+    tracing::info!(backup = %name, %snapshot_id, job_namespace = %job_ns, "created SnapshotDelete Job");
     Ok(Action::requeue(Duration::from_secs(15)))
 }
 
@@ -1711,6 +2026,7 @@ mod tests {
             on_namespace_delete: Default::default(),
             mode: Default::default(),
             credential_projection_allowed: false,
+            owner_ref: Default::default(),
         }
     }
 
@@ -2043,6 +2359,175 @@ mod tests {
             ),
             DeletionPlan::RetainSnapshot
         );
+    }
+
+    // --- delete_job_placement (the cascade Job cannot run in a terminating ns)
+
+    #[test]
+    fn non_terminating_delete_runs_in_the_snapshots_own_namespace() {
+        // Status quo for a lone `kubectl delete snapshot`: the Job runs (and is
+        // GC'd) next to the Snapshot, whatever the repository's shape.
+        for repo_ns in [None, Some("repo-ns"), Some("app")] {
+            assert_eq!(
+                delete_job_placement(false, "app", repo_ns, Some("kopiur-system")),
+                DeleteJobPlacement::RunIn("app".into())
+            );
+        }
+    }
+
+    #[test]
+    fn terminating_cluster_repo_runs_in_the_operator_namespace() {
+        // The regression the e2e cascade test caught: NamespaceLifecycle rejects
+        // creating the delete Job in the terminating namespace, so the cascade
+        // must run it where the ClusterRepository's canonical Secret lives.
+        assert_eq!(
+            delete_job_placement(true, "app", None, Some("kopiur-system")),
+            DeleteJobPlacement::RunIn("kopiur-system".into())
+        );
+    }
+
+    #[test]
+    fn terminating_cluster_repo_without_operator_namespace_orphans() {
+        // Nowhere survivable to run the Job: fail safe (release the finalizer,
+        // keep the snapshot) rather than wedge namespace deletion forever, and
+        // tell the operator admin exactly what to set.
+        match delete_job_placement(true, "app", None, None) {
+            DeleteJobPlacement::OrphanFallback { reason } => {
+                assert!(reason.contains("KOPIUR_NAMESPACE"), "actionable: {reason}");
+            }
+            other => panic!("expected OrphanFallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminating_namespaced_repo_in_another_namespace_runs_there() {
+        // A cross-namespace Repository ref: its credential Secret (and any repo
+        // PVC) live in the repository's namespace, which survives the cascade.
+        assert_eq!(
+            delete_job_placement(true, "app", Some("storage"), Some("kopiur-system")),
+            DeleteJobPlacement::RunIn("storage".into())
+        );
+    }
+
+    #[test]
+    fn terminating_namespaced_repo_in_the_same_namespace_orphans() {
+        // The Repository dies with the namespace — its Secret/PVC are going
+        // away too, so there is nothing survivable to clean against.
+        match delete_job_placement(true, "app", Some("app"), Some("kopiur-system")) {
+            DeleteJobPlacement::OrphanFallback { reason } => {
+                assert!(
+                    reason.contains("kopia snapshot delete"),
+                    "actionable: {reason}"
+                );
+            }
+            other => panic!("expected OrphanFallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminating_operator_namespace_itself_orphans() {
+        // Deleting the operator's own namespace: the fallback host is the
+        // terminating namespace, so the cascade must orphan, not wedge.
+        match delete_job_placement(true, "kopiur-system", None, Some("kopiur-system")) {
+            DeleteJobPlacement::OrphanFallback { reason } => {
+                assert!(
+                    reason.contains("kopiur-system"),
+                    "names the namespace: {reason}"
+                );
+            }
+            other => panic!("expected OrphanFallback, got {other:?}"),
+        }
+    }
+
+    // --- pinned_repository_ref (status.resolved freezes the run's repo) ------
+
+    #[test]
+    fn pinned_ref_defaults_a_namespaced_repository_to_the_recipe_namespace() {
+        use kopiur_api::common::{RepositoryKind, RepositoryRef};
+        let r = RepositoryRef {
+            kind: RepositoryKind::Repository,
+            name: "nas".into(),
+            namespace: None,
+        };
+        let pinned = pinned_repository_ref(&r, "billing");
+        assert_eq!(pinned.namespace.as_deref(), Some("billing"));
+        // An explicit cross-namespace ref is preserved as-is.
+        let r = RepositoryRef {
+            namespace: Some("storage".into()),
+            ..r
+        };
+        assert_eq!(
+            pinned_repository_ref(&r, "billing").namespace.as_deref(),
+            Some("storage")
+        );
+    }
+
+    #[test]
+    fn pinned_ref_never_pins_a_namespace_for_cluster_repositories() {
+        use kopiur_api::common::{RepositoryKind, RepositoryRef};
+        // The webhook forbids `namespace` on ClusterRepository refs; the pinned
+        // ref must stay valid against the same validator.
+        let r = RepositoryRef {
+            kind: RepositoryKind::ClusterRepository,
+            name: "shared".into(),
+            namespace: Some("ignored".into()),
+        };
+        assert_eq!(pinned_repository_ref(&r, "billing").namespace, None);
+    }
+
+    // --- resolved_run_status (status.resolved frozen at run time, ADR §3.4) --
+
+    #[test]
+    fn resolved_run_status_pins_repository_and_concrete_source() {
+        use kopiur_api::snapshot_policy::{PvcSource, Source};
+        let cfg = config_with_source(
+            "media",
+            Source {
+                pvc: Some(PvcSource {
+                    name: "media-data".into(),
+                }),
+                pvc_selector: None,
+                nfs: None,
+                source_path_override: None,
+                source_path_strategy: None,
+            },
+        );
+        let repo = resolved_s3_repo();
+        let (ws, _, _, _) =
+            build_backup_run(&dummy_backup(), &cfg, &repo, "media-ns", "media").unwrap();
+        let resolved = resolved_run_status(&cfg, "media-ns", &ws);
+        // The deletion path re-resolves the repo from this pinned ref alone, so
+        // it must carry the namespace the recipe resolved against.
+        let pinned = resolved.repository.expect("repository pinned");
+        assert_eq!(pinned.name, "repo");
+        assert_eq!(pinned.namespace.as_deref(), Some("media-ns"));
+        // ...and the concrete source the run snapshotted.
+        assert_eq!(resolved.sources.len(), 1);
+        assert_eq!(
+            resolved.sources[0].pvc.as_deref(),
+            Some("media-ns/media-data")
+        );
+        assert_eq!(
+            resolved.sources[0].source_path.as_deref(),
+            Some(ws.identity.source_path.as_str())
+        );
+    }
+
+    // --- capped_name (cross-namespace Job names stay valid DNS labels) -------
+
+    #[test]
+    fn capped_name_passes_short_names_through() {
+        assert_eq!(capped_name("app-nightly-delete"), "app-nightly-delete");
+    }
+
+    #[test]
+    fn capped_name_caps_long_names_uniquely_and_deterministically() {
+        let long_a = format!("{}-snap-a-delete", "n".repeat(80));
+        let long_b = format!("{}-snap-b-delete", "n".repeat(80));
+        let a = capped_name(&long_a);
+        assert!(a.len() <= 63, "{} chars", a.len());
+        assert_eq!(a, capped_name(&long_a), "deterministic across reconciles");
+        assert_ne!(a, capped_name(&long_b), "distinct inputs stay distinct");
     }
 
     // --- effective_deletion_policy ------------------------------------------

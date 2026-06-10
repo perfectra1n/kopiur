@@ -1,3 +1,4 @@
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::Api;
 
 use kopiur_api::backend::{Backend, RepoVolume};
@@ -73,6 +74,12 @@ pub struct ResolvedRepository {
     /// `ReadOnly` repo refuses backup Jobs and maintenance (restores allowed); the
     /// `Snapshot` reconciler gates on [`RepositoryMode::allows_writes`].
     pub mode: RepositoryMode,
+    /// An `OwnerReference` to the repository CR itself. The namespace-deletion
+    /// cascade runs its `SnapshotDelete` Job *outside* the terminating namespace
+    /// (ADR-0005 §5), where the deleting `Snapshot` cannot own it (cross-namespace
+    /// owner references are invalid) — the repository, which outlives the
+    /// namespace, owns the Job instead so GC still reaps it.
+    pub owner_ref: OwnerReference,
 }
 
 /// Which API a [`RepositoryRef`] resolves against, derived purely from `kind`.
@@ -157,6 +164,7 @@ pub async fn resolve_repository_ref(
             let repo = api.get_opt(&name).await?.ok_or_else(|| {
                 Error::MissingDependency(format!("Repository {namespace}/{name}"))
             })?;
+            let owner_ref = super::owner_ref_for(&repo, "Repository")?;
             Ok(ResolvedRepository {
                 repo_namespace: Some(namespace),
                 backend: repo.spec.backend,
@@ -170,6 +178,7 @@ pub async fn resolve_repository_ref(
                 // same-namespace no-op. Treat the gate as not-applicable (false).
                 credential_projection_allowed: false,
                 mode: repo.spec.mode,
+                owner_ref,
             })
         }
         RepoLookup::Cluster { name } => {
@@ -178,6 +187,7 @@ pub async fn resolve_repository_ref(
                 .get_opt(&name)
                 .await?
                 .ok_or_else(|| Error::MissingDependency(format!("ClusterRepository {name}")))?;
+            let owner_ref = super::owner_ref_for(&repo, "ClusterRepository")?;
             Ok(ResolvedRepository {
                 repo_namespace: None,
                 backend: repo.spec.backend,
@@ -191,6 +201,7 @@ pub async fn resolve_repository_ref(
                     .map(|p| p.allowed)
                     .unwrap_or(false),
                 mode: repo.spec.mode,
+                owner_ref,
             })
         }
     }
