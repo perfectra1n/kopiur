@@ -120,6 +120,7 @@ rules:
   - list
   - watch
   - create
+  - patch
   - delete
 - apiGroups:
   - groupsnapshot.storage.k8s.io

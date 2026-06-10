@@ -188,6 +188,43 @@ fn operator_role_can_server_side_apply_the_minted_mover_rbac() {
     }
 }
 
+#[test]
+fn operator_role_can_server_side_apply_staged_source_snapshots() {
+    let artifacts = xtask::rbac::artifacts().expect("generate RBAC artifacts");
+    for (rel, kind) in [
+        ("rbac/operator-clusterrole.yaml", "ClusterRole"),
+        ("rbac/operator-role.yaml", "Role"),
+    ] {
+        let a = artifact(&artifacts, rel);
+        let rules = docs(&a.content)
+            .into_iter()
+            .find_map(|d| {
+                let v: serde_yaml::Value = serde_yaml::from_str(&d).ok()?;
+                (v.get("kind").and_then(|k| k.as_str()) == Some(kind)).then_some(())?;
+                if kind == "ClusterRole" {
+                    serde_yaml::from_str::<ClusterRole>(&d).ok()?.rules
+                } else {
+                    serde_yaml::from_str::<Role>(&d).ok()?.rules
+                }
+            })
+            .unwrap_or_else(|| panic!("{rel}: {kind} rules must parse"));
+
+        for (verb, reason) in [
+            (
+                "patch",
+                "controller creates staged source snapshots via server-side apply",
+            ),
+            ("create", "first-time staged source snapshot create"),
+            ("delete", "controller cleans up staged source snapshots"),
+        ] {
+            assert!(
+                rule_grants_verb(&rules, "snapshot.storage.k8s.io", "volumesnapshots", verb),
+                "{rel}: must grant `{verb}` on volumesnapshots ({reason})"
+            );
+        }
+    }
+}
+
 /// The dedicated, least-privilege mover role is generated for both install modes
 /// and grants ONLY what the mover uses (status patch on the owning CRDs + the
 /// bootstrap-result configmap patch) — never the operator's broad rule set.

@@ -196,7 +196,7 @@ fn workload_rules() -> Vec<PolicyRule> {
         rule(
             &["snapshot.storage.k8s.io"],
             &["volumesnapshots".into()],
-            &["get", "list", "watch", "create", "delete"],
+            &["get", "list", "watch", "create", "patch", "delete"],
         ),
         rule(
             &["groupsnapshot.storage.k8s.io"],

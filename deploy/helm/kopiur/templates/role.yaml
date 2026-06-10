@@ -81,7 +81,7 @@ rules:
   - apiGroups: [snapshot.storage.k8s.io]
     resources:
       - volumesnapshots
-    verbs: [get, list, watch, create, delete]
+    verbs: [get, list, watch, create, patch, delete]
   - apiGroups: [groupsnapshot.storage.k8s.io]
     resources:
       - volumegroupsnapshots

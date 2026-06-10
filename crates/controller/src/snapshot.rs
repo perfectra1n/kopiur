@@ -18,8 +18,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::ConfigMap;
+use k8s_openapi::api::core::v1::{
+    ConfigMap, PersistentVolumeClaim, PersistentVolumeClaimSpec, TypedLocalObjectReference,
+};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::api::DeleteParams;
+use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType};
 use kube::{Api, Resource, ResourceExt};
@@ -29,6 +33,7 @@ use kopiur_api::common::{
     NamespaceDeletePolicy, RepositoryKind, RepositoryRef, ResolvedIdentity as ApiResolvedIdentity,
 };
 use kopiur_api::snapshot::SnapshotPhase;
+use kopiur_api::snapshot_policy::CopyMethod;
 use kopiur_api::{DeletionPolicy, Origin, Snapshot, SnapshotPolicy};
 use kopiur_mover::workspec::{
     MoverOptions, MoverWorkSpec, Operation, RepositoryConnect, ResolvedIdentity as MoverIdentity,
@@ -521,6 +526,7 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
                 if backup.status.as_ref().and_then(|s| s.phase) != Some(SnapshotPhase::Succeeded) {
                     finalize_succeeded(ctx, backup, &api, &name, &namespace).await?;
                 }
+                cleanup_source_capture(ctx, backup, &namespace, &name).await?;
                 // §13(c): reconcile kopia-side pin state with spec.pin once the
                 // snapshot exists. A no-op when already in the desired state.
                 return reconcile_pin(backup, ctx, &api, &namespace, &name).await;
@@ -559,6 +565,7 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
                     )
                     .await?;
                 }
+                cleanup_source_capture(ctx, backup, &namespace, &name).await?;
                 return Ok(Action::requeue(Duration::from_secs(120)));
             }
             None => {
@@ -579,6 +586,17 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
                 return Ok(Action::requeue(Duration::from_secs(30)));
             }
         }
+    }
+    match backup.status.as_ref().and_then(|s| s.phase) {
+        Some(SnapshotPhase::Succeeded) => {
+            cleanup_source_capture(ctx, backup, &namespace, &name).await?;
+            return reconcile_pin(backup, ctx, &api, &namespace, &name).await;
+        }
+        Some(SnapshotPhase::Failed) => {
+            cleanup_source_capture(ctx, backup, &namespace, &name).await?;
+            return Ok(Action::requeue(Duration::from_secs(120)));
+        }
+        _ => {}
     }
 
     // No Job yet: resolve the recipe and create the mover Job + ConfigMap.
@@ -637,9 +655,6 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
         }
         return Ok(Action::await_change());
     }
-
-    let (work_spec, source_volume, repo_volume, _) =
-        build_backup_run(backup, &config, &repo, &namespace, &name)?;
 
     // The mover Job runs in THIS (workload) namespace, where the operator SA does
     // not exist. Mint the least-privilege mover SA + RoleBinding here, then verify
@@ -908,6 +923,17 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
             }
         }
     }
+
+    let prepared_source_claim =
+        prepare_source_capture(ctx, &config, &namespace, &name, &owner).await?;
+    let (work_spec, source_volume, repo_volume, _) = build_backup_run(
+        backup,
+        &config,
+        &repo,
+        &namespace,
+        &name,
+        prepared_source_claim.as_deref(),
+    )?;
 
     let labels = run_labels(&config, origin);
     let mut limits = job_limits(backup);
@@ -1731,6 +1757,242 @@ async fn resolve_succeeded_snapshot(
     }
 }
 
+fn source_capture_name(snapshot_name: &str) -> String {
+    capped_name(&format!("{snapshot_name}-source"))
+}
+
+fn volume_snapshot_resource() -> ApiResource {
+    ApiResource::from_gvk_with_plural(
+        &GroupVersionKind::gvk("snapshot.storage.k8s.io", "v1", "VolumeSnapshot"),
+        "volumesnapshots",
+    )
+}
+
+fn volume_snapshot_api(client: kube::Client, namespace: &str) -> Api<DynamicObject> {
+    let resource = volume_snapshot_resource();
+    Api::namespaced_with(client, namespace, &resource)
+}
+
+fn build_source_volume_snapshot(
+    name: &str,
+    namespace: &str,
+    source_claim: &str,
+    class_name: Option<&str>,
+    owner: OwnerReference,
+) -> DynamicObject {
+    let resource = volume_snapshot_resource();
+    let mut spec = serde_json::json!({
+        "source": {
+            "persistentVolumeClaimName": source_claim,
+        },
+    });
+    if let Some(class_name) = class_name {
+        spec["volumeSnapshotClassName"] = serde_json::json!(class_name);
+    }
+    let mut object = DynamicObject::new(name, &resource)
+        .within(namespace)
+        .data(serde_json::json!({ "spec": spec }));
+    object.metadata.owner_references = Some(vec![owner]);
+    object.metadata.labels = Some(BTreeMap::from([(
+        crate::consts::MANAGED_BY_LABEL.to_string(),
+        crate::consts::MANAGED_BY_VALUE.to_string(),
+    )]));
+    object
+}
+
+fn staged_pvc_data_source(kind: &CopyMethod, source_name: &str) -> TypedLocalObjectReference {
+    match kind {
+        CopyMethod::Snapshot => TypedLocalObjectReference {
+            api_group: Some("snapshot.storage.k8s.io".to_string()),
+            kind: "VolumeSnapshot".to_string(),
+            name: source_name.to_string(),
+        },
+        CopyMethod::Clone => TypedLocalObjectReference {
+            api_group: None,
+            kind: "PersistentVolumeClaim".to_string(),
+            name: source_name.to_string(),
+        },
+        CopyMethod::Direct => unreachable!("Direct does not create a staged PVC"),
+    }
+}
+
+fn build_staged_source_pvc(
+    name: &str,
+    namespace: &str,
+    source_pvc: &PersistentVolumeClaim,
+    data_source: TypedLocalObjectReference,
+    owner: OwnerReference,
+) -> Result<PersistentVolumeClaim> {
+    let source_spec = source_pvc.spec.as_ref().ok_or_else(|| {
+        Error::Invariant(format!("source PVC {} has no spec", source_pvc.name_any()))
+    })?;
+    Ok(PersistentVolumeClaim {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(BTreeMap::from([(
+                crate::consts::MANAGED_BY_LABEL.to_string(),
+                crate::consts::MANAGED_BY_VALUE.to_string(),
+            )])),
+            owner_references: Some(vec![owner]),
+            ..Default::default()
+        },
+        spec: Some(PersistentVolumeClaimSpec {
+            access_modes: source_spec.access_modes.clone(),
+            resources: source_spec.resources.clone(),
+            storage_class_name: source_spec.storage_class_name.clone(),
+            volume_mode: source_spec.volume_mode.clone(),
+            data_source: Some(data_source),
+            ..Default::default()
+        }),
+        status: None,
+    })
+}
+
+async fn prepare_source_capture(
+    ctx: &Context,
+    config: &SnapshotPolicy,
+    namespace: &str,
+    name: &str,
+    owner: &OwnerReference,
+) -> Result<Option<String>> {
+    let source = config
+        .spec
+        .sources
+        .first()
+        .ok_or_else(|| Error::Invariant("SnapshotPolicy has no sources".into()))?;
+    let Some(pvc_source) = source.pvc.as_ref() else {
+        return Ok(None);
+    };
+    if config.spec.copy_method == CopyMethod::Direct {
+        return Ok(None);
+    }
+
+    let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), namespace);
+    let source_pvc = pvc_api.get(&pvc_source.name).await?;
+    let capture_name = source_capture_name(name);
+
+    if config.spec.copy_method == CopyMethod::Snapshot {
+        let snapshot_api = volume_snapshot_api(ctx.client.clone(), namespace);
+        let volume_snapshot = build_source_volume_snapshot(
+            &capture_name,
+            namespace,
+            &pvc_source.name,
+            config.spec.volume_snapshot_class_name.as_deref(),
+            owner.clone(),
+        );
+        io::apply(&snapshot_api, &capture_name, &volume_snapshot).await?;
+        let snapshot = snapshot_api.get(&capture_name).await?;
+        if snapshot
+            .data
+            .pointer("/status/readyToUse")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            return Err(Error::MissingDependency(format!(
+                "VolumeSnapshot {namespace}/{capture_name} is not readyToUse yet"
+            )));
+        }
+    }
+
+    let data_source = match config.spec.copy_method {
+        CopyMethod::Snapshot => staged_pvc_data_source(&CopyMethod::Snapshot, &capture_name),
+        CopyMethod::Clone => staged_pvc_data_source(&CopyMethod::Clone, &pvc_source.name),
+        CopyMethod::Direct => unreachable!("Direct returned before staging"),
+    };
+    let staged_pvc = build_staged_source_pvc(
+        &capture_name,
+        namespace,
+        &source_pvc,
+        data_source,
+        owner.clone(),
+    )?;
+    io::apply(&pvc_api, &capture_name, &staged_pvc).await?;
+    let staged = pvc_api.get(&capture_name).await?;
+    let phase = staged.status.as_ref().and_then(|s| s.phase.as_deref());
+    if phase != Some("Bound") {
+        return Err(Error::MissingDependency(format!(
+            "staged source PVC {namespace}/{capture_name} is not Bound yet (phase: {})",
+            phase.unwrap_or("unknown")
+        )));
+    }
+
+    tracing::info!(
+        backup = %name,
+        copy_method = ?config.spec.copy_method,
+        source_pvc = %pvc_source.name,
+        staged_pvc = %capture_name,
+        "prepared staged source PVC for backup"
+    );
+    Ok(Some(capture_name))
+}
+
+fn owned_by_uid(owner_refs: Option<&Vec<OwnerReference>>, uid: &str) -> bool {
+    owner_refs
+        .into_iter()
+        .flatten()
+        .any(|owner| owner.uid == uid && owner.kind == "Snapshot")
+}
+
+async fn cleanup_source_capture(
+    ctx: &Context,
+    backup: &Snapshot,
+    namespace: &str,
+    name: &str,
+) -> Result<()> {
+    let Some(uid) = backup.meta().uid.as_deref() else {
+        return Ok(());
+    };
+    let capture_name = source_capture_name(name);
+
+    let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), namespace);
+    let owned_staged_pvc = pvc_api
+        .get_opt(&capture_name)
+        .await?
+        .filter(|pvc| owned_by_uid(pvc.metadata.owner_references.as_ref(), uid));
+
+    let snapshot_api = volume_snapshot_api(ctx.client.clone(), namespace);
+    let owned_volume_snapshot = snapshot_api
+        .get_opt(&capture_name)
+        .await?
+        .filter(|snapshot| owned_by_uid(snapshot.metadata.owner_references.as_ref(), uid));
+
+    if owned_staged_pvc.is_some() || owned_volume_snapshot.is_some() {
+        let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), namespace);
+        if job_api.get_opt(name).await?.is_some() {
+            let _ = job_api.delete(name, &DeleteParams::background()).await?;
+        }
+        let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), namespace);
+        if cm_api.get_opt(name).await?.is_some() {
+            let _ = cm_api.delete(name, &DeleteParams::background()).await?;
+        }
+    }
+
+    if owned_staged_pvc.is_some() {
+        match pvc_api
+            .delete(&capture_name, &DeleteParams::background())
+            .await
+        {
+            Ok(_) => {}
+            Err(kube::Error::Api(error)) if error.code == 404 => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    if owned_volume_snapshot.is_some() {
+        match snapshot_api
+            .delete(&capture_name, &DeleteParams::background())
+            .await
+        {
+            Ok(_) => {}
+            Err(kube::Error::Api(error)) if error.code == 404 => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Ok(())
+}
+
 /// Resolve a `Snapshot`'s referenced `SnapshotPolicy` and that config's
 /// `Repository`. Cluster references and non-filesystem backends still resolve
 /// here; backend-specific behavior is decided downstream.
@@ -1773,6 +2035,7 @@ fn build_backup_run(
     repo: &ResolvedRepository,
     namespace: &str,
     _name: &str,
+    prepared_source_claim: Option<&str>,
 ) -> Result<SnapshotRun<'static>> {
     let identity = resolve_identity_for(config, namespace, repo.identity_defaults.as_ref())?;
 
@@ -1792,10 +2055,10 @@ fn build_backup_run(
                 .source_path_override
                 .clone()
                 .unwrap_or_else(|| format!("/pvc/{}", pvc.name));
-            (
-                path.clone(),
-                VolumeMountSpec::pvc(pvc.name.clone(), path, true),
-            )
+            let claim_name = prepared_source_claim
+                .map(str::to_string)
+                .unwrap_or_else(|| pvc.name.clone());
+            (path.clone(), VolumeMountSpec::pvc(claim_name, path, true))
         }
         (None, Some(nfs)) => {
             // The export's server-side path (`nfs.path`) is what the volume is
@@ -2355,6 +2618,96 @@ mod tests {
         )
     }
 
+    fn test_owner_ref() -> OwnerReference {
+        crate::jobs::owner_ref("Snapshot", "pg-manual", "uid-123")
+    }
+
+    fn source_pvc() -> PersistentVolumeClaim {
+        use k8s_openapi::api::core::v1::VolumeResourceRequirements;
+        use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+        PersistentVolumeClaim {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("pg-data".into()),
+                namespace: Some("ns".into()),
+                ..Default::default()
+            },
+            spec: Some(PersistentVolumeClaimSpec {
+                access_modes: Some(vec!["ReadWriteOnce".into()]),
+                resources: Some(VolumeResourceRequirements {
+                    requests: Some(BTreeMap::from([("storage".into(), Quantity("2Gi".into()))])),
+                    limits: None,
+                }),
+                storage_class_name: Some("database-zfs".into()),
+                volume_mode: Some("Filesystem".into()),
+                ..Default::default()
+            }),
+            status: None,
+        }
+    }
+
+    #[test]
+    fn source_capture_name_is_a_bounded_child_name() {
+        let long = "kanidm-nightly-abcdefghijklmnopqrstuvwxyz-0123456789-extra-long-name";
+        let name = source_capture_name(long);
+        assert!(name.len() <= 63, "{name}");
+        assert_eq!(name, capped_name(&format!("{long}-source")));
+        assert_eq!(source_capture_name("pg-manual"), "pg-manual-source");
+    }
+
+    #[test]
+    fn source_volume_snapshot_references_the_source_pvc() {
+        let object = build_source_volume_snapshot(
+            "pg-manual-source",
+            "ns",
+            "pg-data",
+            Some("openebs-zfs"),
+            test_owner_ref(),
+        );
+        assert_eq!(object.metadata.name.as_deref(), Some("pg-manual-source"));
+        assert_eq!(object.metadata.namespace.as_deref(), Some("ns"));
+        assert_eq!(
+            object
+                .data
+                .pointer("/spec/source/persistentVolumeClaimName"),
+            Some(&serde_json::json!("pg-data"))
+        );
+        assert_eq!(
+            object.data.pointer("/spec/volumeSnapshotClassName"),
+            Some(&serde_json::json!("openebs-zfs"))
+        );
+        assert_eq!(
+            object.metadata.owner_references.as_ref().unwrap()[0].kind,
+            "Snapshot"
+        );
+    }
+
+    #[test]
+    fn staged_source_pvc_copies_source_shape_and_uses_snapshot_data_source() {
+        let pvc = build_staged_source_pvc(
+            "pg-manual-source",
+            "ns",
+            &source_pvc(),
+            staged_pvc_data_source(&CopyMethod::Snapshot, "pg-manual-source"),
+            test_owner_ref(),
+        )
+        .unwrap();
+        let spec = pvc.spec.expect("staged PVC spec");
+        assert_eq!(pvc.metadata.name.as_deref(), Some("pg-manual-source"));
+        assert_eq!(
+            spec.access_modes.as_deref(),
+            Some(&["ReadWriteOnce".to_string()][..])
+        );
+        assert_eq!(spec.storage_class_name.as_deref(), Some("database-zfs"));
+        assert_eq!(spec.volume_mode.as_deref(), Some("Filesystem"));
+        let data_source = spec.data_source.expect("snapshot data source");
+        assert_eq!(
+            data_source.api_group.as_deref(),
+            Some("snapshot.storage.k8s.io")
+        );
+        assert_eq!(data_source.kind, "VolumeSnapshot");
+        assert_eq!(data_source.name, "pg-manual-source");
+    }
+
     #[test]
     fn build_backup_run_maps_nfs_source_to_inline_nfs_mount() {
         use crate::jobs::MountSource;
@@ -2375,7 +2728,7 @@ mod tests {
         );
         let repo = resolved_s3_repo();
         let (ws, source_volume, repo_volume, _creds) =
-            build_backup_run(&dummy_backup(), &cfg, &repo, "media-ns", "media").unwrap();
+            build_backup_run(&dummy_backup(), &cfg, &repo, "media-ns", "media", None).unwrap();
 
         // The NFS export becomes an inline-NFS source mount (read-only), mounted at
         // and snapshotted under the export path (no override → defaults to it).
@@ -2417,7 +2770,7 @@ mod tests {
         );
         let repo = resolved_s3_repo();
         let (ws, source_volume, _repo, _creds) =
-            build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "media").unwrap();
+            build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "media", None).unwrap();
         // The override drives both the mount path and the recorded source path.
         assert_eq!(source_volume.unwrap().mount_path, "/data");
         match ws.operation {
@@ -2451,7 +2804,7 @@ mod tests {
         );
         let repo = resolved_s3_repo();
         let (ws, source_volume, _repo, _creds) =
-            build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "media").unwrap();
+            build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "media", None).unwrap();
         let src = source_volume.expect("an NFS source mount");
         // The NFS volume still exports the server-side pseudo-root.
         assert_eq!(
@@ -2493,7 +2846,7 @@ mod tests {
         );
         let repo = resolved_s3_repo();
         let (_ws, source_volume, _repo, _creds) =
-            build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "pg").unwrap();
+            build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "pg", None).unwrap();
         let src = source_volume.expect("a PVC source mount");
         assert_eq!(
             src.source,
@@ -2502,6 +2855,46 @@ mod tests {
             }
         );
         assert_eq!(src.mount_path, "/pvc/pg-data");
+    }
+
+    #[test]
+    fn build_backup_run_mounts_prepared_pvc_at_original_source_path() {
+        use crate::jobs::MountSource;
+        use kopiur_api::snapshot_policy::{PvcSource, Source};
+        let cfg = config_with_source(
+            "pg",
+            Source {
+                pvc: Some(PvcSource {
+                    name: "pg-data".into(),
+                }),
+                pvc_selector: None,
+                nfs: None,
+                source_path_override: None,
+                source_path_strategy: None,
+            },
+        );
+        let repo = resolved_s3_repo();
+        let (ws, source_volume, _repo, _creds) = build_backup_run(
+            &dummy_backup(),
+            &cfg,
+            &repo,
+            "ns",
+            "pg",
+            Some("pg-snapshot-staging"),
+        )
+        .unwrap();
+        let src = source_volume.expect("a staged PVC source mount");
+        assert_eq!(
+            src.source,
+            MountSource::Pvc {
+                claim_name: "pg-snapshot-staging".into()
+            }
+        );
+        assert_eq!(src.mount_path, "/pvc/pg-data");
+        match ws.operation {
+            Operation::Snapshot(op) => assert_eq!(op.source_path, "/pvc/pg-data"),
+            other => panic!("expected a Snapshot operation, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2521,7 +2914,7 @@ mod tests {
             },
         );
         let repo = resolved_s3_repo();
-        assert!(build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "x").is_err());
+        assert!(build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "x", None).is_err());
     }
 
     // --- plan_deletion: exhaustive over every DeletionPolicy ----------------
@@ -2771,7 +3164,7 @@ mod tests {
         );
         let repo = resolved_s3_repo();
         let (ws, _, _, _) =
-            build_backup_run(&dummy_backup(), &cfg, &repo, "media-ns", "media").unwrap();
+            build_backup_run(&dummy_backup(), &cfg, &repo, "media-ns", "media", None).unwrap();
         let resolved = resolved_run_status(&cfg, "media-ns", &ws);
         // The deletion path re-resolves the repo from this pinned ref alone, so
         // it must carry the namespace the recipe resolved against.
