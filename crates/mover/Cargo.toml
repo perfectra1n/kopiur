@@ -20,7 +20,7 @@ serde_json = { workspace = true }
 opentelemetry = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-anyhow = { workspace = true }
+thiserror = { workspace = true }
 chrono = { workspace = true }
 
 [features]

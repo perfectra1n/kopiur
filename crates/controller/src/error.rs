@@ -61,14 +61,27 @@ pub enum Error {
     #[error("invariant violated: {0}")]
     Invariant(String),
 
-    /// Self-managed webhook TLS setup failed: minting the CA/leaf, writing the
-    /// serving Secret, or injecting `caBundle` into a webhook configuration
-    /// ([`crate::webhook_tls`]). Transient — the webhook config or namespace may
-    /// not exist yet at boot, and the periodic reconcile retries. Never fatal to
-    /// the controller (degrade-not-crash): admission simply stays untrusted until
-    /// it succeeds.
+    /// Self-managed webhook TLS setup failed on the **cluster IO** side: reading/
+    /// writing the serving Secret or injecting `caBundle` into a webhook
+    /// configuration ([`crate::webhook_tls`]). Transient — the webhook config or
+    /// namespace may not exist yet at boot, and the periodic reconcile retries.
+    /// Never fatal to the controller (degrade-not-crash): admission simply stays
+    /// untrusted until it succeeds.
+    ///
+    /// Deliberately a `String`: each call site wraps a `kube::Error` with its own
+    /// what/why context (which Secret, which configuration), and that composed
+    /// message is the useful payload — a `{context, source}` struct would add
+    /// ceremony without adding information. Failures from the pure cert-minting
+    /// layer are the typed [`Error::WebhookCert`] instead.
     #[error("webhook TLS setup failed: {0}")]
     WebhookSetup(String),
+
+    /// The pure cert-minting layer failed to produce the CA or serving leaf
+    /// ([`crate::webhook_tls::CertError`]). Transient like [`Error::WebhookSetup`]
+    /// (the periodic reconcile retries; admission stays untrusted, the controller
+    /// never crashes), but typed so the `rcgen` source chain stays inspectable.
+    #[error("webhook TLS setup failed: could not mint or resolve the CA/serving certificate: {0}")]
+    WebhookCert(#[from] crate::webhook_tls::CertError),
 }
 
 /// How a reconcile error should be re-driven — the classification that picks the
@@ -119,9 +132,10 @@ impl Error {
     /// [`Terminal`](ErrorClass::Terminal) — retrying it on a tight loop only spams.
     pub fn class(&self) -> ErrorClass {
         match self {
-            Error::Kube(_) | Error::MissingDependency(_) | Error::WebhookSetup(_) => {
-                ErrorClass::Transient
-            }
+            Error::Kube(_)
+            | Error::MissingDependency(_)
+            | Error::WebhookSetup(_)
+            | Error::WebhookCert(_) => ErrorClass::Transient,
             Error::Kopia(e) => {
                 if e.class().is_retryable() {
                     ErrorClass::Transient
@@ -140,12 +154,24 @@ impl Error {
 /// Result alias for reconcile functions.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Shared `error_policy` body: log, record the metric, and requeue by class.
+/// Shared `error_policy` body: log, record the metric, surface the failure as
+/// a Warning Event on the failing object, and requeue by class.
 ///
 /// Each controller passes its CRD `kind` label so the metric is correctly
-/// attributed. This keeps one classification/backoff policy across all seven
-/// reconcilers (ADR §5.2).
-pub fn error_policy_for(kind: &str, err: &Error, ctx: &Context) -> Action {
+/// attributed, and the object so the Event has a `regarding` reference. This
+/// keeps one classification/backoff/visibility policy across all reconcilers
+/// (ADR §5.2): every kind's failures are visible in `kubectl get events`, not
+/// only the ones with bespoke in-reconcile publishes.
+///
+/// The Event publish is fire-and-forget on the runtime (`error_policy` is
+/// sync) and best-effort; repeats of the same failure aggregate into a single
+/// Event object via the Recorder's dedup (see [`crate::io::event_ref`] for why
+/// the reference must not carry a `resourceVersion`). Outside a tokio runtime
+/// (pure unit tests) the publish is skipped — degrade, never panic.
+pub fn error_policy_for<K>(kind: &str, obj: &K, err: &Error, ctx: &Context) -> Action
+where
+    K: kube::Resource<DynamicType = ()>,
+{
     let class = err.class();
     ctx.metrics.record_error(kind, class.label());
     tracing::warn!(
@@ -154,6 +180,12 @@ pub fn error_policy_for(kind: &str, err: &Error, ctx: &Context) -> Action {
         error = %err,
         "reconcile error; requeueing"
     );
+    let event = crate::io::reconcile_failure_event(err, crate::io::operator_uid());
+    let regarding = crate::io::event_ref(obj);
+    let recorder = ctx.recorder.clone();
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(crate::io::publish_failure(recorder, regarding, event));
+    }
     class.action()
 }
 
@@ -178,6 +210,21 @@ mod tests {
         assert_eq!(
             Error::WebhookSetup("no such config".into()).class(),
             ErrorClass::Transient
+        );
+    }
+
+    #[test]
+    fn webhook_cert_is_transient_and_keeps_the_source_chain() {
+        // The typed cert-minting failure classifies exactly like WebhookSetup
+        // (retry, degrade-not-crash) but preserves the rcgen source error.
+        let err = Error::WebhookCert(crate::webhook_tls::CertError::Generate(
+            rcgen::Error::CouldNotParseCertificate,
+        ));
+        assert_eq!(err.class(), ErrorClass::Transient);
+        assert!(err.to_string().contains("could not mint"));
+        assert!(
+            std::error::Error::source(&err).is_some(),
+            "the CertError source chain must stay inspectable"
         );
     }
 

@@ -17,12 +17,12 @@ use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::ConfigMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::runtime::controller::Action;
-use kube::{Api, Resource, ResourceExt};
+use kube::{Api, ResourceExt};
 
 use kopiur_api::backend::Backend;
 use kopiur_api::common::RepositoryKind;
 use kopiur_api::{ClusterRepository, RepositoryPhase, validate};
-use kopiur_kopia::{ConnectSpec, KopiaErrorClass};
+use kopiur_kopia::ConnectSpec;
 use kopiur_mover::bootstrap::{BootstrapResult, RESULT_CONFIGMAP_KEY};
 use kopiur_mover::workspec::{
     BootstrapRepositoryOp, MoverOptions, MoverWorkSpec, Operation, ResolvedIdentity, TargetRef,
@@ -248,7 +248,7 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
                     if wrote {
                         io::publish_backend_failure(
                             ctx,
-                            &repo.object_ref(&()),
+                            &io::event_ref(repo),
                             &name,
                             class,
                             &e.to_string(),
@@ -302,7 +302,7 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
                     ctx,
                     &api,
                     repo,
-                    &repo.object_ref(&()),
+                    &io::event_ref(repo),
                     RepositoryKind::ClusterRepository,
                     "ClusterRepository",
                     "",
@@ -525,61 +525,44 @@ async fn finalize_cluster_bootstrap(
 ) -> Result<Action> {
     let result = read_cluster_bootstrap_result(ctx, job_ns, job_name).await?;
 
-    // Classify any terminal failure as a typed value (ADR §5.5): a result-less
-    // failed Job and a kopia-rejected connect are distinct, exhaustively-handled
-    // modes — never a silent `Failed/Unknown` with no Event.
-    let failure = match &result {
-        None if job_succeeded => {
+    // Classify the (result, job state) pair as a typed outcome (ADR §5.5): a
+    // result-less failed Job and a kopia-rejected connect are distinct,
+    // exhaustively-handled modes — never a silent `Failed/Unknown` with no
+    // Event — and the success arm *owns* the result, so there is no
+    // `.expect()` invariant to get wrong.
+    let result = match io::bootstrap_outcome(result, job_succeeded, job_name) {
+        io::BootstrapOutcome::ResultPending => {
             tracing::warn!(repo = %name, "bootstrap Job complete but result not readable yet; requeueing");
             return Ok(Action::requeue(Duration::from_secs(5)));
         }
-        None => Some(io::BootstrapFailure::JobFailedWithoutResult {
-            job_name: job_name.to_string(),
-        }),
-        Some(r) if !r.success => Some(io::BootstrapFailure::Backend {
-            class: r
-                .failure
-                .as_ref()
-                .map(|f| KopiaErrorClass::from_label(&f.kopia_error_class))
-                .unwrap_or(KopiaErrorClass::Unknown),
-            message: r
-                .failure
-                .as_ref()
-                .map(|f| f.message.clone())
-                .unwrap_or_else(|| "repository bootstrap failed".to_string()),
-        }),
-        Some(_) => None,
-    };
-
-    if let Some(failure) = failure {
-        let reason = failure.reason();
-        let conditions =
-            cluster_bootstrap_condition(repo, false, reason, &failure.condition_message());
-        // Guard the write so the Event + warn log fire only on the real transition,
-        // not on every 120 s re-read (the message is stable → a true no-op once
-        // written, so no reconcile hot-loop and no Event spam).
-        let current = serde_json::to_value(&repo.status).ok();
-        let wrote = io::patch_status_if_changed(
-            api,
-            name,
-            current.as_ref(),
-            serde_json::json!({
-                "phase": "Failed",
-                "backend": backend.kind_str(),
-                "observedGeneration": repo.metadata.generation,
-                "conditions": conditions,
-            }),
-        )
-        .await?;
-        if wrote {
-            failure.publish(ctx, &repo.object_ref(&()), name).await;
-            tracing::warn!(repo = %name, reason, "ClusterRepository bootstrap failed");
+        io::BootstrapOutcome::Failed(failure) => {
+            let reason = failure.reason();
+            let conditions =
+                cluster_bootstrap_condition(repo, false, reason, &failure.condition_message());
+            // Guard the write so the Event + warn log fire only on the real transition,
+            // not on every 120 s re-read (the message is stable → a true no-op once
+            // written, so no reconcile hot-loop and no Event spam).
+            let current = serde_json::to_value(&repo.status).ok();
+            let wrote = io::patch_status_if_changed(
+                api,
+                name,
+                current.as_ref(),
+                serde_json::json!({
+                    "phase": "Failed",
+                    "backend": backend.kind_str(),
+                    "observedGeneration": repo.metadata.generation,
+                    "conditions": conditions,
+                }),
+            )
+            .await?;
+            if wrote {
+                failure.publish(ctx, &io::event_ref(repo), name).await;
+                tracing::warn!(repo = %name, reason, "ClusterRepository bootstrap failed");
+            }
+            return Ok(Action::requeue(Duration::from_secs(120)));
         }
-        return Ok(Action::requeue(Duration::from_secs(120)));
-    }
-
-    // Success: the result is present and `success == true`.
-    let result = result.expect("a non-failure bootstrap implies a readable, successful result");
+        io::BootstrapOutcome::Succeeded(result) => result,
+    };
 
     let allowed_count = allowed_namespace_count(&repo.spec.allowed_namespaces);
     let conditions = cluster_bootstrap_condition(
@@ -616,7 +599,7 @@ async fn finalize_cluster_bootstrap(
             ctx,
             api,
             repo,
-            &repo.object_ref(&()),
+            &io::event_ref(repo),
             RepositoryKind::ClusterRepository,
             "ClusterRepository",
             "",
@@ -687,8 +670,8 @@ fn allowed_namespace_count(allowed: &kopiur_api::AllowedNamespaces) -> i64 {
 }
 
 /// `error_policy` for the `ClusterRepository` controller.
-pub fn error_policy(_obj: Arc<ClusterRepository>, err: &Error, ctx: Arc<Context>) -> Action {
-    error_policy_for("ClusterRepository", err, &ctx)
+pub fn error_policy(obj: Arc<ClusterRepository>, err: &Error, ctx: Arc<Context>) -> Action {
+    error_policy_for("ClusterRepository", obj.as_ref(), err, &ctx)
 }
 
 #[cfg(test)]

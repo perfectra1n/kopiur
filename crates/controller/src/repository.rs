@@ -26,7 +26,7 @@ use kube::{Api, Resource, ResourceExt};
 use kopiur_api::backend::Backend;
 use kopiur_api::common::RepositoryKind;
 use kopiur_api::{Repository, RepositoryPhase, Snapshot, validate};
-use kopiur_kopia::{ConnectSpec, KopiaErrorClass, SnapshotListEntry};
+use kopiur_kopia::{ConnectSpec, SnapshotListEntry};
 use kopiur_mover::bootstrap::{BootstrapResult, RESULT_CONFIGMAP_KEY};
 use kopiur_mover::workspec::{
     BootstrapRepositoryOp, MoverOptions, MoverWorkSpec, Operation, ResolvedIdentity, TargetRef,
@@ -292,7 +292,7 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
                     if wrote {
                         io::publish_backend_failure(
                             ctx,
-                            &repo.object_ref(&()),
+                            &io::event_ref(repo),
                             &name,
                             class,
                             &e.to_string(),
@@ -347,7 +347,7 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
                     ctx,
                     &api,
                     repo,
-                    &repo.object_ref(&()),
+                    &io::event_ref(repo),
                     RepositoryKind::Repository,
                     "Repository",
                     &namespace,
@@ -628,62 +628,45 @@ async fn finalize_bootstrap(
 ) -> Result<Action> {
     let result = read_bootstrap_result(ctx, namespace, job_name).await?;
 
-    // Classify any terminal failure as a typed value (ADR §5.5): a result-less
-    // failed Job and a kopia-rejected connect are distinct, exhaustively-handled
-    // modes — never a silent `Failed/Unknown` with no Event.
-    let failure = match &result {
+    // Classify the (result, job state) pair as a typed outcome (ADR §5.5): a
+    // result-less failed Job and a kopia-rejected connect are distinct,
+    // exhaustively-handled modes — never a silent `Failed/Unknown` with no
+    // Event — and the success arm *owns* the result, so there is no
+    // `.expect()` invariant to get wrong.
+    let result = match io::bootstrap_outcome(result, job_succeeded, job_name) {
         // Result not visible yet (write/propagation race): requeue briefly rather
         // than guessing. A truly result-less Job stays terminal for the next pass.
-        None if job_succeeded => {
+        io::BootstrapOutcome::ResultPending => {
             tracing::warn!(repo = %name, "bootstrap Job complete but result not readable yet; requeueing");
             return Ok(Action::requeue(Duration::from_secs(5)));
         }
-        None => Some(io::BootstrapFailure::JobFailedWithoutResult {
-            job_name: job_name.to_string(),
-        }),
-        Some(r) if !r.success => Some(io::BootstrapFailure::Backend {
-            class: r
-                .failure
-                .as_ref()
-                .map(|f| KopiaErrorClass::from_label(&f.kopia_error_class))
-                .unwrap_or(KopiaErrorClass::Unknown),
-            message: r
-                .failure
-                .as_ref()
-                .map(|f| f.message.clone())
-                .unwrap_or_else(|| "repository bootstrap failed".to_string()),
-        }),
-        Some(_) => None,
-    };
-
-    if let Some(failure) = failure {
-        let reason = failure.reason();
-        let conditions = bootstrap_condition(repo, false, reason, &failure.condition_message());
-        // Guard the write so a re-confirmed failure fires the Event + warn log only
-        // on the real transition, not on every 120 s re-read (the message is stable,
-        // so this becomes a true no-op once written — no reconcile hot-loop).
-        let current = serde_json::to_value(&repo.status).ok();
-        let wrote = io::patch_status_if_changed(
-            api,
-            name,
-            current.as_ref(),
-            serde_json::json!({
-                "phase": "Failed",
-                "backend": backend.kind_str(),
-                "observedGeneration": repo.metadata.generation,
-                "conditions": conditions,
-            }),
-        )
-        .await?;
-        if wrote {
-            failure.publish(ctx, &repo.object_ref(&()), name).await;
-            tracing::warn!(repo = %name, reason, "repository bootstrap failed");
+        io::BootstrapOutcome::Failed(failure) => {
+            let reason = failure.reason();
+            let conditions = bootstrap_condition(repo, false, reason, &failure.condition_message());
+            // Guard the write so a re-confirmed failure fires the Event + warn log only
+            // on the real transition, not on every 120 s re-read (the message is stable,
+            // so this becomes a true no-op once written — no reconcile hot-loop).
+            let current = serde_json::to_value(&repo.status).ok();
+            let wrote = io::patch_status_if_changed(
+                api,
+                name,
+                current.as_ref(),
+                serde_json::json!({
+                    "phase": "Failed",
+                    "backend": backend.kind_str(),
+                    "observedGeneration": repo.metadata.generation,
+                    "conditions": conditions,
+                }),
+            )
+            .await?;
+            if wrote {
+                failure.publish(ctx, &io::event_ref(repo), name).await;
+                tracing::warn!(repo = %name, reason, "repository bootstrap failed");
+            }
+            return Ok(Action::requeue(Duration::from_secs(120)));
         }
-        return Ok(Action::requeue(Duration::from_secs(120)));
-    }
-
-    // Success: the result is present and `success == true`.
-    let result = result.expect("a non-failure bootstrap implies a readable, successful result");
+        io::BootstrapOutcome::Succeeded(result) => result,
+    };
 
     // Success: Ready + uniqueId + a Bootstrapped=True condition.
     let conditions = bootstrap_condition(
@@ -737,7 +720,7 @@ async fn finalize_bootstrap(
             ctx,
             api,
             repo,
-            &repo.object_ref(&()),
+            &io::event_ref(repo),
             RepositoryKind::Repository,
             "Repository",
             namespace,
@@ -930,8 +913,8 @@ async fn create_discovered_backup(
 }
 
 /// `error_policy` for the `Repository` controller.
-pub fn error_policy(_obj: Arc<Repository>, err: &Error, ctx: Arc<Context>) -> Action {
-    error_policy_for("Repository", err, &ctx)
+pub fn error_policy(obj: Arc<Repository>, err: &Error, ctx: Arc<Context>) -> Action {
+    error_policy_for("Repository", obj.as_ref(), err, &ctx)
 }
 
 #[cfg(test)]

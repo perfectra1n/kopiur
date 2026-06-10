@@ -619,11 +619,11 @@ async fn set_ready_if_changed(
 
 /// `error_policy` for the `Maintenance` controller.
 pub fn error_policy(
-    _obj: std::sync::Arc<Maintenance>,
+    obj: std::sync::Arc<Maintenance>,
     err: &Error,
     ctx: std::sync::Arc<Context>,
 ) -> Action {
-    error_policy_for("Maintenance", err, &ctx)
+    error_policy_for("Maintenance", obj.as_ref(), err, &ctx)
 }
 
 #[cfg(test)]

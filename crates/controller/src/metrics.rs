@@ -48,6 +48,7 @@ pub struct Metrics {
     orphaned_snapshots: Counter<u64>,
     schedule_backups_created: Counter<u64>,
     secrets_projected: Counter<u64>,
+    backups_refused: Counter<u64>,
 
     // Repository business metrics.
     repo_size_bytes: Gauge<i64>,
@@ -134,6 +135,15 @@ impl Metrics {
                  (opt-in spec.credentialProjection).",
             )
             .build();
+        let backups_refused = m
+            .u64_counter("kopiur_snapshot_refusals")
+            .with_description(
+                "Total backups refused by policy (e.g. a ReadOnly repository, a privileged \
+                 mover without the namespace opt-in), labeled by reason. Refusals are \
+                 deliberate decisions, not reconcile errors, so they are not in \
+                 kopiur_controller_reconcile_errors.",
+            )
+            .build();
 
         let repo_size_bytes = m
             .i64_gauge("kopiur_repo_size_bytes")
@@ -181,6 +191,7 @@ impl Metrics {
             orphaned_snapshots,
             schedule_backups_created,
             secrets_projected,
+            backups_refused,
             repo_size_bytes,
             repo_snapshot_count,
             repo_discovered_backups,
@@ -312,6 +323,21 @@ impl Metrics {
         self.schedule_backups_created.add(1, &ns_name(ns, name));
     }
 
+    /// Count a backup refused by policy. `reason` is the same machine-readable
+    /// label as the Event/condition reason (e.g. `RepositoryReadOnly`,
+    /// `PrivilegedMoverNotPermitted`) so dashboards and `kubectl get events`
+    /// agree on the cause.
+    pub fn inc_backup_refused(&self, ns: &str, name: &str, reason: &'static str) {
+        self.backups_refused.add(
+            1,
+            &[
+                KeyValue::new("namespace", ns.to_string()),
+                KeyValue::new("name", name.to_string()),
+                KeyValue::new("reason", reason),
+            ],
+        );
+    }
+
     // ---- repository / restore / maintenance --------------------------------
 
     /// Set the repository size gauge.
@@ -409,6 +435,20 @@ mod tests {
             text.contains("kopiur_repository_maintenance_configured"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn backup_refusals_export_with_the_reason_label() {
+        // The refusal counter is the dashboard-visible side of a policy
+        // refusal (read-only repo / ungated privileged mover) — the reconcile
+        // itself returns Ok, so kopiur_controller_reconcile_errors_total never
+        // sees it and this counter is the only aggregate signal.
+        let m = Metrics::new();
+        m.inc_backup_refused("apps", "db-daily", "RepositoryReadOnly");
+        let text = String::from_utf8(m.gather()).unwrap();
+        assert!(text.contains("kopiur_snapshot_refusals_total"), "{text}");
+        assert!(text.contains("reason=\"RepositoryReadOnly\""), "{text}");
+        assert!(text.contains("name=\"db-daily\""), "{text}");
     }
 
     #[test]

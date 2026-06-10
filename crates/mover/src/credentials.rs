@@ -28,9 +28,10 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
 use kopiur_kopia::ConnectSpec;
 use tracing::info;
+
+use crate::error::{MoverError, Result};
 
 /// SFTP private key (PEM), read from the credentials Secret → `--keyfile`.
 pub const SFTP_KEY_DATA_ENV: &str = "KOPIA_SFTP_KEY_DATA";
@@ -102,16 +103,25 @@ pub fn materialize(connect: &mut ConnectSpec, staging_dir: &Path) -> Result<()> 
 /// with mode `0600` and return the file path (as the `String` the connect spec
 /// holds). Returns `Ok(None)` when the env var is unset/empty (the credential
 /// simply isn't provided this way).
-fn write_env_file(env_key: &str, staging_dir: &Path, file_name: &str) -> Result<Option<String>> {
+fn write_env_file(
+    env_key: &'static str,
+    staging_dir: &Path,
+    file_name: &str,
+) -> Result<Option<String>> {
     let value = match std::env::var(env_key) {
         Ok(v) if !v.is_empty() => v,
         _ => return Ok(None),
     };
-    std::fs::create_dir_all(staging_dir)
-        .with_context(|| format!("create credential staging dir {}", staging_dir.display()))?;
+    std::fs::create_dir_all(staging_dir).map_err(|source| MoverError::CredentialStagingDir {
+        path: staging_dir.to_path_buf(),
+        source,
+    })?;
     let path = staging_dir.join(file_name);
-    write_private(&path, value.as_bytes())
-        .with_context(|| format!("write credential file {} (from ${env_key})", path.display()))?;
+    write_private(&path, value.as_bytes()).map_err(|source| MoverError::CredentialWrite {
+        env_key,
+        path: path.clone(),
+        source,
+    })?;
     info!(env = env_key, path = %path.display(), "materialized backend credential to file");
     Ok(Some(path.to_string_lossy().into_owned()))
 }

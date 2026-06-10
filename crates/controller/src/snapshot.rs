@@ -528,8 +528,9 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
 
     // §11: a ReadOnly repository serves restores only — refuse to create a backup
     // Job. Surface a clear condition + Event and stop (not an error: it's a
-    // deliberate, terminal-until-spec-change state). Restores remain allowed (the
-    // Restore reconciler does not gate on mode).
+    // deliberate, terminal-until-spec-change state, so it is counted in the
+    // `kopiur_snapshot_refusals` counter rather than reconcile_errors). Restores
+    // remain allowed (the Restore reconciler does not gate on mode).
     if !repo.mode.allows_writes() {
         let conds = backup
             .status
@@ -544,26 +545,38 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
             &readonly_backup_message(&config.spec.repository.name),
             backup.meta().generation,
         );
-        io::patch_status(
+        // Guard the write so the Event + counter + warn fire once per real
+        // transition, not on every watch-desync replay of an already-Failed
+        // Snapshot (the message is stable, so a repeat is a true no-op).
+        let current = serde_json::to_value(&backup.status).ok();
+        let wrote = io::patch_status_if_changed(
             &api,
             &name,
+            current.as_ref(),
             serde_json::json!({ "phase": "Failed", "conditions": conditions }),
         )
         .await?;
-        let _ = ctx
-            .recorder
-            .publish(
-                &Event {
-                    type_: EventType::Warning,
-                    reason: crate::consts::REPOSITORY_READ_ONLY_REASON.into(),
-                    note: Some(readonly_backup_message(&config.spec.repository.name)),
-                    action: "RefuseBackupReadOnlyRepository".into(),
-                    secondary: None,
-                },
-                &backup.object_ref(&()),
-            )
-            .await;
-        tracing::warn!(backup = %name, repository = %config.spec.repository.name, "refusing backup: repository is ReadOnly");
+        if wrote {
+            ctx.metrics.inc_backup_refused(
+                &namespace,
+                &name,
+                crate::consts::REPOSITORY_READ_ONLY_REASON,
+            );
+            let _ = ctx
+                .recorder
+                .publish(
+                    &Event {
+                        type_: EventType::Warning,
+                        reason: crate::consts::REPOSITORY_READ_ONLY_REASON.into(),
+                        note: Some(readonly_backup_message(&config.spec.repository.name)),
+                        action: "RefuseBackupReadOnlyRepository".into(),
+                        secondary: None,
+                    },
+                    &io::event_ref(backup),
+                )
+                .await;
+            tracing::warn!(backup = %name, repository = %config.spec.repository.name, "refusing backup: repository is ReadOnly");
+        }
         return Ok(Action::await_change());
     }
 
@@ -651,20 +664,33 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
             &msg,
             backup.meta().generation,
         );
-        io::patch_status(
+        // Guard the write so the refusal counter + Event fire once per real
+        // transition, not on every 30 s transient retry while the namespace
+        // opt-in is still absent (the message is stable, so a repeat is a
+        // true no-op).
+        let current = serde_json::to_value(&backup.status).ok();
+        let wrote = io::patch_status_if_changed(
             &api,
             &name,
+            current.as_ref(),
             serde_json::json!({ "phase": "Pending", "conditions": conditions }),
         )
         .await?;
-        io::publish_warning_event(
-            ctx,
-            backup,
-            PRIVILEGED_MOVER_NOT_PERMITTED_REASON,
-            ALLOW_PRIVILEGED_MOVER_ACTION,
-            &msg,
-        )
-        .await;
+        if wrote {
+            ctx.metrics.inc_backup_refused(
+                &namespace,
+                &name,
+                PRIVILEGED_MOVER_NOT_PERMITTED_REASON,
+            );
+            io::publish_warning_event(
+                ctx,
+                backup,
+                PRIVILEGED_MOVER_NOT_PERMITTED_REASON,
+                ALLOW_PRIVILEGED_MOVER_ACTION,
+                &msg,
+            )
+            .await;
+        }
         // The missing dependency is the namespace opt-in annotation an admin adds
         // out-of-band (like a missing creds Secret) — Transient, NOT Structural, so
         // it is re-checked on the short transient cadence and the opt-in takes
@@ -983,7 +1009,7 @@ async fn orphan_snapshot(
                 action: "Orphan".into(),
                 secondary: None,
             },
-            &backup.object_ref(&()),
+            &io::event_ref(backup),
         )
         .await;
     io::remove_finalizer(api, backup, SNAPSHOT_CLEANUP_FINALIZER).await?;
@@ -1806,8 +1832,8 @@ pub(crate) fn job_terminal_state(job: &Job) -> Option<bool> {
 }
 
 /// `error_policy` for the `Snapshot` controller.
-pub fn error_policy(_backup: Arc<Snapshot>, err: &Error, ctx: Arc<Context>) -> Action {
-    error_policy_for("Snapshot", err, &ctx)
+pub fn error_policy(backup: Arc<Snapshot>, err: &Error, ctx: Arc<Context>) -> Action {
+    error_policy_for("Snapshot", backup.as_ref(), err, &ctx)
 }
 
 #[cfg(test)]

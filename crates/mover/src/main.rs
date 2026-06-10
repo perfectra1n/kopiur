@@ -18,9 +18,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
 use kopiur_api::{LeaseAction, lease_action};
-use kopiur_kopia::{ConnectSpec, KopiaClient, KopiaError, MaintenanceMode};
+use kopiur_kopia::{ConnectSpec, KopiaClient, KopiaError, KopiaErrorClass, MaintenanceMode};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
@@ -29,6 +28,7 @@ use kopiur_mover::bootstrap::{
 };
 use kopiur_mover::credentials;
 use kopiur_mover::env::{KOPIA_BINARY, RESULT_CONFIGMAP, WORK_SPEC_PATH};
+use kopiur_mover::error::{KopiaOp, MoverError, Result};
 use kopiur_mover::status::StatusUpdate;
 use kopiur_mover::workspec::{
     self, BootstrapRepositoryOp, KOPIUR_PIN_NAME, MaintenanceOp, MoverWorkSpec, Operation,
@@ -57,9 +57,8 @@ async fn run() -> Result<()> {
     // client (the rustls-tls backend panics without it). Idempotent.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let spec_path = work_spec_path().context("locating work spec")?;
-    let spec = load_work_spec(&spec_path)
-        .with_context(|| format!("loading work spec from {}", spec_path.display()))?;
+    let spec_path = work_spec_path()?;
+    let spec = load_work_spec(&spec_path)?;
     let operation = spec.operation.kind_str().to_string();
     info!(
         operation = %operation,
@@ -102,7 +101,16 @@ async fn run() -> Result<()> {
                 // (e.g. running outside a cluster), we log instead of failing.
                 let reporter = StatusReporter::try_new(&spec).await;
                 match client.repository_connect(&connect, spec.cache).await {
-                    Err(e) => terminal_failure(&reporter, &e).await,
+                    Err(e) => {
+                        terminal_failure(
+                            &reporter,
+                            MoverError::Kopia {
+                                op: KopiaOp::RepositoryConnect,
+                                source: e,
+                            },
+                        )
+                        .await
+                    }
                     Ok(()) => {
                         // Apply repository throttle (moverDefaults.throttle, ADR-0005
                         // §13(e)) after connecting, before the data op. A throttle
@@ -113,7 +121,14 @@ async fn run() -> Result<()> {
                                 .repository_throttle_set(&spec.throttle.to_kopia())
                                 .await
                         {
-                            return terminal_failure(&reporter, &e).await;
+                            return terminal_failure(
+                                &reporter,
+                                MoverError::Kopia {
+                                    op: KopiaOp::ThrottleSet,
+                                    source: e,
+                                },
+                            )
+                            .await;
                         }
                         match execute(&client, &spec, &reporter).await {
                             Ok(update) => {
@@ -121,7 +136,7 @@ async fn run() -> Result<()> {
                                 info!(phase = %update.phase, "operation succeeded");
                                 Ok(())
                             }
-                            Err(e) => terminal_failure(&reporter, &e).await,
+                            Err(e) => terminal_failure(&reporter, e).await,
                         }
                     }
                 }
@@ -154,8 +169,7 @@ fn credential_staging_dir() -> PathBuf {
 /// pass through unchanged.
 fn prepare_connect_spec(spec: &MoverWorkSpec) -> Result<ConnectSpec> {
     let mut connect = spec.repository.to_connect_spec();
-    credentials::materialize(&mut connect, &credential_staging_dir())
-        .context("materializing file-based backend credentials")?;
+    credentials::materialize(&mut connect, &credential_staging_dir())?;
     Ok(connect)
 }
 
@@ -165,7 +179,7 @@ async fn execute(
     client: &KopiaClient,
     spec: &MoverWorkSpec,
     reporter: &StatusReporter,
-) -> Result<StatusUpdate, KopiaError> {
+) -> Result<StatusUpdate> {
     let interval = Duration::from_secs(spec.options.progress_interval_secs.max(1));
 
     // Spawn the operation as a future and tick progress alongside it.
@@ -188,10 +202,10 @@ async fn execute(
 
 /// Dispatch on the operation kind. Exhaustive `match` — a new [`Operation`]
 /// variant fails to compile until handled (the project's type-safety thesis).
-async fn run_operation(
-    client: &KopiaClient,
-    spec: &MoverWorkSpec,
-) -> Result<StatusUpdate, KopiaError> {
+async fn run_operation(client: &KopiaClient, spec: &MoverWorkSpec) -> Result<StatusUpdate> {
+    // Each kopia call is wrapped with the `KopiaOp` naming it, so a failure's
+    // message/log always says *which* invocation failed.
+    let kopia = |op: KopiaOp| move |source: KopiaError| MoverError::Kopia { op, source };
     match &spec.operation {
         Operation::Snapshot(op) => {
             // Record the snapshot under the operator-resolved identity
@@ -209,17 +223,20 @@ async fn run_operation(
             if !op.policy.is_empty() {
                 client
                     .policy_set(&override_source, &op.policy.to_kopia())
-                    .await?;
+                    .await
+                    .map_err(kopia(KopiaOp::PolicySet))?;
             }
             let result = client
                 .snapshot_create(&op.source_path, &op.tags, Some(&override_source))
-                .await?;
+                .await
+                .map_err(kopia(KopiaOp::SnapshotCreate))?;
             Ok(StatusUpdate::succeeded_backup(&result, chrono::Utc::now()))
         }
         Operation::Restore(op) => {
             client
                 .snapshot_restore_with(&op.snapshot_id, &op.target_path, &op.restore_options())
-                .await?;
+                .await
+                .map_err(kopia(KopiaOp::SnapshotRestore))?;
             // Restore's terminal success phase is `Completed`, not `Succeeded`
             // (the Snapshot phase) — the Restore CRD enum rejects `Succeeded`.
             Ok(StatusUpdate::completed(chrono::Utc::now()))
@@ -227,7 +244,10 @@ async fn run_operation(
         Operation::SnapshotDelete(op) => {
             // Just delete the snapshot. Space reclamation (maintenance) is a
             // separate concern owned by the Maintenance CRD, not the mover.
-            client.snapshot_delete(&op.snapshot_id).await?;
+            client
+                .snapshot_delete(&op.snapshot_id)
+                .await
+                .map_err(kopia(KopiaOp::SnapshotDelete))?;
             Ok(StatusUpdate::succeeded(chrono::Utc::now()))
         }
         Operation::SnapshotPin(op) => {
@@ -237,11 +257,13 @@ async fn run_operation(
             if op.pin {
                 client
                     .snapshot_pin(&op.snapshot_id, KOPIUR_PIN_NAME)
-                    .await?;
+                    .await
+                    .map_err(kopia(KopiaOp::SnapshotPin))?;
             } else {
                 client
                     .snapshot_unpin(&op.snapshot_id, KOPIUR_PIN_NAME)
-                    .await?;
+                    .await
+                    .map_err(kopia(KopiaOp::SnapshotPin))?;
             }
             Ok(StatusUpdate::succeeded(chrono::Utc::now()))
         }
@@ -312,9 +334,10 @@ async fn run_bootstrap_flow(
             backend = spec.repository.kind_str(),
             class, stderr_tail, "repository bootstrap failed terminally: {message}"
         );
-        Err(anyhow::anyhow!(
-            "repository bootstrap failed (class {class}): {message}"
-        ))
+        Err(MoverError::BootstrapFailed {
+            class: KopiaErrorClass::from_label(class),
+            message: message.to_string(),
+        })
     }
 }
 
@@ -410,17 +433,29 @@ async fn write_result_configmap(
     use k8s_openapi::api::core::v1::ConfigMap;
     use kube::api::{Patch, PatchParams};
 
-    let client = kube::Client::try_default().await?;
+    let client = kube::Client::try_default()
+        .await
+        .map_err(|source| MoverError::KubeClient {
+            source: Box::new(source),
+        })?;
     let api: kube::Api<ConfigMap> = kube::Api::namespaced(client, namespace);
     let body = serde_json::json!({
-        "data": { RESULT_CONFIGMAP_KEY: serde_json::to_string(result)? }
+        "data": {
+            RESULT_CONFIGMAP_KEY: serde_json::to_string(result)
+                .map_err(|source| MoverError::ResultSerialize { source })?
+        }
     });
     api.patch(
         cm_name,
         &PatchParams::apply("kopiur.home-operations.com/mover"),
         &Patch::Merge(&body),
     )
-    .await?;
+    .await
+    .map_err(|source| MoverError::ResultConfigMapPatch {
+        configmap: cm_name.to_string(),
+        namespace: namespace.to_string(),
+        source: Box::new(source),
+    })?;
     Ok(())
 }
 
@@ -446,7 +481,10 @@ async fn run_maintenance_flow(
     if let Err(e) = client.repository_connect(connect, spec.cache).await {
         patch_maintenance_status(&spec.target_ref, &maintenance_failed_body(&e)).await;
         error!(class = %e.class(), "maintenance connect failed");
-        return Err(maintenance_err("connect", &e));
+        return Err(MoverError::Kopia {
+            op: KopiaOp::MaintenanceConnect,
+            source: e,
+        });
     }
 
     // Read the current lease holder and apply the takeover policy.
@@ -455,7 +493,10 @@ async fn run_maintenance_flow(
         Err(e) => {
             patch_maintenance_status(&spec.target_ref, &maintenance_failed_body(&e)).await;
             error!(class = %e.class(), "maintenance info failed");
-            return Err(maintenance_err("info", &e));
+            return Err(MoverError::Kopia {
+                op: KopiaOp::MaintenanceInfo,
+                source: e,
+            });
         }
     };
     let held_by_other = !info.owner.is_empty() && info.owner != op.owner;
@@ -503,12 +544,18 @@ async fn run_maintenance_flow(
             if let Err(e) = client.maintenance_set_owner_me().await {
                 patch_maintenance_status(&spec.target_ref, &maintenance_failed_body(&e)).await;
                 error!(class = %e.class(), "maintenance ownership claim failed");
-                return Err(maintenance_err("set-owner", &e));
+                return Err(MoverError::Kopia {
+                    op: KopiaOp::MaintenanceSetOwner,
+                    source: e,
+                });
             }
             if let Err(e) = client.maintenance_run(op.mode).await {
                 patch_maintenance_status(&spec.target_ref, &maintenance_failed_body(&e)).await;
                 error!(class = %e.class(), "maintenance run failed");
-                return Err(maintenance_err("run", &e));
+                return Err(MoverError::Kopia {
+                    op: KopiaOp::MaintenanceRun,
+                    source: e,
+                });
             }
             patch_maintenance_status(
                 &spec.target_ref,
@@ -519,11 +566,6 @@ async fn run_maintenance_flow(
             Ok(())
         }
     }
-}
-
-/// Build a uniform maintenance error for the process exit (Job → `Failed`).
-fn maintenance_err(stage: &str, e: &KopiaError) -> anyhow::Error {
-    anyhow::anyhow!("maintenance {stage} failed (class {}): {e}", e.class())
 }
 
 /// Drive a `Verify` run (ADR-0005 §4): connect, run the quick (`kopia snapshot
@@ -546,10 +588,10 @@ async fn run_verify_flow(
     if let Err(e) = client.repository_connect(connect, spec.cache).await {
         patch_verify_status(&spec.target_ref, &verify_failed_body(&e.to_string())).await;
         error!(class = %e.class(), "verify connect failed");
-        return Err(anyhow::anyhow!(
-            "verify connect failed (class {}): {e}",
-            e.class()
-        ));
+        return Err(MoverError::Kopia {
+            op: KopiaOp::VerifyConnect,
+            source: e,
+        });
     }
 
     // Run the tier and collect the result environment for successExpr. A kopia
@@ -559,10 +601,10 @@ async fn run_verify_flow(
             if let Err(e) = client.snapshot_verify(&q.to_kopia()).await {
                 patch_verify_status(&spec.target_ref, &verify_failed_body(&e.to_string())).await;
                 error!(class = %e.class(), "snapshot verify failed");
-                return Err(anyhow::anyhow!(
-                    "snapshot verify failed (class {}): {e}",
-                    e.class()
-                ));
+                return Err(MoverError::Kopia {
+                    op: KopiaOp::SnapshotVerify,
+                    source: e,
+                });
             }
             // kopia `snapshot verify` reports no machine-readable file/byte counts on
             // stdout, so we conservatively report 0/0/0 for the predicate environment
@@ -578,24 +620,33 @@ async fn run_verify_flow(
                 None => match resolve_latest_snapshot_id(client, spec).await {
                     Ok(Some(id)) => id,
                     Ok(None) => {
-                        let msg = "deep verify found no snapshot to restore for this identity";
-                        patch_verify_status(&spec.target_ref, &verify_failed_body(msg)).await;
-                        return Err(anyhow::anyhow!("{msg}"));
+                        let err = MoverError::VerifyNoSnapshot {
+                            source_path: spec.identity.source_path.clone(),
+                        };
+                        patch_verify_status(
+                            &spec.target_ref,
+                            &verify_failed_body(&err.to_string()),
+                        )
+                        .await;
+                        return Err(err);
                     }
                     Err(e) => {
                         patch_verify_status(&spec.target_ref, &verify_failed_body(&e.to_string()))
                             .await;
-                        return Err(anyhow::anyhow!("deep verify snapshot list failed: {e}"));
+                        return Err(MoverError::Kopia {
+                            op: KopiaOp::DeepVerifySnapshotList,
+                            source: e,
+                        });
                     }
                 },
             };
             if let Err(e) = client.snapshot_restore(&id, &d.scratch_path).await {
                 patch_verify_status(&spec.target_ref, &verify_failed_body(&e.to_string())).await;
                 error!(class = %e.class(), "deep verify scratch-restore failed");
-                return Err(anyhow::anyhow!(
-                    "deep verify restore failed (class {}): {e}",
-                    e.class()
-                ));
+                return Err(MoverError::Kopia {
+                    op: KopiaOp::DeepVerifyRestore,
+                    source: e,
+                });
             }
             // Count what the scratch-restore produced so `restored.files`/`stats.files`
             // are meaningful to a successExpr. A read failure here is non-fatal: we
@@ -628,15 +679,16 @@ async fn run_verify_flow(
         match kopiur_api::eval_success_expr(expr, &inputs) {
             Ok(true) => {}
             Ok(false) => {
-                let msg = format!("verification successExpr evaluated false: {expr:?}");
+                let err = MoverError::SuccessExprFalse { expr: expr.clone() };
+                let msg = err.to_string();
                 patch_verify_status(&spec.target_ref, &verify_failed_body(&msg)).await;
                 warn!("{msg}");
-                return Err(anyhow::anyhow!("{msg}"));
+                return Err(err);
             }
             Err(e) => {
-                let msg = format!("verification successExpr failed to evaluate: {e}");
-                patch_verify_status(&spec.target_ref, &verify_failed_body(&msg)).await;
-                return Err(anyhow::anyhow!("{msg}"));
+                let err = MoverError::SuccessExprEval { source: e };
+                patch_verify_status(&spec.target_ref, &verify_failed_body(&err.to_string())).await;
+                return Err(err);
             }
         }
     }
@@ -749,10 +801,10 @@ async fn run_replicate_flow(
     if let Err(e) = client.repository_connect(connect, spec.cache).await {
         patch_replicate_status(&spec.target_ref, &replicate_failed_body(&e.to_string())).await;
         error!(class = %e.class(), "replication source connect failed");
-        return Err(anyhow::anyhow!(
-            "replication connect failed (class {}): {e}",
-            e.class()
-        ));
+        return Err(MoverError::Kopia {
+            op: KopiaOp::ReplicateConnect,
+            source: e,
+        });
     }
 
     // Materialize the DESTINATION's file-based credentials (SFTP key/GCS JSON/rclone)
@@ -760,18 +812,19 @@ async fn run_replicate_flow(
     // sync-to. Env-only destinations (S3/Azure/B2/WebDAV/filesystem) pass through.
     let mut dest = op.destination.to_connect_spec();
     if let Err(e) = credentials::materialize(&mut dest, &credential_staging_dir().join("dest")) {
-        let msg = format!("materializing destination credentials failed: {e}");
-        patch_replicate_status(&spec.target_ref, &replicate_failed_body(&msg)).await;
-        return Err(anyhow::anyhow!("{msg}"));
+        // The CredentialWrite/CredentialStagingDir variants already name the env
+        // key, path, and fix — propagate them untouched.
+        patch_replicate_status(&spec.target_ref, &replicate_failed_body(&e.to_string())).await;
+        return Err(e);
     }
 
     if let Err(e) = client.repository_sync_to(&dest, op.delete_extra).await {
         patch_replicate_status(&spec.target_ref, &replicate_failed_body(&e.to_string())).await;
         error!(class = %e.class(), "repository sync-to failed");
-        return Err(anyhow::anyhow!(
-            "repository sync-to failed (class {}): {e}",
-            e.class()
-        ));
+        return Err(MoverError::Kopia {
+            op: KopiaOp::RepositorySyncTo,
+            source: e,
+        });
     }
 
     patch_replicate_status(
@@ -908,45 +961,45 @@ async fn patch_maintenance_status(target: &workspec::TargetRef, body: &serde_jso
     use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 
     let attempt = async {
-        let client = kube::Client::try_default().await?;
+        let client =
+            kube::Client::try_default()
+                .await
+                .map_err(|source| MoverError::KubeClient {
+                    source: Box::new(source),
+                })?;
         let (group, version) = split_api_version(&target.api_version);
         let gvk = GroupVersionKind::gvk(&group, &version, &target.kind);
         let ar = ApiResource::from_gvk(&gvk);
         let api = kube::Api::<DynamicObject>::namespaced_with(client, &target.namespace, &ar);
         api.patch_status(&target.name, &PatchParams::default(), &Patch::Merge(body))
-            .await?;
-        Ok::<(), anyhow::Error>(())
+            .await
+            .map_err(|source| MoverError::StatusPatch {
+                kind: target.kind.clone(),
+                namespace: target.namespace.clone(),
+                name: target.name.clone(),
+                source: Box::new(source),
+            })?;
+        Ok::<(), MoverError>(())
     };
     if let Err(e) = attempt.await {
         warn!(error = %e, target = %target.name, "maintenance status PATCH failed");
     }
 }
 
-/// Report a terminal failure (PATCH the failure block) and return an error so
-/// `main` exits non-zero.
-async fn terminal_failure(reporter: &StatusReporter, err: &KopiaError) -> Result<()> {
-    let update = StatusUpdate::failed(err, chrono::Utc::now());
+/// Report a terminal failure (PATCH the structured failure block) and return
+/// the typed error so `main` exits non-zero. Takes ownership: the same
+/// [`MoverError`] that built the `status.failure` block (class, stderr tail,
+/// retry hint) is what the process exits with — no stringly re-wrap.
+async fn terminal_failure(reporter: &StatusReporter, err: MoverError) -> Result<()> {
+    let update = StatusUpdate::failed_mover(&err, chrono::Utc::now());
     reporter.report(&update).await;
     error!(
-        class = %err.class(),
-        retry = err.class().is_retryable(),
+        class = %err.kopia_class(),
+        retry = err.retry_recommended(),
         "kopia operation failed terminally"
     );
-    Err(anyhow::Error::new(CloneableKopiaError(err.to_string())))
+    Err(err)
 }
-
-/// A lightweight error wrapper so we can return the failure through `anyhow`
-/// without requiring `KopiaError: Clone`.
-#[derive(Debug)]
-struct CloneableKopiaError(String);
-
-impl std::fmt::Display for CloneableKopiaError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for CloneableKopiaError {}
 
 /// Mover metrics, pushed over OTLP (when configured) before the Job exits. The
 /// Prometheus pull endpoint is irrelevant for a short-lived Job, so this only
@@ -998,12 +1051,19 @@ fn work_spec_path() -> Result<PathBuf> {
     if let Ok(env) = std::env::var(WORK_SPEC_PATH) {
         return Ok(PathBuf::from(env));
     }
-    anyhow::bail!("no work spec path: pass it as the first arg or set {WORK_SPEC_PATH}")
+    Err(MoverError::WorkSpecPathMissing)
 }
 
 fn load_work_spec(path: &PathBuf) -> Result<MoverWorkSpec> {
-    let raw = std::fs::read_to_string(path)?;
-    let spec: MoverWorkSpec = serde_json::from_str(&raw)?;
+    let raw = std::fs::read_to_string(path).map_err(|source| MoverError::WorkSpecRead {
+        path: path.clone(),
+        source,
+    })?;
+    let spec: MoverWorkSpec =
+        serde_json::from_str(&raw).map_err(|source| MoverError::WorkSpecParse {
+            path: path.clone(),
+            source,
+        })?;
     Ok(spec)
 }
 
@@ -1073,6 +1133,8 @@ impl StatusReporter {
 /// depend on the typed CRD structs (it PATCHes a merge body under `.status`).
 struct KubeStatusReporter {
     api: kube::Api<kube::api::DynamicObject>,
+    kind: String,
+    namespace: String,
     name: String,
 }
 
@@ -1080,7 +1142,12 @@ impl KubeStatusReporter {
     async fn try_new(target: &workspec::TargetRef) -> Result<Self> {
         use kube::core::{ApiResource, GroupVersionKind};
 
-        let client = kube::Client::try_default().await?;
+        let client =
+            kube::Client::try_default()
+                .await
+                .map_err(|source| MoverError::KubeClient {
+                    source: Box::new(source),
+                })?;
         let (group, version) = split_api_version(&target.api_version);
         let gvk = GroupVersionKind::gvk(&group, &version, &target.kind);
         let ar = ApiResource::from_gvk(&gvk);
@@ -1088,6 +1155,8 @@ impl KubeStatusReporter {
             kube::Api::<kube::api::DynamicObject>::namespaced_with(client, &target.namespace, &ar);
         Ok(KubeStatusReporter {
             api,
+            kind: target.kind.clone(),
+            namespace: target.namespace.clone(),
             name: target.name.clone(),
         })
     }
@@ -1097,7 +1166,13 @@ impl KubeStatusReporter {
         let body = update.as_patch_body();
         self.api
             .patch_status(&self.name, &PatchParams::default(), &Patch::Merge(&body))
-            .await?;
+            .await
+            .map_err(|source| MoverError::StatusPatch {
+                kind: self.kind.clone(),
+                namespace: self.namespace.clone(),
+                name: self.name.clone(),
+                source: Box::new(source),
+            })?;
         Ok(())
     }
 }

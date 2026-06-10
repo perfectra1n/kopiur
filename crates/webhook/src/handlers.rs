@@ -26,7 +26,8 @@ use api::snapshot::{Origin, SnapshotSpec};
 use api::snapshot_policy::SnapshotPolicySpec;
 use api::snapshot_schedule::SnapshotScheduleSpec;
 
-use crate::tenancy::{self, TenancyDecision};
+use crate::error::{AdmissionError, AdmissionResult};
+use crate::tenancy::{self, TenancyDecision, TenancyDenial};
 use json_patch::{AddOperation, Patch, PatchOperation, jsonptr::PointerBuf};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Client;
@@ -43,12 +44,18 @@ pub const SNAPSHOT_CLEANUP_FINALIZER: &str = "kopiur.home-operations.com/snapsho
 /// unexpected kind reaching us is not a reason to block the cluster). The `client`
 /// is used only for `ClusterRepository` tenancy resolution; `None` forces those
 /// checks to fail closed.
+///
+/// This is the **single deny choke point** (ADR §5.5): every handler returns
+/// `Result<AdmissionResponse, AdmissionError>`, and only this `match` turns a
+/// typed [`AdmissionError`] into `AdmissionResponse::deny` — grep for `.deny(`
+/// and this is the one production call. The denial is logged with its stable
+/// [`AdmissionError::reason`] label.
 pub async fn dispatch(
     req: &AdmissionRequest<DynamicObject>,
     client: Option<&Client>,
 ) -> AdmissionResponse {
     let base = AdmissionResponse::from(req);
-    match req.kind.kind.as_str() {
+    let result = match req.kind.kind.as_str() {
         "SnapshotPolicy" => handle_snapshot_policy(req, base, client).await,
         "Snapshot" => handle_snapshot(req, base),
         "SnapshotSchedule" => handle_snapshot_schedule(req, base),
@@ -62,7 +69,21 @@ pub async fn dispatch(
                 kind = other,
                 "admission request for unregistered kind; allowing"
             );
-            base
+            Ok(base)
+        }
+    };
+    match result {
+        Ok(resp) => resp,
+        Err(err) => {
+            tracing::info!(
+                kind = %req.kind.kind,
+                name = %req.name,
+                namespace = req.namespace.as_deref().unwrap_or(""),
+                reason = err.reason(),
+                error = %err,
+                "denying admission"
+            );
+            AdmissionResponse::from(req).deny(err.to_string())
         }
     }
 }
@@ -75,10 +96,10 @@ pub async fn dispatch(
 /// [`ObjectMeta`]) and `data` (everything else: `spec`, `status`). `apiVersion`/
 /// `kind` land in `types`. So spec lives in `obj.data["spec"]` and labels/finalizers
 /// live in `obj.metadata`, NOT in `data`.
-fn raw_object(req: &AdmissionRequest<DynamicObject>) -> Result<&DynamicObject, &'static str> {
+fn raw_object(req: &AdmissionRequest<DynamicObject>) -> AdmissionResult<&DynamicObject> {
     match &req.object {
         Some(obj) => Ok(obj),
-        None => Err("admission request carried no object to validate"),
+        None => Err(AdmissionError::MissingObject),
     }
 }
 
@@ -104,23 +125,14 @@ fn decode_old_spec<T: serde::de::DeserializeOwned>(
     decode_spec(&old.data).ok()
 }
 
-/// Join a validation-error vec into a single user-facing rejection message.
-fn join_errors(errs: &[ValidationError]) -> String {
-    errs.iter()
-        .map(|e| e.to_string())
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-/// Apply a JSON patch to a response, denying (fail closed) if serialization fails.
-fn with_patch_or_deny(resp: AdmissionResponse, ops: Vec<PatchOperation>) -> AdmissionResponse {
+/// Apply a JSON patch to a response; a serialization failure is the typed
+/// [`AdmissionError::InternalPatch`] (fail closed at the dispatch choke point).
+fn with_patch(resp: AdmissionResponse, ops: Vec<PatchOperation>) -> AdmissionResult {
     if ops.is_empty() {
-        return resp;
+        return Ok(resp);
     }
-    match resp.clone().with_patch(Patch(ops)) {
-        Ok(r) => r,
-        Err(e) => resp.deny(format!("internal error building admission patch: {e}")),
-    }
+    resp.with_patch(Patch(ops))
+        .map_err(|source| AdmissionError::InternalPatch { source })
 }
 
 fn ptr(path: &str) -> PointerBuf {
@@ -165,26 +177,24 @@ async fn handle_snapshot_policy(
     req: &AdmissionRequest<DynamicObject>,
     resp: AdmissionResponse,
     client: Option<&Client>,
-) -> AdmissionResponse {
-    let obj = match raw_object(req) {
-        Ok(o) => o,
-        Err(m) => return resp.deny(m),
-    };
-    let spec: SnapshotPolicySpec = match decode_spec(&obj.data) {
-        Ok(s) => s,
-        Err(e) => return resp.deny(format!("failed to decode SnapshotPolicy spec: {e}")),
-    };
+) -> AdmissionResult {
+    let obj = raw_object(req)?;
+    let spec: SnapshotPolicySpec =
+        decode_spec(&obj.data).map_err(|source| AdmissionError::SpecDecode {
+            kind: "SnapshotPolicy",
+            source,
+        })?;
 
     let errs = api::validate::validate_backup_config(&spec);
     if !errs.is_empty() {
-        return resp.deny(join_errors(&errs));
+        return Err(AdmissionError::Invalid(errs));
     }
 
     // ClusterRepository tenancy (fail closed). namespace comes from the request.
-    if let TenancyDecision::Deny(msg) =
+    if let TenancyDecision::Deny(denial) =
         tenancy_for(&spec.repository, req.namespace.as_deref(), client).await
     {
-        return resp.deny(msg);
+        return Err(denial.into());
     }
 
     // Identity-collision detection (ADR-0005 §6): reject a SnapshotPolicy whose
@@ -204,17 +214,16 @@ async fn handle_snapshot_policy(
         )
         .await
         {
-            return resp.deny(
+            return Err(AdmissionError::Invalid(vec![
                 ValidationError::IdentityCollision {
                     identity: collision.identity,
                     conflict: collision.conflict,
-                }
-                .to_string(),
-            );
+                },
+            ]));
         }
     }
 
-    resp
+    Ok(resp)
 }
 
 // --- Snapshot -----------------------------------------------------------------
@@ -222,21 +231,19 @@ async fn handle_snapshot_policy(
 fn handle_snapshot(
     req: &AdmissionRequest<DynamicObject>,
     resp: AdmissionResponse,
-) -> AdmissionResponse {
-    let obj = match raw_object(req) {
-        Ok(o) => o,
-        Err(m) => return resp.deny(m),
-    };
-    let spec: SnapshotSpec = match decode_spec(&obj.data) {
-        Ok(s) => s,
-        Err(e) => return resp.deny(format!("failed to decode Snapshot spec: {e}")),
-    };
+) -> AdmissionResult {
+    let obj = raw_object(req)?;
+    let spec: SnapshotSpec =
+        decode_spec(&obj.data).map_err(|source| AdmissionError::SpecDecode {
+            kind: "Snapshot",
+            source,
+        })?;
 
     let origin = backup_origin(&obj.metadata, &obj.data);
 
     let errs = api::validate::validate_backup(&spec, origin);
     if !errs.is_empty() {
-        return resp.deny(join_errors(&errs));
+        return Err(AdmissionError::Invalid(errs));
     }
 
     // Manual backups carrying a policyRef to a ClusterRepository are not expressible
@@ -266,7 +273,7 @@ fn handle_snapshot(
     // Every Snapshot carries the snapshot-cleanup finalizer (ADR §4.5).
     ensure_finalizer_ops(&obj.metadata, &mut ops);
 
-    with_patch_or_deny(resp, ops)
+    with_patch(resp, ops)
 }
 
 /// Resolve a `Snapshot`'s origin from the `kopiur.home-operations.com/origin` label (canonical) or
@@ -294,20 +301,18 @@ fn backup_origin(meta: &ObjectMeta, data: &Value) -> Origin {
 fn handle_snapshot_schedule(
     req: &AdmissionRequest<DynamicObject>,
     resp: AdmissionResponse,
-) -> AdmissionResponse {
-    let obj = match raw_object(req) {
-        Ok(o) => o,
-        Err(m) => return resp.deny(m),
-    };
+) -> AdmissionResult {
+    let obj = raw_object(req)?;
     let data = &obj.data;
-    let spec: SnapshotScheduleSpec = match decode_spec(data) {
-        Ok(s) => s,
-        Err(e) => return resp.deny(format!("failed to decode SnapshotSchedule spec: {e}")),
-    };
+    let spec: SnapshotScheduleSpec =
+        decode_spec(data).map_err(|source| AdmissionError::SpecDecode {
+            kind: "SnapshotSchedule",
+            source,
+        })?;
 
     let errs = api::validate::validate_backup_schedule(&spec);
     if !errs.is_empty() {
-        return resp.deny(join_errors(&errs));
+        return Err(AdmissionError::Invalid(errs));
     }
 
     // No spec-mutating defaulting here: `schedule.runOnCreate` (false) and
@@ -315,7 +320,7 @@ fn handle_snapshot_schedule(
     // CRD schema (ADR-0005 §1), so the apiserver materializes them. The webhook writes
     // no user spec (the status-only-write invariant, ADR-0005 §14(d)) — a write-back
     // into spec makes Argo/Flux perpetually `OutOfSync`.
-    resp
+    Ok(resp)
 }
 
 // --- Restore ----------------------------------------------------------------
@@ -324,29 +329,27 @@ async fn handle_restore(
     req: &AdmissionRequest<DynamicObject>,
     resp: AdmissionResponse,
     client: Option<&Client>,
-) -> AdmissionResponse {
-    let obj = match raw_object(req) {
-        Ok(o) => o,
-        Err(m) => return resp.deny(m),
-    };
-    let spec: RestoreSpec = match decode_spec(&obj.data) {
-        Ok(s) => s,
-        Err(e) => return resp.deny(format!("failed to decode Restore spec: {e}")),
-    };
+) -> AdmissionResult {
+    let obj = raw_object(req)?;
+    let spec: RestoreSpec =
+        decode_spec(&obj.data).map_err(|source| AdmissionError::SpecDecode {
+            kind: "Restore",
+            source,
+        })?;
 
     let errs = api::validate::validate_restore_spec(&spec);
     if !errs.is_empty() {
-        return resp.deny(join_errors(&errs));
+        return Err(AdmissionError::Invalid(errs));
     }
 
     if let Some(repo) = &spec.repository
-        && let TenancyDecision::Deny(msg) =
+        && let TenancyDecision::Deny(denial) =
             tenancy_for(repo, req.namespace.as_deref(), client).await
     {
-        return resp.deny(msg);
+        return Err(denial.into());
     }
 
-    resp
+    Ok(resp)
 }
 
 // --- Maintenance ------------------------------------------------------------
@@ -355,28 +358,26 @@ async fn handle_maintenance(
     req: &AdmissionRequest<DynamicObject>,
     resp: AdmissionResponse,
     client: Option<&Client>,
-) -> AdmissionResponse {
-    let obj = match raw_object(req) {
-        Ok(o) => o,
-        Err(m) => return resp.deny(m),
-    };
-    let spec: MaintenanceSpec = match decode_spec(&obj.data) {
-        Ok(s) => s,
-        Err(e) => return resp.deny(format!("failed to decode Maintenance spec: {e}")),
-    };
+) -> AdmissionResult {
+    let obj = raw_object(req)?;
+    let spec: MaintenanceSpec =
+        decode_spec(&obj.data).map_err(|source| AdmissionError::SpecDecode {
+            kind: "Maintenance",
+            source,
+        })?;
 
     let errs = api::validate::validate_maintenance(&spec);
     if !errs.is_empty() {
-        return resp.deny(join_errors(&errs));
+        return Err(AdmissionError::Invalid(errs));
     }
 
-    if let TenancyDecision::Deny(msg) =
+    if let TenancyDecision::Deny(denial) =
         tenancy_for(&spec.repository, req.namespace.as_deref(), client).await
     {
-        return resp.deny(msg);
+        return Err(denial.into());
     }
 
-    resp
+    Ok(resp)
 }
 
 // --- RepositoryReplication --------------------------------------------------
@@ -385,26 +386,24 @@ async fn handle_repository_replication(
     req: &AdmissionRequest<DynamicObject>,
     resp: AdmissionResponse,
     client: Option<&Client>,
-) -> AdmissionResponse {
-    let obj = match raw_object(req) {
-        Ok(o) => o,
-        Err(m) => return resp.deny(m),
-    };
-    let spec: RepositoryReplicationSpec = match decode_spec(&obj.data) {
-        Ok(s) => s,
-        Err(e) => return resp.deny(format!("failed to decode RepositoryReplication spec: {e}")),
-    };
+) -> AdmissionResult {
+    let obj = raw_object(req)?;
+    let spec: RepositoryReplicationSpec =
+        decode_spec(&obj.data).map_err(|source| AdmissionError::SpecDecode {
+            kind: "RepositoryReplication",
+            source,
+        })?;
 
     let errs = api::validate::validate_repository_replication(&spec);
     if !errs.is_empty() {
-        return resp.deny(join_errors(&errs));
+        return Err(AdmissionError::Invalid(errs));
     }
 
     // Tenancy: a ClusterRepository sourceRef is gated against allowedNamespaces.
-    if let TenancyDecision::Deny(msg) =
+    if let TenancyDecision::Deny(denial) =
         tenancy_for(&spec.source_ref, req.namespace.as_deref(), client).await
     {
-        return resp.deny(msg);
+        return Err(denial.into());
     }
 
     // §13(d): the destination must differ from the source's backend (no self-mirror).
@@ -416,15 +415,14 @@ async fn handle_repository_replication(
             resolve_source_backend(client, &spec.source_ref, req.namespace.as_deref()).await
         && !api::validate::replication_destination_differs(&source_backend, &spec.destination)
     {
-        return resp.deny(
+        return Err(AdmissionError::Invalid(vec![
             ValidationError::ReplicationDestinationSameAsSource {
                 backend: spec.destination.kind_str().to_string(),
-            }
-            .to_string(),
-        );
+            },
+        ]));
     }
 
-    resp
+    Ok(resp)
 }
 
 /// Resolve a replication source's backend from its `RepositoryRef` (a namespaced
@@ -462,15 +460,13 @@ async fn resolve_source_backend(
 fn handle_cluster_repository(
     req: &AdmissionRequest<DynamicObject>,
     resp: AdmissionResponse,
-) -> AdmissionResponse {
-    let obj = match raw_object(req) {
-        Ok(o) => o,
-        Err(m) => return resp.deny(m),
-    };
-    let spec: ClusterRepositorySpec = match decode_spec(&obj.data) {
-        Ok(s) => s,
-        Err(e) => return resp.deny(format!("failed to decode ClusterRepository spec: {e}")),
-    };
+) -> AdmissionResult {
+    let obj = raw_object(req)?;
+    let spec: ClusterRepositorySpec =
+        decode_spec(&obj.data).map_err(|source| AdmissionError::SpecDecode {
+            kind: "ClusterRepository",
+            source,
+        })?;
 
     let mut errs = api::validate::validate_cluster_repository(&spec);
     // Create-time immutability (ADR-0005 §7): on UPDATE, reject changes to
@@ -484,9 +480,9 @@ fn handle_cluster_repository(
         ));
     }
     if !errs.is_empty() {
-        return resp.deny(join_errors(&errs));
+        return Err(AdmissionError::Invalid(errs));
     }
-    resp
+    Ok(resp)
 }
 
 // --- Repository -------------------------------------------------------------
@@ -494,15 +490,13 @@ fn handle_cluster_repository(
 fn handle_repository(
     req: &AdmissionRequest<DynamicObject>,
     resp: AdmissionResponse,
-) -> AdmissionResponse {
-    let obj = match raw_object(req) {
-        Ok(o) => o,
-        Err(m) => return resp.deny(m),
-    };
-    let spec: RepositorySpec = match decode_spec(&obj.data) {
-        Ok(s) => s,
-        Err(e) => return resp.deny(format!("failed to decode Repository spec: {e}")),
-    };
+) -> AdmissionResult {
+    let obj = raw_object(req)?;
+    let spec: RepositorySpec =
+        decode_spec(&obj.data).map_err(|source| AdmissionError::SpecDecode {
+            kind: "Repository",
+            source,
+        })?;
 
     let mut errs = api::validate::validate_repository(&spec);
     // Create-time immutability (ADR-0005 §7), UPDATE-only.
@@ -512,9 +506,9 @@ fn handle_repository(
         errs.extend(api::validate::validate_repository_immutability(&old, &spec));
     }
     if !errs.is_empty() {
-        return resp.deny(join_errors(&errs));
+        return Err(AdmissionError::Invalid(errs));
     }
-    resp
+    Ok(resp)
 }
 
 // --- shared tenancy adapter -------------------------------------------------
@@ -538,11 +532,7 @@ async fn tenancy_for(
             // validate_repository_ref already rejected a set namespace; the consumer's
             // own namespace is what the gate is evaluated against.
             let Some(ns) = consumer_namespace else {
-                return TenancyDecision::Deny(
-                    "consumer namespace was not provided in the admission request; cannot \
-                     evaluate ClusterRepository tenancy (fail-closed)"
-                        .to_string(),
-                );
+                return TenancyDecision::Deny(TenancyDenial::NoConsumerNamespace);
             };
             tenancy::resolve_tenancy_inputs(client, ns, &repo.name).await
         }

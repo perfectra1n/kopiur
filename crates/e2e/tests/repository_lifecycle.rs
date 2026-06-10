@@ -15,7 +15,10 @@ use kube::api::{DeleteParams, PostParams};
 
 use k8s_openapi::api::batch::v1::Job;
 use kopiur_api::{Repository, Restore, Snapshot, SnapshotPolicy};
-use kopiur_e2e::{E2E_NAMESPACE, Need, World};
+use kopiur_e2e::{
+    E2E_NAMESPACE, Need, World, default_timeout, poll_interval, scrape_controller_metrics,
+    wait_until,
+};
 
 /// `Restore.spec.target.populator: {}` (ADR-0005 §9): the explicit passive-populator
 /// target form is accepted and threads through to a restore mover Job. (The empty
@@ -159,6 +162,31 @@ async fn readonly_repo_refuses_backup_but_allows_restore() {
         Some("Failed"),
         "a refused backup against a ReadOnly repository must be phase Failed"
     );
+
+    // The refusal must also be counted: `kopiur_snapshot_refusals_total` with
+    // reason=RepositoryReadOnly is the only aggregate signal (the reconcile
+    // returns Ok, so reconcile_errors never sees it). Scraped through the
+    // Service proxy like the observability scenarios.
+    wait_until(
+        "kopiur_snapshot_refusals_total{reason=RepositoryReadOnly} >= 1",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let text = scrape_controller_metrics(&client).await.unwrap_or_default();
+            let found = text.lines().any(|l| {
+                l.starts_with("kopiur_snapshot_refusals_total")
+                    && l.contains("reason=\"RepositoryReadOnly\"")
+                    && l.contains("name=\"e2e-ro-backup\"")
+                    && l.split_whitespace()
+                        .last()
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .is_some_and(|v| v >= 1.0)
+            });
+            Ok(found.then_some(()))
+        },
+    )
+    .await
+    .expect("the ReadOnly refusal must increment kopiur_snapshot_refusals_total");
 
     // A Restore against the ReadOnly repo WORKS (serves reads): Completed.
     restores

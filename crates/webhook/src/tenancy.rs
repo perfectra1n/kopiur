@@ -34,24 +34,106 @@ use k8s_openapi::api::core::v1::Namespace;
 use kube::{Api, Client};
 use std::collections::BTreeMap;
 
-/// The outcome of a tenancy evaluation. `Deny` carries a user-facing reason that is
-/// surfaced verbatim in the `kubectl apply` rejection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why a `ClusterRepository` tenancy check rejected a consumer reference. One
+/// typed variant per denial mode (ADR §5.5) — each `Display` is the exact
+/// user-facing reason surfaced verbatim in the `kubectl apply` rejection, and
+/// the fail-closed resolver errors keep their `kube::Error` source.
+#[derive(Debug, thiserror::Error)]
+pub enum TenancyDenial {
+    /// The consumer namespace is simply not in the gate (list miss, `All(false)`,
+    /// or an unsatisfied selector).
+    #[error(
+        "namespace {consumer_namespace:?} is not in the allowedNamespaces of ClusterRepository \
+         {repo_name:?}"
+    )]
+    NotAllowed {
+        /// The consumer CR's namespace.
+        consumer_namespace: String,
+        /// The referenced `ClusterRepository`.
+        repo_name: String,
+    },
+
+    /// A `Selector` gate could not be evaluated because the namespace's labels
+    /// were unresolvable (fail-closed).
+    #[error(
+        "ClusterRepository {repo_name:?} gates namespace {consumer_namespace:?} by a label \
+         selector, but the namespace's labels could not be resolved; denying (fail-closed)"
+    )]
+    SelectorLabelsUnresolved {
+        /// The consumer CR's namespace.
+        consumer_namespace: String,
+        /// The referenced `ClusterRepository`.
+        repo_name: String,
+    },
+
+    /// The webhook has no Kubernetes client to resolve the gate (fail-closed).
+    #[error(
+        "cannot verify ClusterRepository {repo_name:?} tenancy for namespace \
+         {consumer_namespace:?}: the webhook has no Kubernetes client; denying (fail-closed)"
+    )]
+    NoClient {
+        /// The consumer CR's namespace.
+        consumer_namespace: String,
+        /// The referenced `ClusterRepository`.
+        repo_name: String,
+    },
+
+    /// The referenced `ClusterRepository` could not be fetched (fail-closed).
+    #[error(
+        "cannot resolve ClusterRepository {repo_name:?} referenced from namespace \
+         {consumer_namespace:?}: {source}; denying (fail-closed)"
+    )]
+    RepoUnresolvable {
+        /// The consumer CR's namespace.
+        consumer_namespace: String,
+        /// The referenced `ClusterRepository`.
+        repo_name: String,
+        /// The kube fetch failure.
+        #[source]
+        source: Box<kube::Error>,
+    },
+
+    /// The consumer namespace's labels could not be fetched for a `Selector`
+    /// gate (fail-closed).
+    #[error(
+        "cannot resolve labels of namespace {consumer_namespace:?} to evaluate ClusterRepository \
+         {repo_name:?} selector: {source}; denying (fail-closed)"
+    )]
+    NamespaceLabelsUnresolvable {
+        /// The consumer CR's namespace.
+        consumer_namespace: String,
+        /// The referenced `ClusterRepository`.
+        repo_name: String,
+        /// The kube fetch failure.
+        #[source]
+        source: Box<kube::Error>,
+    },
+
+    /// The admission request carried no consumer namespace at all (fail-closed).
+    #[error(
+        "consumer namespace was not provided in the admission request; cannot evaluate \
+         ClusterRepository tenancy (fail-closed)"
+    )]
+    NoConsumerNamespace,
+}
+
+/// The outcome of a tenancy evaluation. `Deny` carries the typed reason whose
+/// `Display` is surfaced verbatim in the `kubectl apply` rejection.
+#[derive(Debug)]
 pub enum TenancyDecision {
     /// The consumer namespace is permitted to reference the `ClusterRepository`.
     Allow,
-    /// The reference is rejected; the string is the user-facing reason surfaced
-    /// verbatim in the `kubectl apply` rejection.
-    Deny(String),
+    /// The reference is rejected for the given typed reason.
+    Deny(TenancyDenial),
 }
 
 impl TenancyDecision {
     /// `true` iff this is [`TenancyDecision::Allow`].
     ///
     /// ```
-    /// use kopiur_webhook::tenancy::TenancyDecision;
+    /// use kopiur_webhook::tenancy::{TenancyDecision, TenancyDenial};
     /// assert!(TenancyDecision::Allow.is_allow());
-    /// assert!(!TenancyDecision::Deny("not allowed".into()).is_allow());
+    /// assert!(!TenancyDecision::Deny(TenancyDenial::NoConsumerNamespace).is_allow());
     /// ```
     pub fn is_allow(&self) -> bool {
         matches!(self, TenancyDecision::Allow)
@@ -90,11 +172,10 @@ pub fn evaluate_tenancy(
         }
         AllowedNamespaces::Selector(sel) => {
             let Some(labels) = labels else {
-                return TenancyDecision::Deny(format!(
-                    "ClusterRepository {repo_name:?} gates namespace {consumer_namespace:?} by a \
-                     label selector, but the namespace's labels could not be resolved; denying \
-                     (fail-closed)"
-                ));
+                return TenancyDecision::Deny(TenancyDenial::SelectorLabelsUnresolved {
+                    consumer_namespace: consumer_namespace.to_string(),
+                    repo_name: repo_name.to_string(),
+                });
             };
             // matchLabels: every (k, v) must be present and equal.
             let match_labels = sel.match_labels.clone().unwrap_or_default();
@@ -118,10 +199,10 @@ pub fn evaluate_tenancy(
 }
 
 fn deny_not_allowed(consumer_namespace: &str, repo_name: &str) -> TenancyDecision {
-    TenancyDecision::Deny(format!(
-        "namespace {consumer_namespace:?} is not in the allowedNamespaces of ClusterRepository \
-         {repo_name:?}"
-    ))
+    TenancyDecision::Deny(TenancyDenial::NotAllowed {
+        consumer_namespace: consumer_namespace.to_string(),
+        repo_name: repo_name.to_string(),
+    })
 }
 
 /// Evaluate a single `matchExpressions` term against a label set, failing closed on
@@ -156,20 +237,21 @@ pub async fn resolve_tenancy_inputs(
     repo_name: &str,
 ) -> TenancyDecision {
     let Some(client) = client else {
-        return TenancyDecision::Deny(format!(
-            "cannot verify ClusterRepository {repo_name:?} tenancy for namespace \
-             {consumer_namespace:?}: the webhook has no Kubernetes client; denying (fail-closed)"
-        ));
+        return TenancyDecision::Deny(TenancyDenial::NoClient {
+            consumer_namespace: consumer_namespace.to_string(),
+            repo_name: repo_name.to_string(),
+        });
     };
 
     let crepos: Api<ClusterRepository> = Api::all(client.clone());
     let crepo = match crepos.get(repo_name).await {
         Ok(c) => c,
         Err(e) => {
-            return TenancyDecision::Deny(format!(
-                "cannot resolve ClusterRepository {repo_name:?} referenced from namespace \
-                 {consumer_namespace:?}: {e}; denying (fail-closed)"
-            ));
+            return TenancyDecision::Deny(TenancyDenial::RepoUnresolvable {
+                consumer_namespace: consumer_namespace.to_string(),
+                repo_name: repo_name.to_string(),
+                source: Box::new(e),
+            });
         }
     };
 
@@ -182,10 +264,11 @@ pub async fn resolve_tenancy_inputs(
             match nss.get(consumer_namespace).await {
                 Ok(ns) => Some(ns.metadata.labels.clone().unwrap_or_default()),
                 Err(e) => {
-                    return TenancyDecision::Deny(format!(
-                        "cannot resolve labels of namespace {consumer_namespace:?} to evaluate \
-                         ClusterRepository {repo_name:?} selector: {e}; denying (fail-closed)"
-                    ));
+                    return TenancyDecision::Deny(TenancyDenial::NamespaceLabelsUnresolvable {
+                        consumer_namespace: consumer_namespace.to_string(),
+                        repo_name: repo_name.to_string(),
+                        source: Box::new(e),
+                    });
                 }
             }
         }
@@ -258,8 +341,49 @@ mod tests {
         let d = evaluate_tenancy("ns", "repo", &allowed, None);
         assert!(!d.is_allow());
         match d {
-            TenancyDecision::Deny(msg) => assert!(msg.contains("fail-closed")),
+            TenancyDecision::Deny(denial) => {
+                assert!(matches!(
+                    denial,
+                    TenancyDenial::SelectorLabelsUnresolved { .. }
+                ));
+                assert!(denial.to_string().contains("fail-closed"));
+            }
             TenancyDecision::Allow => unreachable!(),
+        }
+    }
+
+    // --- TenancyDenial Display: the deny text reaches the user verbatim in the
+    // `kubectl apply` rejection, so each variant's message is pinned here — the
+    // typed refactor must not drift the historical strings. ---
+
+    #[test]
+    fn not_allowed_message_is_byte_identical_to_the_historical_string() {
+        let d = TenancyDenial::NotAllowed {
+            consumer_namespace: "evil".into(),
+            repo_name: "shared".into(),
+        };
+        assert_eq!(
+            d.to_string(),
+            "namespace \"evil\" is not in the allowedNamespaces of ClusterRepository \"shared\""
+        );
+    }
+
+    #[test]
+    fn every_fail_closed_variant_says_so() {
+        let denials = [
+            TenancyDenial::SelectorLabelsUnresolved {
+                consumer_namespace: "ns".into(),
+                repo_name: "repo".into(),
+            },
+            TenancyDenial::NoClient {
+                consumer_namespace: "ns".into(),
+                repo_name: "repo".into(),
+            },
+            TenancyDenial::NoConsumerNamespace,
+        ];
+        for d in denials {
+            let msg = d.to_string();
+            assert!(msg.contains("fail-closed"), "{msg}");
         }
     }
 

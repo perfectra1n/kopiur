@@ -1,14 +1,40 @@
 use k8s_openapi::api::core::v1::ObjectReference;
 use kube::Resource;
-use kube::runtime::events::{Event, EventType};
+use kube::runtime::events::{Event, EventType, Recorder};
 
 use kopiur_kopia::KopiaErrorClass;
 
 use crate::consts::{
-    BOOTSTRAP_JOB_FAILED_REASON, CHECK_BACKEND_ACTION, CHECK_CREDENTIALS_ACTION,
-    CHECK_PERMISSIONS_ACTION, MISSING_CREDENTIALS_REASON,
+    BOOTSTRAP_JOB_FAILED_REASON, CHECK_API_SERVER_ACTION, CHECK_BACKEND_ACTION,
+    CHECK_CREDENTIALS_ACTION, CHECK_PERMISSIONS_ACTION, CHECK_REFERENCES_ACTION,
+    CHECK_WEBHOOK_CONFIGURATION_ACTION, FIX_SCHEDULE_ACTION, FIX_SPEC_ACTION,
+    INVALID_SCHEDULE_REASON, INVALID_SPEC_REASON, INVARIANT_VIOLATED_REASON, KUBE_API_ERROR_REASON,
+    MISSING_CREDENTIALS_REASON, MISSING_DEPENDENCY_REASON, REPORT_ISSUE_ACTION,
+    SERIALIZATION_FAILED_REASON, WEBHOOK_SETUP_FAILED_REASON,
 };
 use crate::context::Context;
+use crate::error::Error;
+
+/// `obj.object_ref(&())` with `resource_version` stripped — the reference every
+/// Event publish must use as `regarding`.
+///
+/// The kube-runtime Recorder aggregates repeats of the same Event (within its
+/// dedup TTL) into one object with a climbing `series.count`, keyed in part on
+/// the `regarding` reference. The cache key's `Hash` ignores
+/// `resource_version`, but its derived `PartialEq` compares the full
+/// `ObjectReference` — so a reference carrying the object's current (churning)
+/// `resourceVersion` mints a brand-new Event object on every repeat instead of
+/// aggregating the series. Stripping it here keeps repeated identical failures
+/// at exactly one Event object.
+pub(crate) fn event_ref<K>(obj: &K) -> ObjectReference
+where
+    K: Resource<DynamicType = ()>,
+{
+    ObjectReference {
+        resource_version: None,
+        ..obj.object_ref(&())
+    }
+}
 
 /// Emit a `Warning` Event on `obj` so an actionable message is visible via
 /// `kubectl describe`/`get events`, not only in the controller log. Best-effort: a
@@ -22,7 +48,7 @@ pub async fn publish_warning_event<K>(
 ) where
     K: Resource<DynamicType = ()>,
 {
-    let regarding = obj.object_ref(&());
+    let regarding = event_ref(obj);
     if let Err(e) = ctx
         .recorder
         .publish(
@@ -149,10 +175,137 @@ pub(crate) fn backend_failure_event(
 /// the controller's in-process kopia ops, and (by default) the mover pods' UID.
 /// Surfaced in the `PermissionDenied` remediation hint so it names the real UID
 /// rather than a hardcoded constant.
-fn operator_uid() -> u32 {
+pub(crate) fn operator_uid() -> u32 {
     // SAFETY: geteuid() is always-succeeds and thread-safe; it has no
     // preconditions and cannot fail.
     unsafe { libc::geteuid() }
+}
+
+/// A pre-composed Warning Event for a failed reconcile: the `(reason, action,
+/// note)` triple [`error_policy_for`](crate::error::error_policy_for) publishes
+/// on the failing object. The note is already clamped to
+/// [`EVENT_NOTE_MAX_BYTES`].
+pub(crate) struct FailureEvent {
+    /// Machine-readable cause (a kopia class label or a `*_REASON` const).
+    pub reason: &'static str,
+    /// The remediation hint (a `*_ACTION` const).
+    pub action: &'static str,
+    /// The human note: what failed, why, and how to fix it.
+    pub note: String,
+}
+
+/// Map a reconcile [`Error`] to the Warning Event surfaced on the failing
+/// object. Exhaustive over `Error` — **no `_ =>` arm** — so a new error variant
+/// cannot compile until it is given an Event decision (ADR §5.5), exactly like
+/// `Error::class()` forces a requeue decision.
+///
+/// A kopia failure reuses the per-class remediation machinery
+/// ([`backend_failure_event`]) so its Event is identical in shape to the
+/// bootstrap-failure ones (reason = the kopia class). Every other variant pairs
+/// the error's own message with a short, stable remediation hint. `uid` is the
+/// operator's effective UID (see [`operator_uid`]), forwarded to the
+/// `PermissionDenied` hint.
+pub(crate) fn reconcile_failure_event(err: &Error, uid: u32) -> FailureEvent {
+    let (reason, action, note): (&'static str, &'static str, String) = match err {
+        Error::Kopia(e) => {
+            let class = e.class();
+            let (action, note) = backend_failure_event(class, &e.to_string(), uid);
+            (class.as_str(), action, note)
+        }
+        Error::Kube(_) => (
+            KUBE_API_ERROR_REASON,
+            CHECK_API_SERVER_ACTION,
+            format!(
+                "{err}. This is usually a transient API-server problem and the reconcile retries \
+                 automatically; if it persists, check the API server's health and the operator's \
+                 RBAC."
+            ),
+        ),
+        Error::Validation(_) => (
+            INVALID_SPEC_REASON,
+            FIX_SPEC_ACTION,
+            format!(
+                "{err}. The object will not reconcile until the spec is corrected — fix the \
+                 field(s) named above and re-apply."
+            ),
+        ),
+        Error::MissingDependency(_) => (
+            MISSING_DEPENDENCY_REASON,
+            CHECK_REFERENCES_ACTION,
+            format!(
+                "{err} — create it, or fix the reference in this object's spec; the reconcile \
+                 retries automatically."
+            ),
+        ),
+        Error::Serialization(_) => (
+            SERIALIZATION_FAILED_REASON,
+            REPORT_ISSUE_ACTION,
+            format!(
+                "{err}. This is likely a bug in kopiur — please report it together with this \
+                 object's YAML."
+            ),
+        ),
+        Error::InvalidSchedule(_) => (
+            INVALID_SCHEDULE_REASON,
+            FIX_SCHEDULE_ACTION,
+            format!(
+                "{err}. Fix the cron expression in this object's spec (five fields, e.g. \
+                 `0 3 * * *`)."
+            ),
+        ),
+        Error::Invariant(_) => (
+            INVARIANT_VIOLATED_REASON,
+            REPORT_ISSUE_ACTION,
+            format!(
+                "{err}. This is likely a bug in kopiur — please report it together with this \
+                 object's YAML."
+            ),
+        ),
+        Error::WebhookSetup(_) | Error::WebhookCert(_) => (
+            WEBHOOK_SETUP_FAILED_REASON,
+            CHECK_WEBHOOK_CONFIGURATION_ACTION,
+            format!(
+                "{err}. Admission stays untrusted until TLS setup succeeds (it is retried); check \
+                 the webhook configuration/namespace and the operator's RBAC on Secrets and \
+                 webhook configurations."
+            ),
+        ),
+    };
+    FailureEvent {
+        reason,
+        action,
+        note: truncate_for_note(&note, EVENT_NOTE_MAX_BYTES),
+    }
+}
+
+/// Publish a [`FailureEvent`] as a Warning on `regarding`. Owned arguments so
+/// the sync `error_policy` can fire-and-forget it on the runtime (`tokio::spawn`).
+/// Best-effort: a failed publish is logged, never fatal — a dropped Event must
+/// not change requeue behavior.
+pub(crate) async fn publish_failure(
+    recorder: Recorder,
+    regarding: ObjectReference,
+    event: FailureEvent,
+) {
+    if let Err(e) = recorder
+        .publish(
+            &Event {
+                type_: EventType::Warning,
+                reason: event.reason.to_string(),
+                note: Some(event.note),
+                action: event.action.to_string(),
+                secondary: None,
+            },
+            &regarding,
+        )
+        .await
+    {
+        tracing::warn!(
+            error = %e,
+            reason = event.reason,
+            "failed to publish reconcile-failure Warning event"
+        );
+    }
 }
 
 /// Publish a Warning Event on `regarding` with a pre-composed `(reason, action,
@@ -276,6 +429,51 @@ impl BootstrapFailure {
                 .await;
             }
         }
+    }
+}
+
+/// The terminal outcome of a repository bootstrap Job, derived purely from the
+/// `(result, job state)` pair. Exhaustive (ADR §5.5): the success arm **owns**
+/// the [`BootstrapResult`], so the reconciler binds it by `match` instead of
+/// asserting an invariant with `.expect()` — an unreadable-success state is
+/// unrepresentable. Shared by the `Repository` and `ClusterRepository`
+/// finalizers.
+pub enum BootstrapOutcome {
+    /// The Job completed but the result ConfigMap is not readable yet (a
+    /// write/propagation race) — requeue briefly rather than guessing. A truly
+    /// result-less Job stays terminal-`Failed` on the next pass.
+    ResultPending,
+    /// A terminal, typed failure (kopia rejection or a result-less failed Job).
+    Failed(BootstrapFailure),
+    /// The bootstrap succeeded; carries the mover's result.
+    Succeeded(Box<kopiur_mover::bootstrap::BootstrapResult>),
+}
+
+/// Classify a bootstrap Job's `(result, job_succeeded)` into a
+/// [`BootstrapOutcome`]. Pure, so the four-way mapping is unit-tested.
+pub fn bootstrap_outcome(
+    result: Option<kopiur_mover::bootstrap::BootstrapResult>,
+    job_succeeded: bool,
+    job_name: &str,
+) -> BootstrapOutcome {
+    match result {
+        None if job_succeeded => BootstrapOutcome::ResultPending,
+        None => BootstrapOutcome::Failed(BootstrapFailure::JobFailedWithoutResult {
+            job_name: job_name.to_string(),
+        }),
+        Some(r) if !r.success => BootstrapOutcome::Failed(BootstrapFailure::Backend {
+            class: r
+                .failure
+                .as_ref()
+                .map(|f| KopiaErrorClass::from_label(&f.kopia_error_class))
+                .unwrap_or(KopiaErrorClass::Unknown),
+            message: r
+                .failure
+                .as_ref()
+                .map(|f| f.message.clone())
+                .unwrap_or_else(|| "repository bootstrap failed".to_string()),
+        }),
+        Some(r) => BootstrapOutcome::Succeeded(Box::new(r)),
     }
 }
 

@@ -172,6 +172,43 @@ pub const CHECK_PERMISSIONS_ACTION: &str = "CheckPermissions";
 /// `action` for any other backend failure: check the backend configuration.
 pub const CHECK_BACKEND_ACTION: &str = "CheckBackend";
 
+// Every reconcile error is surfaced as a Warning Event on the failing object
+// (via `error_policy_for` → `io::reconcile_failure_event`), so a failure is
+// visible in `kubectl get events`/`describe` for **every** CRD kind, not only
+// the ones with bespoke in-reconcile publishes. A kopia failure reuses the
+// kopia class as its `reason` (see `backend_failure_event`); the non-kopia
+// `Error` variants get the reasons/actions below:
+
+/// Event `reason` when a reconcile failed on a Kubernetes API call.
+pub const KUBE_API_ERROR_REASON: &str = "KubeApiError";
+/// `action` for a failed Kubernetes API call: check API-server health and the
+/// controller's RBAC.
+pub const CHECK_API_SERVER_ACTION: &str = "CheckApiServer";
+/// Event `reason` when defensive re-validation rejected the object's spec.
+pub const INVALID_SPEC_REASON: &str = "InvalidSpec";
+/// `action` for a spec that failed validation: the user must fix the spec.
+pub const FIX_SPEC_ACTION: &str = "FixSpec";
+/// Event `reason` when a referenced object (Repository, SnapshotPolicy, …) was
+/// not found.
+pub const MISSING_DEPENDENCY_REASON: &str = "MissingDependency";
+/// `action` for a missing dependency: create it or fix the reference.
+pub const CHECK_REFERENCES_ACTION: &str = "CheckReferences";
+/// Event `reason` when JSON (de)serialization of a spec/status failed.
+pub const SERIALIZATION_FAILED_REASON: &str = "SerializationFailed";
+/// `action` for failures that indicate a kopiur bug (serialization, violated
+/// invariants): report the issue.
+pub const REPORT_ISSUE_ACTION: &str = "ReportIssue";
+/// Event `reason` when a cron expression failed to parse at scheduling time.
+pub const INVALID_SCHEDULE_REASON: &str = "InvalidSchedule";
+/// `action` for an unparseable cron expression: fix the schedule in the spec.
+pub const FIX_SCHEDULE_ACTION: &str = "FixSchedule";
+/// Event `reason` when an object lacked a field the reconciler requires.
+pub const INVARIANT_VIOLATED_REASON: &str = "InvariantViolated";
+/// Event `reason` when self-managed webhook TLS setup failed.
+pub const WEBHOOK_SETUP_FAILED_REASON: &str = "WebhookSetupFailed";
+/// `action` for a webhook TLS setup failure: check the webhook configuration.
+pub const CHECK_WEBHOOK_CONFIGURATION_ACTION: &str = "CheckWebhookConfiguration";
+
 /// Annotation the controller stamps on the self-managed webhook TLS Secret
 /// recording the serving leaf's `notAfter` as a Unix timestamp (seconds). Read
 /// back to decide leaf rotation without parsing the certificate

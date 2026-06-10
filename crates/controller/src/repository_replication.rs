@@ -454,11 +454,11 @@ async fn patch_ready_if_changed(
 
 /// `error_policy` for the `RepositoryReplication` controller.
 pub fn error_policy(
-    _obj: std::sync::Arc<RepositoryReplication>,
+    obj: std::sync::Arc<RepositoryReplication>,
     err: &Error,
     ctx: std::sync::Arc<Context>,
 ) -> Action {
-    error_policy_for("RepositoryReplication", err, &ctx)
+    error_policy_for("RepositoryReplication", obj.as_ref(), err, &ctx)
 }
 
 #[cfg(test)]

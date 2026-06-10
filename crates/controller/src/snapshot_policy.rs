@@ -375,8 +375,8 @@ fn resolve_config_identity(
 }
 
 /// `error_policy` for the `SnapshotPolicy` controller.
-pub fn error_policy(_obj: Arc<SnapshotPolicy>, err: &Error, ctx: Arc<Context>) -> Action {
-    error_policy_for("SnapshotPolicy", err, &ctx)
+pub fn error_policy(obj: Arc<SnapshotPolicy>, err: &Error, ctx: Arc<Context>) -> Action {
+    error_policy_for("SnapshotPolicy", obj.as_ref(), err, &ctx)
 }
 
 #[cfg(test)]

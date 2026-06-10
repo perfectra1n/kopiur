@@ -32,7 +32,7 @@ use kopiur_api::{
 };
 use kopiur_e2e::{
     E2E_NAMESPACE, Need, World, annotate_namespace, apply_secret, default_timeout,
-    ensure_namespace, poll_interval, wait_until,
+    ensure_namespace, poll_interval, scrape_controller_metrics, wait_until,
 };
 
 /// Deserialize a CR from a JSON literal into its typed kube object.
@@ -1045,17 +1045,6 @@ async fn maintenance_claims_lease() {
     )
     .await
     .expect("Maintenance should claim the lease");
-}
-
-/// Scrape the controller's `/metrics` through the API server's Service-proxy
-/// subresource (no port-forward / `ws` feature needed). The chart names the
-/// controller metrics Service `kopiur-controller-metrics` on port 8080.
-async fn scrape_controller_metrics(client: &Client) -> anyhow::Result<String> {
-    let path = format!(
-        "/api/v1/namespaces/{E2E_NAMESPACE}/services/kopiur-controller-metrics:8080/proxy/metrics"
-    );
-    let req = http::Request::get(path).body(Vec::new())?;
-    Ok(client.request_text(req).await?)
 }
 
 /// Drive a Snapshot to Succeeded, then assert the controller exposes the expected

@@ -79,6 +79,17 @@ pub fn poll_interval() -> Duration {
     Duration::from_secs(3)
 }
 
+/// Scrape the controller's `/metrics` through the API server's Service-proxy
+/// subresource (no port-forward / `ws` feature needed). The chart names the
+/// controller metrics Service `kopiur-controller-metrics` on port 8080.
+pub async fn scrape_controller_metrics(client: &Client) -> anyhow::Result<String> {
+    let path = format!(
+        "/api/v1/namespaces/{E2E_NAMESPACE}/services/kopiur-controller-metrics:8080/proxy/metrics"
+    );
+    let req = http::Request::get(path).body(Vec::new())?;
+    Ok(client.request_text(req).await?)
+}
+
 /// Ensure a `Namespace` named `ns` exists (idempotent: a 409 Conflict is treated
 /// as success). Used by the cross-namespace scenarios that run a workload + Snapshot
 /// in a namespace separate from the operator's.

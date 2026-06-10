@@ -13,6 +13,8 @@ $ kubectl describe repository <name> -n <ns>   # or snapshotpolicy / snapshot / 
 
 Read the conditions and Events at the bottom. The messages are written to say **what** failed, **why**, and **how to fix it**.
 
+This holds for **every** kopiur kind: any reconcile failure — a missing referenced Repository, an invalid spec, an unparseable cron, a backend rejection — is published as a `Warning` Event on the failing object with a machine-readable reason (`MissingDependency`, `InvalidSpec`, `InvalidSchedule`, or the kopia error class). Repeats of the same failure aggregate into one Event with a climbing count, so `kubectl get events -n <ns>` stays readable.
+
 ## A map of the pipeline
 
 Most failures are one link in this chain not being green yet:

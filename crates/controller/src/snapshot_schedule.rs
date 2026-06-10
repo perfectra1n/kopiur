@@ -479,8 +479,8 @@ async fn fire_for_targets(
 }
 
 /// `error_policy` for the `SnapshotSchedule` controller.
-pub fn error_policy(_obj: Arc<SnapshotSchedule>, err: &Error, ctx: Arc<Context>) -> Action {
-    error_policy_for("SnapshotSchedule", err, &ctx)
+pub fn error_policy(obj: Arc<SnapshotSchedule>, err: &Error, ctx: Arc<Context>) -> Action {
+    error_policy_for("SnapshotSchedule", obj.as_ref(), err, &ctx)
 }
 
 #[cfg(test)]

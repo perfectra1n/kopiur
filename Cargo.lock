@@ -1358,7 +1358,6 @@ dependencies = [
 name = "kopiur-mover"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "chrono",
  "k8s-openapi",
  "kopiur-api",
@@ -1369,6 +1368,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -1410,6 +1410,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tower",
  "tracing",

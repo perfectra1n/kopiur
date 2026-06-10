@@ -795,8 +795,8 @@ fn condition(type_: &str, status: &str, reason: &str, message: &str) -> serde_js
 }
 
 /// `error_policy` for the `Restore` controller.
-pub fn error_policy(_obj: Arc<Restore>, err: &Error, ctx: Arc<Context>) -> Action {
-    error_policy_for("Restore", err, &ctx)
+pub fn error_policy(obj: Arc<Restore>, err: &Error, ctx: Arc<Context>) -> Action {
+    error_policy_for("Restore", obj.as_ref(), err, &ctx)
 }
 
 #[cfg(test)]

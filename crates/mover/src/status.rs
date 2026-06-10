@@ -120,6 +120,51 @@ impl From<&KopiaError> for FailureBlock {
     }
 }
 
+impl From<&crate::error::MoverError> for FailureBlock {
+    /// Map a typed mover failure to the persisted block. The structured error
+    /// is stringified **only here**, at the status surface; a kopia-backed
+    /// failure carries its stderr tail and exit code through, and the class +
+    /// retry hint always come from [`MoverError::kopia_class`]
+    /// (`crate::error::MoverError::kopia_class`) so they cannot drift from the
+    /// message.
+    fn from(err: &crate::error::MoverError) -> Self {
+        use crate::error::MoverError;
+        let (stderr_tail, exit_code) = match err {
+            MoverError::Kopia { source, .. } => (
+                source.stderr_tail().map(str::to_string),
+                match source {
+                    KopiaError::NonZeroExit { code, .. } => *code,
+                    KopiaError::Spawn { .. }
+                    | KopiaError::Json { .. }
+                    | KopiaError::EmptyOutput { .. }
+                    | KopiaError::Timeout { .. } => None,
+                },
+            ),
+            MoverError::BootstrapFailed { .. }
+            | MoverError::WorkSpecPathMissing
+            | MoverError::WorkSpecRead { .. }
+            | MoverError::WorkSpecParse { .. }
+            | MoverError::CredentialStagingDir { .. }
+            | MoverError::CredentialWrite { .. }
+            | MoverError::VerifyNoSnapshot { .. }
+            | MoverError::SuccessExprFalse { .. }
+            | MoverError::SuccessExprEval { .. }
+            | MoverError::KubeClient { .. }
+            | MoverError::StatusPatch { .. }
+            | MoverError::ResultSerialize { .. }
+            | MoverError::ResultConfigMapPatch { .. }
+            | MoverError::Telemetry(_) => (None, None),
+        };
+        FailureBlock {
+            kopia_error_class: err.kopia_class().as_str().to_string(),
+            message: err.to_string(),
+            stderr_tail,
+            exit_code,
+            retry_recommended: err.retry_recommended(),
+        }
+    }
+}
+
 /// The phase a mover run reports.
 ///
 /// ```
@@ -255,6 +300,20 @@ impl StatusUpdate {
         }
     }
 
+    /// A terminal-failure update from a typed mover error — same JSON shape as
+    /// [`StatusUpdate::failed`], but the message names which operation failed
+    /// and non-kopia failures (work spec, credentials, …) are representable.
+    pub fn failed_mover(err: &crate::error::MoverError, observed_at: DateTime<Utc>) -> Self {
+        StatusUpdate {
+            phase: MoverPhase::Failed.as_str().to_string(),
+            observed_at,
+            snapshot: None,
+            timing: None,
+            stats: None,
+            failure: Some(FailureBlock::from(err)),
+        }
+    }
+
     /// Wrap this update as the `{ "status": ... }` merge-patch body kube
     /// expects for a status subresource PATCH.
     pub fn as_patch_body(&self) -> serde_json::Value {
@@ -355,6 +414,52 @@ mod tests {
         let fb = FailureBlock::from(&err);
         assert_eq!(fb.kopia_error_class, "RepositoryUnavailable");
         assert!(fb.retry_recommended);
+    }
+
+    #[test]
+    fn failure_block_from_mover_kopia_matches_the_kopia_error_path() {
+        // The MoverError wrapper must not lose anything the bare-KopiaError
+        // mapping carried: class, stderr tail, exit code, retry hint all
+        // survive; only the message gains the "which op" prefix.
+        use crate::error::{KopiaOp, MoverError};
+        let kopia = KopiaError::NonZeroExit {
+            args: "snapshot create".into(),
+            code: Some(1),
+            class: KopiaErrorClass::RepositoryUnavailable,
+            stderr_tail: "dial tcp: connection refused".into(),
+        };
+        let bare = FailureBlock::from(&kopia);
+        let wrapped = FailureBlock::from(&MoverError::Kopia {
+            op: KopiaOp::SnapshotCreate,
+            source: kopia,
+        });
+        assert_eq!(wrapped.kopia_error_class, bare.kopia_error_class);
+        assert_eq!(wrapped.stderr_tail, bare.stderr_tail);
+        assert_eq!(wrapped.exit_code, bare.exit_code);
+        assert_eq!(wrapped.retry_recommended, bare.retry_recommended);
+        assert!(wrapped.message.starts_with("snapshot create failed"));
+    }
+
+    #[test]
+    fn failure_block_from_bootstrap_failed_keeps_class_and_retry_hint() {
+        use crate::error::MoverError;
+        let fb = FailureBlock::from(&MoverError::BootstrapFailed {
+            class: KopiaErrorClass::AuthFailure,
+            message: "invalid repository password".into(),
+        });
+        assert_eq!(fb.kopia_error_class, "AuthFailure");
+        assert!(!fb.retry_recommended);
+        assert!(fb.stderr_tail.is_none());
+    }
+
+    #[test]
+    fn failure_block_from_environmental_mover_error_is_unknown_non_retryable() {
+        use crate::error::MoverError;
+        let fb = FailureBlock::from(&MoverError::WorkSpecPathMissing);
+        assert_eq!(fb.kopia_error_class, "Unknown");
+        assert!(!fb.retry_recommended);
+        assert!(fb.exit_code.is_none());
+        assert!(fb.message.contains("KOPIUR_WORK_SPEC_PATH"));
     }
 
     #[test]
