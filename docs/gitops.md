@@ -136,7 +136,7 @@ production.
 | `SnapshotPolicy` | each `source` is exactly one of `pvc`/`pvcSelector`/`nfs`. |
 | `SnapshotSchedule` | exactly one of `policyRef` / `policySelector`. |
 | `Restore` | exactly one of `target.pvc` / `target.pvcRef` / `target.populator`. |
-| `Repository` / `ClusterRepository` | `encryption`, `create.{splitter,hash,encryption,ecc}` are immutable (transition rules). |
+| `Repository` / `ClusterRepository` | `create.{splitter,hash,encryption,ecc}` are immutable (transition rules). The `encryption.passwordSecretRef` reference is mutable — rename/repoint freely as long as it resolves to the same password value. |
 
 /// tip | Validate before you push
 

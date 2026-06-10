@@ -32,7 +32,7 @@ Short name `kopiarepo`. Print columns: `PHASE`, `BACKEND`, `AGE`.
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `backend` | externally-tagged [Backend](#backend) | **required** | Exactly one storage backend. |
-| `encryption.passwordSecretRef` | [SecretKeyRef](#secretkeyref) | **required** | The kopia repository password Secret. **Immutable.** |
+| `encryption.passwordSecretRef` | [SecretKeyRef](#secretkeyref) | **required** | The kopia repository password Secret. The *reference* may be changed/renamed; the password *value* it resolves to must stay the same (kopia bakes only the value into the repo format). |
 | `create` | [CreateBehavior](#createbehavior) | — | Initialize the repo if absent (off by default). |
 | `moverDefaults` | [MoverDefaults](#moverdefaults) | — | Base config every mover inherits (bootstrap/backup/restore/maintenance). |
 | `catalog` | [CatalogBounds](#catalogbounds) | — | Bounds materialization of `discovered` `Snapshot` CRs. |
@@ -41,8 +41,10 @@ Short name `kopiarepo`. Print columns: `PHASE`, `BACKEND`, `AGE`.
 | `mode` | enum(**`ReadWrite`**\|`ReadOnly`) | `ReadWrite` | `ReadOnly` serves restores only (no backups/maintenance). §11 |
 | `suspend` | bool | `false` | Pause connect/bootstrap + maintenance projection. §14(e) |
 
-Immutable after creation: `encryption`, `create.splitter`, `create.hash`,
-`create.encryption`, `create.ecc`.
+Immutable after creation: `create.splitter`, `create.hash`, `create.encryption`,
+`create.ecc`. The `encryption.passwordSecretRef` *reference* is mutable (rename/repoint
+freely) — only the password *value* it resolves to is fixed in the kopia format, so a
+wrong value surfaces as a connect-time error, not an admission rejection.
 
 ### `status`
 
@@ -70,7 +72,7 @@ Because it is cluster-scoped, **every** Secret reference in it (`backend.*.auth`
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `backend` | externally-tagged [Backend](#backend) | **required** | Exactly one backend. |
-| `encryption.passwordSecretRef` | [SecretKeyRef](#secretkeyref) (with `namespace`) | **required** | Repo password. **Immutable.** |
+| `encryption.passwordSecretRef` | [SecretKeyRef](#secretkeyref) (with `namespace`) | **required** | Repo password. The *reference* may be changed/renamed; the resolved password *value* must stay the same. |
 | `create` | [CreateBehavior](#createbehavior) | — | Same as `Repository`. |
 | `moverDefaults` | [MoverDefaults](#moverdefaults) | — | Inherited by every mover (including consumer backup/restore). |
 | `catalog` | [CatalogBounds](#catalogbounds) | — | Adds `fallbackNamespace` for discovered snapshots. |
@@ -82,7 +84,8 @@ Because it is cluster-scoped, **every** Secret reference in it (`backend.*.auth`
 | `mode` | enum(**`ReadWrite`**\|`ReadOnly`) | `ReadWrite` | §11 |
 | `suspend` | bool | `false` | §14(e) |
 
-Same immutable set as `Repository`.
+Same immutable set as `Repository` (the `create.*` algorithms only; the
+`encryption.passwordSecretRef` reference is mutable).
 
 ### `status`
 

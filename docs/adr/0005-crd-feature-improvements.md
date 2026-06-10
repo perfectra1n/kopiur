@@ -44,7 +44,9 @@ The webhook pins identity at admission (ADR-0003 §4.2); extend it to **reject**
 
 #### §7 — Enforce create-time immutability
 
-`encryption`/`splitter`/`hash` (fixed at repository creation) and pinned identity become **webhook-immutable**: edits are rejected with an actionable message ("immutable after creation; create a new Repository") rather than silently ignored.
+`create.{splitter,hash,encryption,ecc}` (the kopia algorithms fixed at repository creation) and pinned identity become **webhook- and apiserver-immutable**: edits are rejected with an actionable message ("immutable after creation; create a new Repository") rather than silently ignored.
+
+> **Amendment (2026-06):** `encryption.passwordSecretRef` is **not** immutable. The original decision locked the password *Secret reference*, but kopia bakes only the resolved password *value* into the repository format — never the Secret name/namespace/key. Locking the reference was both over-strict (a GitOps Secret **rename** with identical content was rejected, wedging the whole Kustomization) and under-strict (editing a Secret's content in place — the real password change kopia would reject — passed admission). kopia also supports `repository change-password`, so the password is operationally mutable. The reference is therefore freely changeable; a genuinely wrong value surfaces as a recoverable connect-time error, not an admission rejection. Only the `create.*` algorithms remain immutable.
 
 ### C. Multi-tenancy authorization
 
@@ -109,7 +111,7 @@ Building on the `cel-rust`/`*Expr` foundation established in **ADR-0004 §5** (s
 - **`successExpr` on verification (§4)** — a pass/fail predicate over the verify/restore result (e.g. `stats.files > 0`, killing the silent "0 files" success).
 - **`*MatchExpr` selectors** — `pvcMatchExpr`, `namespaceMatchExpr` (the `allowedNamespaces` selector), `policyMatchExpr` (§10) — richer than label selectors.
 - **`pinExpr` / `whenExpr` / `tagsExpr`** — conditional pinning, hook gating, computed tags (speculative; ship on demand).
-- **`x-kubernetes-validations`** — operator-authored CEL in the CRD *schema* for cross-field invariants (exactly-one-of `{pvc,pvcSelector,nfs}`, `target.populator` XOR `target.pvc`) and §7 immutability via transition rules (`self.encryption == oldSelf.encryption`), validating in the apiserver and CI — which also shrinks the validating webhook and tightens §14's PR gate.
+- **`x-kubernetes-validations`** — operator-authored CEL in the CRD *schema* for cross-field invariants (exactly-one-of `{pvc,pvcSelector,nfs}`, `target.populator` XOR `target.pvc`) and §7 immutability via transition rules (`self.create.splitter == oldSelf.create.splitter`, and likewise `create.{hash,encryption,ecc}`), validating in the apiserver and CI — which also shrinks the validating webhook and tightens §14's PR gate.
 
 **Worked examples.** Each `*Expr` is typed (predicates return `bool`, `tagsExpr` returns a `map`) and validated at admission against a documented environment:
 

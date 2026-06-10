@@ -28,8 +28,11 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 // §7/§15: create-time-immutability transition rules in the CRD schema (apiserver +
-// CI), complementing the webhook checks. `encryption` is required so it's always
-// present; the `create.*` rules only bite when `create` is present on both sides.
+// CI), complementing the webhook checks. The `create.*` rules only bite when `create`
+// is present on both sides. `encryption` (the password Secret reference) is deliberately
+// NOT locked: kopia fixes only the resolved password value in the repo format, never the
+// Secret name/key, and the reference is not a reliable proxy (a rename with identical
+// content must not be rejected — that broke GitOps). See `validate::diff_immutable_repo_fields`.
 // Each leaf is `has()`-guarded: CEL field access on an absent optional key raises a
 // "no such key" error (which fails the WHOLE rule → 422 on *every* update, blocking
 // the controller's finalizer/status writes), so we compare presence first and only
@@ -37,7 +40,6 @@ use serde::{Deserialize, Serialize};
 // hash/encryption/ecc) must reconcile, not wedge. Mirrors the webhook's None-vs-Some
 // semantics in `validate::diff_immutable_repo_fields`.
 #[schemars(extend("x-kubernetes-validations" = [
-    {"rule": "self.encryption == oldSelf.encryption", "message": "encryption is immutable after creation"},
     {"rule": "!has(self.create) || !has(oldSelf.create) || (has(self.create.splitter) == has(oldSelf.create.splitter) && (!has(self.create.splitter) || self.create.splitter == oldSelf.create.splitter))", "message": "create.splitter is immutable after creation"},
     {"rule": "!has(self.create) || !has(oldSelf.create) || (has(self.create.hash) == has(oldSelf.create.hash) && (!has(self.create.hash) || self.create.hash == oldSelf.create.hash))", "message": "create.hash is immutable after creation"},
     {"rule": "!has(self.create) || !has(oldSelf.create) || (has(self.create.encryption) == has(oldSelf.create.encryption) && (!has(self.create.encryption) || self.create.encryption == oldSelf.create.encryption))", "message": "create.encryption is immutable after creation"},
@@ -235,8 +237,10 @@ suspend: true
 
     #[test]
     fn repository_crd_carries_immutability_transition_rules() {
-        // §7/§15: the spec schema carries the encryption + create.{splitter,hash,
-        // encryption,ecc} immutability transition rules.
+        // §7/§15: the spec schema carries the create.{splitter,hash,encryption,ecc}
+        // immutability transition rules — but NOT an `encryption` (password Secret ref)
+        // rule: the reference is mutable (kopia fixes only the resolved value, so a
+        // rename with identical content must pass).
         let crd = Repository::crd();
         let json = serde_json::to_value(&crd).unwrap();
         let rules = json["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
@@ -248,7 +252,10 @@ suspend: true
                 .iter()
                 .any(|r| r["rule"].as_str().is_some_and(|s| s.contains(needle)))
         };
-        assert!(has("self.encryption == oldSelf.encryption"));
+        assert!(
+            !has("self.encryption == oldSelf.encryption"),
+            "the password Secret ref must NOT be locked (a rename must be allowed)"
+        );
         assert!(has("self.create.splitter == oldSelf.create.splitter"));
         assert!(has("self.create.hash == oldSelf.create.hash"));
         assert!(has("self.create.ecc == oldSelf.create.ecc"));

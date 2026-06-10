@@ -2001,8 +2001,6 @@ spec:
             - encryption
             type: object
             x-kubernetes-validations:
-            - message: encryption is immutable after creation
-              rule: self.encryption == oldSelf.encryption
             - message: create.splitter is immutable after creation
               rule: '!has(self.create) || !has(oldSelf.create) || (has(self.create.splitter) == has(oldSelf.create.splitter) && (!has(self.create.splitter) || self.create.splitter == oldSelf.create.splitter))'
             - message: create.hash is immutable after creation

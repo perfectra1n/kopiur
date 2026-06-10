@@ -319,19 +319,18 @@ pub fn validate_repository_maintenance(
 /// Pure: the webhook supplies `old`/`new` from the admission request's old/new
 /// objects; CREATE has no old object, so this is only wired into the UPDATE path.
 fn diff_immutable_repo_fields(
-    old_encryption: &crate::common::Encryption,
-    new_encryption: &crate::common::Encryption,
     old_create: Option<&crate::common::CreateBehavior>,
     new_create: Option<&crate::common::CreateBehavior>,
 ) -> Vec<ValidationError> {
     let mut errs = Vec::new();
-    // `encryption` (the whole block — its password Secret ref pins the repository's
-    // encryption material). A changed password ref points at a different repository.
-    if old_encryption != new_encryption {
-        errs.push(ValidationError::Immutable {
-            field: "encryption".to_string(),
-        });
-    }
+    // NOTE: `encryption` (the password Secret *reference*) is deliberately NOT immutable.
+    // kopia bakes only the resolved password *value* and the `create.*` algorithms into
+    // the repository format — never the Secret name/namespace/key. Locking the reference
+    // was both over-strict (a Secret rename with identical content was rejected, breaking
+    // GitOps) and under-strict (editing a Secret's content in place — the actual password
+    // change kopia would reject — sailed through). kopia also supports `change-password`,
+    // so the password is operationally mutable; a genuinely wrong ref surfaces at connect
+    // time, not at admission. We only enforce the create-time algorithms below.
     // The create-time kopia algorithms. Compared field-wise so the message names the
     // exact field. `create` itself may be absent on either side (absent ⇒ None algos).
     let old_splitter = old_create.and_then(|c| c.splitter.as_deref());
@@ -368,8 +367,12 @@ fn diff_immutable_repo_fields(
 }
 
 /// Reject changes to create-time-immutable `Repository` fields on UPDATE (ADR-0005
-/// §7): `encryption`, `create.splitter`, `create.hash`, `create.encryption`. Returns
+/// §7): `create.splitter`, `create.hash`, `create.encryption`, `create.ecc`. Returns
 /// every changed field so a user sees them all at once. Empty ⇒ no immutable change.
+///
+/// `encryption` (the password Secret reference) is intentionally NOT in this set — only
+/// the resolved password value is fixed in the kopia format, and the reference is not a
+/// reliable proxy for it (see [`diff_immutable_repo_fields`]). Renaming the Secret is fine.
 ///
 /// ```
 /// use kopiur_api::repository::RepositorySpec;
@@ -393,12 +396,7 @@ pub fn validate_repository_immutability(
     old: &RepositorySpec,
     new: &RepositorySpec,
 ) -> Vec<ValidationError> {
-    diff_immutable_repo_fields(
-        &old.encryption,
-        &new.encryption,
-        old.create.as_ref(),
-        new.create.as_ref(),
-    )
+    diff_immutable_repo_fields(old.create.as_ref(), new.create.as_ref())
 }
 
 /// Reject changes to create-time-immutable `ClusterRepository` fields on UPDATE
@@ -407,12 +405,7 @@ pub fn validate_cluster_repository_immutability(
     old: &ClusterRepositorySpec,
     new: &ClusterRepositorySpec,
 ) -> Vec<ValidationError> {
-    diff_immutable_repo_fields(
-        &old.encryption,
-        &new.encryption,
-        old.create.as_ref(),
-        new.create.as_ref(),
-    )
+    diff_immutable_repo_fields(old.create.as_ref(), new.create.as_ref())
 }
 
 /// An already-admitted `SnapshotPolicy`'s identity, keyed for collision detection
@@ -1741,15 +1734,55 @@ mod tests {
     }
 
     #[test]
-    fn repository_immutability_rejects_changed_encryption_secret() {
-        let old = repo_spec_create("pw-old", None, None, None);
-        let new = repo_spec_create("pw-new", None, None, None);
-        let errs = validate_repository_immutability(&old, &new);
-        assert_eq!(
-            errs,
-            vec![ValidationError::Immutable {
-                field: "encryption".to_string()
-            }]
+    fn repository_immutability_allows_changed_password_secret_ref() {
+        // Renaming/repointing the password Secret is NOT an immutable change: kopia
+        // fixes only the resolved password value, never the Secret reference, so a
+        // rename with identical content must pass admission (regression: a GitOps
+        // Secret rename used to wedge the whole Kustomization).
+        let old = repo_spec_create("kopia-creds", None, None, None);
+        let new = repo_spec_create("kopia-creds-renamed", None, None, None);
+        assert!(
+            validate_repository_immutability(&old, &new).is_empty(),
+            "changing only the password Secret ref must be allowed"
+        );
+    }
+
+    #[test]
+    fn cluster_repository_immutability_allows_changed_password_secret_ref() {
+        use crate::backend::{Backend, FilesystemBackend};
+        use crate::common::{CreateBehavior, Encryption, SecretKeyRef};
+        let mk = |secret: &str| ClusterRepositorySpec {
+            backend: Backend::Filesystem(FilesystemBackend {
+                path: "/r".into(),
+                volume: None,
+            }),
+            encryption: Encryption {
+                password_secret_ref: SecretKeyRef {
+                    name: secret.into(),
+                    namespace: Some("kopia-system".into()),
+                    key: None,
+                },
+            },
+            create: Some(CreateBehavior {
+                enabled: true,
+                encryption: None,
+                splitter: Some("FIXED-4M".into()),
+                hash: None,
+                ecc: None,
+            }),
+            mover_defaults: None,
+            catalog: None,
+            allowed_namespaces: AllowedNamespaces::All(true),
+            identity_defaults: None,
+            maintenance: None,
+            on_namespace_delete: Default::default(),
+            mode: Default::default(),
+            suspend: false,
+            credential_projection: None,
+        };
+        assert!(
+            validate_cluster_repository_immutability(&mk("creds"), &mk("creds-renamed")).is_empty(),
+            "changing only the password Secret ref must be allowed"
         );
     }
 

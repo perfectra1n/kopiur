@@ -470,8 +470,9 @@ fn handle_cluster_repository(
 
     let mut errs = api::validate::validate_cluster_repository(&spec);
     // Create-time immutability (ADR-0005 §7): on UPDATE, reject changes to
-    // `encryption`/`create.{splitter,hash,encryption}` — kopia bakes them into the
-    // repository format. CREATE has no old object, so the check is UPDATE-only.
+    // `create.{splitter,hash,encryption,ecc}` — kopia bakes them into the repository
+    // format. The password Secret reference is intentionally NOT locked (a rename with
+    // identical content must pass). CREATE has no old object, so the check is UPDATE-only.
     if req.operation == Operation::Update
         && let Some(old) = decode_old_spec::<ClusterRepositorySpec>(req)
     {
@@ -499,7 +500,8 @@ fn handle_repository(
         })?;
 
     let mut errs = api::validate::validate_repository(&spec);
-    // Create-time immutability (ADR-0005 §7), UPDATE-only.
+    // Create-time immutability (ADR-0005 §7), UPDATE-only: `create.*` algorithms only;
+    // the password Secret reference is mutable (a rename with identical content passes).
     if req.operation == Operation::Update
         && let Some(old) = decode_old_spec::<RepositorySpec>(req)
     {

@@ -124,7 +124,9 @@ spec:
 
 /// note | Create-time settings are immutable
 
-`encryption`, `create.{splitter,hash,encryption,ecc}` and the pinned identity are fixed at repository creation. Editing them is **rejected** (by the webhook and by CRD `x-kubernetes-validations` transition rules) with an actionable message — create a new `Repository` instead of mutating these.
+`create.{splitter,hash,encryption,ecc}` and the pinned identity are fixed at repository creation. Editing them is **rejected** (by the webhook and by CRD `x-kubernetes-validations` transition rules) with an actionable message — create a new `Repository` instead of mutating these.
+
+The `encryption.passwordSecretRef` is **not** in this set: you may rename or repoint the Secret freely (e.g. a GitOps secret rename) as long as it still resolves to the **same password value** — kopia bakes only the resolved value into the repository format, not the reference. Point it at a *different* password and kopia simply fails to open the repository at connect time (a recoverable runtime error, not an admission rejection).
 
 ///
 

@@ -433,9 +433,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repository_encryption_change_on_update_is_denied() {
-        // ADR-0005 §7: encryption is immutable after creation. An UPDATE that changes
-        // the password Secret ref is rejected with an actionable message.
+    async fn repository_password_secret_ref_change_on_update_is_allowed() {
+        // The password Secret reference is NOT immutable: kopia fixes only the resolved
+        // password value, never the Secret name/key. An UPDATE that only renames/repoints
+        // the ref must be accepted (regression: a GitOps Secret rename used to be rejected
+        // here and wedged the whole Kustomization).
         let old_spec = json!({
             "backend": { "filesystem": { "path": "/repo" } },
             "encryption": { "passwordSecretRef": { "name": "pw-old" } }
@@ -453,10 +455,37 @@ mod tests {
             "spec": old_spec,
         });
         let (_s, v) = post_review(body).await;
+        assert_eq!(v["response"]["allowed"], true, "got: {v}");
+    }
+
+    #[tokio::test]
+    async fn repository_create_splitter_change_on_update_is_denied() {
+        // The create-time algorithms ARE still immutable (kopia bakes them into the repo
+        // format). An UPDATE that changes `create.splitter` is rejected with an actionable
+        // message — guards against accidentally loosening the webhook with the ref change.
+        let old_spec = json!({
+            "backend": { "filesystem": { "path": "/repo" } },
+            "encryption": { "passwordSecretRef": { "name": "pw" } },
+            "create": { "enabled": true, "splitter": "FIXED-4M" }
+        });
+        let new_spec = json!({
+            "backend": { "filesystem": { "path": "/repo" } },
+            "encryption": { "passwordSecretRef": { "name": "pw" } },
+            "create": { "enabled": true, "splitter": "DYNAMIC" }
+        });
+        let mut body = review_body("Repository", "billing", "u", new_spec);
+        body["request"]["operation"] = json!("UPDATE");
+        body["request"]["oldObject"] = json!({
+            "apiVersion": "kopiur.home-operations.com/v1alpha1",
+            "kind": "Repository",
+            "metadata": { "name": "nas", "namespace": "billing" },
+            "spec": old_spec,
+        });
+        let (_s, v) = post_review(body).await;
         assert_eq!(v["response"]["allowed"], false);
         let msg = v["response"]["status"]["message"].as_str().unwrap();
         assert!(
-            msg.contains("encryption") && msg.contains("immutable"),
+            msg.contains("create.splitter") && msg.contains("immutable"),
             "msg was: {msg}"
         );
     }
