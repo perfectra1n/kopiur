@@ -186,6 +186,16 @@ impl KopiaErrorClass {
             || s.contains("not found")
             || s.contains("does not exist")
             || s.contains("unable to find snapshot")
+            // kopia's `repo.ErrRepositoryNotInitialized` ("repository not initialized
+            // in the provided storage") — an *empty* backend with no kopia repo at the
+            // prefix. The CLI wraps it as `error connecting to repository: repository
+            // not initialized ...`, so it MUST be matched here, ahead of the
+            // RepositoryUnavailable arm, or an uninitialized repo is misread as an
+            // unreachable backend. Classifying it `NotFound` is what lets the mover
+            // surface the actionable `RepositoryNotInitialized` outcome (set
+            // `spec.create.enabled: true`) instead of a misleading "backend
+            // unreachable, retry".
+            || s.contains("not initialized")
         {
             KopiaErrorClass::NotFound
         } else if s.contains("error connecting to repository")
@@ -360,6 +370,32 @@ mod tests {
             KopiaErrorClass::classify("something totally unexpected"),
             KopiaErrorClass::Unknown
         );
+    }
+
+    #[test]
+    fn classify_uninitialized_repository_as_not_found() {
+        // Regression: connecting to an empty backend (no kopia repo at the prefix)
+        // makes kopia emit `repo.ErrRepositoryNotInitialized`, which the CLI wraps
+        // with its generic connect prefix. That prefix matches the
+        // RepositoryUnavailable arm, so without an explicit "not initialized" check
+        // the empty-bucket case was misclassified as a transient unreachable backend
+        // — and the mover's `not_initialized()` path (keyed on NotFound) never fired,
+        // so the operator saw "backend unreachable; retry" instead of the actionable
+        // "set spec.create.enabled: true". It must classify as NotFound.
+        assert_eq!(
+            KopiaErrorClass::classify(
+                "ERROR error connecting to repository: repository not initialized in the \
+                 provided storage"
+            ),
+            KopiaErrorClass::NotFound
+        );
+        // Bare form (no connect prefix) classifies the same way.
+        assert_eq!(
+            KopiaErrorClass::classify("repository not initialized in the provided storage"),
+            KopiaErrorClass::NotFound
+        );
+        // NotFound is non-retryable: the fix is a spec change, not a blind retry.
+        assert!(!KopiaErrorClass::NotFound.is_retryable());
     }
 
     #[test]
