@@ -599,6 +599,7 @@ async fn finalize_cluster_bootstrap(
             "uniqueId": result.unique_id,
             "allowedNamespaceCount": allowed_count,
             "storageStats": { "snapshotCount": result.snapshot_count },
+            "observedGeneration": repo.metadata.generation,
             "conditions": conditions,
         }),
     )
