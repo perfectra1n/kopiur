@@ -2095,6 +2095,14 @@ spec:
                 - Failed
                 nullable: true
                 type: string
+              resolvedCredentialVersion:
+                description: |-
+                  `resourceVersion` of the password Secret observed at the last connect attempt.
+                  The terminal-failure hard-stop reopens when this changes, so editing the
+                  Secret's *content* (which does NOT bump `metadata.generation`) re-triggers a
+                  connect instead of parking the repository as `Failed` forever.
+                nullable: true
+                type: string
               storageStats:
                 description: Repository size and snapshot counts from the last catalog scan.
                 nullable: true
@@ -4313,6 +4321,14 @@ spec:
                 - Ready
                 - Degraded
                 - Failed
+                nullable: true
+                type: string
+              resolvedCredentialVersion:
+                description: |-
+                  `resourceVersion` of the password Secret observed at the last connect attempt.
+                  The terminal-failure hard-stop reopens when this changes, so editing the
+                  Secret's *content* (which does NOT bump `metadata.generation`) re-triggers a
+                  connect instead of parking the repository as `Failed` forever.
                 nullable: true
                 type: string
               storageStats:

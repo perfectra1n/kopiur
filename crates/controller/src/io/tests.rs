@@ -707,6 +707,45 @@ fn terminal_gate_only_on_failed_at_current_generation() {
     ));
 }
 
+#[test]
+fn terminal_gate_reopens_when_credential_secret_changes() {
+    use kopiur_api::RepositoryPhase;
+    // Terminally Failed at gen 5; the password Secret recorded at failure was rv "100".
+    let failed = |recorded: Option<&str>, current: &str| {
+        terminal_gate_holds(
+            Some(RepositoryPhase::Failed),
+            Some(5),
+            Some(5),
+            recorded,
+            current,
+        )
+    };
+    // Same Secret revision → gate HOLDS (quiet heartbeat, don't re-hit the backend).
+    assert!(failed(Some("100"), "100"));
+    // The Secret's content was edited (rv bumped) → gate REOPENS even though the
+    // generation is unchanged. This is the regression fix: a fixed password Secret
+    // re-triggers a connect instead of parking the repo as Failed forever.
+    assert!(!failed(Some("100"), "200"));
+    // First failure recorded no version (older status / upgrade) → reopen, re-attempt.
+    assert!(!failed(None, "100"));
+    // A non-terminal phase never holds, regardless of the version match.
+    assert!(!terminal_gate_holds(
+        Some(RepositoryPhase::Degraded),
+        Some(5),
+        Some(5),
+        Some("100"),
+        "100"
+    ));
+    // A spec change (gen bumped) reopens regardless of the version match.
+    assert!(!terminal_gate_holds(
+        Some(RepositoryPhase::Failed),
+        Some(5),
+        Some(6),
+        Some("100"),
+        "100"
+    ));
+}
+
 // --- managed Maintenance projection (ADR §3.7, default-on) ---------------
 
 fn dummy_owner(kind: &str, name: &str) -> OwnerReference {

@@ -194,23 +194,33 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
             .await;
         }
         Backend::Filesystem(fs) => {
+            // Read the password Secret up front (one cheap GET). We need it to connect
+            // anyway, and its `resourceVersion` drives the hard-stop below: a credential
+            // fix after a terminal failure does NOT bump `metadata.generation`, so the
+            // gate must also key on the Secret revision.
+            let creds = io::repo_credentials(&repo.spec.encryption);
+            let (password, cred_version) =
+                io::read_repo_credential(&ctx.client, &namespace, &creds).await?;
+
             // Hard-stop: if we already terminally failed to connect for THIS spec
-            // generation, don't re-read the password Secret or re-hit the backend.
-            // A non-retryable failure (e.g. PermissionDenied on the NFS export)
-            // cannot succeed until the user edits the CR — which bumps
-            // `metadata.generation` and reopens this gate. The 30 min heartbeat
-            // keeps us resilient to a watch desync without spamming the backend or
-            // the logs (this wake does no IO and logs nothing).
-            if io::is_terminal_for_generation(
+            // generation AND the password Secret is unchanged since, don't re-hit the
+            // backend. A non-retryable failure (e.g. PermissionDenied on the NFS export,
+            // or a wrong password) cannot succeed until an input changes — the CR spec
+            // (bumps `generation`) or the password Secret (bumps its `resourceVersion`,
+            // re-triggered by the Secret watch in `lib.rs`). The 30 min heartbeat keeps
+            // us resilient to a watch desync without spamming the backend or the logs.
+            if io::terminal_gate_holds(
                 repo.status.as_ref().and_then(|s| s.phase),
                 repo.status.as_ref().and_then(|s| s.observed_generation),
                 repo.metadata.generation,
+                repo.status
+                    .as_ref()
+                    .and_then(|s| s.resolved_credential_version.as_deref()),
+                &cred_version,
             ) {
                 return Ok(Action::requeue(TERMINAL_HEARTBEAT));
             }
 
-            let creds = io::repo_credentials(&repo.spec.encryption);
-            let password = io::read_repo_password(&ctx.client, &namespace, &creds).await?;
             let client = ctx.kopia.build([("KOPIA_PASSWORD".to_string(), password)]);
             let spec = ConnectSpec::Filesystem {
                 path: fs.path.clone().into(),
@@ -283,6 +293,9 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
                             "phase": phase,
                             "backend": "Filesystem",
                             "observedGeneration": repo.metadata.generation,
+                            // Pin the Secret revision we just failed with, so a later
+                            // content fix (same generation) reopens the hard-stop gate.
+                            "resolvedCredentialVersion": cred_version,
                             "conditions": conditions,
                         }),
                     )
@@ -321,6 +334,7 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
                     "backend": "Filesystem",
                     "uniqueId": status.unique_id_hex,
                     "observedGeneration": repo.metadata.generation,
+                    "resolvedCredentialVersion": cred_version,
                 }),
             )
             .await?;

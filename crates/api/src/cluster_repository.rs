@@ -187,6 +187,12 @@ pub struct ClusterRepositoryStatus {
     /// `metadata.generation` of the `spec` last reconciled; drives staleness detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
+    /// `resourceVersion` of the password Secret observed at the last connect attempt.
+    /// The terminal-failure hard-stop reopens when this changes, so editing the
+    /// Secret's *content* (which does NOT bump `metadata.generation`) re-triggers a
+    /// connect instead of parking the repository as `Failed` forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_credential_version: Option<String>,
     /// Kopia repository unique ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_id: Option<String>,

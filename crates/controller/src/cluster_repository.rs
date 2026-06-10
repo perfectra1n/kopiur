@@ -164,24 +164,35 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
             return bootstrap_cluster_via_mover(ctx, repo, &name, &api, &repo.spec.backend).await;
         }
         Backend::Filesystem(fs) => {
-            // Hard-stop: see the namespaced Repository reconciler for the rationale.
-            // Once terminally Failed for this spec generation, don't re-read secrets
-            // or re-hit the backend until the spec changes (bumps generation).
-            if io::is_terminal_for_generation(
-                repo.status.as_ref().and_then(|s| s.phase),
-                repo.status.as_ref().and_then(|s| s.observed_generation),
-                repo.metadata.generation,
-            ) {
-                return Ok(Action::requeue(TERMINAL_HEARTBEAT));
-            }
-
+            // Read the password Secret up front; its `resourceVersion` drives the
+            // hard-stop below (see the namespaced Repository reconciler for the full
+            // rationale: a credential fix does not bump `generation`, so the gate must
+            // also key on the Secret revision).
             let creds = io::repo_credentials(&repo.spec.encryption);
             let secret_ns = creds.namespace.clone().ok_or_else(|| {
                 Error::Validation(
                     "ClusterRepository encryption.passwordSecretRef.namespace is required".into(),
                 )
             })?;
-            let password = io::read_repo_password(&ctx.client, &secret_ns, &creds).await?;
+            let (password, cred_version) =
+                io::read_repo_credential(&ctx.client, &secret_ns, &creds).await?;
+
+            // Hard-stop: terminally Failed for this spec generation AND the password
+            // Secret unchanged since → quiet heartbeat. Reopens on a spec change
+            // (generation) or a Secret content edit (resourceVersion; re-triggered by
+            // the Secret watch in `lib.rs`).
+            if io::terminal_gate_holds(
+                repo.status.as_ref().and_then(|s| s.phase),
+                repo.status.as_ref().and_then(|s| s.observed_generation),
+                repo.metadata.generation,
+                repo.status
+                    .as_ref()
+                    .and_then(|s| s.resolved_credential_version.as_deref()),
+                &cred_version,
+            ) {
+                return Ok(Action::requeue(TERMINAL_HEARTBEAT));
+            }
+
             let client = ctx.kopia.build([("KOPIA_PASSWORD".to_string(), password)]);
             let spec = ConnectSpec::Filesystem {
                 path: fs.path.clone().into(),
@@ -241,6 +252,9 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
                             "phase": phase,
                             "backend": "Filesystem",
                             "observedGeneration": repo.metadata.generation,
+                            // Pin the Secret revision we just failed with, so a later
+                            // content fix (same generation) reopens the hard-stop gate.
+                            "resolvedCredentialVersion": cred_version,
                             "conditions": conditions,
                         }),
                     )
@@ -273,6 +287,7 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
                     "uniqueId": status.unique_id_hex,
                     "allowedNamespaceCount": allowed_count,
                     "observedGeneration": repo.metadata.generation,
+                    "resolvedCredentialVersion": cred_version,
                 }),
             )
             .await?;

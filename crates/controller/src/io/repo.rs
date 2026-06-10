@@ -280,7 +280,23 @@ pub async fn read_repo_password(
     namespace: &str,
     creds: &RepoCredentials,
 ) -> Result<String> {
+    Ok(read_repo_credential(client, namespace, creds).await?.0)
+}
+
+/// Read the repository password value AND the password Secret's `resourceVersion`.
+///
+/// The `resourceVersion` lets the in-process filesystem reconciler detect a Secret
+/// *content* change after a terminal failure: such an edit does not bump the CR's
+/// `metadata.generation`, so the generation-keyed hard-stop ([`super::apply::terminal_gate_holds`])
+/// also compares this version to reopen the gate when the credential is fixed.
+/// (`resourceVersion` is always populated on a fetched object; defaults to `""`.)
+pub async fn read_repo_credential(
+    client: &kube::Client,
+    namespace: &str,
+    creds: &RepoCredentials,
+) -> Result<(String, String)> {
     use k8s_openapi::api::core::v1::Secret;
+    use kube::ResourceExt;
     let ns = creds.namespace.as_deref().unwrap_or(namespace);
     let api: Api<Secret> = Api::namespaced(client.clone(), ns);
     let secret = api.get(&creds.secret_name).await.map_err(|e| {
@@ -289,6 +305,7 @@ pub async fn read_repo_password(
             creds.secret_name
         ))
     })?;
+    let version = secret.resource_version().unwrap_or_default();
     let data = secret.data.unwrap_or_default();
     let raw = data.get(&creds.password_key).ok_or_else(|| {
         Error::MissingDependency(format!(
@@ -296,8 +313,9 @@ pub async fn read_repo_password(
             creds.secret_name, creds.password_key
         ))
     })?;
-    String::from_utf8(raw.0.clone())
-        .map_err(|e| Error::Invariant(format!("password not valid utf-8: {e}")))
+    let password = String::from_utf8(raw.0.clone())
+        .map_err(|e| Error::Invariant(format!("password not valid utf-8: {e}")))?;
+    Ok((password, version))
 }
 
 /// The backend credentials Secret name for an object-store backend, if any.
@@ -318,6 +336,27 @@ pub fn backend_auth_secret_ref(backend: &Backend) -> Option<&kopiur_api::common:
         Backend::WebDav(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
         Backend::Rclone(b) => b.config_secret_ref.as_ref(),
         Backend::Filesystem(_) => None,
+    }
+}
+
+/// The TLS CA-bundle `ConfigMap` name an object-store backend references, if any
+/// (currently only S3 exposes `tls.caBundleRef`). Exhaustive over [`Backend`]
+/// (ADR §5.5): a new backend that adds TLS must decide its CA source here. Used by
+/// the ConfigMap→repo watch so editing a CA bundle re-triggers a connect.
+pub fn backend_tls_ca_configmap(backend: &Backend) -> Option<&str> {
+    match backend {
+        Backend::S3(b) => b
+            .tls
+            .as_ref()
+            .and_then(|t| t.ca_bundle_ref.as_ref())
+            .and_then(|c| c.config_map_name.as_deref()),
+        Backend::Azure(_)
+        | Backend::Gcs(_)
+        | Backend::B2(_)
+        | Backend::Filesystem(_)
+        | Backend::Sftp(_)
+        | Backend::WebDav(_)
+        | Backend::Rclone(_) => None,
     }
 }
 

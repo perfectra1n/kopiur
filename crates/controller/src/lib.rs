@@ -18,6 +18,7 @@ pub mod snapshot;
 pub mod snapshot_policy;
 pub mod snapshot_schedule;
 pub mod verification;
+pub mod watch;
 pub mod webhook_tls;
 
 use std::sync::Arc;
@@ -25,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::ConfigMap;
+use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use kube::runtime::events::{Recorder, Reporter};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher::Config as WatcherConfig;
@@ -327,26 +328,21 @@ fn spawn_webhook_tls_reconcile(client: Client, cfg: webhook_tls::WebhookTlsConfi
 async fn spawn_all(client: Client, ctx: Arc<Context>) {
     let cfg = WatcherConfig::default();
 
-    macro_rules! controller {
-        ($ty:ty, $module:ident) => {{
-            let api: Api<$ty> = Api::all(client.clone());
-            let ctx = ctx.clone();
-            Controller::new(api, cfg.clone())
-                .run($module::reconcile, $module::error_policy, ctx)
-                .for_each(|res| async move {
-                    if let Err(e) = res {
-                        tracing::debug!(error = %e, "reconcile loop item error");
-                    }
-                })
-        }};
-    }
-
-    // Snapshot owns its mover Job + ConfigMap (reaped via owner-ref GC, §4.10).
+    // Snapshot owns its mover Job + ConfigMap (reaped via owner-ref GC, §4.10), and
+    // watches its `SnapshotPolicy` recipe so a policy edit (or a policy whose
+    // repository just became Ready) re-runs the snapshot promptly instead of waiting
+    // out its requeue.
     let snapshot_api: Api<Snapshot> = Api::all(client.clone());
     let snapshot_ctx = ctx.clone();
-    let snapshot_ctrl = Controller::new(snapshot_api, cfg.clone())
+    let snapshot_ctrl = Controller::new(snapshot_api, cfg.clone());
+    let snapshot_store = snapshot_ctrl.store();
+    let snapshot_ctrl = snapshot_ctrl
         .owns(Api::<Job>::all(client.clone()), cfg.clone())
         .owns(Api::<ConfigMap>::all(client.clone()), cfg.clone())
+        .watches(Api::<SnapshotPolicy>::all(client.clone()), cfg.clone(), {
+            let store = snapshot_store.clone();
+            move |p: SnapshotPolicy| watch::policy_to_snapshots(&store, &p)
+        })
         .run(snapshot::reconcile, snapshot::error_policy, snapshot_ctx)
         .for_each(|res| async move {
             if let Err(e) = res {
@@ -354,11 +350,19 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
             }
         });
 
-    // SnapshotSchedule owns the Snapshot CRs it creates.
+    // SnapshotSchedule owns the Snapshot CRs it creates, and watches SnapshotPolicy
+    // (by `policyRef` or `policySelector`) so a new/relabeled/edited policy is picked
+    // up promptly rather than only on the schedule's periodic re-list.
     let sched_api: Api<SnapshotSchedule> = Api::all(client.clone());
     let sched_ctx = ctx.clone();
-    let sched_ctrl = Controller::new(sched_api, cfg.clone())
+    let sched_ctrl = Controller::new(sched_api, cfg.clone());
+    let sched_store = sched_ctrl.store();
+    let sched_ctrl = sched_ctrl
         .owns(Api::<Snapshot>::all(client.clone()), cfg.clone())
+        .watches(Api::<SnapshotPolicy>::all(client.clone()), cfg.clone(), {
+            let store = sched_store.clone();
+            move |p: SnapshotPolicy| watch::policy_to_schedules(&store, &p)
+        })
         .run(
             snapshot_schedule::reconcile,
             snapshot_schedule::error_policy,
@@ -376,9 +380,24 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     // seconds instead of waiting for the 300s requeue. The mappers are exhaustive
     // over RepositoryKind (a Repository ref never triggers a ClusterRepository
     // reconcile and vice versa).
+    // Repository/ClusterRepository additionally watch their credential `Secret`(s)
+    // and TLS-CA `ConfigMap`: a content edit to a referenced Secret/ConfigMap does
+    // NOT bump the repo's `generation`, so without these watches a fixed password
+    // never re-triggers a connect (and the terminal-failure gate, keyed on the
+    // Secret's `resourceVersion`, would only reopen on the 30-min heartbeat).
     let repo_api: Api<Repository> = Api::all(client.clone());
     let repo_ctx = ctx.clone();
-    let repo_ctrl = Controller::new(repo_api, cfg.clone())
+    let repo_ctrl = Controller::new(repo_api, cfg.clone());
+    let repo_store = repo_ctrl.store();
+    let repo_ctrl = repo_ctrl
+        .watches(Api::<Secret>::all(client.clone()), cfg.clone(), {
+            let store = repo_store.clone();
+            move |s: Secret| watch::secret_to_repositories(&store, &s)
+        })
+        .watches(Api::<ConfigMap>::all(client.clone()), cfg.clone(), {
+            let store = repo_store.clone();
+            move |cm: ConfigMap| watch::configmap_to_repositories(&store, &cm)
+        })
         .watches(
             Api::<Maintenance>::all(client.clone()),
             cfg.clone(),
@@ -402,7 +421,17 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
 
     let crepo_api: Api<ClusterRepository> = Api::all(client.clone());
     let crepo_ctx = ctx.clone();
-    let crepo_ctrl = Controller::new(crepo_api, cfg.clone())
+    let crepo_ctrl = Controller::new(crepo_api, cfg.clone());
+    let crepo_store = crepo_ctrl.store();
+    let crepo_ctrl = crepo_ctrl
+        .watches(Api::<Secret>::all(client.clone()), cfg.clone(), {
+            let store = crepo_store.clone();
+            move |s: Secret| watch::secret_to_cluster_repositories(&store, &s)
+        })
+        .watches(Api::<ConfigMap>::all(client.clone()), cfg.clone(), {
+            let store = crepo_store.clone();
+            move |cm: ConfigMap| watch::configmap_to_cluster_repositories(&store, &cm)
+        })
         .watches(
             Api::<Maintenance>::all(client.clone()),
             cfg.clone(),
@@ -432,7 +461,9 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     // reconcile (the verify scheduler).
     let config_api: Api<SnapshotPolicy> = Api::all(client.clone());
     let config_ctx = ctx.clone();
-    let config_ctrl = Controller::new(config_api, cfg.clone())
+    let config_ctrl = Controller::new(config_api, cfg.clone());
+    let config_store = config_ctrl.store();
+    let config_ctrl = config_ctrl
         .owns(Api::<Job>::all(client.clone()), cfg.clone())
         .owns(Api::<ConfigMap>::all(client.clone()), cfg.clone())
         // A produced `Snapshot` carries its owning policy in the config label. Watch
@@ -449,6 +480,20 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
                 _ => None,
             },
         )
+        // Watch the backing repository: when it becomes Ready (e.g. a credential was
+        // fixed) the policy re-reconciles at once instead of waiting out its requeue.
+        .watches(Api::<Repository>::all(client.clone()), cfg.clone(), {
+            let store = config_store.clone();
+            move |r: Repository| watch::repository_to_policies(&store, &r)
+        })
+        .watches(
+            Api::<ClusterRepository>::all(client.clone()),
+            cfg.clone(),
+            {
+                let store = config_store.clone();
+                move |r: ClusterRepository| watch::cluster_repository_to_policies(&store, &r)
+            },
+        )
         .run(
             snapshot_policy::reconcile,
             snapshot_policy::error_policy,
@@ -460,15 +505,83 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
             }
         });
 
-    let restore_ctrl = controller!(Restore, restore);
-    let maint_ctrl = controller!(Maintenance, maintenance);
+    // Restore watches its repository so a restore blocked on a not-yet-Ready repo
+    // proceeds the moment the repo connects, rather than on the restore's requeue.
+    let restore_api: Api<Restore> = Api::all(client.clone());
+    let restore_ctx = ctx.clone();
+    let restore_ctrl = Controller::new(restore_api, cfg.clone());
+    let restore_store = restore_ctrl.store();
+    let restore_ctrl = restore_ctrl
+        .watches(Api::<Repository>::all(client.clone()), cfg.clone(), {
+            let store = restore_store.clone();
+            move |r: Repository| watch::repository_to_restores(&store, &r)
+        })
+        .watches(
+            Api::<ClusterRepository>::all(client.clone()),
+            cfg.clone(),
+            {
+                let store = restore_store.clone();
+                move |r: ClusterRepository| watch::cluster_repository_to_restores(&store, &r)
+            },
+        )
+        .run(restore::reconcile, restore::error_policy, restore_ctx)
+        .for_each(|res| async move {
+            if let Err(e) = res {
+                tracing::debug!(error = %e, "restore reconcile error");
+            }
+        });
 
-    // RepositoryReplication owns its per-slot mover Jobs + ConfigMaps (ADR-0005 §13(d)).
+    // Maintenance watches its repository (same Ready-gate prompting as the others).
+    let maint_api: Api<Maintenance> = Api::all(client.clone());
+    let maint_ctx = ctx.clone();
+    let maint_ctrl = Controller::new(maint_api, cfg.clone());
+    let maint_store = maint_ctrl.store();
+    let maint_ctrl = maint_ctrl
+        .watches(Api::<Repository>::all(client.clone()), cfg.clone(), {
+            let store = maint_store.clone();
+            move |r: Repository| watch::repository_to_maintenances(&store, &r)
+        })
+        .watches(
+            Api::<ClusterRepository>::all(client.clone()),
+            cfg.clone(),
+            {
+                let store = maint_store.clone();
+                move |r: ClusterRepository| watch::cluster_repository_to_maintenances(&store, &r)
+            },
+        )
+        .run(maintenance::reconcile, maintenance::error_policy, maint_ctx)
+        .for_each(|res| async move {
+            if let Err(e) = res {
+                tracing::debug!(error = %e, "maintenance reconcile error");
+            }
+        });
+
+    // RepositoryReplication owns its per-slot mover Jobs + ConfigMaps (ADR-0005 §13(d)),
+    // watches its *source* repository (Ready-gate prompting), and its *destination*
+    // credential Secret (a dest password/auth fix re-triggers the mirror promptly).
     let repl_api: Api<RepositoryReplication> = Api::all(client.clone());
     let repl_ctx = ctx.clone();
-    let repl_ctrl = Controller::new(repl_api, cfg.clone())
+    let repl_ctrl = Controller::new(repl_api, cfg.clone());
+    let repl_store = repl_ctrl.store();
+    let repl_ctrl = repl_ctrl
         .owns(Api::<Job>::all(client.clone()), cfg.clone())
         .owns(Api::<ConfigMap>::all(client.clone()), cfg.clone())
+        .watches(Api::<Secret>::all(client.clone()), cfg.clone(), {
+            let store = repl_store.clone();
+            move |s: Secret| watch::secret_to_replications(&store, &s)
+        })
+        .watches(Api::<Repository>::all(client.clone()), cfg.clone(), {
+            let store = repl_store.clone();
+            move |r: Repository| watch::repository_to_replications(&store, &r)
+        })
+        .watches(
+            Api::<ClusterRepository>::all(client.clone()),
+            cfg.clone(),
+            {
+                let store = repl_store.clone();
+                move |r: ClusterRepository| watch::cluster_repository_to_replications(&store, &r)
+            },
+        )
         .run(
             repository_replication::reconcile,
             repository_replication::error_policy,

@@ -103,3 +103,29 @@ pub fn is_terminal_for_generation(
         && phase == Some(kopiur_api::RepositoryPhase::Failed)
         && observed_generation == generation
 }
+
+/// Whether the terminal-failure hard-stop still holds — i.e. we should return a
+/// quiet heartbeat instead of re-attempting the backend.
+///
+/// Extends [`is_terminal_for_generation`] with a *credential* check: a terminal
+/// failure means "won't succeed until an **input** changes", and the inputs are
+/// the spec (`generation`) **and** the referenced password Secret. A Secret
+/// content edit does NOT bump `metadata.generation`, so gating on generation alone
+/// parks the object forever even after the user fixes the credential. We therefore
+/// also reopen the gate when the password Secret's `resourceVersion` differs from
+/// the one (`recorded_version`) observed at the last failed connect — `current_version`
+/// is the Secret's live `resourceVersion`, read cheaply before this check.
+///
+/// Holds (skip the backend) only when BOTH are unchanged: terminal for this
+/// generation AND the credential is byte-for-byte the same Secret revision. Any
+/// difference (including a first failure that recorded no version) reopens it.
+pub fn terminal_gate_holds(
+    phase: Option<kopiur_api::RepositoryPhase>,
+    observed_generation: Option<i64>,
+    generation: Option<i64>,
+    recorded_version: Option<&str>,
+    current_version: &str,
+) -> bool {
+    is_terminal_for_generation(phase, observed_generation, generation)
+        && recorded_version == Some(current_version)
+}
