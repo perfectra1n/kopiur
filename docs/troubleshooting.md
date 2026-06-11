@@ -112,6 +112,27 @@ same `logTail`/`failure` fields appear on a failed `Restore`.
 
 Common causes: the source PVC's `VolumeSnapshotClass` is wrong/missing (for `copyMethod: Snapshot`), a `beforeSnapshot` hook failed (it aborts the backup unless `continueOnFailure: true`), or the repository became unreachable mid-run.
 
+## Mover pod stuck with `Multi-Attach error` (RWO PVC)
+
+The mover **Job** exists but its **pod** never starts; `kubectl describe pod` shows:
+
+```
+Warning  FailedAttachVolume  ...  Multi-Attach error for volume "pvc-..."
+                                   Volume is already exclusively attached to one node
+```
+
+A `ReadWriteOnce` (RWO) PVC can only be attached to one node at a time. The app pod holding it is on node A; the mover got scheduled to node B.
+
+Kopiur avoids this **by default**: it pins an RWO source/destination mover to the node its PVC is attached to (`moverDefaults.sourceColocation.mode: Auto`). If you still hit this:
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Multi-Attach despite default `Auto` | `sourceColocation.mode: Disabled` is set, or co-location couldn't find the node (no running consumer pod; trimmed RBAC missing `persistentvolumes`/`volumeattachments` read). | Leave/restore `mode: Auto`; ensure the workload pod is running; grant the RBAC (see [Repositories → `sourceColocation`](repositories.md#sourcecolocation-avoid-the-rwo-multi-attach-error)). |
+| Backup `Failed`: *"is ReadWriteOncePod and is currently held by a running pod"* | A `ReadWriteOncePod` volume can't be co-mounted by a second pod **at all**. | Scale the workload down for the backup window, switch the PVC to `ReadWriteMany`, or set `mode: Disabled` and manage placement yourself. |
+| Backup `Failed` (mode `Required`): *"could not determine which node it is attached to"* | `mode: Required` refuses to guess when no consumer pod / PV `nodeAffinity` / `VolumeAttachment` reveals the node. | Start the workload that uses the PVC, switch to `ReadWriteMany`, or relax to `mode: Auto`/`Disabled`. |
+
+See [Repositories → `sourceColocation`](repositories.md#sourcecolocation-avoid-the-rwo-multi-attach-error) for the full behavior.
+
 ## Restore won't complete
 
 ```console

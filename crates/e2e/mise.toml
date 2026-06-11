@@ -93,7 +93,7 @@ docker exec "$NODE" sh -c '
   # PVC ROOT is the kopia repo — a subdir under one shared PVC gives no isolation.
   # Each scenario binds its own PVC over one of these dirs. KEEP IN LOCKSTEP with
   # crates/e2e/src/consts.rs::REPO_SUBPATHS.
-  for s in moverdefaults nsdel-orphan nsdel-delete pin populator readonly kstatus verify repl-src repl-dst projgate hooks gfs errh; do
+  for s in moverdefaults nsdel-orphan nsdel-delete pin populator readonly kstatus verify repl-src repl-dst projgate hooks gfs errh colocation colocation-off; do
     mkdir -p "/kopiur-e2e/repos/$s"
   done
   # Source dir with one UNREADABLE file for the errorHandling.ignoreFileErrors

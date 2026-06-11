@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.2](https://github.com/home-operations/kopiur/compare/0.3.1...0.3.2) (2026-06-11)
+
+
+### Features
+
+* **docs:** add a ton of docs and comments ([0197546](https://github.com/home-operations/kopiur/commit/01975467a8bae81c21756a23ea3e854048a686de))
+* **license:** uhhh idk ([cc78085](https://github.com/home-operations/kopiur/commit/cc78085b04cd45c64f5ef33bf69c59ccd6396b34))
+
 ## [0.3.1](https://github.com/home-operations/kopiur/compare/0.3.0...0.3.1) (2026-06-10)
 
 

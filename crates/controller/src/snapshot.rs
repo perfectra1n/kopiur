@@ -958,6 +958,32 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
         .as_ref(),
     )
     .await?;
+    // RWO Multi-Attach avoidance: pin the mover to the node the source PVC is
+    // attached to, so it co-locates with the app pod already holding the volume.
+    // Only the single-`pvc` source needs this — an NFS source is network-mounted, so
+    // a Multi-Attach error is impossible. The resolved `sourceColocation` mode
+    // (default `Auto`) decides whether/how to pin. RWO multi-attach fix.
+    let (mover_affinity, mover_tolerations) =
+        match config.spec.sources.first().and_then(|s| s.pvc.as_ref()) {
+            Some(pvc) => {
+                let decision = io::resolve_source_colocation(
+                    &ctx.client,
+                    &namespace,
+                    &pvc.name,
+                    resolved_mover.source_colocation,
+                )
+                .await?;
+                io::apply_colocation(
+                    decision,
+                    resolved_mover.affinity.clone(),
+                    resolved_mover.tolerations.clone(),
+                )?
+            }
+            None => (
+                resolved_mover.affinity.clone(),
+                resolved_mover.tolerations.clone(),
+            ),
+        };
     let inputs = MoverJobInputs {
         name: &name,
         namespace: &namespace,
@@ -972,8 +998,8 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
         security_context: resolved_mover.security_context.clone(),
         pod_security_context: resolved_mover.pod_security_context.clone(),
         node_selector: resolved_mover.node_selector.clone(),
-        tolerations: resolved_mover.tolerations.clone(),
-        affinity: resolved_mover.affinity.clone(),
+        tolerations: mover_tolerations,
+        affinity: mover_affinity,
         labels,
         source_volume,
         repo_volume,

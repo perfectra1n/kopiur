@@ -335,6 +335,19 @@ fn cluster_artifact() -> Result<Artifact> {
     // §4.11/§G16). Cluster-scoped resource → cluster install only; a namespaced
     // install can't grant it and the controller fails the check open there.
     rules.push(rule(&[""], &["namespaces".into()], READ_VERBS));
+    // RWO Multi-Attach avoidance: discover the node a ReadWriteOnce source/
+    // destination PVC is attached to so the mover can be pinned there. The bound
+    // PV's `nodeAffinity` (topology-pinned volumes) and the CSI `VolumeAttachment`
+    // (ground-truth attached node) are read-only fallbacks when no consuming pod is
+    // found. Both are cluster-scoped → cluster install only (a namespaced install
+    // can't grant them; co-location then relies on the consuming-pod lookup, which
+    // is namespace-local and still works).
+    rules.push(rule(&[""], &["persistentvolumes".into()], READ_VERBS));
+    rules.push(rule(
+        &["storage.k8s.io"],
+        &["volumeattachments".into()],
+        READ_VERBS,
+    ));
     // Self-managed webhook TLS (`webhook.tls.mode: self`): both halves fit a
     // ClusterRole.
     rules.extend(webhook_cert_cluster_rules());

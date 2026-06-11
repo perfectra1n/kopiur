@@ -8,6 +8,7 @@
 //! per-reconciler pure functions (which remain unit-tested without a cluster).
 
 mod apply;
+mod colocation;
 mod creds;
 mod events;
 mod finalizer;
@@ -16,6 +17,7 @@ mod mover;
 mod repo;
 
 pub use apply::*;
+pub use colocation::*;
 pub use creds::*;
 pub use events::*;
 pub use finalizer::*;

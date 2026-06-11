@@ -2008,6 +2008,31 @@ spec:
                             type: string
                         type: object
                     type: object
+                  sourceColocation:
+                    description: |-
+                      How a mover co-locates with the node its RWO source/destination PVC is
+                      attached to, to avoid a Multi-Attach error. Defaults to
+                      [`SourceColocationMode::Auto`] when unset. ADR §3.7 / RWO multi-attach fix.
+                    nullable: true
+                    properties:
+                      mode:
+                        description: |-
+                          How the mover pod co-locates with the node a `ReadWriteOnce` source/destination
+                          PVC is attached to, to avoid a Kubernetes **Multi-Attach error**.
+
+                          A `ReadWriteOnce` (RWO) PVC can only be attached to one node at a time, but it
+                          *can* be mounted by multiple pods **on that same node**. When an app pod already
+                          holds an RWO PVC on node A and the mover lands on node B, the kubelet on B cannot
+                          attach the volume and the mover pod is stuck `Multi-Attach error`. The controller
+                          resolves the node the PVC is attached to (consuming pod → PV `nodeAffinity` →
+                          `VolumeAttachment`) and pins the mover there so it co-locates with the workload.
+                        enum:
+                        - Auto
+                        - Required
+                        - Disabled
+                        nullable: true
+                        type: string
+                    type: object
                   throttle:
                     description: |-
                       Repository throttle limits (`kopia repository throttle set`) applied by every
