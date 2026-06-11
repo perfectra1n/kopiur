@@ -135,7 +135,7 @@ See [Repositories → `sourceColocation`](repositories.md#sourcecolocation-avoid
 
 ## Backup `Failed`: source staging (`copyMethod: Snapshot`/`Clone`)
 
-`copyMethod: Snapshot` (the default) and `Clone` capture a CSI snapshot/clone of the source PVC before backing it up. When that capture can't happen, the `Snapshot` is `Failed` with a `SourceStaged=False` condition naming exactly why — Kopiur never silently falls back to reading the live volume.
+`copyMethod: Snapshot` and `Clone` (opt-in; the default is `Direct`) capture a CSI snapshot/clone of the source PVC before backing it up. When that capture can't happen, the `Snapshot` is `Failed` with a `SourceStaged=False` condition naming exactly why — Kopiur never silently falls back to reading the live volume.
 
 ```console
 $ kubectl get snapshot <name> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="SourceStaged")]}'

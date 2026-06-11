@@ -107,7 +107,7 @@ Short name `kopiasp`, plural `snapshotpolicies`. Print columns: `REPOSITORY`,
 | `repository` | [RepositoryRef](#repositoryref) | **required** | The `Repository`/`ClusterRepository` to write to. |
 | `identity` | {`username`?,`hostname`?} | — | Override the resolved `username@hostname`. |
 | `sources` | [][Source](#source) | — | What to back up (≥1, webhook-enforced). |
-| `copyMethod` | enum(**`Snapshot`**\|`Clone`\|`Direct`) | `Snapshot` | How the source is captured: `Snapshot` (CSI VolumeSnapshot → staged PVC), `Clone` (CSI clone → staged PVC), `Direct` (live PVC, co-located). See [Copy methods](copy-methods.md). |
+| `copyMethod` | enum(`Snapshot`\|`Clone`\|**`Direct`**) | `Direct` | How the source is captured: `Direct` (live PVC, co-located — default, works anywhere), `Snapshot` (CSI VolumeSnapshot → staged PVC, opt-in), `Clone` (CSI clone → staged PVC, opt-in). See [Copy methods](copy-methods.md). |
 | `volumeSnapshotClassName` | string | — | `VolumeSnapshotClass` for `Snapshot`/`Clone`; unset auto-selects the source driver's default class. NFS sources reject it (nothing to snapshot). |
 | `groupBy` | enum(**`VolumeGroupSnapshot`**\|`None`) | `VolumeGroupSnapshot` | Multi-PVC consistency. **Not yet wired** — single-PVC staging only today (multi-PVC `pvcSelector` fan-out + VolumeGroupSnapshot is future work). |
 | `retention` | [Retention](#retention) | — | GFS — the only successful-retention driver. |

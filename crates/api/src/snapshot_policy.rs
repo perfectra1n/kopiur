@@ -48,13 +48,16 @@ pub struct SnapshotPolicySpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 100))]
     pub sources: Vec<Source>,
-    /// How the source volume is captured before kopia reads it: `Snapshot`
-    /// (point-in-time CSI snapshot, default), `Clone`, or `Direct`. ADR §3.3.
+    /// How the source volume is captured before kopia reads it: `Direct` (read the live
+    /// PVC, the **default** — works on any storage), `Snapshot` (point-in-time CSI
+    /// snapshot, opt-in), or `Clone` (CSI clone, opt-in). ADR §3.3 / [Copy methods].
     ///
-    /// Carries a real OpenAPI `default: Snapshot` (ADR-0005 §1) so it materializes
-    /// into the stored object and `kubectl explain`, and GitOps engines stop
-    /// diff-thrashing on a controller-set value. A bare value (not `Option`) so the
-    /// default is never dropped by `skip_serializing_if`.
+    /// Carries a real OpenAPI `default: Direct` so it materializes into the stored object
+    /// and `kubectl explain`, and GitOps engines stop diff-thrashing on a controller-set
+    /// value. A bare value (not `Option`) so the default is never dropped by
+    /// `skip_serializing_if`.
+    ///
+    /// [Copy methods]: https://github.com/home-operations/kopiur/blob/main/docs/copy-methods.md
     #[serde(default = "default_copy_method")]
     #[schemars(default = "default_copy_method")]
     pub copy_method: CopyMethod,
@@ -196,12 +199,21 @@ pub struct NamespaceSelector {
     pub match_names: Vec<String>,
 }
 
-/// serde/schemars `default` for [`SnapshotPolicySpec::copy_method`] — `Snapshot`
-/// (ADR-0005 §1). A named fn so it backs BOTH `#[serde(default = ...)]` and
-/// `#[schemars(default = ...)]`, which is what makes schemars 1 emit a real
-/// OpenAPI `default:` in the generated CRD schema.
+/// serde/schemars `default` for [`SnapshotPolicySpec::copy_method`] — **`Direct`**.
+///
+/// `Direct` (read the live PVC) is the default for **backward compatibility and
+/// portability**: it is the behavior that was actually in effect before `copyMethod`
+/// was wired (the field was inert), and it works on **any** storage — no CSI snapshot
+/// stack required. `Snapshot`/`Clone` (point-in-time CSI capture) are an explicit
+/// opt-in for users who have the snapshot stack and want app-decoupled, point-in-time
+/// backups. (Originally ADR-0005 §1 proposed `Snapshot` as the default; defaulting to it
+/// would silently break every existing policy / non-CSI source on upgrade, so the
+/// implemented default is `Direct`.)
+///
+/// A named fn so it backs BOTH `#[serde(default = ...)]` and `#[schemars(default = ...)]`,
+/// which is what makes schemars 1 emit a real OpenAPI `default:` in the generated CRD.
 fn default_copy_method() -> CopyMethod {
-    CopyMethod::Snapshot
+    CopyMethod::Direct
 }
 
 /// Volume snapshot copy method. Closed enum. ADR §3.3.
@@ -209,21 +221,24 @@ fn default_copy_method() -> CopyMethod {
 /// ```
 /// use kopiur_api::CopyMethod;
 ///
-/// // Defaults to a point-in-time CSI snapshot.
-/// assert_eq!(CopyMethod::default(), CopyMethod::Snapshot);
+/// // Defaults to a live read (Direct) — works on any storage, no CSI snapshot stack.
+/// assert_eq!(CopyMethod::default(), CopyMethod::Direct);
 /// // Serializes as a bare PascalCase string (no external tagging — it has no payload).
 /// assert_eq!(serde_json::to_value(CopyMethod::Snapshot).unwrap(), "Snapshot");
 /// assert_eq!(serde_json::to_value(CopyMethod::Direct).unwrap(), "Direct");
 /// ```
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
 pub enum CopyMethod {
-    /// Point-in-time CSI volume snapshot (default).
-    #[default]
+    /// Point-in-time CSI volume snapshot. Opt-in: requires the CSI snapshot stack + a
+    /// `VolumeSnapshotClass` for the source's driver.
     Snapshot,
-    /// CSI volume clone of the source, mounted read-only for the snapshot.
+    /// CSI volume clone of the source, mounted read-only for the snapshot. Opt-in:
+    /// requires a CSI driver that supports cloning.
     Clone,
-    /// Read the live PVC directly with no intermediate snapshot/clone (no
-    /// point-in-time guarantee). ADR §3.3.
+    /// Read the live PVC directly with no intermediate snapshot/clone (no point-in-time
+    /// guarantee; the mover co-locates on the volume's node for RWO). The **default** —
+    /// works on any storage. ADR §3.3.
+    #[default]
     Direct,
 }
 
@@ -611,28 +626,31 @@ mod tests {
 
     #[test]
     fn copy_method_carries_static_openapi_default_in_crd() {
-        // ADR-0005 §1: copyMethod must carry a real schema `default: Snapshot` so it
-        // appears in `kubectl explain` / the stored object and GitOps stops thrashing.
+        // copyMethod must carry a real schema `default: Direct` so it appears in
+        // `kubectl explain` / the stored object and GitOps stops thrashing. `Direct` (not
+        // the ADR-0005 §1 `Snapshot`) so wiring the field doesn't silently break every
+        // existing policy / non-CSI source on upgrade — Snapshot/Clone are opt-in.
         let crd = SnapshotPolicy::crd();
         let json = serde_json::to_value(&crd).expect("serialize CRD");
         let default = &json["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
             ["properties"]["copyMethod"]["default"];
         assert_eq!(
-            default, "Snapshot",
-            "copyMethod must emit `default: Snapshot` in the CRD schema; got {default:?}"
+            default, "Direct",
+            "copyMethod must emit `default: Direct` in the CRD schema; got {default:?}"
         );
     }
 
     #[test]
-    fn copy_method_defaults_to_snapshot_when_absent() {
-        // A bare value with a serde default: an omitted copyMethod parses to Snapshot.
+    fn copy_method_defaults_to_direct_when_absent() {
+        // A bare value with a serde default: an omitted copyMethod parses to Direct (the
+        // portable, backward-compatible live-mount behavior).
         let spec: SnapshotPolicySpec = from_yaml(
             "repository: { kind: Repository, name: r }\nsources: [ { pvc: { name: d } } ]\n",
         );
-        assert_eq!(spec.copy_method, CopyMethod::Snapshot);
+        assert_eq!(spec.copy_method, CopyMethod::Direct);
         // And it serializes (not skip-elided), so the materialized value round-trips.
         let json = serde_json::to_value(&spec).unwrap();
-        assert_eq!(json["copyMethod"], "Snapshot");
+        assert_eq!(json["copyMethod"], "Direct");
     }
 
     #[test]

@@ -1,5 +1,6 @@
-# Example 23 — copyMethod: Direct (read the live volume)
+# Example 23 — copyMethod: Direct (read the live volume) — THE DEFAULT
 #
+# Direct is the default copyMethod (this example sets it explicitly for clarity).
 # Mounts the LIVE source PVC into the mover (read-only) and kopia reads it in place —
 # no snapshot, no clone, no extra storage. Works on ANY storage, including local-path
 # / hostPath with no snapshot support. The backup is crash-consistent (a live read),

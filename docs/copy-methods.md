@@ -4,9 +4,9 @@
 
 | Method | What the mover reads | Point-in-time? | Decoupled from the app's node? | Requires |
 | --- | --- | --- | --- | --- |
-| **`Snapshot`** _(default)_ | A temporary PVC restored from a CSI **VolumeSnapshot** of your source | ✅ yes | ✅ yes | CSI snapshot stack + a `VolumeSnapshotClass` |
+| **`Direct`** _(default)_ | Your **live** source PVC, read-only | ❌ no (crash-consistent live read) | ❌ no (co-located with the app) | Nothing — works on any storage |
+| **`Snapshot`** | A temporary PVC restored from a CSI **VolumeSnapshot** of your source | ✅ yes | ✅ yes | CSI snapshot stack + a `VolumeSnapshotClass` |
 | **`Clone`** | A temporary **CSI clone** of your source PVC | ✅ yes (at clone time) | ✅ yes | CSI driver with volume-clone support |
-| **`Direct`** | Your **live** source PVC, read-only | ❌ no (crash-consistent live read) | ❌ no (co-located with the app) | Nothing — works on any storage |
 
 ## Which should I use?
 
@@ -27,12 +27,12 @@ Do you need a point-in-time, app-decoupled backup (e.g. a database)?
 - **Use `Snapshot`** for databases and anything where you want a consistent, point-in-time capture that doesn't tie the backup to the node your app runs on.
 - **Use `Clone`** only if your driver does cloning but not snapshots (uncommon).
 
-!!! note "`Snapshot` is the default"
-    `copyMethod` defaults to `Snapshot` because point-in-time is the safer backup. If your cluster has no CSI snapshot stack, either install it (below) or set `copyMethod: Direct` explicitly.
+!!! note "`Direct` is the default"
+    `copyMethod` defaults to `Direct` so backups work on **any** storage with no extra setup. Opt into `Snapshot` (or `Clone`) per-policy when you want a point-in-time, app-decoupled capture **and** your cluster has the CSI snapshot stack. (When you do opt in but the stack/class is missing, the backup fails with a clear condition — it never silently falls back.)
 
 ---
 
-## `Snapshot` — point-in-time CSI snapshot (default)
+## `Snapshot` — point-in-time CSI snapshot (opt-in)
 
 When a backup runs, Kopiur:
 
@@ -87,7 +87,7 @@ Use it when your CSI driver supports cloning (`CLONE_VOLUME`) but not snapshots.
 
 ---
 
-## `Direct` — read the live volume
+## `Direct` — read the live volume (default)
 
 `Direct` mounts your **live** source PVC into the mover, read-only, and kopia reads it in place. No snapshot, no clone, no extra storage — it works on **any** storage, including `local-path`/hostPath that has no snapshot support.
 
