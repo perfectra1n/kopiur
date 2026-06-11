@@ -91,7 +91,7 @@ Use it when your CSI driver supports cloning (`CLONE_VOLUME`) but not snapshots.
 
 `Direct` mounts your **live** source PVC into the mover, read-only, and kopia reads it in place. No snapshot, no clone, no extra storage — it works on **any** storage, including `local-path`/hostPath that has no snapshot support.
 
-Because the live volume is mounted, Kopiur **co-locates** the mover on the node already holding the PVC (for `ReadWriteOnce` volumes), avoiding the Kubernetes *Multi-Attach error*. See [Repositories → `sourceColocation`](repositories.md#sourcecolocation-avoid-the-rwo-multi-attach-error).
+Because the live volume is mounted, Kopiur **co-locates** the mover on the node already holding the PVC (for `ReadWriteOnce` volumes), avoiding the Kubernetes *Multi-Attach error*. See [Repositories → `sourceColocation`](repositories.md#sourcecolocation-avoid-the-rwo-multi-attach-error). A `ReadWriteOncePod` source is stricter: it can't be co-mounted by the mover **at all** while your app holds it, so use `Snapshot` (or `Clone`) for those — see [PVC access modes & RWOP](access-modes.md).
 
 ```yaml
 --8<-- "deploy/examples/23-copy-method-direct.yaml"

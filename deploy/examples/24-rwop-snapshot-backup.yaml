@@ -1,0 +1,52 @@
+# Example 24 — Back up a ReadWriteOncePod (RWOP) PVC with no downtime
+#
+# A ReadWriteOncePod PVC can be mounted by exactly ONE pod cluster-wide, so the
+# default copyMethod (Direct) cannot mount it while your app holds it — a held RWOP
+# volume fails fast with guidance instead of leaving a mover stuck Pending. The fix
+# is copyMethod: Snapshot: Kopiur snapshots the volume at the STORAGE layer (which
+# RWOP's mount exclusivity does not restrict), stages a temporary PVC from the
+# snapshot, and the mover reads that stage — never the live volume. The staged PVC
+# inherits RWOP, but the mover is its only pod, so the exclusivity is satisfied.
+# Your app keeps running, untouched. See docs/access-modes.md.
+#
+# REQUIRES the CSI snapshot stack (external-snapshotter + CRDs) and a
+# VolumeSnapshotClass for your driver — and since RWOP itself is CSI-only, a driver
+# new enough for RWOP almost always ships snapshot support too.
+#
+# The source PVC referenced below is your application's existing claim, e.g.:
+#   spec:
+#     accessModes: ["ReadWriteOncePod"]   # single pod cluster-wide
+#     storageClassName: csi-rbd           # any CSI class; RWOP requires CSI
+#
+# Field shapes verified against crates/api.
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: SnapshotPolicy
+metadata:
+  name: postgres-rwop
+  namespace: databases
+spec:
+  repository:
+    name: primary
+  # The one load-bearing line: never mount the live RWOP volume — snapshot it.
+  # (Clone also avoids the live mount, but cloning an ATTACHED volume is
+  # driver-dependent; Snapshot is the safe choice.)
+  copyMethod: Snapshot
+  volumeSnapshotClassName: csi-rbd-snapclass # optional; omit to use the driver default
+  sources:
+    - pvc:
+        name: postgres-data # the app's ReadWriteOncePod PVC
+  retention:
+    keepDaily: 14
+    keepWeekly: 8
+  # The snapshot is block-level point-in-time (crash-consistent). For application
+  # consistency, quiesce the database first — the VolumeSnapshot is captured AFTER
+  # beforeSnapshot hooks run.
+  hooks:
+    beforeSnapshot:
+      - workloadExec:
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+          command: ["/bin/sh", "-c", "psql -c 'CHECKPOINT;'"]
+          continueOnFailure: false

@@ -159,6 +159,7 @@ nav:
           - rclone: backends/rclone.md
       - Backups & schedules: backups.md
       - Copy methods (Snapshot/Clone/Direct): copy-methods.md
+      - PVC access modes & RWOP: access-modes.md
       - Restores: restores.md
       - Repository replication: replication.md
       - Movers, RBAC & credentials: movers.md

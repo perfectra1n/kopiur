@@ -199,7 +199,7 @@ spec:
             mode: Auto # Auto (default) | Required | Disabled
 ```
 
-- **`Auto`** (default): pin an RWO source/destination PVC to the node it's attached to when that node is discoverable (via the consuming pod, the bound PV's `nodeAffinity`, or a CSI `VolumeAttachment`). `ReadWriteMany`/`ReadOnlyMany` volumes and unheld RWO volumes are scheduled freely (no Multi-Attach risk). A `ReadWriteOncePod` volume **held by a running pod** fails with guidance — a second pod can't mount it even on the same node, so scale the workload down or switch the PVC to `ReadWriteMany`.
+- **`Auto`** (default): pin an RWO source/destination PVC to the node it's attached to when that node is discoverable (via the consuming pod, the bound PV's `nodeAffinity`, or a CSI `VolumeAttachment`). `ReadWriteMany`/`ReadOnlyMany` volumes and unheld RWO volumes are scheduled freely (no Multi-Attach risk). A `ReadWriteOncePod` volume **held by a running pod** fails with guidance — a second pod can't mount it even on the same node; use `copyMethod: Snapshot` or scale the workload down (see [PVC access modes & RWOP](access-modes.md)).
 - **`Required`**: like `Auto`, but if an RWO PVC's node can't be determined, the run **fails** with an actionable error instead of scheduling freely. Use when an RWO source must never be backed up from the wrong node.
 - **`Disabled`**: never compute a node pin; the mover uses only the explicit `nodeSelector`/`affinity`/`tolerations`. The pre-fix behavior — an escape hatch for topologies that manage placement themselves.
 

@@ -99,6 +99,8 @@ target:
         name: postgres-data # an existing PVC in this namespace
 ```
 
+The restore mover must **mount** this PVC to write into it. For a `ReadWriteOnce` target held by a running pod, Kopiur co-locates the mover onto that node automatically; a **`ReadWriteOncePod`** target can't be co-mounted at all while a pod holds it — scale the workload down first (see [PVC access modes & RWOP](access-modes.md#restoring-into-an-rwop-volume)).
+
 ### `populator: {}` — passive populator mode
 
 Set `target.populator: {}` and the `Restore` becomes a **passive volume-populator source**: it doesn't act on its own; instead a PVC's `spec.dataSourceRef` points at it, and the snapshot is restored as that PVC is provisioned. This is the GitOps deploy-or-restore pattern (next section).
