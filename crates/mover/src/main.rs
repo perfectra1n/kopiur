@@ -221,10 +221,23 @@ async fn run_operation(client: &KopiaClient, spec: &MoverWorkSpec) -> Result<Sta
             // errorHandling,upload,extraArgs} actually reach kopia (ADR-0005 §13(b)/§13(f),
             // ADR-0004 §4b). Skipped when nothing is configured.
             if !op.policy.is_empty() {
+                // kopia rejects `--max-parallel-snapshots` on a path-scoped
+                // policy ("only global, username@hostname or @hostname"), so
+                // that one knob is applied in a second `policy set` at the
+                // identity scope (the policy_knobs e2e regression).
+                let (path_policy, identity_policy) =
+                    kopiur_kopia::split_policy_scopes(op.policy.to_kopia());
                 client
-                    .policy_set(&override_source, &op.policy.to_kopia())
+                    .policy_set(&override_source, &path_policy)
                     .await
                     .map_err(kopia(KopiaOp::PolicySet))?;
+                if let Some(p) = identity_policy {
+                    let identity_scope = format!("{}@{}", id.username, id.hostname);
+                    client
+                        .policy_set(&identity_scope, &p)
+                        .await
+                        .map_err(kopia(KopiaOp::PolicySet))?;
+                }
             }
             let result = client
                 .snapshot_create(&op.source_path, &op.tags, Some(&override_source))
@@ -239,7 +252,7 @@ async fn run_operation(client: &KopiaClient, spec: &MoverWorkSpec) -> Result<Sta
                 .map_err(kopia(KopiaOp::SnapshotRestore))?;
             // Restore's terminal success phase is `Completed`, not `Succeeded`
             // (the Snapshot phase) — the Restore CRD enum rejects `Succeeded`.
-            Ok(StatusUpdate::completed(chrono::Utc::now()))
+            Ok(StatusUpdate::completed(&op.snapshot_id, chrono::Utc::now()))
         }
         Operation::SnapshotDelete(op) => {
             // Just delete the snapshot. Space reclamation (maintenance) is a

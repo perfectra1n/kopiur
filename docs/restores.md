@@ -54,7 +54,11 @@ source:
         # asOf: 2026-05-01T00:00:00Z   # or: newest snapshot at/before this instant
 ```
 
-`asOf` (newest snapshot at/before an RFC3339 instant) and `offset` (count back from latest) are alternatives — set one. `asOf` is the "roll back to a known-good time" knob; `offset` is "the previous one."
+`asOf` (newest snapshot at/before an RFC3339 instant) and `offset` (count back from latest) usually travel alone — `asOf` is the "roll back to a known-good time" knob; `offset` is "the previous one." They do compose if you set both: `asOf` filters first, then `offset` counts back within what's left ("the one before the last known-good").
+
+/// note | The resolution is pinned — a restore never silently retargets
+Whatever the source resolves to is written ONCE to `status.resolved.kopiaSnapshotID` and reused for the rest of the restore's life. New snapshots appearing mid-flight (a schedule firing) cannot change which snapshot this Restore writes.
+///
 
 ### `identity` — a raw kopia identity
 
@@ -81,9 +85,11 @@ target:
     pvc:
         name: postgres-data-restored
         storageClassName: fast-ssd # optional; cluster default otherwise
-        capacity: 100Gi
-        accessModes: [ReadWriteOnce]
+        capacity: 100Gi # REQUIRED: the operator won't guess a size it creates
+        accessModes: [ReadWriteOnce] # optional; defaults to [ReadWriteOnce]
 ```
+
+`capacity` is required (webhook-enforced): the operator creates this PVC, and a guessed default could be smaller than the data being restored. Size it at least as large as the source. The created PVC is deliberately **not** owned by the `Restore` — deleting the Restore CR afterwards leaves the restored data in place.
 
 ### `pvcRef` — write into an existing PVC
 
@@ -134,6 +140,10 @@ By default a restore is **additive** — it writes the snapshot's files and leav
 | `Continue` | No matching snapshot ⇒ proceed without restoring (the volume comes up empty). | `fromPolicy`.                                |
 
 The defaults are the point: an _explicit_ restore that finds nothing is an error you want surfaced; a _deploy-or-restore_ that finds nothing should let the app start with a fresh volume.
+
+### `waitTimeout` — wait before giving up
+
+`waitTimeout` (a Go-style duration, e.g. `5m`) opens a grace window, anchored at the Restore's **creation**, during which "no matching snapshot yet" means *wait and re-check* (every ~15 s, surfacing `Resolved=False reason=WaitingForSnapshot` on the conditions) instead of giving up. `onMissingSnapshot` applies only once the window closes. Use it when the Restore may be applied before the thing that produces its snapshot — a schedule about to fire, a GitOps apply ordering, a populator claim racing the first backup.
 
 ## Mover, cache & failure policy
 

@@ -61,6 +61,21 @@ pub enum Error {
     #[error("invariant violated: {0}")]
     Invariant(String),
 
+    /// A `Restore` source needs an in-process kopia snapshot listing
+    /// (`fromPolicy` / `identity` without a pinned `snapshotID`) against a
+    /// backend the controller cannot list in-process. Structural: the spec must
+    /// change to a supported source form.
+    #[error(
+        "cannot resolve the restore source by identity: in-process snapshot listing is only \
+         implemented for filesystem-backed repositories (this repository's backend is \
+         '{backend}'). Use source.snapshotRef to pick a Snapshot CR, or pin the exact \
+         snapshot with source.identity.snapshotID"
+    )]
+    UnsupportedSourceResolution {
+        /// The repository backend kind the listing was attempted against.
+        backend: &'static str,
+    },
+
     /// Self-managed webhook TLS setup failed on the **cluster IO** side: reading/
     /// writing the serving Secret or injecting `caBundle` into a webhook
     /// configuration ([`crate::webhook_tls`]). Transient — the webhook config or
@@ -146,7 +161,8 @@ impl Error {
             Error::Validation(_)
             | Error::Serialization(_)
             | Error::InvalidSchedule(_)
-            | Error::Invariant(_) => ErrorClass::Structural,
+            | Error::Invariant(_)
+            | Error::UnsupportedSourceResolution { .. } => ErrorClass::Structural,
         }
     }
 }
@@ -271,6 +287,20 @@ mod tests {
             Error::Invariant("no name".into()).class(),
             ErrorClass::Structural
         );
+    }
+
+    #[test]
+    fn unsupported_source_resolution_is_structural_and_message_names_the_fix() {
+        let err = Error::UnsupportedSourceResolution { backend: "s3" };
+        // Structural: only a spec change (snapshotRef / pinned snapshotID) fixes it,
+        // so it must not retry on the transient 30 s cadence.
+        assert_eq!(err.class(), ErrorClass::Structural);
+        // The message a human acts on: what failed, why, and both fixes.
+        let msg = err.to_string();
+        assert!(msg.contains("'s3'"), "{msg}");
+        assert!(msg.contains("filesystem-backed"), "{msg}");
+        assert!(msg.contains("source.snapshotRef"), "{msg}");
+        assert!(msg.contains("source.identity.snapshotID"), "{msg}");
     }
 
     #[test]

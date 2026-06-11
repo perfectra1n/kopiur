@@ -62,16 +62,21 @@ fn timing_from_result(r: &SnapshotCreateResult) -> SnapshotTiming {
     }
 }
 
-/// A structured terminal-failure block (ADR §4.10): kopia error class, the last
-/// stderr lines, and a retry recommendation. Written to `status.failure` before
-/// the mover exits non-zero.
-///
-/// Built directly from a [`kopiur_kopia::KopiaError`]; the class, stderr tail,
-/// exit code, and retry hint all carry through:
+/// The structured terminal-failure block (ADR §4.10), re-exported from
+/// `kopiur-api` so the field names are the CRD's own — the API server prunes a
+/// status field the schema doesn't define, which is exactly how the original
+/// mover-local `FailureBlock` was silently lost (`SnapshotStatus` had no
+/// `failure` property until the API type landed).
+pub use kopiur_api::common::FailureBlock;
+
+/// Build a [`FailureBlock`] from a bare kopia error; the class, stderr tail,
+/// exit code, and retry hint all carry through. (A free function, not
+/// `From<&KopiaError>`: both types are foreign here, so the impl would violate
+/// the orphan rule.)
 ///
 /// ```
 /// use kopiur_kopia::{KopiaError, KopiaErrorClass};
-/// use kopiur_mover::status::FailureBlock;
+/// use kopiur_mover::status::failure_block_from_kopia;
 ///
 /// let err = KopiaError::NonZeroExit {
 ///     args: "repository connect".into(),
@@ -79,44 +84,25 @@ fn timing_from_result(r: &SnapshotCreateResult) -> SnapshotTiming {
 ///     class: KopiaErrorClass::AuthFailure,
 ///     stderr_tail: "invalid repository password".into(),
 /// };
-/// let fb = FailureBlock::from(&err);
+/// let fb = failure_block_from_kopia(&err);
 /// assert_eq!(fb.kopia_error_class, "AuthFailure");
 /// assert_eq!(fb.exit_code, Some(1));
 /// assert_eq!(fb.stderr_tail.as_deref(), Some("invalid repository password"));
 /// // A wrong password is not worth a blind retry.
 /// assert!(!fb.retry_recommended);
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FailureBlock {
-    /// kopia error class (e.g. `RepositoryUnavailable`, `AuthFailure`).
-    pub kopia_error_class: String,
-    /// A short human-readable message.
-    pub message: String,
-    /// The last lines of kopia's stderr, if any were captured.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stderr_tail: Option<String>,
-    /// The process exit code, if one was reported.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
-    /// Whether the operator should retry the same operation.
-    pub retry_recommended: bool,
-}
-
-impl From<&KopiaError> for FailureBlock {
-    fn from(err: &KopiaError) -> Self {
-        let class = err.class();
-        let exit_code = match err {
-            KopiaError::NonZeroExit { code, .. } => *code,
-            _ => None,
-        };
-        FailureBlock {
-            kopia_error_class: class.as_str().to_string(),
-            message: err.to_string(),
-            stderr_tail: err.stderr_tail().map(str::to_string),
-            exit_code,
-            retry_recommended: class.is_retryable(),
-        }
+pub fn failure_block_from_kopia(err: &KopiaError) -> FailureBlock {
+    let class = err.class();
+    let exit_code = match err {
+        KopiaError::NonZeroExit { code, .. } => *code,
+        _ => None,
+    };
+    FailureBlock {
+        kopia_error_class: class.as_str().to_string(),
+        message: err.to_string(),
+        stderr_tail: err.stderr_tail().map(str::to_string),
+        exit_code,
+        retry_recommended: class.is_retryable(),
     }
 }
 
@@ -162,6 +148,40 @@ impl From<&crate::error::MoverError> for FailureBlock {
             exit_code,
             retry_recommended: err.retry_recommended(),
         }
+    }
+}
+
+/// Truncate to the LAST [`MAX_LOG_TAIL_BYTES`] bytes (the newest output is the
+/// actionable part), cutting on a `char` boundary and preferring to start at the
+/// first whole line after the cut. Pure.
+pub fn capped_tail(s: &str) -> String {
+    use kopiur_api::common::MAX_LOG_TAIL_BYTES;
+    if s.len() <= MAX_LOG_TAIL_BYTES {
+        return s.to_string();
+    }
+    let mut start = s.len() - MAX_LOG_TAIL_BYTES;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = &s[start..];
+    // Prefer starting on a whole line, as long as that doesn't eat most of the tail.
+    match tail.find('\n') {
+        Some(nl) if nl + 1 < tail.len() && nl < MAX_LOG_TAIL_BYTES / 8 => {
+            tail[nl + 1..].to_string()
+        }
+        _ => tail.to_string(),
+    }
+}
+
+/// The `logTail` text for a terminal failure: the actionable message plus the
+/// kopia stderr tail (when present), capped. Deterministic given the failure —
+/// no timestamps — so a re-patch of the same outcome cannot churn status.
+fn failure_log_tail(failure: &FailureBlock) -> String {
+    match failure.stderr_tail.as_deref() {
+        Some(stderr) if !stderr.is_empty() => {
+            capped_tail(&format!("{}\n{}", failure.message, stderr))
+        }
+        _ => capped_tail(&failure.message),
     }
 }
 
@@ -232,6 +252,12 @@ pub struct StatusUpdate {
     /// Failure block, on terminal failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<FailureBlock>,
+    /// The last lines of the run's output (CRD `status.logTail`), set ONLY by
+    /// the terminal constructors — never by `running()` — so it is written once
+    /// per terminal transition and cannot churn status. Bounded by
+    /// [`kopiur_api::common::MAX_LOG_TAIL_BYTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_tail: Option<String>,
 }
 
 impl StatusUpdate {
@@ -244,10 +270,12 @@ impl StatusUpdate {
             timing: None,
             stats: None,
             failure: None,
+            log_tail: None,
         }
     }
 
-    /// A successful backup update from a kopia create result.
+    /// A successful backup update from a kopia create result. `logTail` carries
+    /// the documented `Snapshot created: <id>` line (ADR §3.4).
     pub fn succeeded_backup(result: &SnapshotCreateResult, observed_at: DateTime<Utc>) -> Self {
         StatusUpdate {
             phase: MoverPhase::Succeeded.as_str().to_string(),
@@ -256,6 +284,7 @@ impl StatusUpdate {
             timing: Some(timing_from_result(result)),
             stats: Some(stats_from_result(result)),
             failure: None,
+            log_tail: Some(format!("Snapshot created: {}", result.id)),
         }
     }
 
@@ -269,6 +298,7 @@ impl StatusUpdate {
             timing: None,
             stats: None,
             failure: None,
+            log_tail: None,
         }
     }
 
@@ -276,8 +306,9 @@ impl StatusUpdate {
     /// success phase is `Completed` — NOT `Succeeded` (the Snapshot phase). Writing
     /// `Succeeded` here is rejected by the apiserver with a 422 (the enum forbids
     /// it), so the phase string is sourced from [`RestorePhase::Completed`] to
-    /// stay locked to the CRD.
-    pub fn completed(observed_at: DateTime<Utc>) -> Self {
+    /// stay locked to the CRD. `snapshot_id` is the kopia snapshot that was
+    /// restored, surfaced on `status.logTail`.
+    pub fn completed(snapshot_id: &str, observed_at: DateTime<Utc>) -> Self {
         StatusUpdate {
             phase: RestorePhase::Completed.label().to_string(),
             observed_at,
@@ -285,18 +316,23 @@ impl StatusUpdate {
             timing: None,
             stats: None,
             failure: None,
+            log_tail: Some(format!("Restore completed: snapshot {snapshot_id}")),
         }
     }
 
-    /// A terminal-failure update from a kopia error.
+    /// A terminal-failure update from a kopia error. `logTail` mirrors the
+    /// failure's message + stderr tail so `kubectl get -o yaml` shows the
+    /// actionable text without digging into the (possibly reaped) Job pod.
     pub fn failed(err: &KopiaError, observed_at: DateTime<Utc>) -> Self {
+        let failure = failure_block_from_kopia(err);
         StatusUpdate {
             phase: MoverPhase::Failed.as_str().to_string(),
             observed_at,
             snapshot: None,
             timing: None,
             stats: None,
-            failure: Some(FailureBlock::from(err)),
+            log_tail: Some(failure_log_tail(&failure)),
+            failure: Some(failure),
         }
     }
 
@@ -304,13 +340,15 @@ impl StatusUpdate {
     /// [`StatusUpdate::failed`], but the message names which operation failed
     /// and non-kopia failures (work spec, credentials, …) are representable.
     pub fn failed_mover(err: &crate::error::MoverError, observed_at: DateTime<Utc>) -> Self {
+        let failure = FailureBlock::from(err);
         StatusUpdate {
             phase: MoverPhase::Failed.as_str().to_string(),
             observed_at,
             snapshot: None,
             timing: None,
             stats: None,
-            failure: Some(FailureBlock::from(err)),
+            log_tail: Some(failure_log_tail(&failure)),
+            failure: Some(failure),
         }
     }
 
@@ -369,7 +407,7 @@ mod tests {
             class: KopiaErrorClass::RepositoryUnavailable,
             stderr_tail: "error connecting to repository: dial tcp".into(),
         };
-        let fb = FailureBlock::from(&err);
+        let fb = failure_block_from_kopia(&err);
         assert_eq!(fb.kopia_error_class, "RepositoryUnavailable");
         assert_eq!(fb.exit_code, Some(1));
         assert_eq!(
@@ -387,7 +425,7 @@ mod tests {
             class: KopiaErrorClass::AuthFailure,
             stderr_tail: "invalid repository password".into(),
         };
-        let fb = FailureBlock::from(&err);
+        let fb = failure_block_from_kopia(&err);
         assert_eq!(fb.kopia_error_class, "AuthFailure");
         assert!(!fb.retry_recommended);
     }
@@ -398,7 +436,7 @@ mod tests {
             binary: "kopia".into(),
             source: std::io::Error::from(std::io::ErrorKind::NotFound),
         };
-        let fb = FailureBlock::from(&err);
+        let fb = failure_block_from_kopia(&err);
         assert_eq!(fb.kopia_error_class, "Unknown");
         assert_eq!(fb.exit_code, None);
         assert_eq!(fb.stderr_tail, None);
@@ -411,7 +449,7 @@ mod tests {
             args: "snapshot create".into(),
             seconds: 3600,
         };
-        let fb = FailureBlock::from(&err);
+        let fb = failure_block_from_kopia(&err);
         assert_eq!(fb.kopia_error_class, "RepositoryUnavailable");
         assert!(fb.retry_recommended);
     }
@@ -428,7 +466,7 @@ mod tests {
             class: KopiaErrorClass::RepositoryUnavailable,
             stderr_tail: "dial tcp: connection refused".into(),
         };
-        let bare = FailureBlock::from(&kopia);
+        let bare = failure_block_from_kopia(&kopia);
         let wrapped = FailureBlock::from(&MoverError::Kopia {
             op: KopiaOp::SnapshotCreate,
             source: kopia,
@@ -497,13 +535,20 @@ mod tests {
         // but the Restore CRD enum only allows "Completed", so the status PATCH
         // was rejected 422 and every restore flooded the controller logs. The
         // restore terminal phase MUST match RestorePhase::Completed.
-        let u = StatusUpdate::completed(ts());
+        let u = StatusUpdate::completed("k1f1ec0a8", ts());
         assert_eq!(u.phase, "Completed");
         assert_eq!(u.phase, RestorePhase::Completed.label());
         assert_ne!(u.phase, MoverPhase::Succeeded.as_str());
         assert!(u.failure.is_none());
         assert!(u.snapshot.is_none());
-        assert_eq!(u.as_patch_body()["status"]["phase"], "Completed");
+        let body = u.as_patch_body();
+        assert_eq!(body["status"]["phase"], "Completed");
+        // The restored snapshot id is surfaced on logTail (the exact CRD field
+        // name — a drifting name would be pruned by the API server).
+        assert_eq!(
+            body["status"]["logTail"],
+            "Restore completed: snapshot k1f1ec0a8"
+        );
     }
 
     #[test]
@@ -522,5 +567,66 @@ mod tests {
         let u = StatusUpdate::running(ts());
         let body = u.as_patch_body();
         assert_eq!(body["status"]["phase"], "Running");
+    }
+
+    #[test]
+    fn capped_tail_keeps_the_last_bytes_on_char_and_line_boundaries() {
+        use kopiur_api::common::MAX_LOG_TAIL_BYTES;
+        // Under the cap: passthrough.
+        assert_eq!(capped_tail("short"), "short");
+        // Exactly at the cap: passthrough.
+        let exact = "x".repeat(MAX_LOG_TAIL_BYTES);
+        assert_eq!(capped_tail(&exact), exact);
+        // Over the cap: keeps the LAST bytes (the newest output), bounded.
+        let over = format!("{}{}", "a".repeat(MAX_LOG_TAIL_BYTES), "tail-marker");
+        let capped = capped_tail(&over);
+        assert!(capped.len() <= MAX_LOG_TAIL_BYTES);
+        assert!(capped.ends_with("tail-marker"));
+        // Multi-byte char straddling the cut: never panics, stays valid UTF-8.
+        let snowmen = "☃".repeat(MAX_LOG_TAIL_BYTES); // 3 bytes each
+        let capped = capped_tail(&snowmen);
+        assert!(capped.len() <= MAX_LOG_TAIL_BYTES);
+        assert!(capped.chars().all(|c| c == '☃'));
+        // A newline shortly after the cut: the tail starts on a whole line
+        // (a partial first line is dropped when a full one follows close by).
+        let payload = format!("fresh line{}", "x".repeat(MAX_LOG_TAIL_BYTES - 60));
+        let lines = format!("{}\n{}", "junk".repeat(2000), payload);
+        assert!(capped_tail(&lines).starts_with("fresh line"));
+    }
+
+    #[test]
+    fn terminal_updates_carry_log_tail_with_the_exact_crd_field_name() {
+        // Success: the documented `Snapshot created: <id>` line (ADR §3.4),
+        // serialized as `logTail` — the CRD's field name. A drifting name is
+        // silently pruned by the API server (regression guard).
+        let json = r#"{
+            "id":"snap1","source":{"host":"h","userName":"u","path":"/p"},
+            "startTime":"2026-06-02T03:13:59Z","endTime":"2026-06-02T03:14:00Z",
+            "rootEntry":{"name":"p","type":"d","obj":"k1","summ":{"size":42,"files":3}}
+        }"#;
+        let r: SnapshotCreateResult = serde_json::from_str(json).unwrap();
+        let body = StatusUpdate::succeeded_backup(&r, ts()).as_patch_body();
+        assert_eq!(body["status"]["logTail"], "Snapshot created: snap1");
+
+        // Failure: logTail carries the actionable message + kopia stderr tail,
+        // alongside the structured failure block.
+        let err = KopiaError::NonZeroExit {
+            args: "repository connect".into(),
+            code: Some(1),
+            class: KopiaErrorClass::AuthFailure,
+            stderr_tail: "invalid repository password".into(),
+        };
+        let body = StatusUpdate::failed(&err, ts()).as_patch_body();
+        let tail = body["status"]["logTail"].as_str().unwrap();
+        assert!(tail.contains("invalid repository password"), "{tail}");
+        assert_eq!(
+            body["status"]["failure"]["kopiaErrorClass"], "AuthFailure",
+            "the structured failure block must land under the CRD's field names"
+        );
+
+        // Progress updates never set logTail (it is written once, at the
+        // terminal transition — the status-churn rule).
+        let body = StatusUpdate::running(ts()).as_patch_body();
+        assert!(body["status"].get("logTail").is_none());
     }
 }

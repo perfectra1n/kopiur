@@ -165,8 +165,10 @@ the whole `spec` is empty.
 | `job` | {`name`,`attempts`} | Mover Job (absent for discovered). |
 | `resolved` | {`repository`,`sources`[]} | Frozen recipe values at run time. |
 | `conditions` | []Condition | `SourcesQuiesced`, `SnapshotCreated`, … |
-| `logTail` | string | Capped ~4KB; full logs in the Job pod. |
+| `logTail` | string | Last output lines, written by the mover at the terminal transition — `Snapshot created: <id>` on success, the actionable error + kopia stderr tail on failure. Capped 4KiB; full logs in the Job pod. |
+| `failure` | {`kopiaErrorClass`,`message`,`stderrTail`?,`exitCode`?,`retryRecommended`} | Structured terminal-failure detail, written by the mover before it exits non-zero. §4.10 |
 | `pinned` | bool? | Observed kopia-side pin state (vs `spec.pin`). |
+| `hooks` | {`preCompletedAt`?,`postCompletedAt`?} | Hook-execution stamps — each list runs exactly once per Snapshot. §4.8 |
 
 ---
 
@@ -225,11 +227,13 @@ CRD validation).
 | `phase` | enum(`Pending`\|`Resolving`\|`Restoring`\|`Completed`\|`Failed`) | Lifecycle. |
 | `sourceKind` | string | `SnapshotRef`/`FromPolicy`/`Identity`; backs `SOURCE`. |
 | `observedGeneration` | int | kstatus. |
-| `resolved` | {`snapshotRef`,`repository`,`pinnedAt`,`identity`} | Pinned source. |
+| `resolved` | {`kopiaSnapshotID`,`snapshotRef`,`repository`,`pinnedAt`,`identity`} | Pinned ONCE at first resolution; later reconciles restore exactly this snapshot even if newer ones appear. §4.6 |
 | `target` | {`pvcPrime`,`pvcRef`} | Resolved target. |
 | `timing` | {`startTime`,`endTime`} | — |
 | `progress` | {`bytesRestored`,`filesRestored`} | Live mover progress. |
-| `conditions` | []Condition | `Ready`/`Reconciling`/`Stalled`, reason text. |
+| `conditions` | []Condition | `Ready`/`Reconciling`/`Stalled`, reason text; `Resolved=False reason=WaitingForSnapshot` while a `policy.waitTimeout` window is open. |
+| `logTail` | string | Last output lines, written by the mover at the terminal transition — `Restore completed: snapshot <id>` on success, the actionable error + kopia stderr tail on failure. Capped 4KiB. |
+| `failure` | {`kopiaErrorClass`,`message`,`stderrTail`?,`exitCode`?,`retryRecommended`} | Structured terminal-failure detail, written by the mover before it exits non-zero. §4.10 |
 
 ---
 

@@ -72,6 +72,9 @@ opentelemetry-prometheus = "0.31"
 opentelemetry-appender-tracing = "0.31"
 tracing-opentelemetry = "0.32"
 url = "2"
+# HTTP client for SnapshotPolicy `httpRequest` hooks (ADR §4.8). rustls-only,
+# matching the kube/webhook TLS stack — never openssl.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # Scheduling / expressions
 croner = "2"

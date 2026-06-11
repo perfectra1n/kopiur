@@ -417,6 +417,73 @@ pub fn mc_bucket_pod(ns: &str, name: &str) -> Pod {
     }))
 }
 
+/// A one-shot helper Pod (`restartPolicy: Never`) running `command` under
+/// [`consts::BUSYBOX_IMAGE`], with each `(pvc, mount_path)` in `pvc_mounts`
+/// mounted read-write. Drive it with `wait::pod_succeeded` — a non-zero exit
+/// leaves the pod `Failed` and the wait reports it. Used by hook/sentinel
+/// scenarios (write a marker into a source PVC; read one out of a restore).
+pub fn one_shot_pod(ns: &str, name: &str, command: &[&str], pvc_mounts: &[(&str, &str)]) -> Pod {
+    let mounts: Vec<serde_json::Value> = pvc_mounts
+        .iter()
+        .enumerate()
+        .map(|(i, (_, path))| json!({ "name": format!("vol{i}"), "mountPath": path }))
+        .collect();
+    let volumes: Vec<serde_json::Value> = pvc_mounts
+        .iter()
+        .enumerate()
+        .map(|(i, (pvc, _))| {
+            json!({ "name": format!("vol{i}"), "persistentVolumeClaim": { "claimName": pvc } })
+        })
+        .collect();
+    from_json(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": { "name": name, "namespace": ns },
+        "spec": {
+            "restartPolicy": "Never",
+            "containers": [{
+                "name": "task",
+                "image": consts::BUSYBOX_IMAGE,
+                "imagePullPolicy": "IfNotPresent",
+                "command": command,
+                "volumeMounts": mounts,
+            }],
+            "volumes": volumes,
+        },
+    }))
+}
+
+/// A long-running labeled workload Pod (busybox `sleep`) mounting `pvc` at
+/// `mount_path` — the exec target for `workloadExec` hook scenarios.
+pub fn sleeper_pod(
+    ns: &str,
+    name: &str,
+    labels: &[(&str, &str)],
+    pvc: &str,
+    mount_path: &str,
+) -> Pod {
+    let labels: serde_json::Map<String, serde_json::Value> = labels
+        .iter()
+        .map(|(k, v)| (k.to_string(), json!(v)))
+        .collect();
+    from_json(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": { "name": name, "namespace": ns, "labels": labels },
+        "spec": {
+            "restartPolicy": "Never",
+            "containers": [{
+                "name": "app",
+                "image": consts::BUSYBOX_IMAGE,
+                "imagePullPolicy": "IfNotPresent",
+                "command": ["sleep", "3600"],
+                "volumeMounts": [{ "name": "data", "mountPath": mount_path }],
+            }],
+            "volumes": [{ "name": "data", "persistentVolumeClaim": { "claimName": pvc } }],
+        },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

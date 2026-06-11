@@ -15,6 +15,7 @@ pub mod snapshot_schedule;
 // Shared pure-logic modules (no controller-runtime deps). The webhook and the
 // controller both import these, so validation/resolution behavior is identical
 // across the two call sites (ADR §5.1, SKILL "one validator, two callers").
+pub mod duration;
 pub mod error;
 pub mod identity;
 pub mod jitter;
@@ -57,6 +58,7 @@ pub use snapshot_schedule::{
 };
 
 // Shared logic re-exports.
+pub use duration::parse_go_duration;
 pub use error::{ValidationError, ValidationResult};
 pub use identity::{IdentityInputs, identity_string, resolve_identity, validate_identity_expr};
 pub use jitter::{offset as jitter_offset, substitute_h};

@@ -142,6 +142,9 @@ fn repository_json(name: &str) -> serde_json::Value {
 const SEED_REPO: &str = "e2e-r-repo";
 const SEED_CFG: &str = "e2e-r-cfg";
 const SEED_BACKUP: &str = "e2e-r-seed";
+/// A second, strictly-newer seed snapshot for the same policy/identity — what the
+/// source-mode tests (`fromPolicy` offset/asOf, `identity`) discriminate between.
+const SEED_BACKUP2: &str = "e2e-r-seed2";
 
 /// Ensure a single Repository + SnapshotPolicy + Snapshot exist and the Snapshot has
 /// `Succeeded` (a real snapshot to restore from). Idempotent so every restore test
@@ -185,6 +188,52 @@ async fn ensure_seed_backup(client: &Client) {
     wait_phase(&backups, SEED_BACKUP, "Succeeded")
         .await
         .expect("seed Snapshot should reach Succeeded with a snapshot");
+}
+
+/// Ensure TWO seed snapshots exist for `SEED_CFG`, created strictly sequentially so
+/// their kopia `endTime`s differ (`SEED_BACKUP2` is the newer one). Idempotent.
+async fn ensure_seed_backups(client: &Client) {
+    ensure_seed_backup(client).await;
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    if backups.get_opt(SEED_BACKUP2).await.ok().flatten().is_none() {
+        // seed1 already Succeeded; a short gap guarantees a distinct endTime even
+        // if the second run is instant.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let backup = serde_json::json!({
+            "apiVersion": "kopiur.home-operations.com/v1alpha1",
+            "kind": "Snapshot",
+            "metadata": { "name": SEED_BACKUP2, "namespace": E2E_NAMESPACE },
+            "spec": { "policyRef": { "name": SEED_CFG }, "deletionPolicy": "Retain" }
+        });
+        let _ = backups.create(&PostParams::default(), &cr(backup)).await;
+    }
+    wait_phase(&backups, SEED_BACKUP2, "Succeeded")
+        .await
+        .expect("second seed Snapshot should reach Succeeded");
+}
+
+/// The kopia snapshot id a Succeeded `Snapshot` CR pinned to status.
+async fn snapshot_kopia_id(backups: &Api<Snapshot>, name: &str) -> String {
+    let s = status_json(backups, name).await;
+    s.get("snapshot")
+        .and_then(|i| i.get("kopiaSnapshotID"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("{name} should carry status.snapshot.kopiaSnapshotID"))
+        .to_string()
+}
+
+/// A condition's `reason` from a status JSON (empty if absent).
+fn condition_reason(status: &serde_json::Value, type_: &str) -> String {
+    status
+        .get("conditions")
+        .and_then(|c| c.as_array())
+        .and_then(|a| {
+            a.iter()
+                .find(|c| c.get("type").and_then(|t| t.as_str()) == Some(type_))
+        })
+        .and_then(|c| c.get("reason").and_then(|r| r.as_str()))
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// A Restore referencing the seed backup, writing into a fresh target PVC, with the
@@ -685,4 +734,432 @@ async fn privileged_restore_mover_requires_namespace_optin() {
         .await;
     let nss: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
     let _ = nss.delete(RESTORE_NS, &DeleteParams::default()).await;
+}
+
+// --- Restore source modes (ADR §4.6): fromPolicy / identity / asOf / offset /
+// --- onMissingSnapshot / waitTimeout. Before these, only `snapshotRef` had e2e
+// --- coverage, and `asOf`/`waitTimeout` were inert fields.
+
+/// `source.fromPolicy` resolves the NEWEST snapshot for the policy's identity and
+/// pins the full resolution to `status.resolved` (id + provenance), which is the
+/// user-visible proof a restore never silently retargets.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
+async fn restore_from_policy_resolves_latest_and_pins_resolution() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("fixtures ready");
+    let client = world.client().clone();
+    ensure_seed_backups(&client).await;
+
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let newest = snapshot_kopia_id(&backups, SEED_BACKUP2).await;
+
+    let restores: Api<Restore> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let name = "e2e-r-frompolicy";
+    cleanup_restore(&restores, name).await;
+    let restore = restore_json(
+        name,
+        serde_json::json!({ "source": { "fromPolicy": { "name": SEED_CFG } } }),
+    );
+    restores
+        .create(&PostParams::default(), &cr(restore))
+        .await
+        .expect("create fromPolicy Restore");
+
+    wait_phase(&restores, name, "Completed")
+        .await
+        .expect("fromPolicy restore should complete");
+    let s = status_json(&restores, name).await;
+    assert_eq!(
+        s.get("sourceKind").and_then(|v| v.as_str()),
+        Some("FromPolicy")
+    );
+    let resolved = s.get("resolved").cloned().unwrap_or_default();
+    assert_eq!(
+        resolved.get("kopiaSnapshotID").and_then(|v| v.as_str()),
+        Some(newest.as_str()),
+        "fromPolicy must resolve the newest snapshot and pin its id; resolved: {resolved}"
+    );
+    assert!(
+        resolved
+            .get("pinnedAt")
+            .and_then(|v| v.as_str())
+            .is_some_and(|p| !p.is_empty()),
+        "resolution must be pinned with a timestamp; resolved: {resolved}"
+    );
+    assert!(
+        resolved
+            .get("identity")
+            .and_then(|i| i.get("username"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|u| !u.is_empty()),
+        "fromPolicy must pin the identity it resolved through; resolved: {resolved}"
+    );
+    cleanup_restore(&restores, name).await;
+}
+
+/// `source.fromPolicy.offset: 1` selects the PREVIOUS snapshot, not the newest.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
+async fn restore_from_policy_offset_selects_previous() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("fixtures ready");
+    let client = world.client().clone();
+    ensure_seed_backups(&client).await;
+
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let previous = snapshot_kopia_id(&backups, SEED_BACKUP).await;
+
+    let restores: Api<Restore> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let name = "e2e-r-offset";
+    cleanup_restore(&restores, name).await;
+    let restore = restore_json(
+        name,
+        serde_json::json!({ "source": { "fromPolicy": { "name": SEED_CFG, "offset": 1 } } }),
+    );
+    restores
+        .create(&PostParams::default(), &cr(restore))
+        .await
+        .expect("create offset Restore");
+
+    wait_phase(&restores, name, "Completed")
+        .await
+        .expect("offset restore should complete");
+    let s = status_json(&restores, name).await;
+    assert_eq!(
+        s.get("resolved")
+            .and_then(|r| r.get("kopiaSnapshotID"))
+            .and_then(|v| v.as_str()),
+        Some(previous.as_str()),
+        "offset: 1 must resolve the previous snapshot, not the newest; status: {s}"
+    );
+    cleanup_restore(&restores, name).await;
+}
+
+/// `source.fromPolicy.asOf` selects the newest snapshot AT OR BEFORE the instant —
+/// using the older seed's exact `endTime` as the boundary, so this fails if `asOf`
+/// ever goes inert again (it would resolve the newest snapshot instead).
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
+async fn restore_from_policy_as_of_selects_point_in_time() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("fixtures ready");
+    let client = world.client().clone();
+    ensure_seed_backups(&client).await;
+
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let older = snapshot_kopia_id(&backups, SEED_BACKUP).await;
+    let older_end = status_json(&backups, SEED_BACKUP)
+        .await
+        .get("timing")
+        .and_then(|t| t.get("endTime"))
+        .and_then(|v| v.as_str())
+        .expect("seed Snapshot should carry status.timing.endTime")
+        .to_string();
+
+    let restores: Api<Restore> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let name = "e2e-r-asof";
+    cleanup_restore(&restores, name).await;
+    let restore = restore_json(
+        name,
+        serde_json::json!({
+            "source": { "fromPolicy": { "name": SEED_CFG, "asOf": older_end } }
+        }),
+    );
+    restores
+        .create(&PostParams::default(), &cr(restore))
+        .await
+        .expect("create asOf Restore");
+
+    wait_phase(&restores, name, "Completed")
+        .await
+        .expect("asOf restore should complete");
+    let s = status_json(&restores, name).await;
+    assert_eq!(
+        s.get("resolved")
+            .and_then(|r| r.get("kopiaSnapshotID"))
+            .and_then(|v| v.as_str()),
+        Some(older.as_str()),
+        "asOf at the older seed's endTime must resolve THAT snapshot ('at or before'), \
+         not the newer one; status: {s}"
+    );
+    cleanup_restore(&restores, name).await;
+}
+
+/// `source.identity` resolves by raw kopia identity (newest first), and an explicit
+/// `snapshotID` pin wins over the listing.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
+async fn restore_identity_source_resolves_and_pinned_id_wins() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("fixtures ready");
+    let client = world.client().clone();
+    ensure_seed_backups(&client).await;
+
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let newest = snapshot_kopia_id(&backups, SEED_BACKUP2).await;
+    let older = snapshot_kopia_id(&backups, SEED_BACKUP).await;
+    // The identity the seeds were recorded under, read from real operator output.
+    let identity = status_json(&backups, SEED_BACKUP2)
+        .await
+        .get("snapshot")
+        .and_then(|i| i.get("identity"))
+        .cloned()
+        .expect("seed Snapshot should pin status.snapshot.identity");
+
+    let restores: Api<Restore> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    // (a) listing by identity resolves the newest snapshot.
+    let by_identity = "e2e-r-identity";
+    cleanup_restore(&restores, by_identity).await;
+    let mut src = identity.clone();
+    src.as_object_mut().unwrap().remove("sourcePath");
+    if let Some(path) = identity.get("sourcePath") {
+        src["sourcePath"] = path.clone();
+    }
+    let restore = restore_json(
+        by_identity,
+        serde_json::json!({ "source": { "identity": src } }),
+    );
+    restores
+        .create(&PostParams::default(), &cr(restore))
+        .await
+        .expect("create identity Restore");
+    wait_phase(&restores, by_identity, "Completed")
+        .await
+        .expect("identity restore should complete");
+    let s = status_json(&restores, by_identity).await;
+    assert_eq!(
+        s.get("sourceKind").and_then(|v| v.as_str()),
+        Some("Identity")
+    );
+    assert_eq!(
+        s.get("resolved")
+            .and_then(|r| r.get("kopiaSnapshotID"))
+            .and_then(|v| v.as_str()),
+        Some(newest.as_str()),
+        "identity listing must resolve the newest snapshot; status: {s}"
+    );
+    cleanup_restore(&restores, by_identity).await;
+
+    // (b) an explicit snapshotID pin wins over the listing.
+    let by_pin = "e2e-r-identity-pin";
+    cleanup_restore(&restores, by_pin).await;
+    let mut pinned_src = identity.clone();
+    pinned_src["snapshotID"] = serde_json::json!(older);
+    let restore = restore_json(
+        by_pin,
+        serde_json::json!({ "source": { "identity": pinned_src } }),
+    );
+    restores
+        .create(&PostParams::default(), &cr(restore))
+        .await
+        .expect("create pinned identity Restore");
+    wait_phase(&restores, by_pin, "Completed")
+        .await
+        .expect("pinned identity restore should complete");
+    let s = status_json(&restores, by_pin).await;
+    assert_eq!(
+        s.get("resolved")
+            .and_then(|r| r.get("kopiaSnapshotID"))
+            .and_then(|v| v.as_str()),
+        Some(older.as_str()),
+        "an explicit snapshotID must win over the identity listing; status: {s}"
+    );
+    cleanup_restore(&restores, by_pin).await;
+}
+
+/// `onMissingSnapshot` semantics (ADR §4.6 G7): an explicit `snapshotRef` to a
+/// nonexistent Snapshot fails closed; `fromPolicy` with no snapshots defaults to
+/// Continue (deploy-or-restore) and completes cleanly; an explicit `Fail` on
+/// `fromPolicy` overrides the default.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
+async fn restore_missing_snapshot_fail_vs_continue() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("fixtures ready");
+    let client = world.client().clone();
+    ensure_seed_backup(&client).await;
+    let restores: Api<Restore> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    // (a) snapshotRef to a Snapshot that doesn't exist → fail closed.
+    let fail_name = "e2e-r-missing-fail";
+    cleanup_restore(&restores, fail_name).await;
+    let restore = restore_json(
+        fail_name,
+        serde_json::json!({ "source": { "snapshotRef": { "name": "e2e-r-no-such" } } }),
+    );
+    restores
+        .create(&PostParams::default(), &cr(restore))
+        .await
+        .expect("create missing-snapshotRef Restore");
+    wait_phase(&restores, fail_name, "Failed")
+        .await
+        .expect("missing snapshotRef must fail closed");
+    let s = status_json(&restores, fail_name).await;
+    assert_eq!(
+        condition_reason(&s, "Resolved"),
+        "SnapshotNotFound",
+        "status: {s}"
+    );
+    cleanup_restore(&restores, fail_name).await;
+
+    // A policy with NO snapshots: same repo/source, fresh name → fresh identity.
+    let empty_cfg = "e2e-r-empty-cfg";
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    if configs.get_opt(empty_cfg).await.ok().flatten().is_none() {
+        let cfg = serde_json::json!({
+            "apiVersion": "kopiur.home-operations.com/v1alpha1",
+            "kind": "SnapshotPolicy",
+            "metadata": { "name": empty_cfg, "namespace": E2E_NAMESPACE },
+            "spec": {
+                "repository": { "kind": "Repository", "name": SEED_REPO },
+                "sources": [ { "pvc": { "name": "e2e-src" } } ]
+            }
+        });
+        let _ = configs.create(&PostParams::default(), &cr(cfg)).await;
+    }
+
+    // (b) fromPolicy with no snapshots → default Continue (deploy-or-restore).
+    let cont_name = "e2e-r-missing-continue";
+    cleanup_restore(&restores, cont_name).await;
+    let restore = restore_json(
+        cont_name,
+        serde_json::json!({ "source": { "fromPolicy": { "name": empty_cfg } } }),
+    );
+    restores
+        .create(&PostParams::default(), &cr(restore))
+        .await
+        .expect("create deploy-or-restore Restore");
+    wait_phase(&restores, cont_name, "Completed")
+        .await
+        .expect("fromPolicy with no snapshots must Continue (deploy-or-restore)");
+    let s = status_json(&restores, cont_name).await;
+    assert_eq!(
+        condition_reason(&s, "Resolved"),
+        "NoSnapshotContinue",
+        "status: {s}"
+    );
+    cleanup_restore(&restores, cont_name).await;
+
+    // (c) explicit onMissingSnapshot: Fail overrides the fromPolicy default.
+    let strict_name = "e2e-r-missing-strict";
+    cleanup_restore(&restores, strict_name).await;
+    let restore = restore_json(
+        strict_name,
+        serde_json::json!({
+            "source": { "fromPolicy": { "name": empty_cfg } },
+            "policy": { "onMissingSnapshot": "Fail" }
+        }),
+    );
+    restores
+        .create(&PostParams::default(), &cr(restore))
+        .await
+        .expect("create strict deploy-or-restore Restore");
+    wait_phase(&restores, strict_name, "Failed")
+        .await
+        .expect("explicit onMissingSnapshot: Fail must override the fromPolicy default");
+    cleanup_restore(&restores, strict_name).await;
+    let _ = configs.delete(empty_cfg, &DeleteParams::default()).await;
+}
+
+/// `policy.waitTimeout` keeps a restore WAITING (not Failed) while the source
+/// snapshot has not appeared yet, then proceeds once it does. Fails on the buggy
+/// code where waitTimeout was inert: the restore would go straight to Failed.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
+async fn restore_wait_timeout_waits_for_late_snapshot() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("fixtures ready");
+    let client = world.client().clone();
+    ensure_seed_backup(&client).await;
+
+    let restores: Api<Restore> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let name = "e2e-r-wait";
+    let late_backup = "e2e-r-late";
+    cleanup_restore(&restores, name).await;
+    let _ = backups.delete(late_backup, &DeleteParams::default()).await;
+
+    // waitTimeout far beyond the harness timeout: the restore must never Fail
+    // during this test — the window-expiry decision itself is unit-tested.
+    let restore = restore_json(
+        name,
+        serde_json::json!({
+            "source": { "snapshotRef": { "name": late_backup } },
+            "policy": { "waitTimeout": "10m" }
+        }),
+    );
+    restores
+        .create(&PostParams::default(), &cr(restore))
+        .await
+        .expect("create waiting Restore");
+
+    // It reports WaitingForSnapshot instead of failing.
+    wait_until(
+        &format!("{name} reason=WaitingForSnapshot"),
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let s = status_json(&restores, name).await;
+            Ok((condition_reason(&s, "Resolved") == "WaitingForSnapshot").then_some(()))
+        },
+    )
+    .await
+    .expect("restore should wait for the snapshot, not fail");
+    let s = status_json(&restores, name).await;
+    assert_eq!(
+        s.get("phase").and_then(|v| v.as_str()),
+        Some("Pending"),
+        "a waiting restore must sit Pending, not Failed; status: {s}"
+    );
+
+    // The snapshot appears late → the restore picks it up and completes.
+    let backup = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "Snapshot",
+        "metadata": { "name": late_backup, "namespace": E2E_NAMESPACE },
+        "spec": { "policyRef": { "name": SEED_CFG }, "deletionPolicy": "Retain" }
+    });
+    backups
+        .create(&PostParams::default(), &cr(backup))
+        .await
+        .expect("create the late Snapshot");
+    wait_phase(&backups, late_backup, "Succeeded")
+        .await
+        .expect("late Snapshot should succeed");
+    wait_phase(&restores, name, "Completed")
+        .await
+        .expect("waiting restore should complete once the snapshot appears");
+    cleanup_restore(&restores, name).await;
 }

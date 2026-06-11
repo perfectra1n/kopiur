@@ -701,6 +701,45 @@ spec:
                   - type
                   type: object
                 type: array
+              failure:
+                description: |-
+                  Structured terminal-failure detail (kopia error class, stderr tail, retry
+                  hint), written by the mover before it exits non-zero. ADR §4.10.
+                nullable: true
+                properties:
+                  exitCode:
+                    description: The process exit code, if one was reported.
+                    format: int32
+                    nullable: true
+                    type: integer
+                  kopiaErrorClass:
+                    description: kopia error class (e.g. `RepositoryUnavailable`, `AuthFailure`).
+                    type: string
+                  message:
+                    description: 'A short human-readable message: what failed, why, and how to fix it.'
+                    type: string
+                  retryRecommended:
+                    description: Whether retrying the same operation unchanged could succeed.
+                    type: boolean
+                  stderrTail:
+                    description: |-
+                      The last lines of kopia's stderr, if any were captured (bounded by
+                      [`MAX_LOG_TAIL_BYTES`]).
+                    nullable: true
+                    type: string
+                required:
+                - kopiaErrorClass
+                - message
+                - retryRecommended
+                type: object
+              logTail:
+                description: |-
+                  The last lines of the run's output, written by the mover at the terminal
+                  transition (success: the `Restore completed: snapshot <id>` line; failure:
+                  the actionable error + kopia stderr tail). Capped at
+                  [`crate::common::MAX_LOG_TAIL_BYTES`]; full logs live in the Job pod.
+                nullable: true
+                type: string
               observedGeneration:
                 description: '`metadata.generation` last reconciled, so stale status is detectable.'
                 format: int64
@@ -753,6 +792,14 @@ spec:
                     - hostname
                     - username
                     type: object
+                  kopiaSnapshotID:
+                    description: |-
+                      The exact kopia snapshot manifest id the source resolved to. Pinned once;
+                      subsequent reconciles restore THIS id even if newer snapshots appear, so a
+                      restore never silently retargets (ADR §4.6). Matches
+                      `Snapshot.status.snapshot.kopiaSnapshotID`.
+                    nullable: true
+                    type: string
                   pinnedAt:
                     description: Timestamp at which the source was pinned (RFC3339).
                     nullable: true

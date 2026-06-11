@@ -18,6 +18,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 anyhow = { workspace = true }
+# Backdating Snapshot endTimes + computing expected GFS partitions in the
+# retention e2e (the same DateTime type `kopiur_api::select_kept` consumes).
+chrono = { workspace = true }
 http = "1"
 
 [features]

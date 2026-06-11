@@ -129,6 +129,12 @@ jobs:
           - shard: reshape-core
             bins: "mover_config data_integrity repository_lifecycle tenancy"
             backends: false
+          # Hooks (ADR §4.8) + GFS time-bucketed retention + policy knobs. The
+          # httpRequest hook reuses the WebDAV fixture as its receiver, so this
+          # shard preloads the backend images.
+          - shard: hooks-retention
+            bins: "hooks retention policy_knobs"
+            backends: true
           - shard: reshape-async
             bins: "verification replication"
             backends: false

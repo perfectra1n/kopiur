@@ -107,7 +107,7 @@ fn restore_json(name: &str, repo: &str, backup: &str) -> serde_json::Value {
             "repository": { "kind": "Repository", "name": repo },
             "source": { "snapshotRef": { "name": backup } },
             // Restore into the pre-provisioned destination PVC (from Need::Filesystem).
-            "target": { "pvc": { "name": consts::PVC_DST } }
+            "target": { "pvcRef": { "name": consts::PVC_DST } }
         }
     })
 }

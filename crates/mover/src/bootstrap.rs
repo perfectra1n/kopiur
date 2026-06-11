@@ -13,7 +13,7 @@
 use kopiur_kopia::{KopiaError, KopiaErrorClass, SnapshotListEntry};
 use serde::{Deserialize, Serialize};
 
-use crate::status::FailureBlock;
+use crate::status::{FailureBlock, failure_block_from_kopia};
 
 /// The `ConfigMap` data key the bootstrap result is written under (the mover
 /// writes it; the controller reads it — one definition so the contract can't
@@ -124,7 +124,7 @@ impl BootstrapResult {
             snapshot_count: 0,
             snapshots: Vec::new(),
             snapshots_truncated: false,
-            failure: Some(FailureBlock::from(err)),
+            failure: Some(failure_block_from_kopia(err)),
         }
     }
 

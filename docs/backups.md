@@ -205,7 +205,14 @@ hooks:
               command: ["/bin/sh", "-c", "pg_backup_stop"]
 ```
 
-The other two forms are `runJob` (run a full one-shot `Job` — the k8up `PreBackupPod` analog) and `httpRequest` (POST to a URL for cross-system orchestration). A hook failure **aborts** the backup unless you set `continueOnFailure: true`.
+The other two forms are `runJob` (run a full one-shot `Job` owned by the `Snapshot` — the k8up `PreBackupPod` analog) and `httpRequest` (call a URL — default `POST`; `http://user:pass@…` becomes Basic auth). A worked manifest with all the knobs is [example 20](examples.md#example-20--quiesce-with-hooks).
+
+Semantics you can rely on:
+
+- A hook failure **aborts** the backup (`Failed` + a `HooksSucceeded=False` condition naming the hook and the cause) unless that hook sets `continueOnFailure: true`. An aborted backup never creates its mover Job; create a new `Snapshot` once the hook is fixed.
+- `afterSnapshot` hooks run whether the backup succeeded **or failed** — the canonical pairing is quiesce/resume, and a failed backup must not leave your database quiesced.
+- Each list runs **exactly once** per `Snapshot` (stamped on `status.hooks.preCompletedAt` / `postCompletedAt`), so requeues and controller restarts never repeat a side-effecting command.
+- Each hook is bounded by its `timeout` (Go-style duration; default 5m) — a wedged quiesce fails the hook rather than hanging the backup forever.
 
 ### mover — resources, cache, security context
 

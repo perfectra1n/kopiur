@@ -52,6 +52,10 @@ pub enum Need {
     /// filesystem repo and an NFS backup source. Implies [`Need::Filesystem`] for
     /// the backup source/restore-destination PVCs the scenarios reuse.
     Nfs,
+    /// The error-handling source PV/PVC over the node-seeded `src-eh` dir (one
+    /// root-owned, mode-0000 file) for the `errorHandling.ignoreFileErrors` e2e.
+    /// Implies [`Need::Filesystem`] for the shared credentials Secret.
+    ErrorSource,
 }
 
 /// Handle to a reachable cluster plus per-`Need` idempotency latches.
@@ -68,6 +72,7 @@ pub struct World {
     /// volume is mounted by the kubelet in the node's host netns, which cannot
     /// resolve cluster Service DNS, so scenarios address the server by IP.
     nfs: OnceCell<String>,
+    error_source: OnceCell<()>,
 }
 
 impl World {
@@ -85,6 +90,7 @@ impl World {
             webdav: OnceCell::new(),
             rclone: OnceCell::new(),
             nfs: OnceCell::new(),
+            error_source: OnceCell::new(),
         })
     }
 
@@ -139,9 +145,33 @@ impl World {
                 Need::Nfs => {
                     self.nfs.get_or_try_init(|| self.ensure_nfs()).await?;
                 }
+                Need::ErrorSource => {
+                    // Implies Filesystem (the shared creds Secret) — same direct
+                    // latch the other implied needs use (no async recursion).
+                    self.fs.get_or_try_init(|| self.ensure_filesystem()).await?;
+                    self.error_source
+                        .get_or_try_init(|| self.ensure_error_source())
+                        .await?;
+                }
             }
         }
         Ok(())
+    }
+
+    /// The `src-eh` source PV/PVC (operator namespace) over the node-seeded dir
+    /// holding the deliberately unreadable file.
+    async fn ensure_error_source(&self) -> Result<()> {
+        let fixtures: Vec<Fixture> = vec![
+            builders::hostpath_pv(consts::PV_SRC_EH, consts::HOSTPATH_SRC_EH, "1Gi").into(),
+            builders::static_pvc(
+                consts::OPERATOR_NS,
+                consts::PVC_SRC_EH,
+                consts::PV_SRC_EH,
+                "1Gi",
+            )
+            .into(),
+        ];
+        apply_all(&self.client, &fixtures).await
     }
 
     async fn ensure_filesystem(&self) -> Result<()> {

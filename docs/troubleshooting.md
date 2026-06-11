@@ -98,10 +98,17 @@ The mover Job ran and exhausted its retries (`failurePolicy.backoffLimit`). The 
 
 ```console
 $ kubectl get snapshots <name> -n <ns> -o jsonpath='{.status.logTail}'
+# the structured failure block has the kopia error class + a retry hint:
+$ kubectl get snapshots <name> -n <ns> -o jsonpath='{.status.failure.kopiaErrorClass}'
 # full logs live in the mover Job's pod (the Job name is on the Snapshot):
 $ JOB=$(kubectl get snapshot <name> -n <ns> -o jsonpath='{.status.job.name}')
 $ kubectl logs -n <ns> --selector=job-name="$JOB"
 ```
+
+`status.failure.retryRecommended: false` means retrying unchanged won't help —
+fix the cause (`kopiaErrorClass` names it: `AuthFailure` = wrong password,
+`PermissionDenied` = filesystem/bucket ACLs, …) and re-create the Snapshot. The
+same `logTail`/`failure` fields appear on a failed `Restore`.
 
 Common causes: the source PVC's `VolumeSnapshotClass` is wrong/missing (for `copyMethod: Snapshot`), a `beforeSnapshot` hook failed (it aborts the backup unless `continueOnFailure: true`), or the repository became unreachable mid-run.
 

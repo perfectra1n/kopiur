@@ -36,28 +36,11 @@ use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
 use crate::io;
 
-/// Parse Go-style duration strings used in the CRD (`30m`, `1h`, `90s`). Returns
-/// `None` for unparseable input (caller treats as "no jitter window").
-pub fn parse_go_duration(s: &str) -> Option<StdDuration> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    // Support a single unit suffix (s/m/h) or a bare number of seconds.
-    let (num, mult) = if let Some(stripped) = s.strip_suffix('h') {
-        (stripped, 3600u64)
-    } else if let Some(stripped) = s.strip_suffix('m') {
-        (stripped, 60)
-    } else if let Some(stripped) = s.strip_suffix('s') {
-        (stripped, 1)
-    } else {
-        (s, 1)
-    };
-    num.trim()
-        .parse::<u64>()
-        .ok()
-        .map(|n| StdDuration::from_secs(n * mult))
-}
+/// Parse Go-style duration strings used in the CRD (`30m`, `1h`, `90s`).
+/// Re-exported from `kopiur-api` so the admission validator and every
+/// reconciler (schedules, maintenance, replication, restore `waitTimeout`)
+/// parse the exact same grammar.
+pub use kopiur_api::parse_go_duration;
 
 /// Compute the next fire time at or after `after`, applying deterministic
 /// jitter (ADR §4.1). `H` tokens are resolved first via `jitter::substitute_h`,

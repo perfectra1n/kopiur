@@ -209,3 +209,124 @@ async fn filesystem_permission_denied_hard_stops_without_spam() {
     .await
     .expect("the gate must reopen on a spec change and re-pin observedGeneration");
 }
+
+/// A MOVER-side terminal failure must surface on the Snapshot CR itself:
+/// `status.logTail` carries the actionable error text and `status.failure` the
+/// structured block (kopia error class + retry hint). Before the wiring, both
+/// were silently pruned by the API server (`failure` had no schema field;
+/// `logTail` was never written) and a failed backup showed nothing but
+/// `phase: Failed`.
+///
+/// Failure injection: `SnapshotPolicy.spec.extraArgs` passes an unknown flag to
+/// the mover's `kopia policy set` step, which fails deterministically with
+/// "unknown long flag" on stderr — using only the standard Filesystem fixtures.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
+async fn failed_mover_writes_log_tail_and_failure_block() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("fixtures ready");
+    let client = world.client().clone();
+
+    use kopiur_api::{Snapshot, SnapshotPolicy};
+    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    // A working repository on the shared /repo (idempotent).
+    let repo = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "Repository",
+        "metadata": { "name": "e2e-movertail-repo", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "backend": { "filesystem": { "path": "/repo", "volume": { "pvc": { "name": "kopiur-e2e-repo" } } } },
+            "encryption": { "passwordSecretRef": { "name": CREDS_SECRET, "key": "KOPIA_PASSWORD" } },
+            "create": { "enabled": true }
+        }
+    });
+    let _ = repos.create(&PostParams::default(), &cr(repo)).await;
+    wait_phase(&repos, "e2e-movertail-repo", "Ready")
+        .await
+        .expect("repository should reach Ready");
+
+    // The poisoned recipe: an unknown kopia flag fails the mover's policy-set step.
+    let cfg = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "SnapshotPolicy",
+        "metadata": { "name": "e2e-movertail-cfg", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "repository": { "kind": "Repository", "name": "e2e-movertail-repo" },
+            "sources": [ { "pvc": { "name": "e2e-src" } } ],
+            "extraArgs": ["--kopiur-e2e-bogus-flag"]
+        }
+    });
+    let _ = configs.create(&PostParams::default(), &cr(cfg)).await;
+
+    let backup = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "Snapshot",
+        "metadata": { "name": "e2e-movertail", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "policyRef": { "name": "e2e-movertail-cfg" },
+            "deletionPolicy": "Retain",
+            // One attempt: the failure is deterministic, retries just slow the test.
+            "failurePolicy": { "backoffLimit": 0 }
+        }
+    });
+    let _ = backups.create(&PostParams::default(), &cr(backup)).await;
+
+    // The user-visible outcome: Failed, WITH the actionable detail on status.
+    let status = wait_until(
+        "e2e-movertail Failed with logTail + failure block",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let Some(obj) = backups.get_opt("e2e-movertail").await? else {
+                return Ok(None);
+            };
+            let v = serde_json::to_value(&obj).unwrap_or_default();
+            let s = v.get("status").cloned().unwrap_or_default();
+            let failed = s.get("phase").and_then(|p| p.as_str()) == Some("Failed");
+            let has_tail = s
+                .get("logTail")
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| !t.is_empty());
+            Ok((failed && has_tail).then_some(s))
+        },
+    )
+    .await
+    .expect("a failed mover must surface logTail on the Snapshot status");
+
+    let tail = status["logTail"].as_str().unwrap_or_default();
+    assert!(
+        tail.contains("kopiur-e2e-bogus-flag") || tail.to_lowercase().contains("unknown"),
+        "logTail must carry the actionable kopia error text, got: {tail}"
+    );
+    let failure = status
+        .get("failure")
+        .cloned()
+        .expect("status.failure block must land (it used to be pruned by the API server)");
+    assert!(
+        failure["kopiaErrorClass"]
+            .as_str()
+            .is_some_and(|c| !c.is_empty()),
+        "failure.kopiaErrorClass must be set, got {failure}"
+    );
+    assert_eq!(
+        failure["retryRecommended"], false,
+        "an unknown-flag failure is not retryable as-is; got {failure}"
+    );
+
+    // Cleanup (Retain: deleting the CR leaves no kopia snapshot to delete).
+    use kube::api::DeleteParams;
+    let _ = backups
+        .delete("e2e-movertail", &DeleteParams::default())
+        .await;
+    let _ = configs
+        .delete("e2e-movertail-cfg", &DeleteParams::default())
+        .await;
+}

@@ -38,8 +38,9 @@ use kopiur_mover::workspec::{
 use crate::config;
 use crate::consts::{
     ALLOW_PRIVILEGED_MOVER_ACTION, API_VERSION, CONFIG_LABEL, CREDENTIALS_AVAILABLE_CONDITION,
-    CREDENTIALS_PROJECTED_REASON, MISSING_CREDENTIALS_REASON, MOVER_PERMITTED_CONDITION,
-    ORIGIN_LABEL, PRIVILEGED_MOVER_NOT_PERMITTED_REASON, SKIP_SNAPSHOT_CLEANUP_ANNOTATION,
+    CREDENTIALS_PROJECTED_REASON, FIX_HOOK_ACTION, HOOKS_SUCCEEDED_CONDITION,
+    MISSING_CREDENTIALS_REASON, MOVER_PERMITTED_CONDITION, ORIGIN_LABEL,
+    PRIVILEGED_MOVER_NOT_PERMITTED_REASON, SKIP_SNAPSHOT_CLEANUP_ANNOTATION,
     SNAPSHOT_CLEANUP_FINALIZER,
 };
 use crate::context::Context;
@@ -474,12 +475,49 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
         return Ok(Action::requeue(Duration::from_secs(1)));
     }
 
+    // A hook failure is TERMINAL for this one-shot Snapshot (ADR §4.8): the fix
+    // lives in the SnapshotPolicy, and a NEW Snapshot picks it up. Without this
+    // gate the next reconcile would re-run side-effecting hooks (quiesce/exec)
+    // or resurrect the Failed phase to Succeeded.
+    if backup.status.as_ref().and_then(|s| s.phase) == Some(SnapshotPhase::Failed)
+        && backup
+            .status
+            .as_ref()
+            .map(|s| {
+                s.conditions
+                    .iter()
+                    .any(|c| c.type_ == HOOKS_SUCCEEDED_CONDITION && c.status == "False")
+            })
+            .unwrap_or(false)
+    {
+        return Ok(Action::await_change());
+    }
+
     // If the owned mover Job already reached a terminal state, copy phase/stats
     // into status (controller-as-source-of-truth for phase) and stop running.
     let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), &namespace);
     if let Some(job) = job_api.get_opt(&name).await? {
         match job_terminal_state(&job) {
             Some(true) => {
+                // ADR §4.8: afterSnapshot hooks (resume/notify) complete — once —
+                // before the terminal Succeeded patch. An aborting failure marks
+                // the Snapshot Failed (the kopia snapshot exists, but the hook
+                // contract was broken) unless the hook set continueOnFailure.
+                if let Some((failure, policy_name)) =
+                    run_post_hooks_once(backup, ctx, &api, &namespace, &name).await?
+                {
+                    return fail_for_hook(
+                        ctx,
+                        backup,
+                        &api,
+                        &namespace,
+                        &name,
+                        &failure,
+                        crate::hooks::HookPhase::After,
+                        &policy_name,
+                    )
+                    .await;
+                }
                 if backup.status.as_ref().and_then(|s| s.phase) != Some(SnapshotPhase::Succeeded) {
                     finalize_succeeded(ctx, backup, &api, &name, &namespace).await?;
                 }
@@ -488,6 +526,26 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
                 return reconcile_pin(backup, ctx, &api, &namespace, &name).await;
             }
             Some(false) => {
+                // Resume hooks run even when the backup FAILED — the canonical
+                // pairing is quiesce/resume, and a database left locked because
+                // the backup failed would turn one incident into two. A hook
+                // failure here is surfaced on the condition but cannot mask the
+                // primary mover failure.
+                if let Some((failure, policy_name)) =
+                    run_post_hooks_once(backup, ctx, &api, &namespace, &name).await?
+                {
+                    patch_hook_failure(
+                        ctx,
+                        backup,
+                        &api,
+                        &name,
+                        &failure,
+                        crate::hooks::HookPhase::After,
+                        &policy_name,
+                        false,
+                    )
+                    .await?;
+                }
                 if backup.status.as_ref().and_then(|s| s.phase) != Some(SnapshotPhase::Failed) {
                     io::patch_status(
                         &api,
@@ -801,6 +859,56 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
     }
     let creds_secrets = creds.names;
 
+    // ADR §4.8: beforeSnapshot hooks (quiesce/flush) run to completion BEFORE the
+    // mover Job is created. `status.hooks.preCompletedAt` makes the list run
+    // exactly once per Snapshot across requeues and controller restarts — hooks
+    // have side effects that must not repeat.
+    let hook_spec = config.spec.hooks.clone().unwrap_or_default();
+    let pre_done = backup
+        .status
+        .as_ref()
+        .and_then(|s| s.hooks.as_ref())
+        .and_then(|h| h.pre_completed_at.as_ref())
+        .is_some();
+    if !hook_spec.before_snapshot.is_empty() && !pre_done {
+        match crate::hooks::run_hooks(
+            ctx,
+            &namespace,
+            &owner,
+            &name,
+            &hook_spec.before_snapshot,
+            crate::hooks::HookPhase::Before,
+        )
+        .await?
+        {
+            Some(failure) => {
+                return fail_for_hook(
+                    ctx,
+                    backup,
+                    &api,
+                    &namespace,
+                    &name,
+                    &failure,
+                    crate::hooks::HookPhase::Before,
+                    &config.name_any(),
+                )
+                .await;
+            }
+            None => {
+                // Stamped BEFORE the Job exists, so a crash between here and the
+                // Job apply re-enters with the gate already closed.
+                io::patch_status(
+                    &api,
+                    &name,
+                    serde_json::json!({
+                        "hooks": { "preCompletedAt": chrono::Utc::now().to_rfc3339() }
+                    }),
+                )
+                .await?;
+            }
+        }
+    }
+
     let labels = run_labels(&config, origin);
     let mut limits = job_limits(backup);
     // moverDefaults.ttlSecondsAfterFinished applies unless the recipe's FailurePolicy
@@ -870,6 +978,128 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
     tracing::info!(backup = %name, "created mover Job for backup");
 
     Ok(Action::requeue(Duration::from_secs(30)))
+}
+
+/// Fetch the Snapshot's recipe and run its `afterSnapshot` hooks exactly once,
+/// gated by `status.hooks.postCompletedAt`. The stamp is written AFTER the run
+/// **whatever the outcome** — the hooks executed, and their side effects
+/// (resume, notify) must not repeat on the next requeue. Returns the aborting
+/// failure (and the policy name, for the message), if any.
+async fn run_post_hooks_once(
+    backup: &Snapshot,
+    ctx: &Context,
+    api: &Api<Snapshot>,
+    namespace: &str,
+    name: &str,
+) -> Result<Option<(crate::hooks::HookFailure, String)>> {
+    if backup
+        .status
+        .as_ref()
+        .and_then(|s| s.hooks.as_ref())
+        .and_then(|h| h.post_completed_at.as_ref())
+        .is_some()
+    {
+        return Ok(None);
+    }
+    let Some(policy_ref) = backup.spec.policy_ref.as_ref() else {
+        // Discovered snapshots have no recipe (and never reach this path).
+        return Ok(None);
+    };
+    let cfg_ns = policy_ref.namespace.as_deref().unwrap_or(namespace);
+    let cfg_api: Api<SnapshotPolicy> = Api::namespaced(ctx.client.clone(), cfg_ns);
+    let Some(config) = cfg_api.get_opt(&policy_ref.name).await? else {
+        // The recipe is gone (namespace teardown, manual delete) — nothing to run.
+        tracing::warn!(
+            backup = %name,
+            policy = %policy_ref.name,
+            "skipping afterSnapshot hooks: the SnapshotPolicy no longer exists"
+        );
+        return Ok(None);
+    };
+    let hooks = config.spec.hooks.clone().unwrap_or_default();
+    if hooks.after_snapshot.is_empty() {
+        return Ok(None);
+    }
+    let owner = io::owner_ref_for(backup, "Snapshot")?;
+    let failure = crate::hooks::run_hooks(
+        ctx,
+        namespace,
+        &owner,
+        name,
+        &hooks.after_snapshot,
+        crate::hooks::HookPhase::After,
+    )
+    .await?;
+    io::patch_status(
+        api,
+        name,
+        serde_json::json!({
+            "hooks": { "postCompletedAt": chrono::Utc::now().to_rfc3339() }
+        }),
+    )
+    .await?;
+    Ok(failure.map(|f| (f, config.name_any())))
+}
+
+/// Surface an aborting hook failure on the Snapshot: `HooksSucceeded=False` with
+/// the actionable message (+ a Warning Event, fired once per real transition via
+/// the if-changed guard). `set_failed_phase` additionally moves the phase to
+/// `Failed` (the pre-hook / post-hook-after-success paths; the failed-Job path
+/// keeps its own `MoverJobFailed` phase write).
+#[allow(clippy::too_many_arguments)]
+async fn patch_hook_failure(
+    ctx: &Context,
+    backup: &Snapshot,
+    api: &Api<Snapshot>,
+    name: &str,
+    failure: &crate::hooks::HookFailure,
+    phase: crate::hooks::HookPhase,
+    policy_name: &str,
+    set_failed_phase: bool,
+) -> Result<()> {
+    let msg = failure.condition_message(phase, policy_name);
+    let existing = backup
+        .status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default();
+    let conditions = io::upsert_condition(
+        &existing,
+        HOOKS_SUCCEEDED_CONDITION,
+        false,
+        phase.failed_reason(),
+        &msg,
+        backup.meta().generation,
+    );
+    let mut patch = serde_json::json!({ "conditions": conditions });
+    if set_failed_phase {
+        patch["phase"] = serde_json::json!("Failed");
+    }
+    let current = serde_json::to_value(&backup.status).ok();
+    let wrote = io::patch_status_if_changed(api, name, current.as_ref(), patch).await?;
+    if wrote {
+        io::publish_warning_event(ctx, backup, phase.failed_reason(), FIX_HOOK_ACTION, &msg).await;
+        tracing::warn!(backup = %name, %msg, "aborting hook failure");
+    }
+    Ok(())
+}
+
+/// Terminal hook failure: surface it, mark the Snapshot `Failed`, and stop until
+/// the object changes (one-shot semantics — create a new Snapshot once the
+/// policy's hook is fixed).
+#[allow(clippy::too_many_arguments)]
+async fn fail_for_hook(
+    ctx: &Context,
+    backup: &Snapshot,
+    api: &Api<Snapshot>,
+    _namespace: &str,
+    name: &str,
+    failure: &crate::hooks::HookFailure,
+    phase: crate::hooks::HookPhase,
+    policy_name: &str,
+) -> Result<Action> {
+    patch_hook_failure(ctx, backup, api, name, failure, phase, policy_name, true).await?;
+    Ok(Action::await_change())
 }
 
 /// Execute the deletion plan (the tested [`plan_deletion`] decision) against the
@@ -1626,7 +1856,9 @@ fn build_backup_run(
             name: _name.to_string(),
             namespace: namespace.to_string(),
         },
-        hook_plan: Default::default(),
+        // Observability only: the CONTROLLER executes hooks around this Job
+        // (ADR §4.8); the summary lets the mover/work-spec show what ran.
+        hook_plan: hook_plan_for(config),
         options: MoverOptions::default(),
         cache,
         // Repository-wide throttle (moverDefaults.throttle, ADR-0005 §13(e)).
@@ -1642,6 +1874,25 @@ fn build_backup_run(
         });
 
     Ok((work_spec, source_volume, repo_volume, creds_secrets))
+}
+
+/// The hook plan summary carried on the work spec (`<index>:<form>` per hook) —
+/// pure observability; execution lives in [`crate::hooks`].
+fn hook_plan_for(config: &SnapshotPolicy) -> kopiur_mover::workspec::HookPlanSummary {
+    let summarize = |hooks: &[kopiur_api::Hook]| {
+        hooks
+            .iter()
+            .enumerate()
+            .map(|(i, h)| format!("{i}:{}", h.kind_str()))
+            .collect()
+    };
+    match &config.spec.hooks {
+        Some(h) => kopiur_mover::workspec::HookPlanSummary {
+            pre: summarize(&h.before_snapshot),
+            post: summarize(&h.after_snapshot),
+        },
+        None => Default::default(),
+    }
 }
 
 /// Resolve identity from a `SnapshotPolicy` (overrides + the repository's CEL

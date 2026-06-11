@@ -1063,14 +1063,44 @@ impl KopiaClient {
     }
 }
 
-/// Push a kopia `--[no-]flag` tri-state: `Some(true)` → `--flag`,
-/// `Some(false)` → `--no-flag`, `None` → nothing.
+/// Push a kingpin `--[no-]flag` boolean tri-state (`Some(true)` → `--flag`,
+/// `Some(false)` → `--no-flag`). This is `kopia snapshot restore`'s flag
+/// grammar (`--[no-]overwrite-files`, …) — NOT `policy set`'s (see
+/// [`push_valued_tristate`]); the two commands genuinely differ.
 fn push_tristate(args: &mut Vec<String>, flag: &str, value: Option<bool>) {
     match value {
         Some(true) => args.push(format!("--{flag}")),
         Some(false) => args.push(format!("--no-{flag}")),
         None => {}
     }
+}
+
+/// Push a kopia `policy set` boolean knob. These are VALUED flags
+/// (`--flag=true|false`, "inherit" being the unset state) — NOT kingpin
+/// `--flag/--no-flag` booleans: a bare `--ignore-file-errors` fails with
+/// "expected argument for flag" (caught by the `policy_knobs` e2e; the old
+/// `--no-` form never reached kopia). Verified against
+/// `kopia policy set --help` (0.23).
+fn push_valued_tristate(args: &mut Vec<String>, flag: &str, value: Option<bool>) {
+    match value {
+        Some(true) => args.push(format!("--{flag}=true")),
+        Some(false) => args.push(format!("--{flag}=false")),
+        None => {}
+    }
+}
+
+/// Split [`PolicyArgs`] into the path-scoped part and an optional
+/// identity-scoped part. kopia rejects `--max-parallel-snapshots` on a
+/// path-scoped policy ("max parallel snapshots cannot be specified for paths,
+/// only global, username@hostname or @hostname" — the `policy_knobs` e2e
+/// regression), so that one knob must be applied in a second `policy set`
+/// against the bare `username@hostname` identity. Pure.
+pub fn split_policy_scopes(mut policy: PolicyArgs) -> (PolicyArgs, Option<PolicyArgs>) {
+    let identity = policy.max_parallel_snapshots.take().map(|n| PolicyArgs {
+        max_parallel_snapshots: Some(n),
+        ..Default::default()
+    });
+    (policy, identity)
 }
 
 /// Build the args for `kopia snapshot restore <id> <target>` plus options. Pure
@@ -1158,10 +1188,10 @@ fn policy_set_args(target: &str, policy: &PolicyArgs) -> Vec<String> {
         args.push("--add-never-compress".into());
         args.push(pat.clone());
     }
-    push_tristate(&mut args, "ignore-cache-dirs", policy.ignore_cache_dirs);
-    push_tristate(&mut args, "ignore-file-errors", policy.ignore_file_errors);
-    push_tristate(&mut args, "ignore-dir-errors", policy.ignore_dir_errors);
-    push_tristate(
+    push_valued_tristate(&mut args, "ignore-cache-dirs", policy.ignore_cache_dirs);
+    push_valued_tristate(&mut args, "ignore-file-errors", policy.ignore_file_errors);
+    push_valued_tristate(&mut args, "ignore-dir-errors", policy.ignore_dir_errors);
+    push_valued_tristate(
         &mut args,
         "ignore-unknown-types",
         policy.ignore_unknown_types,
@@ -1706,12 +1736,56 @@ mod tests {
     }
 
     #[test]
-    fn push_tristate_maps_correctly() {
+    fn tristate_helpers_match_each_command_grammar() {
+        // `snapshot restore` flags are kingpin `--[no-]flag` booleans…
         let mut a = Vec::new();
         push_tristate(&mut a, "flag", Some(true));
         push_tristate(&mut a, "flag", Some(false));
         push_tristate(&mut a, "flag", None);
         assert_eq!(a, vec!["--flag", "--no-flag"]);
+        // …while `policy set` knobs are VALUED flags (`--flag=true|false`,
+        // verified against `kopia policy set --help` 0.23). The bare/`--no-`
+        // forms are rejected with "expected argument for flag" — the
+        // policy_knobs e2e regression.
+        let mut a = Vec::new();
+        push_valued_tristate(&mut a, "flag", Some(true));
+        push_valued_tristate(&mut a, "flag", Some(false));
+        push_valued_tristate(&mut a, "flag", None);
+        assert_eq!(a, vec!["--flag=true", "--flag=false"]);
+    }
+
+    #[test]
+    fn split_policy_scopes_moves_max_parallel_snapshots_to_identity() {
+        // kopia: "max parallel snapshots cannot be specified for paths, only
+        // global, username@hostname or @hostname" (the policy_knobs e2e
+        // regression) — that one knob must be applied at the identity scope.
+        let policy = PolicyArgs {
+            compression: Some("zstd".into()),
+            max_parallel_snapshots: Some(2),
+            max_parallel_file_reads: Some(4),
+            ..Default::default()
+        };
+        let (path, identity) = split_policy_scopes(policy);
+        assert_eq!(path.compression.as_deref(), Some("zstd"));
+        // file-reads IS path-legal and stays put; snapshots moves out.
+        assert_eq!(path.max_parallel_file_reads, Some(4));
+        assert_eq!(path.max_parallel_snapshots, None);
+        let identity = identity.expect("identity-scoped policy present");
+        assert_eq!(
+            identity,
+            PolicyArgs {
+                max_parallel_snapshots: Some(2),
+                ..Default::default()
+            }
+        );
+
+        // Without the knob there is no identity-scoped policy at all.
+        let (path, identity) = split_policy_scopes(PolicyArgs {
+            compression: Some("zstd".into()),
+            ..Default::default()
+        });
+        assert_eq!(path.compression.as_deref(), Some("zstd"));
+        assert!(identity.is_none());
     }
 
     #[test]
@@ -1732,10 +1806,10 @@ mod tests {
                 "policy",
                 "set",
                 "u@h:/p",
-                "--ignore-cache-dirs",
-                "--ignore-file-errors",
-                "--no-ignore-dir-errors",
-                "--ignore-unknown-types",
+                "--ignore-cache-dirs=true",
+                "--ignore-file-errors=true",
+                "--ignore-dir-errors=false",
+                "--ignore-unknown-types=true",
                 "--max-parallel-snapshots",
                 "4",
                 "--max-parallel-file-reads",

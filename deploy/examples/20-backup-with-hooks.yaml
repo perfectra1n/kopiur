@@ -1,0 +1,130 @@
+# Example 20 — Quiesce with hooks (ADR §4.8)
+#
+# App-consistent backups: hooks run IN THE WORKLOAD (the controller execs into
+# your pod; the mover never runs hooks) around the snapshot. The classic pairing
+# is quiesce/resume — here PostgreSQL's backup mode — plus an httpRequest
+# notification. Three hook forms exist (exactly ONE per list entry, externally
+# tagged): `workloadExec` (exec into a matched pod), `runJob` (materialize a full
+# one-shot Job — the k8up PreBackupPod analog), `httpRequest` (call a URL).
+#
+# Semantics worth knowing before you rely on them:
+#   - A failing hook ABORTS the backup unless that hook sets
+#     `continueOnFailure: true`.
+#   - `afterSnapshot` hooks run whether the backup succeeded OR failed — a
+#     resume hook must not depend on backup success, or a failed backup would
+#     leave your database quiesced.
+#   - Each list runs exactly once per Snapshot (stamped on
+#     `status.hooks.preCompletedAt` / `postCompletedAt`).
+#
+# Field shapes verified against crates/api (Hook is externally tagged:
+# `- workloadExec: {...}`, NOT `- kind: WorkloadExec`).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nas-primary-creds
+  namespace: databases
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: nas-primary
+  namespace: databases
+spec:
+  backend:
+    s3:
+      bucket: my-backups
+      prefix: databases/
+      endpoint: s3.us-east-1.amazonaws.com
+      region: us-east-1
+      auth:
+        secretRef:
+          name: nas-primary-creds
+  encryption:
+    passwordSecretRef:
+      name: nas-primary-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: SnapshotPolicy
+metadata:
+  name: postgres-data
+  namespace: databases
+spec:
+  repository:
+    kind: Repository
+    name: nas-primary
+  sources:
+    - pvc:
+        name: postgres-data # the PVC your postgres pod mounts
+  retention:
+    keepDaily: 7
+    keepWeekly: 4
+    keepMonthly: 6
+  hooks:
+    beforeSnapshot:
+      # Quiesce: put PostgreSQL into backup mode so the filesystem snapshot is
+      # consistent. Runs INSIDE the matched workload pod, like `kubectl exec`.
+      - workloadExec:
+          podSelector:
+            matchLabels:
+              app: postgres # must match a RUNNING pod in this namespace
+          container: postgres # optional; defaults to the pod's first container
+          command: ["psql", "-U", "postgres", "-c", "SELECT pg_backup_start('kopiur')"]
+          timeout: 2m # hook fails (and aborts the backup) past this
+    afterSnapshot:
+      # Resume: ALWAYS runs once the mover Job is terminal — success or failure —
+      # so a failed backup can't leave the database in backup mode.
+      - workloadExec:
+          podSelector:
+            matchLabels:
+              app: postgres
+          container: postgres
+          command: ["psql", "-U", "postgres", "-c", "SELECT pg_backup_stop()"]
+          timeout: 2m
+      # Notify: a failing notification should not fail the backup → opt out of
+      # the abort-by-default with continueOnFailure.
+      - httpRequest:
+          url: http://notifier.tools.svc:8080/fire # http://user:pass@… becomes Basic auth
+          method: POST # the default; shown for teaching
+          body: '{"event": "postgres-data backed up"}'
+          timeout: 30s
+          continueOnFailure: true
+      # The third form, runJob, materializes a full one-shot Job (owned by the
+      # Snapshot, GC'd with it) — use it when the work needs its own image or
+      # volumes rather than an exec into the app:
+      #
+      # - runJob:
+      #     timeout: 5m
+      #     jobSpec:
+      #       backoffLimit: 0
+      #       template:
+      #         spec:
+      #           restartPolicy: Never
+      #           containers:
+      #             - name: dump
+      #               image: postgres:17
+      #               command: ["sh", "-c", "pg_dumpall -h postgres > /backup/dump.sql"]
+      #               volumeMounts: [{ name: backup, mountPath: /backup }]
+      #           volumes:
+      #             - name: backup
+      #               persistentVolumeClaim: { claimName: postgres-data }
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: SnapshotSchedule
+metadata:
+  name: postgres-data-nightly
+  namespace: databases
+spec:
+  policyRef:
+    name: postgres-data
+  schedule:
+    cron: "0 2 * * *" # nightly at 02:00
+    jitter: 30m

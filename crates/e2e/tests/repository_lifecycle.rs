@@ -275,3 +275,114 @@ async fn kstatus_ready_condition_present_for_wait() {
 
     // Cleanup leaves the seed for reuse (E2E_NAMESPACE persists); nothing to delete.
 }
+
+/// Fixing a credential Secret IN PLACE un-sticks a terminally-`Failed`
+/// Repository — with ZERO edits to the CR itself. This is the
+/// `watch.rs::secret_to_repositories` mapper + the `terminal_gate_holds`
+/// credential-version key (`status.resolvedCredentialVersion`) working
+/// together: a Secret content edit bumps neither the repo's generation nor any
+/// spec field, so on the buggy generation-only gate this test times out with
+/// the repo parked `Failed` until the 30-minute heartbeat.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
+async fn fixed_credential_secret_unsticks_failed_repository() {
+    use kopiur_e2e::{apply_secret, consts};
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("fixtures ready");
+    let client = world.client().clone();
+    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    // The credential-version gate lives in the IN-PROCESS filesystem arm (no
+    // `volume`): the controller itself connects at /repo. First make sure the
+    // repo at /repo is initialized with the GOOD password (idempotent).
+    let init = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "Repository",
+        "metadata": { "name": "e2e-rotate-init", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "backend": { "filesystem": { "path": "/repo" } },
+            "encryption": { "passwordSecretRef": { "name": CREDS_SECRET, "key": "KOPIA_PASSWORD" } },
+            "create": { "enabled": true }
+        }
+    });
+    let _ = repos.create(&PostParams::default(), &cr(init)).await;
+    wait_phase(&repos, "e2e-rotate-init", "Ready")
+        .await
+        .expect("the /repo repository should initialize with the good password");
+
+    // A dedicated Secret, seeded with the WRONG password.
+    apply_secret(
+        &client,
+        E2E_NAMESPACE,
+        "e2e-rotate-creds",
+        &[("KOPIA_PASSWORD", consts::KOPIA_BADPW)],
+    )
+    .await
+    .expect("seed the bad-password Secret");
+
+    let repo = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "Repository",
+        "metadata": { "name": "e2e-rotate", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "backend": { "filesystem": { "path": "/repo" } },
+            "encryption": { "passwordSecretRef": { "name": "e2e-rotate-creds", "key": "KOPIA_PASSWORD" } },
+            "create": { "enabled": false }
+        }
+    });
+    let _ = repos.create(&PostParams::default(), &cr(repo)).await;
+    wait_phase(&repos, "e2e-rotate", "Failed")
+        .await
+        .expect("the wrong password must park the repository Failed (terminal)");
+    let s = status_json(&repos, "e2e-rotate").await;
+    let recorded_version = s
+        .get("resolvedCredentialVersion")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !recorded_version.is_empty(),
+        "a terminal credential failure must pin status.resolvedCredentialVersion \
+         (the gate key); got {s}"
+    );
+    let generation_before = repos
+        .get("e2e-rotate")
+        .await
+        .expect("get repo")
+        .metadata
+        .generation;
+
+    // Fix the Secret IN PLACE — content-only; the CR is never touched.
+    apply_secret(
+        &client,
+        E2E_NAMESPACE,
+        "e2e-rotate-creds",
+        &[("KOPIA_PASSWORD", consts::KOPIA_PASSWORD)],
+    )
+    .await
+    .expect("fix the password Secret in place");
+
+    // The Secret watch + credential-version gate must re-drive the repo to Ready
+    // well inside the harness timeout (the buggy gate waits ~30 minutes).
+    wait_phase(&repos, "e2e-rotate", "Ready")
+        .await
+        .expect("a FIXED credential Secret must un-stick the Failed repository");
+    let after = repos.get("e2e-rotate").await.expect("get repo");
+    assert_eq!(
+        after.metadata.generation, generation_before,
+        "recovery must come from the Secret watch, not a CR edit (generation changed!)"
+    );
+    let s = status_json(&repos, "e2e-rotate").await;
+    assert_ne!(
+        s.get("resolvedCredentialVersion").and_then(|v| v.as_str()),
+        Some(recorded_version.as_str()),
+        "the gate key must advance to the fixed Secret's resourceVersion; got {s}"
+    );
+
+    let _ = repos.delete("e2e-rotate", &DeleteParams::default()).await;
+}

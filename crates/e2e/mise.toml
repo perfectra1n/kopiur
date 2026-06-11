@@ -77,7 +77,7 @@ preload janeczku/nfs-ganesha@sha256:17fe1813fd20d9fdfa497a26c8a2e39dd49748cd39db
 """
 
 [tasks.node-seed]
-description = "Seed the kopiur-e2e node's hostPath fixtures (repo/src + non-writable ro-repo)"
+description = "Seed the kopiur-e2e node's hostPath fixtures (repo/src + non-writable ro-repo + unreadable-file src-eh) and preload busybox"
 dir = "{{config_root}}/../.."
 run = '''
 set -eu
@@ -93,16 +93,33 @@ docker exec "$NODE" sh -c '
   # PVC ROOT is the kopia repo — a subdir under one shared PVC gives no isolation.
   # Each scenario binds its own PVC over one of these dirs. KEEP IN LOCKSTEP with
   # crates/e2e/src/consts.rs::REPO_SUBPATHS.
-  for s in moverdefaults nsdel-orphan nsdel-delete pin populator readonly kstatus verify repl-src repl-dst projgate; do
+  for s in moverdefaults nsdel-orphan nsdel-delete pin populator readonly kstatus verify repl-src repl-dst projgate hooks gfs errh; do
     mkdir -p "/kopiur-e2e/repos/$s"
   done
+  # Source dir with one UNREADABLE file for the errorHandling.ignoreFileErrors
+  # e2e (kept separate from /kopiur-e2e/src so it cannot break other backups).
+  mkdir -p /kopiur-e2e/src-eh
+  printf "readable\n" > /kopiur-e2e/src-eh/ok.txt
+  printf "sekrit\n"   > /kopiur-e2e/src-eh/secret.bin
   chmod -R 0777 /kopiur-e2e
-  # A deliberately NON-writable repo dir (root-owned, no write bit) for the
-  # terminal-failure regression test; set AFTER the 0777 above so it sticks.
+  # Permission fixtures are set AFTER the global 0777 so they stick:
+  # the unreadable file (root-owned, no bits) ...
+  chown 0:0 /kopiur-e2e/src-eh/secret.bin
+  chmod 0000 /kopiur-e2e/src-eh/secret.bin
+  # ... and the deliberately NON-writable repo dir (root-owned, no write bit)
+  # for the terminal-failure regression test.
   mkdir -p /kopiur-e2e/ro-repo
   chown 0:0 /kopiur-e2e/ro-repo
   chmod 0555 /kopiur-e2e/ro-repo
 '
+# Tiny helper image for hook workloads / sentinel reader pods (mirror
+# crates/e2e/src/consts.rs::BUSYBOX_IMAGE). Preloaded HERE (not minio-preload)
+# because Filesystem-only shards skip the backend preload. Best-effort: pods
+# fall back to an in-cluster pull (IfNotPresent) if this fails.
+BUSYBOX="busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+for attempt in 1 2 3; do docker pull "$BUSYBOX" >/dev/null 2>&1 && break; echo "   (retry $attempt) $BUSYBOX"; sleep 3; done
+docker save "$BUSYBOX" | docker exec -i "$NODE" ctr --namespace=k8s.io images import - >/dev/null 2>&1 \
+  && echo "   preloaded $BUSYBOX" || echo "   warn: could not preload $BUSYBOX (will pull in-cluster)"
 '''
 
 [tasks.helm]

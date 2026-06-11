@@ -166,6 +166,11 @@ pub const MOVER_PERMITTED_CONDITION: &str = "MoverPermitted";
 pub const PRIVILEGED_MOVER_NOT_PERMITTED_REASON: &str = "PrivilegedMoverNotPermitted";
 /// Event `action` (remediation hint) for a refused privileged mover.
 pub const ALLOW_PRIVILEGED_MOVER_ACTION: &str = "AnnotateNamespaceForPrivilegedMovers";
+/// `Snapshot` condition for `spec.hooks` execution (ADR §4.8) — `False` carries
+/// the failing hook's index, form, and actionable cause.
+pub const HOOKS_SUCCEEDED_CONDITION: &str = "HooksSucceeded";
+/// Event `action` (remediation hint) for an aborting hook failure.
+pub const FIX_HOOK_ACTION: &str = "FixHookOrSetContinueOnFailure";
 /// `action` for a `PermissionDenied` failure: make the repository path/PVC
 /// writable by the operator's UID.
 pub const CHECK_PERMISSIONS_ACTION: &str = "CheckPermissions";

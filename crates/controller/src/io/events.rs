@@ -270,6 +270,12 @@ pub(crate) fn reconcile_failure_event(err: &Error, uid: u32) -> FailureEvent {
                  webhook configurations."
             ),
         ),
+        // The error message itself carries the full what/why/fix (use snapshotRef
+        // or pin snapshotID) — the spec must change, same remediation as a
+        // validation failure.
+        Error::UnsupportedSourceResolution { .. } => {
+            (INVALID_SPEC_REASON, FIX_SPEC_ACTION, err.to_string())
+        }
     };
     FailureEvent {
         reason,

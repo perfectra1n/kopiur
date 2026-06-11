@@ -183,6 +183,7 @@ nav:
       - Clone an app into another namespace: scenarios/clone-app-to-namespace.md
   - Reference:
       - Field reference (all CRDs): field-reference.md
+      - RBAC reference: rbac.md
       - API reference (rustdoc): api-reference.md
   # Top-level entry → its own top-level item in the left sidebar, so the Rust API
   # docs are one click from the top of every page. Root-absolute link into the
@@ -193,6 +194,7 @@ nav:
   - Developer:
       - API conventions: dev/api-conventions.md
       - Observability: dev/observability.md
+      - Watches & reconcile triggers: dev/watch-and-reconcile.md
   - Architecture Decision Records:
       - ADR-0003 — Kopiur, a Kopia-native operator in Rust: adr/0003-kopiur-rust-operator.md
       - ADR-0004 — Breaking CRD & field renames: adr/0004-breaking-crd-and-field-renames.md

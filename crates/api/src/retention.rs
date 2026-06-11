@@ -418,4 +418,43 @@ mod tests {
         // Every input is accounted for exactly once.
         assert_eq!(keep.len() + del.len(), 4);
     }
+
+    #[test]
+    fn e2e_gfs_history_partitions_exactly_as_the_retention_e2e_expects() {
+        // The EXACT history + spec the `gfs_time_buckets_prune_backdated_history`
+        // e2e (crates/e2e/tests/retention.rs) seeds, pinned hermetically so the
+        // e2e's in-test expectation can never drift from the kernel. Note
+        // keepAnnual: 2 — buckets are the N most recent periods CONTAINING
+        // snapshots, so holding a prior-year snapshot needs the 2026 bucket
+        // (the newest snapshot's year) plus one more.
+        let backups = vec![
+            fake("e2e-gfs-1", at(2025, 4, 10, 10, 0)),
+            fake("e2e-gfs-2", at(2026, 3, 2, 10, 0)),
+            fake("e2e-gfs-3", at(2026, 4, 6, 10, 0)),
+            fake("e2e-gfs-4", at(2026, 5, 25, 10, 0)),
+            fake("e2e-gfs-5", at(2026, 6, 1, 10, 0)),
+            fake("e2e-gfs-6", at(2026, 6, 8, 10, 0)),
+            fake("e2e-gfs-7", at(2026, 6, 8, 11, 0)),
+        ];
+        let policy: Retention = serde_json::from_value(serde_json::json!({
+            "keepLatest": 1, "keepDaily": 2, "keepWeekly": 2,
+            "keepMonthly": 2, "keepAnnual": 2
+        }))
+        .unwrap();
+        let got = select_kept(&backups, &policy);
+        assert_eq!(
+            as_set(&got.keep),
+            ["e2e-gfs-1", "e2e-gfs-4", "e2e-gfs-5", "e2e-gfs-7"]
+                .into_iter()
+                .collect(),
+            "keep: latest+daily+weekly (gfs-7/5), monthly #2 (gfs-4), annual #2 (gfs-1)"
+        );
+        assert_eq!(
+            as_set(&got.delete),
+            ["e2e-gfs-2", "e2e-gfs-3", "e2e-gfs-6"]
+                .into_iter()
+                .collect(),
+            "delete: months outside keepMonthly:2 and the same-day older duplicate"
+        );
+    }
 }

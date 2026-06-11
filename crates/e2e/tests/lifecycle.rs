@@ -273,6 +273,14 @@ async fn backup_restore_delete_lifecycle() {
         !snap_id.is_empty(),
         "Snapshot status must carry a real kopia snapshot id, got {bstatus}"
     );
+    // status.logTail is written by the mover at the terminal transition with the
+    // documented `Snapshot created: <id>` line (it was an inert, never-written
+    // field before — this guards the wiring end-to-end).
+    assert_eq!(
+        bstatus.get("logTail").and_then(|v| v.as_str()),
+        Some(format!("Snapshot created: {snap_id}").as_str()),
+        "status.logTail must carry the snapshot-created line; got {bstatus}"
+    );
 
     // 3. Restore that Snapshot into a target PVC → Completed.
     let restore = serde_json::json!({
@@ -282,7 +290,7 @@ async fn backup_restore_delete_lifecycle() {
         "spec": {
             "repository": { "kind": "Repository", "name": "e2e-repo" },
             "source": { "snapshotRef": { "name": "e2e-backup" } },
-            "target": { "pvc": { "name": "e2e-dst" } }
+            "target": { "pvcRef": { "name": "e2e-dst" } }
         }
     });
     restores
@@ -292,6 +300,14 @@ async fn backup_restore_delete_lifecycle() {
     wait_phase(&restores, "e2e-restore", "Completed")
         .await
         .expect("Restore should reach Completed");
+    // Same logTail wiring on the Restore side: the mover writes the restored
+    // snapshot id at the terminal transition.
+    let rstatus = status_json(&restores, "e2e-restore").await;
+    assert_eq!(
+        rstatus.get("logTail").and_then(|v| v.as_str()),
+        Some(format!("Restore completed: snapshot {snap_id}").as_str()),
+        "Restore status.logTail must carry the restored snapshot id; got {rstatus}"
+    );
 
     // 4. Delete a Snapshot whose deletionPolicy is Delete → finalizer runs a delete
     //    Job and the CR is removed. (Use a second Snapshot so step 2's Retain one
@@ -990,6 +1006,148 @@ async fn schedule_creates_backup() {
     )
     .await
     .expect("schedule should create a Snapshot CR");
+}
+
+/// `policySelector` fan-out (ADR-0005 §10): one schedule firing creates exactly
+/// one Snapshot per MATCHING, non-suspended SnapshotPolicy — and nothing for the
+/// non-matching or suspended ones. A broken selector fails silently in
+/// production (no Snapshots, no errors), which is why this needs e2e coverage.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
+async fn schedule_policy_selector_fans_out_to_matching_policies() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("provision filesystem fixtures");
+    let client = world.client().clone();
+    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let schedules: Api<SnapshotSchedule> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    let _ = repos
+        .create(&PostParams::default(), &cr(repository_json("e2e-repo")))
+        .await;
+    wait_phase(&repos, "e2e-repo", "Ready")
+        .await
+        .expect("Repository should reach Ready");
+
+    // Four policies: two matching, one non-matching, one matching-but-suspended.
+    let policy = |name: &str, tier: &str, suspend: bool| {
+        let mut cfg = backup_config_json(name, "e2e-repo", "e2e-src");
+        cfg["metadata"]["labels"] = serde_json::json!({ "tier": tier });
+        if suspend {
+            cfg["spec"]["suspend"] = serde_json::json!(true);
+        }
+        cfg
+    };
+    for (name, tier, suspend) in [
+        ("e2e-fan-a", "critical", false),
+        ("e2e-fan-b", "critical", false),
+        ("e2e-fan-c", "bulk", false),
+        ("e2e-fan-d", "critical", true),
+    ] {
+        let _ = configs
+            .create(&PostParams::default(), &cr(policy(name, tier, suspend)))
+            .await;
+    }
+
+    // Yearly cron + runOnCreate ⇒ exactly ONE immediate fire during the test.
+    let sched = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "SnapshotSchedule",
+        "metadata": { "name": "e2e-fan-sched", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "policySelector": { "matchLabels": { "tier": "critical" } },
+            "schedule": { "cron": "0 0 1 1 *", "runOnCreate": true }
+        }
+    });
+    schedules
+        .create(&PostParams::default(), &cr::<SnapshotSchedule>(sched))
+        .await
+        .expect("create fan-out SnapshotSchedule");
+
+    // Exactly the two matching, non-suspended policies get a Snapshot.
+    let fan_snapshots = || async {
+        let list = backups
+            .list(
+                &kube::api::ListParams::default()
+                    .labels("kopiur.home-operations.com/schedule=e2e-fan-sched"),
+            )
+            .await?;
+        anyhow::Ok(list.items)
+    };
+    wait_until(
+        "fan-out creates the two matching Snapshots",
+        Duration::from_secs(120),
+        poll_interval(),
+        || async {
+            let items = fan_snapshots()
+                .await
+                .map_err(|e| kube::Error::Service(e.into()))?;
+            Ok((items.len() == 2).then_some(()))
+        },
+    )
+    .await
+    .expect("policySelector must fan out to the matching policies");
+    // A grace window: still exactly 2 (no fan-out to the bulk/suspended ones,
+    // no duplicate fire).
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let items = fan_snapshots().await.expect("list fan-out snapshots");
+    assert_eq!(
+        items.len(),
+        2,
+        "exactly the two matching, non-suspended policies fan out; got {:?}",
+        items.iter().map(|b| b.name_any()).collect::<Vec<_>>()
+    );
+
+    let mut targeted: Vec<String> = items
+        .iter()
+        .filter_map(|b| b.spec.policy_ref.as_ref().map(|p| p.name.clone()))
+        .collect();
+    targeted.sort();
+    assert_eq!(
+        targeted,
+        ["e2e-fan-a", "e2e-fan-b"],
+        "each fan-out Snapshot must reference its own matching policy"
+    );
+    for b in &items {
+        assert_eq!(
+            b.labels()
+                .get("kopiur.home-operations.com/origin")
+                .map(String::as_str),
+            Some("scheduled"),
+            "fan-out snapshots carry origin=scheduled"
+        );
+        assert!(
+            b.owner_references()
+                .iter()
+                .any(|o| o.kind == "SnapshotSchedule" && o.name == "e2e-fan-sched"),
+            "fan-out snapshots are owned by the schedule"
+        );
+        assert!(
+            b.name_any().starts_with("e2e-fan-sched-e2e-fan-"),
+            "fan-out names are per-policy ({})",
+            b.name_any()
+        );
+    }
+    // The fan-out refs resolve: both reach Succeeded (a real backup each).
+    for b in &items {
+        wait_phase(&backups, &b.name_any(), "Succeeded")
+            .await
+            .unwrap_or_else(|e| panic!("fan-out snapshot {} should succeed: {e}", b.name_any()));
+    }
+
+    // Cleanup: delete the schedule (owner GC reaps its snapshots) + policies.
+    let _ = schedules
+        .delete("e2e-fan-sched", &DeleteParams::default())
+        .await;
+    for name in ["e2e-fan-a", "e2e-fan-b", "e2e-fan-c", "e2e-fan-d"] {
+        let _ = configs.delete(name, &DeleteParams::default()).await;
+    }
 }
 
 /// A Maintenance claims the repository lease.

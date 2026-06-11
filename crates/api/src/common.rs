@@ -359,6 +359,35 @@ pub struct Identity {
     pub hostname: Option<String>,
 }
 
+/// Byte cap for `status.logTail` (and the stderr tail inside
+/// [`FailureBlock`]): the mover truncates to the LAST `MAX_LOG_TAIL_BYTES`
+/// bytes before patching status, so a noisy kopia run can't bloat etcd. Full
+/// logs live in the mover Job's pod. ADR §3.4/§4.10.
+pub const MAX_LOG_TAIL_BYTES: usize = 4096;
+
+/// A structured terminal-failure block written by the mover to `status.failure`
+/// (ADR §4.10): the kopia error class, a human-readable message, the last
+/// stderr lines, and a retry recommendation. Defined in `kopiur-api` (not the
+/// mover) so the field names cannot drift from the CRD structural schema — a
+/// mismatched name is silently pruned by the API server.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FailureBlock {
+    /// kopia error class (e.g. `RepositoryUnavailable`, `AuthFailure`).
+    pub kopia_error_class: String,
+    /// A short human-readable message: what failed, why, and how to fix it.
+    pub message: String,
+    /// The last lines of kopia's stderr, if any were captured (bounded by
+    /// [`MAX_LOG_TAIL_BYTES`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_tail: Option<String>,
+    /// The process exit code, if one was reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Whether retrying the same operation unchanged could succeed.
+    pub retry_recommended: bool,
+}
+
 /// Fully-resolved identity pinned into status; never re-rendered after admission. ADR §4.2.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]

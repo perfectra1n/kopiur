@@ -123,7 +123,7 @@ fn restore_json(
         "spec": {
             "repository": { "kind": "ClusterRepository", "name": repo },
             "source": { "snapshotRef": { "name": backup } },
-            "target": { "pvc": { "name": "e2e-dst" } },
+            "target": { "pvcRef": { "name": "e2e-dst" } },
             "credentialProjection": { "enabled": project }
         }
     })

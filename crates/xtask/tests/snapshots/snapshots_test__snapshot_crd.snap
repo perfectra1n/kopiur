@@ -155,6 +155,54 @@ spec:
                   - type
                   type: object
                 type: array
+              failure:
+                description: |-
+                  Structured terminal-failure detail (kopia error class, stderr tail, retry
+                  hint), written by the mover before it exits non-zero. ADR §4.10.
+                nullable: true
+                properties:
+                  exitCode:
+                    description: The process exit code, if one was reported.
+                    format: int32
+                    nullable: true
+                    type: integer
+                  kopiaErrorClass:
+                    description: kopia error class (e.g. `RepositoryUnavailable`, `AuthFailure`).
+                    type: string
+                  message:
+                    description: 'A short human-readable message: what failed, why, and how to fix it.'
+                    type: string
+                  retryRecommended:
+                    description: Whether retrying the same operation unchanged could succeed.
+                    type: boolean
+                  stderrTail:
+                    description: |-
+                      The last lines of kopia's stderr, if any were captured (bounded by
+                      [`MAX_LOG_TAIL_BYTES`]).
+                    nullable: true
+                    type: string
+                required:
+                - kopiaErrorClass
+                - message
+                - retryRecommended
+                type: object
+              hooks:
+                description: |-
+                  Hook-execution bookkeeping (ADR §4.8): completion timestamps the
+                  reconciler stamps so each hook list runs exactly once per Snapshot across
+                  requeues and controller restarts (hooks have side effects — quiesce,
+                  resume — that must not repeat).
+                nullable: true
+                properties:
+                  postCompletedAt:
+                    description: When the `afterSnapshot` list completed (RFC3339); absent until it has.
+                    nullable: true
+                    type: string
+                  preCompletedAt:
+                    description: When the `beforeSnapshot` list completed (RFC3339); absent until it has.
+                    nullable: true
+                    type: string
+                type: object
               job:
                 description: Present for scheduled/manual; absent for discovered. ADR §3.4.
                 nullable: true
@@ -170,7 +218,12 @@ spec:
                     type: string
                 type: object
               logTail:
-                description: Capped at ~4KB; full logs live in the Job pod. ADR §3.4/§4.10.
+                description: |-
+                  The last lines of the run's output, written by the mover at the terminal
+                  transition (success: the `Snapshot created: <id>` line; failure: the
+                  actionable error + kopia stderr tail). Capped at
+                  [`crate::common::MAX_LOG_TAIL_BYTES`]; full logs live in the Job pod.
+                  ADR §3.4/§4.10.
                 nullable: true
                 type: string
               observedGeneration:

@@ -183,69 +183,127 @@ async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
         &restore.spec.source,
     );
 
-    // Resolve the source to a concrete snapshot id, pinning status.resolved.
-    let resolved = resolve_snapshot(ctx, restore, &namespace).await?;
-    let snapshot_id = match resolved {
-        Some(id) => id,
-        None => {
-            // No snapshot matched. Honor the closed enum exhaustively.
-            return match on_missing {
-                OnMissingSnapshot::Fail => {
-                    io::patch_status(
-                        &api,
-                        &name,
-                        serde_json::json!({
-                            "phase": "Failed",
-                            "conditions": [condition(
-                                "Resolved", "False", "SnapshotNotFound",
-                                "no snapshot matched the restore source",
-                            )],
-                        }),
-                    )
-                    .await?;
-                    Err(Error::MissingDependency(
-                        "no snapshot matched restore source".into(),
-                    ))
-                }
-                OnMissingSnapshot::Continue => {
-                    // Deploy-or-restore: nothing to restore, complete cleanly.
-                    io::patch_status(
-                        &api,
-                        &name,
-                        serde_json::json!({
-                            "phase": "Completed",
-                            "conditions": [condition(
-                                "Resolved", "True", "NoSnapshotContinue",
-                                "no snapshot found; continuing (deploy-or-restore)",
-                            )],
-                        }),
-                    )
-                    .await?;
-                    Ok(Action::requeue(std::time::Duration::from_secs(600)))
-                }
-            };
-        }
-    };
-
-    // Pin the resolution timestamp exactly once. `resolved` is "pinned at
-    // admission; never re-resolved" (ADR §4.6) — re-writing `now()` on every
-    // reconcile churned status and self-triggered the loop.
-    if restore
+    // ADR §4.6: the resolution is pinned ONCE and never re-resolved — a restore
+    // must not silently retarget when newer snapshots appear mid-flight. Reuse a
+    // previously pinned id; resolve only while no pin exists yet.
+    let pinned_id = restore
         .status
         .as_ref()
         .and_then(|s| s.resolved.as_ref())
-        .is_none()
-    {
-        io::patch_status(
-            &api,
-            &name,
-            serde_json::json!({
-                "phase": "Resolving",
-                "resolved": { "pinnedAt": chrono::Utc::now().to_rfc3339() },
-            }),
-        )
-        .await?;
-    }
+        .and_then(|r| r.kopia_snapshot_id.clone());
+    let snapshot_id = if let Some(id) = pinned_id {
+        id
+    } else {
+        match resolve_snapshot(ctx, restore, &namespace).await? {
+            Some(res) => {
+                // Pin the FULL resolution (id + provenance + timestamp) exactly
+                // once; the no-pin check above makes this a single write, so it
+                // cannot churn status.
+                let mut resolved = serde_json::json!({
+                    "kopiaSnapshotID": res.kopia_snapshot_id,
+                    "pinnedAt": chrono::Utc::now().to_rfc3339(),
+                });
+                if let Some(r) = &res.snapshot_ref {
+                    resolved["snapshotRef"] = serde_json::to_value(r)?;
+                }
+                if let Some(i) = &res.identity {
+                    resolved["identity"] = serde_json::to_value(i)?;
+                }
+                io::patch_status(
+                    &api,
+                    &name,
+                    serde_json::json!({ "phase": "Resolving", "resolved": resolved }),
+                )
+                .await?;
+                res.kopia_snapshot_id
+            }
+            None => {
+                // No snapshot matched. While the `waitTimeout` window (anchored at
+                // the Restore's creation) is open, keep waiting instead of giving
+                // up — `onMissingSnapshot` applies only once the window closes
+                // (ADR §4.6 G7).
+                let now = chrono::Utc::now().timestamp();
+                let created = restore
+                    .metadata
+                    .creation_timestamp
+                    .as_ref()
+                    .map(|t| t.0.as_second())
+                    .unwrap_or(now);
+                let wait_timeout = restore
+                    .spec
+                    .policy
+                    .as_ref()
+                    .and_then(|p| p.wait_timeout.as_deref());
+                if let Some(remaining) = wait_remaining_secs(created, wait_timeout, now) {
+                    let existing = restore
+                        .status
+                        .as_ref()
+                        .map(|s| s.conditions.clone())
+                        .unwrap_or_default();
+                    // Static message (no countdown): an identical re-patch is a
+                    // server-side no-op, so polling here cannot churn status.
+                    let conditions = io::upsert_condition(
+                        &existing,
+                        "Resolved",
+                        false,
+                        "WaitingForSnapshot",
+                        &format!(
+                            "no snapshot matched the restore source yet; waiting up to \
+                             waitTimeout ({}) from creation for it to appear before \
+                             applying onMissingSnapshot",
+                            wait_timeout.unwrap_or_default()
+                        ),
+                        restore.metadata.generation,
+                    );
+                    io::patch_status(
+                        &api,
+                        &name,
+                        serde_json::json!({ "phase": "Pending", "conditions": conditions }),
+                    )
+                    .await?;
+                    return Ok(Action::requeue(std::time::Duration::from_secs(
+                        remaining.clamp(1, 15),
+                    )));
+                }
+                // Window closed (or none configured): honor the closed enum exhaustively.
+                return match on_missing {
+                    OnMissingSnapshot::Fail => {
+                        io::patch_status(
+                            &api,
+                            &name,
+                            serde_json::json!({
+                                "phase": "Failed",
+                                "conditions": [condition(
+                                    "Resolved", "False", "SnapshotNotFound",
+                                    "no snapshot matched the restore source",
+                                )],
+                            }),
+                        )
+                        .await?;
+                        Err(Error::MissingDependency(
+                            "no snapshot matched restore source".into(),
+                        ))
+                    }
+                    OnMissingSnapshot::Continue => {
+                        // Deploy-or-restore: nothing to restore, complete cleanly.
+                        io::patch_status(
+                            &api,
+                            &name,
+                            serde_json::json!({
+                                "phase": "Completed",
+                                "conditions": [condition(
+                                    "Resolved", "True", "NoSnapshotContinue",
+                                    "no snapshot found; continuing (deploy-or-restore)",
+                                )],
+                            }),
+                        )
+                        .await?;
+                        Ok(Action::requeue(std::time::Duration::from_secs(600)))
+                    }
+                };
+            }
+        }
+    };
 
     match state {
         PopulatorState::DirectTarget => {
@@ -327,7 +385,13 @@ async fn drive_direct_restore(
     // variant must be considered here.
     let target_pvc = match &restore.spec.target {
         RestoreTarget::PvcRef(r) => r.name.clone(),
-        RestoreTarget::Pvc(t) => t.name.clone(),
+        // `target.pvc` means the operator CREATES the PVC (ADR §3.6) — without
+        // this the mover Job references a claim nobody made and sits Pending
+        // forever (FailedScheduling: persistentvolumeclaim not found).
+        RestoreTarget::Pvc(t) => {
+            ensure_restore_target_pvc(ctx, namespace, t).await?;
+            t.name.clone()
+        }
         RestoreTarget::Populator(_) => {
             return Err(Error::Invariant(
                 "DirectTarget restore reached with a populator target (should route to \
@@ -628,13 +692,81 @@ async fn drive_direct_restore(
     Ok(Action::requeue(std::time::Duration::from_secs(30)))
 }
 
-/// Resolve the restore's source to a concrete kopia snapshot id. Returns `None`
-/// when no snapshot matches (caller applies `onMissingSnapshot`).
+/// A fully-resolved restore source, ready to pin to `status.resolved` (ADR §4.6):
+/// the exact kopia snapshot id plus its provenance (the `Snapshot` CR or the
+/// kopia identity it was selected by).
+#[derive(Debug, Clone)]
+struct ResolvedSource {
+    kopia_snapshot_id: String,
+    snapshot_ref: Option<kopiur_api::common::ObjectRef>,
+    identity: Option<kopiur_api::common::ResolvedIdentity>,
+}
+
+/// Create the `target.pvc` PVC if it doesn't exist (idempotent). Deliberately
+/// NOT owner-referenced to the `Restore`: the restored data must survive
+/// `kubectl delete restore` — GC'ing the target PVC with the CR would destroy
+/// what the user just recovered. Missing `capacity` is rejected (webhook + here,
+/// defensively): a silently-defaulted size could truncate the restored data.
+async fn ensure_restore_target_pvc(
+    ctx: &Context,
+    namespace: &str,
+    template: &kopiur_api::restore::PvcTemplate,
+) -> Result<()> {
+    use k8s_openapi::api::core::v1::PersistentVolumeClaim;
+    let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), namespace);
+    if pvc_api.get_opt(&template.name).await?.is_some() {
+        return Ok(());
+    }
+    let capacity = template.capacity.as_deref().ok_or_else(|| {
+        Error::Validation(format!(
+            "restore target.pvc {:?} has no capacity; set target.pvc.capacity (e.g. 10Gi, at \
+             least the size of the data being restored) — the operator will not guess a size \
+             for a PVC it creates",
+            template.name
+        ))
+    })?;
+    let access_modes = if template.access_modes.is_empty() {
+        vec!["ReadWriteOnce".to_string()]
+    } else {
+        template.access_modes.clone()
+    };
+    let pvc: PersistentVolumeClaim = serde_json::from_value(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": template.name,
+            "namespace": namespace,
+            "labels": io::child_labels(&[("kopiur.home-operations.com/op", "restore-target")]),
+        },
+        "spec": {
+            "accessModes": access_modes,
+            "resources": { "requests": { "storage": capacity } },
+            "storageClassName": template.storage_class_name,
+        },
+    }))?;
+    match pvc_api
+        .create(&kube::api::PostParams::default(), &pvc)
+        .await
+    {
+        Ok(_) => {
+            tracing::info!(pvc = %template.name, %namespace, "created restore target PVC");
+            Ok(())
+        }
+        // Lost a create race with another reconcile — the PVC exists, which is
+        // all this function guarantees.
+        Err(kube::Error::Api(e)) if e.code == 409 => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Resolve the restore's source to a concrete kopia snapshot. Returns `None`
+/// when no snapshot matches (caller applies `waitTimeout` + `onMissingSnapshot`).
 async fn resolve_snapshot(
     ctx: &Context,
     restore: &Restore,
     namespace: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<ResolvedSource>> {
+    use kopiur_api::common::{ObjectRef, ResolvedIdentity};
     match &restore.spec.source {
         RestoreSource::SnapshotRef(r) => {
             let ns = r.namespace.as_deref().unwrap_or(namespace);
@@ -643,12 +775,28 @@ async fn resolve_snapshot(
             Ok(backup
                 .and_then(|b| b.status)
                 .and_then(|s| s.snapshot)
-                .map(|s| s.kopia_snapshot_id))
+                .map(|s| ResolvedSource {
+                    kopia_snapshot_id: s.kopia_snapshot_id,
+                    snapshot_ref: Some(ObjectRef {
+                        name: r.name.clone(),
+                        namespace: Some(ns.to_string()),
+                    }),
+                    identity: None,
+                }))
         }
         RestoreSource::Identity(id) => {
+            let identity = ResolvedIdentity {
+                username: id.username.clone(),
+                hostname: id.hostname.clone(),
+                source_path: id.source_path.clone(),
+            };
             // An explicit snapshot id wins; otherwise resolve via snapshot list.
             if let Some(sid) = &id.snapshot_id {
-                return Ok(Some(sid.clone()));
+                return Ok(Some(ResolvedSource {
+                    kopia_snapshot_id: sid.clone(),
+                    snapshot_ref: None,
+                    identity: Some(identity),
+                }));
             }
             let repo = resolve_restore_repository(ctx, restore, namespace).await?;
             let snapshots = list_for_identity(
@@ -660,7 +808,14 @@ async fn resolve_snapshot(
                 id.source_path.as_deref(),
             )
             .await?;
-            Ok(pick_offset(snapshots, id.offset.unwrap_or(0)))
+            let snapshots = filter_as_of(snapshots, id.as_of.as_deref())?;
+            Ok(
+                pick_offset(snapshots, id.offset.unwrap_or(0)).map(|sid| ResolvedSource {
+                    kopia_snapshot_id: sid,
+                    snapshot_ref: None,
+                    identity: Some(identity),
+                }),
+            )
         }
         RestoreSource::FromPolicy(c) => {
             // Resolve identity from the SnapshotPolicy, then list newest/offset.
@@ -685,9 +840,51 @@ async fn resolve_snapshot(
                 identity.source_path.as_deref(),
             )
             .await?;
-            Ok(pick_offset(snapshots, c.offset))
+            let snapshots = filter_as_of(snapshots, c.as_of.as_deref())?;
+            Ok(pick_offset(snapshots, c.offset).map(|sid| ResolvedSource {
+                kopia_snapshot_id: sid,
+                snapshot_ref: None,
+                identity: Some(identity),
+            }))
         }
     }
+}
+
+/// Keep only snapshots taken at or before `asOf` (point-in-time selection,
+/// applied BEFORE `offset` so the two compose: "the previous one as of last
+/// Tuesday"). `None` keeps the full list. The webhook validates the format at
+/// admission; re-parsing here is defensive (one validator, two callers).
+fn filter_as_of(
+    mut snapshots: Vec<kopiur_kopia::SnapshotListEntry>,
+    as_of: Option<&str>,
+) -> Result<Vec<kopiur_kopia::SnapshotListEntry>> {
+    let Some(s) = as_of else {
+        return Ok(snapshots);
+    };
+    let cutoff = chrono::DateTime::parse_from_rfc3339(s)
+        .map_err(|e| {
+            Error::Validation(format!(
+                "source asOf {s:?} is not an RFC3339 timestamp; use e.g. \
+                 2026-05-01T00:00:00Z (the newest snapshot at or before this instant \
+                 is restored): {e}"
+            ))
+        })?
+        .with_timezone(&chrono::Utc);
+    snapshots.retain(|e| e.end_time <= cutoff);
+    Ok(snapshots)
+}
+
+/// Seconds left in the `waitTimeout` window that started at the Restore's
+/// creation, or `None` when no (parseable) window is configured or it has
+/// elapsed. Pure, clock-free — unit-tested without a cluster.
+pub fn wait_remaining_secs(
+    created_epoch: i64,
+    wait_timeout: Option<&str>,
+    now_epoch: i64,
+) -> Option<u64> {
+    let timeout = crate::snapshot_schedule::parse_go_duration(wait_timeout?)?;
+    let deadline = created_epoch.saturating_add(timeout.as_secs().try_into().ok()?);
+    (now_epoch < deadline).then(|| (deadline - now_epoch) as u64)
 }
 
 /// kopia snapshot list filtered to one identity (filesystem in-process path),
@@ -723,9 +920,20 @@ async fn list_for_identity(
             list.sort_by_key(|e| std::cmp::Reverse(e.end_time));
             Ok(list)
         }
-        // NOTE: object-store snapshot resolution would run via a short Job; the
-        // filesystem path is the working core (see repository.rs NOTE).
-        _ => Ok(vec![]),
+        // In-process snapshot listing needs a locally mounted repo; object-store
+        // backends cannot be listed here. Fail LOUDLY with the fix (snapshotRef or
+        // a pinned snapshotID) instead of returning an empty list that would read
+        // as "no snapshots" and silently Continue/Fail. Exhaustive so a new
+        // backend must decide its resolution story before it compiles.
+        b @ (Backend::S3(_)
+        | Backend::Azure(_)
+        | Backend::Gcs(_)
+        | Backend::B2(_)
+        | Backend::Sftp(_)
+        | Backend::WebDav(_)
+        | Backend::Rclone(_)) => Err(Error::UnsupportedSourceResolution {
+            backend: b.kind_str(),
+        }),
     }
 }
 
@@ -886,6 +1094,84 @@ mod tests {
         assert_eq!(source_mode(&snapshot_ref()), "SnapshotRef");
         assert_eq!(source_mode(&from_config()), "FromPolicy");
         assert_eq!(source_mode(&identity()), "Identity");
+    }
+
+    fn list_entry(id: &str, end_time: &str) -> kopiur_kopia::SnapshotListEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "source": { "host": "h", "userName": "u", "path": "/data" },
+            "startTime": end_time,
+            "endTime": end_time,
+        }))
+        .expect("valid SnapshotListEntry")
+    }
+
+    /// Three snapshots, newest-first (the order `list_for_identity` returns).
+    fn three_snapshots() -> Vec<kopiur_kopia::SnapshotListEntry> {
+        vec![
+            list_entry("k3", "2026-06-03T00:00:00Z"),
+            list_entry("k2", "2026-06-02T00:00:00Z"),
+            list_entry("k1", "2026-06-01T00:00:00Z"),
+        ]
+    }
+
+    #[test]
+    fn filter_as_of_keeps_snapshots_at_or_before_the_instant() {
+        // A cutoff between k2 and k3 drops k3 (newer than the instant); k2/k1 remain.
+        let kept = filter_as_of(three_snapshots(), Some("2026-06-02T12:00:00Z")).unwrap();
+        assert_eq!(
+            kept.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            ["k2", "k1"]
+        );
+        // Exactly AT a snapshot's endTime keeps it ("at or before").
+        let kept = filter_as_of(three_snapshots(), Some("2026-06-02T00:00:00Z")).unwrap();
+        assert_eq!(kept.first().map(|e| e.id.as_str()), Some("k2"));
+        // Before everything → empty (caller applies onMissingSnapshot).
+        let kept = filter_as_of(three_snapshots(), Some("2026-05-01T00:00:00Z")).unwrap();
+        assert!(kept.is_empty());
+        // No asOf → untouched.
+        let kept = filter_as_of(three_snapshots(), None).unwrap();
+        assert_eq!(kept.len(), 3);
+    }
+
+    #[test]
+    fn filter_as_of_rejects_non_rfc3339_with_actionable_message() {
+        let err = filter_as_of(three_snapshots(), Some("yesterday")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("yesterday"), "{msg}");
+        assert!(msg.contains("RFC3339"), "{msg}");
+        assert!(msg.contains("2026-05-01T00:00:00Z"), "{msg}");
+    }
+
+    #[test]
+    fn as_of_composes_with_offset() {
+        // "the previous one as of just after k2": asOf drops k3, offset 1 then
+        // steps past k2 to k1.
+        let kept = filter_as_of(three_snapshots(), Some("2026-06-02T12:00:00Z")).unwrap();
+        assert_eq!(pick_offset(kept, 1), Some("k1".to_string()));
+    }
+
+    #[test]
+    fn pick_offset_zero_is_newest_and_out_of_range_is_none() {
+        assert_eq!(pick_offset(three_snapshots(), 0), Some("k3".to_string()));
+        assert_eq!(pick_offset(three_snapshots(), 2), Some("k1".to_string()));
+        assert_eq!(pick_offset(three_snapshots(), 3), None);
+        // A negative offset clamps to newest rather than panicking.
+        assert_eq!(pick_offset(three_snapshots(), -1), Some("k3".to_string()));
+    }
+
+    #[test]
+    fn wait_remaining_counts_down_from_creation_and_closes() {
+        // 5m window, 60s elapsed → 240s left.
+        assert_eq!(wait_remaining_secs(1000, Some("5m"), 1060), Some(240));
+        // Window exactly elapsed → closed (None), onMissingSnapshot applies.
+        assert_eq!(wait_remaining_secs(1000, Some("5m"), 1300), None);
+        assert_eq!(wait_remaining_secs(1000, Some("5m"), 1301), None);
+        // No waitTimeout configured → no window at all.
+        assert_eq!(wait_remaining_secs(1000, None, 1000), None);
+        // Unparseable timeout → treated as no window (webhook rejects it at
+        // admission; this is the defensive path).
+        assert_eq!(wait_remaining_secs(1000, Some("bogus"), 1000), None);
     }
 
     #[test]

@@ -243,7 +243,7 @@ async fn s3_bootstrap_backup_restore_adopt_and_guard() {
                 "spec": {
                     "repository": { "kind": "Repository", "name": "e2e-s3" },
                     "source": { "snapshotRef": { "name": "e2e-s3-backup" } },
-                    "target": { "pvc": { "name": "e2e-dst" } }
+                    "target": { "pvcRef": { "name": "e2e-dst" } }
                 }
             })),
         )

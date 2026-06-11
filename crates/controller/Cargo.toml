@@ -13,7 +13,9 @@ kopiur-api = { workspace = true }
 kopiur-kopia = { workspace = true }
 kopiur-mover = { workspace = true }
 kopiur-telemetry = { workspace = true }
-kube = { workspace = true, features = ["client", "runtime", "derive", "rustls-tls"] }
+# `ws` enables pods/exec (AttachedProcess) for SnapshotPolicy workloadExec hooks (ADR §4.8).
+kube = { workspace = true, features = ["client", "runtime", "derive", "rustls-tls", "ws"] }
+reqwest = { workspace = true }
 rustls = { workspace = true }
 k8s-openapi = { workspace = true, features = ["v1_33"] }
 schemars = { workspace = true }

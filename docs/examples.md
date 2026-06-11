@@ -41,6 +41,7 @@ Kopiur separates the backup **recipe** (`SnapshotPolicy`) from its **invocation*
 | 17  | [Restore from a shared repo (projection)](#example-17--restore-from-a-shared-repo-projection) | Restore from a `ClusterRepository` into a fresh namespace, creds projected. |
 | 18  | [Inherit the mover security context](#example-18--inherit-the-mover-security-context-from-a-workload) | Run the mover as "whatever the app runs as" by selecting the workload. |
 | 19  | [Repository replication](#example-19--repository-replication)           | Mirror a repository to a second backend (the "2" in 3-2-1).             |
+| 20  | [Quiesce with hooks](#example-20--quiesce-with-hooks)                    | Run workloadExec/httpRequest hooks around the snapshot for app-consistent backups. |
 
 /// tip | Looking for a specific storage backend?
 
@@ -254,4 +255,12 @@ Mirror a repository's blobs to a **second** backend on a schedule (`kopia reposi
 
 ```yaml
 --8<-- "deploy/examples/19-repository-replication.yaml"
+```
+
+## Example 20 — Quiesce with hooks
+
+App-consistent backups: `spec.hooks` runs commands **in the workload** (the controller execs into your pod — the mover never runs hooks) before and after the snapshot. Here PostgreSQL is put into backup mode (`beforeSnapshot` workloadExec), resumed afterwards, and a notifier is called (`httpRequest` with `continueOnFailure: true` so a flaky notifier can't fail the backup). The `runJob` form (a full one-shot Job, the k8up `PreBackupPod` analog) is shown in a comment. A failing hook **aborts** the backup unless that hook opts out; `afterSnapshot` hooks run whether the backup succeeded or failed, so a resume can't be skipped. See [Backups → hooks](backups.md#hooks--quiesce-the-app-around-the-snapshot).
+
+```yaml
+--8<-- "deploy/examples/20-backup-with-hooks.yaml"
 ```

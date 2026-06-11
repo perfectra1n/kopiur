@@ -238,14 +238,20 @@ async fn reconcile_inner(config: &SnapshotPolicy, ctx: &Context) -> Result<Actio
         // Only stamp `lastPruneAt`/`lastPruneDeleted` when a prune actually
         // happened. Writing `now()` on every reconcile made the status differ each
         // pass → resourceVersion bump → watch event → self-triggered reconcile (the
-        // same hot-loop class as the repo bug). The bare `activeBackupCount` write
-        // is deterministic, so an unchanged value is a no-op patch at the apiserver.
-        let mut retention = serde_json::json!({ "activeBackupCount": active as i64 });
-        if !to_delete.is_empty() {
-            retention["lastPruneAt"] = serde_json::json!(Utc::now().to_rfc3339());
-            retention["lastPruneDeleted"] = serde_json::json!(to_delete.len() as i64);
-        }
-        io::patch_status(&api, &name, serde_json::json!({ "retention": retention })).await?;
+        // same hot-loop class as the repo bug). The bare count write is
+        // deterministic, so an unchanged value is a no-op patch at the apiserver.
+        //
+        // Built from the CRD's own `RetentionSummary` so the field names cannot
+        // drift from the structural schema: this used to write the pre-rename
+        // `activeBackupCount`, which the apiserver SILENTLY PRUNED (the schema
+        // field is `activeSnapshotCount`) — caught by the retention e2e.
+        let pruned = !to_delete.is_empty();
+        let summary = kopiur_api::snapshot_policy::RetentionSummary {
+            active_snapshot_count: Some(active as i64),
+            last_prune_at: pruned.then(|| Utc::now().to_rfc3339()),
+            last_prune_deleted: pruned.then_some(to_delete.len() as i64),
+        };
+        io::patch_status(&api, &name, serde_json::json!({ "retention": summary })).await?;
     }
 
     // Final status: Ready (the policy is reconciled and its repo is Ready), the

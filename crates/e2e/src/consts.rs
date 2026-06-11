@@ -62,6 +62,9 @@ pub const REPO_SUBPATHS: &[&str] = &[
     "repl-src",
     "repl-dst",
     "projgate",
+    "hooks",
+    "gfs",
+    "errh",
 ];
 /// The in-pod mount path for an isolated per-scenario repo: the PVC root is mounted
 /// here and `kopia --path` points here, so the kopia repo IS this dir (one repo per
@@ -97,6 +100,15 @@ pub const HOSTPATH_SRC: &str = "/kopiur-e2e/src";
 /// Deliberately non-writable repo dir (root-owned 0555) for the terminal-failure
 /// regression test (filesystem PermissionDenied hard-stop).
 pub const HOSTPATH_RO_REPO: &str = "/kopiur-e2e/ro-repo";
+/// Source dir with one UNREADABLE file (root-owned `0000` `secret.bin`, set after
+/// the global 0777) for the `errorHandling.ignoreFileErrors` e2e: a default
+/// backup of it fails; one with the flag succeeds. Kept SEPARATE from
+/// [`HOSTPATH_SRC`] so the poison file can't break every other backup test.
+pub const HOSTPATH_SRC_EH: &str = "/kopiur-e2e/src-eh";
+/// hostPath PV over [`HOSTPATH_SRC_EH`], operator namespace.
+pub const PV_SRC_EH: &str = "kopiur-e2e-src-eh";
+/// PVC (operator namespace) binding [`PV_SRC_EH`].
+pub const PVC_SRC_EH: &str = "e2e-src-eh";
 
 // --- Secrets -------------------------------------------------------------------
 /// Filesystem-backend credentials (just `KOPIA_PASSWORD`).
@@ -271,6 +283,11 @@ pub const RCLONE_REMOTE_PATH: &str = "miniors3:kopiur-rclone/repo";
 /// preloaded by the `minio-preload` mise task so CI doesn't pull it in-cluster.
 pub const NFS_IMAGE: &str =
     "janeczku/nfs-ganesha@sha256:17fe1813fd20d9fdfa497a26c8a2e39dd49748cd39dbb0559df7627d9bcf4c53";
+/// Tiny shell image for hook workloads / one-shot helper pods (sentinel writers,
+/// readers). Digest-pinned (`busybox:1.37.0`); preloaded by `node-seed` so the
+/// Filesystem-only shards never pull in-cluster.
+pub const BUSYBOX_IMAGE: &str =
+    "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028";
 /// The nfs `Service` FQDN, kept for documentation/reference only. Scenarios do
 /// **not** mount by this name: the in-tree NFS volume is mounted by the kubelet
 /// in the node's host network namespace, which has no cluster DNS, so a mount by

@@ -161,9 +161,17 @@ pub struct SnapshotStatus {
     /// ADR §3.4 status.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
-    /// Capped at ~4KB; full logs live in the Job pod. ADR §3.4/§4.10.
+    /// The last lines of the run's output, written by the mover at the terminal
+    /// transition (success: the `Snapshot created: <id>` line; failure: the
+    /// actionable error + kopia stderr tail). Capped at
+    /// [`crate::common::MAX_LOG_TAIL_BYTES`]; full logs live in the Job pod.
+    /// ADR §3.4/§4.10.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_tail: Option<String>,
+    /// Structured terminal-failure detail (kopia error class, stderr tail, retry
+    /// hint), written by the mover before it exits non-zero. ADR §4.10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<crate::common::FailureBlock>,
     /// The observed kopia-side pin state (ADR-0005 §13(c)): `Some(true)` once the
     /// operator has applied the pin, `Some(false)` once it has removed it, `None`
     /// before any pin reconcile. The reconciler compares `spec.pin` against this to
@@ -171,6 +179,25 @@ pub struct SnapshotStatus {
     /// never spawned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
+    /// Hook-execution bookkeeping (ADR §4.8): completion timestamps the
+    /// reconciler stamps so each hook list runs exactly once per Snapshot across
+    /// requeues and controller restarts (hooks have side effects — quiesce,
+    /// resume — that must not repeat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HookExecutionStatus>,
+}
+
+/// When each hook list completed (ADR §4.8). Written once per list, at the
+/// transition — never re-stamped — per the status-churn rule.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HookExecutionStatus {
+    /// When the `beforeSnapshot` list completed (RFC3339); absent until it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_completed_at: Option<String>,
+    /// When the `afterSnapshot` list completed (RFC3339); absent until it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_completed_at: Option<String>,
 }
 
 /// Identifies the kopia snapshot a [`Snapshot`] CR owns. ADR §3.4.

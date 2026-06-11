@@ -350,12 +350,32 @@ pub struct RestoreStatus {
     /// Standard Kubernetes conditions carrying the human-readable status/reason.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+    /// The last lines of the run's output, written by the mover at the terminal
+    /// transition (success: the `Restore completed: snapshot <id>` line; failure:
+    /// the actionable error + kopia stderr tail). Capped at
+    /// [`crate::common::MAX_LOG_TAIL_BYTES`]; full logs live in the Job pod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_tail: Option<String>,
+    /// Structured terminal-failure detail (kopia error class, stderr tail, retry
+    /// hint), written by the mover before it exits non-zero. ADR §4.10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<crate::common::FailureBlock>,
 }
 
 /// The source resolved and pinned at admission, so a restore never silently retargets. ADR §4.6.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedRestore {
+    /// The exact kopia snapshot manifest id the source resolved to. Pinned once;
+    /// subsequent reconciles restore THIS id even if newer snapshots appear, so a
+    /// restore never silently retargets (ADR §4.6). Matches
+    /// `Snapshot.status.snapshot.kopiaSnapshotID`.
+    #[serde(
+        default,
+        rename = "kopiaSnapshotID",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub kopia_snapshot_id: Option<String>,
     /// The concrete `Snapshot` CR the source resolved to, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_ref: Option<ObjectRef>,

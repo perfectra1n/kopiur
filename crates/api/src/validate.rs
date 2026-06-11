@@ -23,7 +23,7 @@ use crate::repository::RepositorySpec;
 use crate::repository_replication::RepositoryReplicationSpec;
 use crate::restore::{RestoreSource, RestoreSpec, RestoreTarget};
 use crate::snapshot::{Origin, SnapshotSpec};
-use crate::snapshot_policy::{SnapshotPolicySpec, Source};
+use crate::snapshot_policy::{Hook, SnapshotPolicySpec, Source};
 use crate::snapshot_schedule::SnapshotScheduleSpec;
 use std::collections::BTreeMap;
 
@@ -212,10 +212,58 @@ pub fn validate_restore(spec: &RestoreSpec) -> ValidationResult {
     if matches!(spec.source, RestoreSource::Identity(_)) && spec.repository.is_none() {
         return Err(ValidationError::RestoreSourceRepositoryRequired);
     }
+    // `asOf` / `waitTimeout` are parsed at reconcile time with the SAME parsers
+    // used here, so a value the webhook admits can never fail to parse later.
+    // Exhaustive over the source so a new variant must declare its rules.
+    match &spec.source {
+        RestoreSource::SnapshotRef(_) => {}
+        RestoreSource::FromPolicy(c) => {
+            validate_as_of("restore.source.fromPolicy.asOf", c.as_of.as_deref())?;
+        }
+        RestoreSource::Identity(i) => {
+            validate_as_of("restore.source.identity.asOf", i.as_of.as_deref())?;
+            // `snapshotID` pins an exact snapshot — combining it with the
+            // relative selectors would silently ignore one of them.
+            if i.snapshot_id.is_some() && i.as_of.is_some() {
+                return Err(ValidationError::MutuallyExclusive {
+                    a: "source.identity.snapshotID".to_string(),
+                    b: "source.identity.asOf".to_string(),
+                    context: "snapshotID pins an exact snapshot; asOf selects by time".to_string(),
+                });
+            }
+            if i.snapshot_id.is_some() && i.offset.is_some_and(|o| o != 0) {
+                return Err(ValidationError::MutuallyExclusive {
+                    a: "source.identity.snapshotID".to_string(),
+                    b: "source.identity.offset".to_string(),
+                    context: "snapshotID pins an exact snapshot; offset selects by position"
+                        .to_string(),
+                });
+            }
+        }
+    }
+    if let Some(wt) = spec.policy.as_ref().and_then(|p| p.wait_timeout.as_deref())
+        && crate::duration::parse_go_duration(wt).is_none()
+    {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "restore.policy.waitTimeout".to_string(),
+            reason: format!(
+                "{wt:?} is not a valid Go-style duration; use a positive number with an \
+                 s/m/h suffix (e.g. 90s, 5m, 1h) — how long the restore waits for the \
+                 source snapshot to appear before applying onMissingSnapshot"
+            ),
+        });
+    }
     match &spec.target {
         RestoreTarget::Pvc(t) if t.name.trim().is_empty() => {
             return Err(ValidationError::MissingRequiredField {
                 field: "restore.target.pvc.name".to_string(),
+            });
+        }
+        // `target.pvc` makes the operator CREATE the PVC, so it must know the
+        // size — a guessed default could be smaller than the restored data.
+        RestoreTarget::Pvc(t) if t.capacity.as_deref().is_none_or(|c| c.trim().is_empty()) => {
+            return Err(ValidationError::MissingRequiredField {
+                field: "restore.target.pvc.capacity".to_string(),
             });
         }
         RestoreTarget::Populator(_) => {
@@ -236,6 +284,24 @@ pub fn validate_restore(spec: &RestoreSpec) -> ValidationResult {
     }
     if let Some(m) = &spec.mover {
         validate_mover(m, "Restore mover")?;
+    }
+    Ok(())
+}
+
+/// An `asOf` point-in-time selector must be a valid RFC3339 timestamp — the
+/// reconciler parses it with `chrono::DateTime::parse_from_rfc3339`, so the
+/// webhook rejects anything that parser would choke on, with a fix in the message.
+fn validate_as_of(field: &str, as_of: Option<&str>) -> ValidationResult {
+    if let Some(s) = as_of
+        && chrono::DateTime::parse_from_rfc3339(s).is_err()
+    {
+        return Err(ValidationError::InvalidFieldValue {
+            field: field.to_string(),
+            reason: format!(
+                "{s:?} is not an RFC3339 timestamp; use e.g. 2026-05-01T00:00:00Z \
+                 (the newest snapshot at or before this instant is restored)"
+            ),
+        });
     }
     Ok(())
 }
@@ -549,7 +615,81 @@ pub fn validate_backup_config(spec: &SnapshotPolicySpec) -> Vec<ValidationError>
             errs.push(e);
         }
     }
+    // Hooks (ADR §4.8): per-hook shape problems are caught at admission rather
+    // than at the first backup run (where a quiesce hook failing on a typo would
+    // abort the backup).
+    if let Some(h) = &spec.hooks {
+        for (list, hooks) in [
+            ("beforeSnapshot", &h.before_snapshot),
+            ("afterSnapshot", &h.after_snapshot),
+        ] {
+            for (i, hook) in hooks.iter().enumerate() {
+                if let Err(e) = validate_hook(list, i, hook) {
+                    errs.push(e);
+                }
+            }
+        }
+    }
     errs
+}
+
+/// Validate one hook entry — the controller executes these with the SAME parsers
+/// (Go-style `timeout`, URL/method for `httpRequest`), so a value admitted here
+/// can never fail to parse at run time. Exhaustive over [`Hook`].
+fn validate_hook(list: &str, index: usize, hook: &Hook) -> ValidationResult {
+    let field = |leaf: &str| format!("spec.hooks.{list}[{index}].{leaf}");
+    let check_timeout = |leaf: &str, t: Option<&str>| -> ValidationResult {
+        if let Some(t) = t
+            && crate::duration::parse_go_duration(t).is_none()
+        {
+            return Err(ValidationError::InvalidFieldValue {
+                field: field(leaf),
+                reason: format!(
+                    "{t:?} is not a valid Go-style duration; use a positive number with an \
+                     s/m/h suffix (e.g. 90s, 2m) — how long the hook may run before it is \
+                     treated as failed"
+                ),
+            });
+        }
+        Ok(())
+    };
+    match hook {
+        Hook::WorkloadExec(h) => {
+            if h.command.is_empty() {
+                return Err(ValidationError::MissingRequiredField {
+                    field: field("workloadExec.command"),
+                });
+            }
+            check_timeout("workloadExec.timeout", h.timeout.as_deref())
+        }
+        Hook::RunJob(h) => check_timeout("runJob.timeout", h.timeout.as_deref()),
+        Hook::HttpRequest(h) => {
+            if !(h.url.starts_with("http://") || h.url.starts_with("https://")) {
+                return Err(ValidationError::InvalidFieldValue {
+                    field: field("httpRequest.url"),
+                    reason: format!(
+                        "{:?} must be an absolute http:// or https:// URL the controller can \
+                         reach (e.g. http://notifier.tools.svc:8080/fire)",
+                        h.url
+                    ),
+                });
+            }
+            if let Some(m) = &h.method {
+                const METHODS: [&str; 7] =
+                    ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+                if !METHODS.contains(&m.to_ascii_uppercase().as_str()) {
+                    return Err(ValidationError::InvalidFieldValue {
+                        field: field("httpRequest.method"),
+                        reason: format!(
+                            "{m:?} is not an HTTP method; use one of GET, POST (default), PUT, \
+                             PATCH, DELETE, HEAD, OPTIONS"
+                        ),
+                    });
+                }
+            }
+            check_timeout("httpRequest.timeout", h.timeout.as_deref())
+        }
+    }
 }
 
 /// Validate a `Snapshot` spec for a given origin, accumulating all problems.
@@ -1204,6 +1344,215 @@ mod tests {
             validate_restore(&spec),
             Err(ValidationError::MissingRequiredField { .. })
         ));
+    }
+
+    #[test]
+    fn restore_pvc_target_requires_capacity() {
+        use crate::common::ObjectRef;
+        use crate::restore::PvcTemplate;
+        let mut spec = restore_with(
+            RestoreSource::SnapshotRef(ObjectRef {
+                name: "b".into(),
+                namespace: None,
+            }),
+            None,
+        );
+        // The operator creates this PVC, so it must be told the size.
+        spec.target = RestoreTarget::Pvc(PvcTemplate {
+            name: "restored".into(),
+            storage_class_name: None,
+            capacity: None,
+            access_modes: vec![],
+        });
+        assert!(matches!(
+            validate_restore(&spec),
+            Err(ValidationError::MissingRequiredField { field }) if field.contains("capacity")
+        ));
+        spec.target = RestoreTarget::Pvc(PvcTemplate {
+            name: "restored".into(),
+            storage_class_name: None,
+            capacity: Some("10Gi".into()),
+            access_modes: vec![],
+        });
+        assert!(validate_restore(&spec).is_ok());
+    }
+
+    #[test]
+    fn restore_as_of_must_be_rfc3339_and_message_says_how_to_fix() {
+        use crate::restore::FromPolicy;
+        let spec = restore_with(
+            RestoreSource::FromPolicy(FromPolicy {
+                name: "pg".into(),
+                namespace: None,
+                as_of: Some("yesterday".into()),
+                offset: 0,
+            }),
+            None,
+        );
+        let err = validate_restore(&spec).unwrap_err();
+        assert!(matches!(err, ValidationError::InvalidFieldValue { .. }));
+        // The message a human acts on: names the field, the bad value, and the fix.
+        let msg = err.to_string();
+        assert!(msg.contains("restore.source.fromPolicy.asOf"), "{msg}");
+        assert!(msg.contains("yesterday"), "{msg}");
+        assert!(msg.contains("RFC3339"), "{msg}");
+        assert!(msg.contains("2026-05-01T00:00:00Z"), "{msg}");
+
+        // A valid RFC3339 instant (with offset) is accepted.
+        let ok = restore_with(
+            RestoreSource::FromPolicy(FromPolicy {
+                name: "pg".into(),
+                namespace: None,
+                as_of: Some("2026-05-01T00:00:00+02:00".into()),
+                offset: 1,
+            }),
+            None,
+        );
+        assert!(validate_restore(&ok).is_ok());
+    }
+
+    #[test]
+    fn restore_identity_snapshot_id_excludes_as_of_and_offset() {
+        use crate::restore::IdentitySource;
+        let base = IdentitySource {
+            username: "u".into(),
+            hostname: "h".into(),
+            source_path: None,
+            snapshot_id: Some("k1f1ec0a8".into()),
+            as_of: None,
+            offset: None,
+        };
+        let with_as_of = restore_with(
+            RestoreSource::Identity(IdentitySource {
+                as_of: Some("2026-05-01T00:00:00Z".into()),
+                ..base.clone()
+            }),
+            Some(repo_ref(RepositoryKind::Repository, None)),
+        );
+        assert!(matches!(
+            validate_restore(&with_as_of),
+            Err(ValidationError::MutuallyExclusive { .. })
+        ));
+        let with_offset = restore_with(
+            RestoreSource::Identity(IdentitySource {
+                offset: Some(1),
+                ..base.clone()
+            }),
+            Some(repo_ref(RepositoryKind::Repository, None)),
+        );
+        assert!(matches!(
+            validate_restore(&with_offset),
+            Err(ValidationError::MutuallyExclusive { .. })
+        ));
+        // An explicit offset: 0 is the "latest" default — not a conflict.
+        let with_zero = restore_with(
+            RestoreSource::Identity(IdentitySource {
+                offset: Some(0),
+                ..base
+            }),
+            Some(repo_ref(RepositoryKind::Repository, None)),
+        );
+        assert!(validate_restore(&with_zero).is_ok());
+    }
+
+    #[test]
+    fn restore_wait_timeout_must_parse_as_go_duration() {
+        use crate::common::ObjectRef;
+        use crate::restore::RestorePolicy;
+        let mut spec = restore_with(
+            RestoreSource::SnapshotRef(ObjectRef {
+                name: "b".into(),
+                namespace: None,
+            }),
+            None,
+        );
+        spec.policy = Some(RestorePolicy {
+            on_missing_snapshot: None,
+            wait_timeout: Some("soon".into()),
+        });
+        let err = validate_restore(&spec).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("restore.policy.waitTimeout"), "{msg}");
+        assert!(msg.contains("5m"), "{msg}");
+
+        spec.policy = Some(RestorePolicy {
+            on_missing_snapshot: None,
+            wait_timeout: Some("5m".into()),
+        });
+        assert!(validate_restore(&spec).is_ok());
+    }
+
+    #[test]
+    fn hooks_are_validated_at_admission_with_actionable_messages() {
+        use crate::common::PodSelector;
+        use crate::snapshot_policy::{Hooks, HttpRequestHook, WorkloadExecHook};
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+        let base: SnapshotPolicySpec = crate::testutil::from_yaml(
+            "repository: { kind: Repository, name: r }\nsources: [ { pvc: { name: data } } ]\n",
+        );
+        let selector = PodSelector {
+            pod_selector: LabelSelector::default(),
+            container: None,
+        };
+
+        // workloadExec with no command → missing required field, with the path.
+        let mut spec = base.clone();
+        spec.hooks = Some(Hooks {
+            before_snapshot: vec![Hook::WorkloadExec(WorkloadExecHook {
+                selector: selector.clone(),
+                command: vec![],
+                timeout: None,
+                continue_on_failure: false,
+            })],
+            after_snapshot: vec![],
+        });
+        let errs = validate_backup_config(&spec);
+        assert!(
+            errs.iter().any(|e| e
+                .to_string()
+                .contains("spec.hooks.beforeSnapshot[0].workloadExec.command")),
+            "{errs:?}"
+        );
+
+        // httpRequest: relative URL and an unparseable timeout, both rejected
+        // with the fix in the message.
+        let mut spec = base.clone();
+        spec.hooks = Some(Hooks {
+            before_snapshot: vec![],
+            after_snapshot: vec![Hook::HttpRequest(HttpRequestHook {
+                url: "notifier.tools/fire".into(),
+                method: Some("FETCH".into()),
+                body: None,
+                timeout: Some("soon".into()),
+                continue_on_failure: false,
+            })],
+        });
+        let errs = validate_backup_config(&spec);
+        let all = errs
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("http://"), "{all}");
+
+        // A well-formed hook set passes (lowercase method is normalized).
+        let mut spec = base;
+        spec.hooks = Some(Hooks {
+            before_snapshot: vec![Hook::WorkloadExec(WorkloadExecHook {
+                selector,
+                command: vec!["sh".into(), "-c".into(), "sync".into()],
+                timeout: Some("2m".into()),
+                continue_on_failure: false,
+            })],
+            after_snapshot: vec![Hook::HttpRequest(HttpRequestHook {
+                url: "https://notifier.tools.svc/fire".into(),
+                method: Some("post".into()),
+                body: Some("done".into()),
+                timeout: Some("30s".into()),
+                continue_on_failure: true,
+            })],
+        });
+        assert!(validate_backup_config(&spec).is_empty());
     }
 
     // --- validate_mover: inheritSecurityContextFrom XOR explicit (container OR pod) ---
