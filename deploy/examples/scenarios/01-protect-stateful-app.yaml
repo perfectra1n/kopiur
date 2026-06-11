@@ -62,9 +62,11 @@ spec:
     - pvc:
         name: postgres-data
   # ── How the volume is captured ────────────────────────────────────────────
-  # Snapshot (the default) takes a point-in-time CSI VolumeSnapshot, then kopia
-  # reads THAT — no app downtime, consistent on disk. Combined with the hooks
-  # below you also get application consistency.
+  # Snapshot takes a point-in-time CSI VolumeSnapshot, then kopia reads THAT — no
+  # app downtime, consistent on disk. Combined with the hooks below you also get
+  # application consistency. (copyMethod defaults to Direct, which reads the live
+  # volume and works on any storage; Snapshot is opt-in and needs the CSI snapshot
+  # stack + a VolumeSnapshotClass for your driver — ideal for databases like this.)
   copyMethod: Snapshot
   # volumeSnapshotClassName: csi-hostpath-snapclass   # set if not the cluster default
   # ── Quiesce the database around the snapshot ──────────────────────────────

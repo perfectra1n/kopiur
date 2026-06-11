@@ -30,10 +30,11 @@ namespace, because that's where the mover Job runs.
 
 /// tip | Why hooks instead of just a snapshot?
 
-`copyMethod: Snapshot` (the default) already gives you a crash-consistent
-point-in-time copy. The `beforeSnapshot`/`afterSnapshot` hooks add **application
-consistency**: they run _inside the workload_ to tell the database a backup is
-starting, so what's on disk at snapshot time is a clean, restorable state. A hook
+`copyMethod: Snapshot` (opt-in — the default is `Direct`; Snapshot needs the CSI
+snapshot stack and is the right choice for a database like this) already gives you a
+crash-consistent point-in-time copy. The `beforeSnapshot`/`afterSnapshot` hooks add
+**application consistency**: they run _inside the workload_ to tell the database a backup
+is starting, so what's on disk at snapshot time is a clean, restorable state. A hook
 failure aborts the backup unless you set `continueOnFailure: true` (we set it on
 the _after_ hook so the database never gets stuck in backup mode).
 
