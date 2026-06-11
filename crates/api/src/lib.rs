@@ -49,6 +49,7 @@ pub use restore::{
 };
 pub use snapshot::{
     Origin, Snapshot, SnapshotPhase, SnapshotSpec, SnapshotStats, SnapshotStatus, SnapshotTiming,
+    StagedSources,
 };
 pub use snapshot_policy::{
     CopyMethod, DeepVerification, GroupBy, Hook, SnapshotPolicy, SnapshotPolicySpec,

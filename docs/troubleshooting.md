@@ -133,6 +133,23 @@ Kopiur avoids this **by default**: it pins an RWO source/destination mover to th
 
 See [Repositories → `sourceColocation`](repositories.md#sourcecolocation-avoid-the-rwo-multi-attach-error) for the full behavior.
 
+## Backup `Failed`: source staging (`copyMethod: Snapshot`/`Clone`)
+
+`copyMethod: Snapshot` (the default) and `Clone` capture a CSI snapshot/clone of the source PVC before backing it up. When that capture can't happen, the `Snapshot` is `Failed` with a `SourceStaged=False` condition naming exactly why — Kopiur never silently falls back to reading the live volume.
+
+```console
+$ kubectl get snapshot <name> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="SourceStaged")]}'
+```
+
+| Reason | Cause | Fix |
+| --- | --- | --- |
+| `SnapshotStackMissing` | The cluster has no `VolumeSnapshotClass` API — the external-snapshotter (snapshot-controller + CRDs) isn't installed. | Install the [CSI snapshot stack](https://kubernetes-csi.github.io/docs/snapshot-controller.html) + a `VolumeSnapshotClass`, or set `copyMethod: Direct`. |
+| `NoVolumeSnapshotClass` | No `VolumeSnapshotClass` matches the source PVC's driver, several match with no single default, or an explicit `volumeSnapshotClassName` doesn't exist. | Create/annotate a class for the driver, set `volumeSnapshotClassName` explicitly, or use `Direct`. |
+| `VolumeSnapshotFailed` | The CSI driver reported an error creating the snapshot (the message includes the driver's text). | Fix the class/driver issue, then re-create the `Snapshot`. |
+| `SourceNotCSIProvisioned` | The source PVC has no `StorageClass` (static/hostPath) — nothing to snapshot. | Use a CSI-provisioned PVC, or `copyMethod: Direct`. |
+
+A staged backup that stays `Pending` with a `Pending` staged PVC (`<name>-src`) is usually a `WaitForFirstConsumer` class (normal — it binds when the mover starts) or, for `Clone`, a driver that can't clone the volume (`kubectl describe pvc <name>-src` shows the driver event). Staged objects are auto-cleaned when the backup finishes. Full guide: **[Copy methods](copy-methods.md)**.
+
 ## Restore won't complete
 
 ```console

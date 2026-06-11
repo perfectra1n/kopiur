@@ -67,6 +67,8 @@ pub const REPO_SUBPATHS: &[&str] = &[
     "errh",
     "colocation",
     "colocation-off",
+    "copymethod",
+    "copymethod-csi",
 ];
 /// The in-pod mount path for an isolated per-scenario repo: the PVC root is mounted
 /// here and `kopia --path` points here, so the kopia repo IS this dir (one repo per

@@ -122,6 +122,7 @@ rules:
   - list
   - watch
   - create
+  - patch
   - delete
 - apiGroups:
   - groupsnapshot.storage.k8s.io
@@ -167,6 +168,7 @@ rules:
   - get
   - list
   - watch
+  - patch
 - apiGroups:
   - storage.k8s.io
   resources:
@@ -175,6 +177,31 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - storageclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - snapshot.storage.k8s.io
+  resources:
+  - volumesnapshotclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - snapshot.storage.k8s.io
+  resources:
+  - volumesnapshotcontents
+  verbs:
+  - get
+  - list
+  - watch
+  - delete
 - apiGroups:
   - admissionregistration.k8s.io
   resourceNames:

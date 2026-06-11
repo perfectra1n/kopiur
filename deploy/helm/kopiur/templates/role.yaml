@@ -78,10 +78,14 @@ rules:
     resources:
       - jobs
     verbs: [get, list, watch, create, update, patch, delete]
+  # CSI volume snapshots used as a consistent source for snapshotting (copyMethod:
+  # Snapshot/Clone). `patch` backs the server-side apply that creates the staged
+  # VolumeSnapshot. (Cluster-scoped VolumeSnapshotClasses/Contents + StorageClasses are
+  # granted in the ClusterRole; a namespaced install cannot stage CSI snapshots.)
   - apiGroups: [snapshot.storage.k8s.io]
     resources:
       - volumesnapshots
-    verbs: [get, list, watch, create, delete]
+    verbs: [get, list, watch, create, patch, delete]
   - apiGroups: [groupsnapshot.storage.k8s.io]
     resources:
       - volumegroupsnapshots

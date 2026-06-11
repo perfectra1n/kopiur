@@ -16069,6 +16069,38 @@ spec:
                 - identity
                 - kopiaSnapshotID
                 type: object
+              staged:
+                description: |-
+                  The CSI staging objects the run created for `copyMethod: Snapshot`/`Clone`
+                  (ADR §3.3). Pinned once when the stage is provisioned so the reconciler can
+                  (a) reuse the same VolumeSnapshot/PVC across mover-Job retries idempotently
+                  and (b) reap them on the terminal transition. Absent for `Direct` (and NFS),
+                  which mount the live source with no staging.
+                nullable: true
+                properties:
+                  copyMethod:
+                    description: The resolved capture method (`Snapshot` or `Clone`) that produced this stage.
+                    nullable: true
+                    type: string
+                  pvcName:
+                    description: |-
+                      Name of the staged `PersistentVolumeClaim` the mover mounts in place of the
+                      live source PVC.
+                    nullable: true
+                    type: string
+                  ready:
+                    description: |-
+                      `true` once the stage is ready for the mover (VolumeSnapshot `readyToUse` and
+                      the staged PVC applied). Before that the reconcile is still provisioning it.
+                    nullable: true
+                    type: boolean
+                  volumeSnapshotName:
+                    description: |-
+                      Name of the `VolumeSnapshot` created from the source PVC (`copyMethod: Snapshot`
+                      only; absent for `Clone`, which stages directly from the source PVC).
+                    nullable: true
+                    type: string
+                type: object
               stats:
                 description: Byte/file counts parsed from kopia's JSON output. ADR §3.4 status.
                 nullable: true

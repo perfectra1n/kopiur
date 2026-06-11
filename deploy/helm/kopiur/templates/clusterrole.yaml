@@ -86,19 +86,40 @@ rules:
   # RWO Multi-Attach avoidance: discover the node a ReadWriteOnce source/destination
   # PVC is attached to so the mover can be pinned there. The bound PV's nodeAffinity
   # (topology-pinned volumes) and the CSI VolumeAttachment (ground-truth attached node)
-  # are read-only fallbacks when no consuming pod is found. Both are cluster-scoped.
+  # are read-only fallbacks when no consuming pod is found. `patch` lets staging flip a
+  # staged PVC's bound PV from Retain to Delete before deleting it (so a Retain
+  # StorageClass doesn't leak the PV + backend volume). All cluster-scoped.
   - apiGroups: [""]
     resources:
       - persistentvolumes
-    verbs: [get, list, watch]
+    verbs: [get, list, watch, patch]
   - apiGroups: [storage.k8s.io]
     resources:
       - volumeattachments
     verbs: [get, list, watch]
+  # Read StorageClasses to resolve the source PVC's CSI provisioner (the driver the
+  # staged VolumeSnapshotClass must match).
+  - apiGroups: [storage.k8s.io]
+    resources:
+      - storageclasses
+    verbs: [get, list, watch]
+  # CSI volume snapshots used as a consistent source for snapshotting (copyMethod:
+  # Snapshot/Clone). `patch` backs the server-side apply used to create the staged
+  # VolumeSnapshot. VolumeSnapshotClasses are read to pick the driver's class and to
+  # detect whether the snapshot stack is installed; VolumeSnapshotContents are deleted
+  # on cleanup.
   - apiGroups: [snapshot.storage.k8s.io]
     resources:
       - volumesnapshots
-    verbs: [get, list, watch, create, delete]
+    verbs: [get, list, watch, create, patch, delete]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources:
+      - volumesnapshotclasses
+    verbs: [get, list, watch]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources:
+      - volumesnapshotcontents
+    verbs: [get, list, watch, delete]
   - apiGroups: [groupsnapshot.storage.k8s.io]
     resources:
       - volumegroupsnapshots

@@ -185,6 +185,39 @@ pub struct SnapshotStatus {
     /// resume — that must not repeat).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<HookExecutionStatus>,
+    /// The CSI staging objects the run created for `copyMethod: Snapshot`/`Clone`
+    /// (ADR §3.3). Pinned once when the stage is provisioned so the reconciler can
+    /// (a) reuse the same VolumeSnapshot/PVC across mover-Job retries idempotently
+    /// and (b) reap them on the terminal transition. Absent for `Direct` (and NFS),
+    /// which mount the live source with no staging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged: Option<StagedSources>,
+}
+
+/// The CSI staging objects a backup created so kopia reads a point-in-time copy
+/// instead of the live source PVC (`copyMethod: Snapshot`/`Clone`, ADR §3.3).
+///
+/// Recorded once the stage is provisioned (stable values — never re-stamped, per the
+/// status-churn rule) so the controller reaps exactly these objects on completion and
+/// never double-creates them across requeues / controller restarts.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StagedSources {
+    /// The resolved capture method (`Snapshot` or `Clone`) that produced this stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_method: Option<String>,
+    /// Name of the `VolumeSnapshot` created from the source PVC (`copyMethod: Snapshot`
+    /// only; absent for `Clone`, which stages directly from the source PVC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_snapshot_name: Option<String>,
+    /// Name of the staged `PersistentVolumeClaim` the mover mounts in place of the
+    /// live source PVC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pvc_name: Option<String>,
+    /// `true` once the stage is ready for the mover (VolumeSnapshot `readyToUse` and
+    /// the staged PVC applied). Before that the reconcile is still provisioning it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<bool>,
 }
 
 /// When each hook list completed (ADR §4.8). Written once per list, at the

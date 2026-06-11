@@ -158,6 +158,7 @@ nav:
           - WebDAV: backends/webdav.md
           - rclone: backends/rclone.md
       - Backups & schedules: backups.md
+      - Copy methods (Snapshot/Clone/Direct): copy-methods.md
       - Restores: restores.md
       - Repository replication: replication.md
       - Movers, RBAC & credentials: movers.md

@@ -166,6 +166,19 @@ pub const MOVER_PERMITTED_CONDITION: &str = "MoverPermitted";
 pub const PRIVILEGED_MOVER_NOT_PERMITTED_REASON: &str = "PrivilegedMoverNotPermitted";
 /// Event `action` (remediation hint) for a refused privileged mover.
 pub const ALLOW_PRIVILEGED_MOVER_ACTION: &str = "AnnotateNamespaceForPrivilegedMovers";
+/// `Snapshot` condition for CSI source staging (`copyMethod: Snapshot`/`Clone`,
+/// ADR §3.3): `True` once the staged VolumeSnapshot/PVC is ready for the mover;
+/// `False` while waiting (reason [`STAGING_WAITING_REASON`]) or on a preflight
+/// failure (the `io::staging::REASON_*` tokens: stack/class missing, snapshot error).
+pub const SOURCE_STAGED_CONDITION: &str = "SourceStaged";
+/// `reason` for [`SOURCE_STAGED_CONDITION`] = `True`.
+pub const SOURCE_STAGED_REASON: &str = "SourceStaged";
+/// `reason` for [`SOURCE_STAGED_CONDITION`] = `False` while the VolumeSnapshot is
+/// still becoming `readyToUse` (a transient, requeued wait — not a failure).
+pub const STAGING_WAITING_REASON: &str = "WaitingForVolumeSnapshot";
+/// Event `action` (remediation hint) for a staging preflight failure: install the
+/// CSI snapshot stack / VolumeSnapshotClass, or set `copyMethod: Direct`.
+pub const FIX_SNAPSHOT_STACK_ACTION: &str = "InstallSnapshotStackOrUseDirect";
 /// `Snapshot` condition for `spec.hooks` execution (ADR §4.8) — `False` carries
 /// the failing hook's index, form, and actionable cause.
 pub const HOOKS_SUCCEEDED_CONDITION: &str = "HooksSucceeded";

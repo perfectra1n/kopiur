@@ -1,0 +1,25 @@
+# Example 22 — copyMethod: Clone (CSI volume clone)
+#
+# Stages the backup from a CSI CLONE of the source PVC (dataSource: the source PVC
+# itself) instead of a VolumeSnapshot. Use this when your CSI driver supports volume
+# cloning (CLONE_VOLUME) but not snapshots. Like Snapshot, the mover reads the clone
+# and the clone is cleaned up afterward — no VolumeSnapshotClass is needed.
+#
+# If the driver can't clone the volume, the staged PVC stays Pending and the backup
+# never starts — check `kubectl describe pvc <snapshot-name>-src` and switch to
+# Snapshot or Direct. See docs/copy-methods.md.
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: SnapshotPolicy
+metadata:
+  name: app-data
+  namespace: apps
+spec:
+  repository:
+    name: primary
+  copyMethod: Clone
+  sources:
+    - pvc:
+        name: app-data
+  retention:
+    keepDaily: 7

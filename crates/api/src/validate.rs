@@ -590,6 +590,21 @@ pub fn validate_backup_config(spec: &SnapshotPolicySpec) -> Vec<ValidationError>
             errs.push(e);
         }
     }
+    // `volumeSnapshotClassName` only applies when a PVC source is CSI-snapshotted/cloned
+    // (`copyMethod: Snapshot`/`Clone`). An NFS source has no PVC to snapshot, so pairing
+    // it with an explicit class is a configuration mistake — reject it at admission with
+    // an actionable message rather than silently ignoring the class. (`copyMethod` itself
+    // can't be rejected for NFS: it defaults to `Snapshot` implicitly and an NFS source
+    // is simply read directly.)
+    if spec.volume_snapshot_class_name.is_some() && spec.sources.iter().any(|s| s.nfs.is_some()) {
+        errs.push(ValidationError::InvalidFieldValue {
+            field: "spec.volumeSnapshotClassName".to_string(),
+            reason: "an NFS source cannot be CSI-snapshotted, so volumeSnapshotClassName is \
+                     meaningless with it; remove volumeSnapshotClassName (NFS is read directly), \
+                     or use a PVC source for copyMethod: Snapshot/Clone"
+                .to_string(),
+        });
+    }
     if let Some(m) = &spec.mover
         && let Err(e) = validate_mover(m, "SnapshotPolicy mover")
     {
@@ -1553,6 +1568,38 @@ mod tests {
             })],
         });
         assert!(validate_backup_config(&spec).is_empty());
+    }
+
+    #[test]
+    fn volume_snapshot_class_with_nfs_source_is_rejected() {
+        // An NFS source can't be CSI-snapshotted, so an explicit volumeSnapshotClassName
+        // alongside it is a config mistake — rejected with an actionable message.
+        let spec: SnapshotPolicySpec = crate::testutil::from_yaml(
+            "repository: { kind: Repository, name: r }\n\
+             volumeSnapshotClassName: csi-class\n\
+             sources: [ { nfs: { server: nas.lan, path: /export/data } } ]\n",
+        );
+        let errs = validate_backup_config(&spec);
+        let msg = errs
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(msg.contains("spec.volumeSnapshotClassName"), "{msg}");
+        assert!(msg.contains("NFS"), "{msg}");
+
+        // A PVC source with a class is fine; an NFS source WITHOUT a class is fine.
+        let pvc: SnapshotPolicySpec = crate::testutil::from_yaml(
+            "repository: { kind: Repository, name: r }\n\
+             volumeSnapshotClassName: csi-class\n\
+             sources: [ { pvc: { name: data } } ]\n",
+        );
+        assert!(validate_backup_config(&pvc).is_empty());
+        let nfs: SnapshotPolicySpec = crate::testutil::from_yaml(
+            "repository: { kind: Repository, name: r }\n\
+             sources: [ { nfs: { server: nas.lan, path: /export/data } } ]\n",
+        );
+        assert!(validate_backup_config(&nfs).is_empty());
     }
 
     // --- validate_mover: inheritSecurityContextFrom XOR explicit (container OR pod) ---
