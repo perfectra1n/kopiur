@@ -192,11 +192,15 @@ fn workload_rules() -> Vec<PolicyRule> {
         ),
         // Mover Jobs.
         rule(&["batch"], &["jobs".into()], FULL_VERBS),
-        // CSI volume snapshots used as a consistent source for snapshotting.
+        // CSI volume snapshots used as a consistent source for snapshotting
+        // (`copyMethod: Snapshot`/`Clone`, ADR §3.3) — namespaced, so they live here.
+        // `patch` backs the server-side apply the controller uses to (idempotently)
+        // create the staged VolumeSnapshot. The cluster-scoped VolumeSnapshotClasses /
+        // VolumeSnapshotContents / StorageClasses are granted in the ClusterRole only.
         rule(
             &["snapshot.storage.k8s.io"],
             &["volumesnapshots".into()],
-            &["get", "list", "watch", "create", "delete"],
+            &["get", "list", "watch", "create", "patch", "delete"],
         ),
         rule(
             &["groupsnapshot.storage.k8s.io"],
@@ -331,14 +335,40 @@ fn cluster_artifact() -> Result<Artifact> {
     // destination PVC is attached to so the mover can be pinned there. The bound
     // PV's `nodeAffinity` (topology-pinned volumes) and the CSI `VolumeAttachment`
     // (ground-truth attached node) are read-only fallbacks when no consuming pod is
-    // found. Both are cluster-scoped → cluster install only (a namespaced install
-    // can't grant them; co-location then relies on the consuming-pod lookup, which
-    // is namespace-local and still works).
-    rules.push(rule(&[""], &["persistentvolumes".into()], READ_VERBS));
+    // found. `patch` lets staging flip a staged PVC's bound PV from a `Retain` reclaim
+    // policy to `Delete` before deleting it, so a `Retain` StorageClass doesn't leak the
+    // PV + backend volume (ADR §3.3). All cluster-scoped → cluster install only (a
+    // namespaced install can't grant them; co-location then relies on the
+    // consuming-pod lookup, which is namespace-local and still works).
+    rules.push(rule(
+        &[""],
+        &["persistentvolumes".into()],
+        &["get", "list", "watch", "patch"],
+    ));
     rules.push(rule(
         &["storage.k8s.io"],
         &["volumeattachments".into()],
         READ_VERBS,
+    ));
+    // CSI snapshot staging (`copyMethod: Snapshot`/`Clone`, ADR §3.3): read
+    // StorageClasses to resolve the source PVC's provisioner (driver); read
+    // VolumeSnapshotClasses to pick the driver's class + detect whether the snapshot
+    // stack is installed; delete VolumeSnapshotContents on cleanup. All cluster-scoped →
+    // cluster install only (a namespaced install can't stage CSI snapshots).
+    rules.push(rule(
+        &["storage.k8s.io"],
+        &["storageclasses".into()],
+        READ_VERBS,
+    ));
+    rules.push(rule(
+        &["snapshot.storage.k8s.io"],
+        &["volumesnapshotclasses".into()],
+        READ_VERBS,
+    ));
+    rules.push(rule(
+        &["snapshot.storage.k8s.io"],
+        &["volumesnapshotcontents".into()],
+        &["get", "list", "watch", "delete"],
     ));
     // Self-managed webhook TLS (`webhook.tls.mode: self`): both halves fit a
     // ClusterRole.

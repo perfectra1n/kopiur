@@ -15,6 +15,7 @@ mod finalizer;
 mod maintenance;
 mod mover;
 mod repo;
+mod staging;
 
 pub use apply::*;
 pub use colocation::*;
@@ -24,6 +25,7 @@ pub use finalizer::*;
 pub use maintenance::*;
 pub use mover::*;
 pub use repo::*;
+pub use staging::*;
 
 #[cfg(test)]
 mod tests;

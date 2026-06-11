@@ -4471,15 +4471,18 @@ spec:
                     type: array
                 type: object
               copyMethod:
-                default: Snapshot
+                default: Direct
                 description: |-
-                  How the source volume is captured before kopia reads it: `Snapshot`
-                  (point-in-time CSI snapshot, default), `Clone`, or `Direct`. ADR §3.3.
+                  How the source volume is captured before kopia reads it: `Direct` (read the live
+                  PVC, the **default** — works on any storage), `Snapshot` (point-in-time CSI
+                  snapshot, opt-in), or `Clone` (CSI clone, opt-in). ADR §3.3 / [Copy methods].
 
-                  Carries a real OpenAPI `default: Snapshot` (ADR-0005 §1) so it materializes
-                  into the stored object and `kubectl explain`, and GitOps engines stop
-                  diff-thrashing on a controller-set value. A bare value (not `Option`) so the
-                  default is never dropped by `skip_serializing_if`.
+                  Carries a real OpenAPI `default: Direct` so it materializes into the stored object
+                  and `kubectl explain`, and GitOps engines stop diff-thrashing on a controller-set
+                  value. A bare value (not `Option`) so the default is never dropped by
+                  `skip_serializing_if`.
+
+                  [Copy methods]: https://github.com/home-operations/kopiur/blob/main/docs/copy-methods.md
                 enum:
                 - Snapshot
                 - Clone
@@ -16068,6 +16071,38 @@ spec:
                 required:
                 - identity
                 - kopiaSnapshotID
+                type: object
+              staged:
+                description: |-
+                  The CSI staging objects the run created for `copyMethod: Snapshot`/`Clone`
+                  (ADR §3.3). Pinned once when the stage is provisioned so the reconciler can
+                  (a) reuse the same VolumeSnapshot/PVC across mover-Job retries idempotently
+                  and (b) reap them on the terminal transition. Absent for `Direct` (and NFS),
+                  which mount the live source with no staging.
+                nullable: true
+                properties:
+                  copyMethod:
+                    description: The resolved capture method (`Snapshot` or `Clone`) that produced this stage.
+                    nullable: true
+                    type: string
+                  pvcName:
+                    description: |-
+                      Name of the staged `PersistentVolumeClaim` the mover mounts in place of the
+                      live source PVC.
+                    nullable: true
+                    type: string
+                  ready:
+                    description: |-
+                      `true` once the stage is ready for the mover (VolumeSnapshot `readyToUse` and
+                      the staged PVC applied). Before that the reconcile is still provisioning it.
+                    nullable: true
+                    type: boolean
+                  volumeSnapshotName:
+                    description: |-
+                      Name of the `VolumeSnapshot` created from the source PVC (`copyMethod: Snapshot`
+                      only; absent for `Clone`, which stages directly from the source PVC).
+                    nullable: true
+                    type: string
                 type: object
               stats:
                 description: Byte/file counts parsed from kopia's JSON output. ADR §3.4 status.

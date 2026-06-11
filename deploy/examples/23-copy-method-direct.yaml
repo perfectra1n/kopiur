@@ -1,0 +1,29 @@
+# Example 23 — copyMethod: Direct (read the live volume) — THE DEFAULT
+#
+# Direct is the default copyMethod (this example sets it explicitly for clarity).
+# Mounts the LIVE source PVC into the mover (read-only) and kopia reads it in place —
+# no snapshot, no clone, no extra storage. Works on ANY storage, including local-path
+# / hostPath with no snapshot support. The backup is crash-consistent (a live read),
+# which is fine for config, media, and file shares.
+#
+# For ReadWriteOnce volumes Kopiur automatically co-locates the mover on the node
+# already holding the PVC, avoiding the Kubernetes "Multi-Attach error" — no extra
+# config needed (see docs/repositories.md#sourcecolocation-avoid-the-rwo-multi-attach-error).
+#
+# Choose Direct when you don't have (or don't want to maintain) the CSI snapshot stack.
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: SnapshotPolicy
+metadata:
+  name: media
+  namespace: media
+spec:
+  repository:
+    name: primary
+  copyMethod: Direct
+  sources:
+    - pvc:
+        name: media-library
+  retention:
+    keepDaily: 7
+    keepWeekly: 4

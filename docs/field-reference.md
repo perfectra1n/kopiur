@@ -107,9 +107,9 @@ Short name `kopiasp`, plural `snapshotpolicies`. Print columns: `REPOSITORY`,
 | `repository` | [RepositoryRef](#repositoryref) | **required** | The `Repository`/`ClusterRepository` to write to. |
 | `identity` | {`username`?,`hostname`?} | — | Override the resolved `username@hostname`. |
 | `sources` | [][Source](#source) | — | What to back up (≥1, webhook-enforced). |
-| `copyMethod` | enum(**`Snapshot`**\|`Clone`\|`Direct`) | `Snapshot` | How the volume is captured (materialized default). §1 |
-| `volumeSnapshotClassName` | string | — | `VolumeSnapshotClass` for `Snapshot`/`Clone`. |
-| `groupBy` | enum(**`VolumeGroupSnapshot`**\|`None`) | `VolumeGroupSnapshot` | Multi-PVC consistency; `None` must be set explicitly. |
+| `copyMethod` | enum(`Snapshot`\|`Clone`\|**`Direct`**) | `Direct` | How the source is captured: `Direct` (live PVC, co-located — default, works anywhere), `Snapshot` (CSI VolumeSnapshot → staged PVC, opt-in), `Clone` (CSI clone → staged PVC, opt-in). See [Copy methods](copy-methods.md). |
+| `volumeSnapshotClassName` | string | — | `VolumeSnapshotClass` for `Snapshot`/`Clone`; unset auto-selects the source driver's default class. NFS sources reject it (nothing to snapshot). |
+| `groupBy` | enum(**`VolumeGroupSnapshot`**\|`None`) | `VolumeGroupSnapshot` | Multi-PVC consistency. **Not yet wired** — single-PVC staging only today (multi-PVC `pvcSelector` fan-out + VolumeGroupSnapshot is future work). |
 | `retention` | [Retention](#retention) | — | GFS — the only successful-retention driver. |
 | `defaultDeletionPolicy` | enum(`Delete`\|`Retain`\|`Orphan`) | `Delete` (effective) | Default `deletionPolicy` for child `Snapshot`s. |
 | `compression` | {`compressor`?,`neverCompress`[]} | — | kopia compressor + per-glob opt-out. |
@@ -169,6 +169,7 @@ the whole `spec` is empty.
 | `failure` | {`kopiaErrorClass`,`message`,`stderrTail`?,`exitCode`?,`retryRecommended`} | Structured terminal-failure detail, written by the mover before it exits non-zero. §4.10 |
 | `pinned` | bool? | Observed kopia-side pin state (vs `spec.pin`). |
 | `hooks` | {`preCompletedAt`?,`postCompletedAt`?} | Hook-execution stamps — each list runs exactly once per Snapshot. §4.8 |
+| `staged` | {`copyMethod`,`volumeSnapshotName`?,`pvcName`?,`ready`?} | The CSI staging objects created for `copyMethod: Snapshot`/`Clone` (the VolumeSnapshot + staged PVC the mover read), reaped on completion. Absent for `Direct`/NFS. See [Copy methods](copy-methods.md). |
 
 ---
 

@@ -74,13 +74,18 @@ When a selector matches several PVCs, `groupBy` defaults to `VolumeGroupSnapshot
 
 ### How the source is captured — `copyMethod`
 
-| `copyMethod`           | What happens                                               | When                                                               |
-| ---------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------ |
-| `Snapshot` _(default)_ | Point-in-time CSI `VolumeSnapshot`, then kopia reads that. | The safe default — consistent, no app downtime.                    |
-| `Clone`                | CSI clone of the volume, mounted read-only.                | When your CSI driver prefers clones.                               |
-| `Direct`               | Read the live PVC directly, no snapshot.                   | No point-in-time guarantee; only for quiesced or read-mostly data. |
+| `copyMethod`         | What happens                                                  | Requires                                                              |
+| -------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------- |
+| `Direct` _(default)_ | Read the **live** PVC directly (co-located on its node).     | Nothing — works on any storage.                                      |
+| `Snapshot`           | Point-in-time CSI `VolumeSnapshot` → temporary staged PVC → kopia reads the stage. | The CSI **snapshot stack** + a `VolumeSnapshotClass` for your driver. |
+| `Clone`              | CSI clone of the source PVC → kopia reads the clone.          | A CSI driver that supports volume **cloning**.                       |
 
-`volumeSnapshotClassName` selects the snapshot class when `Snapshot`/`Clone` is used.
+`volumeSnapshotClassName` selects the snapshot class when `Snapshot`/`Clone` is used; leave it unset to auto-pick your driver's **default** class.
+
+/// note | `Snapshot`/`Clone` are opt-in and need the CSI snapshot stack
+
+`copyMethod` defaults to `Direct` (live read — works anywhere). When you opt into `Snapshot`/`Clone` on a cluster **without** the external-snapshotter and a matching `VolumeSnapshotClass`, the backup **fails with a clear, actionable condition** (it never silently falls back). Install the stack, or stay on `Direct`. See **[Copy methods](copy-methods.md)** for the full decision guide, requirements, consistency, and cleanup behavior.
+///
 
 ### Retention — how long backups are kept (GFS)
 

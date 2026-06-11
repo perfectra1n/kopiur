@@ -38,10 +38,11 @@ use kopiur_mover::workspec::{
 use crate::config;
 use crate::consts::{
     ALLOW_PRIVILEGED_MOVER_ACTION, API_VERSION, CONFIG_LABEL, CREDENTIALS_AVAILABLE_CONDITION,
-    CREDENTIALS_PROJECTED_REASON, FIX_HOOK_ACTION, HOOKS_SUCCEEDED_CONDITION,
-    MISSING_CREDENTIALS_REASON, MOVER_PERMITTED_CONDITION, ORIGIN_LABEL,
+    CREDENTIALS_PROJECTED_REASON, FIX_HOOK_ACTION, FIX_SNAPSHOT_STACK_ACTION,
+    HOOKS_SUCCEEDED_CONDITION, MISSING_CREDENTIALS_REASON, MOVER_PERMITTED_CONDITION, ORIGIN_LABEL,
     PRIVILEGED_MOVER_NOT_PERMITTED_REASON, SKIP_SNAPSHOT_CLEANUP_ANNOTATION,
-    SNAPSHOT_CLEANUP_FINALIZER,
+    SNAPSHOT_CLEANUP_FINALIZER, SOURCE_STAGED_CONDITION, SOURCE_STAGED_REASON,
+    STAGING_WAITING_REASON,
 };
 use crate::context::Context;
 use crate::error::{Error, Result, error_policy_for};
@@ -521,6 +522,17 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
                 if backup.status.as_ref().and_then(|s| s.phase) != Some(SnapshotPhase::Succeeded) {
                     finalize_succeeded(ctx, backup, &api, &name, &namespace).await?;
                 }
+                // Reap the CSI staging objects (VolumeSnapshot + staged PVC) now the
+                // mover is done — frees backend storage promptly (ownerRef GC is the
+                // backstop). No-op for Direct (no staged objects recorded).
+                if backup
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.staged.as_ref())
+                    .is_some()
+                {
+                    io::cleanup_staged_source(&ctx.client, &namespace, &name).await?;
+                }
                 // §13(c): reconcile kopia-side pin state with spec.pin once the
                 // snapshot exists. A no-op when already in the desired state.
                 return reconcile_pin(backup, ctx, &api, &namespace, &name).await;
@@ -558,6 +570,16 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
                         ),
                     )
                     .await?;
+                }
+                // The run is terminal (the Job exhausted its retries) — reap any CSI
+                // staging objects. No-op for Direct.
+                if backup
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.staged.as_ref())
+                    .is_some()
+                {
+                    io::cleanup_staged_source(&ctx.client, &namespace, &name).await?;
                 }
                 return Ok(Action::requeue(Duration::from_secs(120)));
             }
@@ -638,7 +660,7 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
         return Ok(Action::await_change());
     }
 
-    let (work_spec, source_volume, repo_volume, _) =
+    let (work_spec, mut source_volume, repo_volume, _) =
         build_backup_run(backup, &config, &repo, &namespace, &name)?;
 
     // The mover Job runs in THIS (workload) namespace, where the operator SA does
@@ -909,6 +931,124 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
         }
     }
 
+    // copyMethod: Snapshot/Clone — capture a point-in-time CSI snapshot (or clone) of
+    // the source PVC and run the mover against the STAGE, not the live volume (ADR §3.3).
+    // Done AFTER beforeSnapshot hooks so a quiesced app yields a consistent capture.
+    // `Direct` (and any NFS source) returns NotApplicable and mounts the live source.
+    let staged_claim: Option<String> =
+        match io::resolve_staging(&ctx.client, &config, &namespace, &name, &owner).await? {
+            io::StagingOutcome::NotApplicable => None,
+            io::StagingOutcome::Ready(staged) => {
+                // Mount the staged PVC in place of the live source — same mount path and
+                // kopia source path, so the snapshot's recorded identity is unchanged.
+                if let Some(mount) = source_volume.as_mut() {
+                    *mount = VolumeMountSpec::pvc(
+                        staged.pvc_name.clone(),
+                        mount.mount_path.clone(),
+                        mount.read_only,
+                    );
+                }
+                let existing = backup
+                    .status
+                    .as_ref()
+                    .map(|s| s.conditions.clone())
+                    .unwrap_or_default();
+                let conditions = io::upsert_condition(
+                    &existing,
+                    SOURCE_STAGED_CONDITION,
+                    true,
+                    SOURCE_STAGED_REASON,
+                    &format!(
+                        "staged source ready ({}): pvc `{}`",
+                        staged.copy_method, staged.pvc_name
+                    ),
+                    backup.meta().generation,
+                );
+                io::patch_status(
+                    &api,
+                    &name,
+                    serde_json::json!({
+                        "conditions": conditions,
+                        "staged": {
+                            "copyMethod": staged.copy_method,
+                            "volumeSnapshotName": staged.volume_snapshot_name,
+                            "pvcName": staged.pvc_name,
+                            "ready": true,
+                        },
+                    }),
+                )
+                .await?;
+                Some(staged.pvc_name)
+            }
+            io::StagingOutcome::Waiting(msg) => {
+                // The VolumeSnapshot isn't readyToUse yet — a normal, transient wait.
+                let existing = backup
+                    .status
+                    .as_ref()
+                    .map(|s| s.conditions.clone())
+                    .unwrap_or_default();
+                let conditions = io::upsert_condition(
+                    &existing,
+                    SOURCE_STAGED_CONDITION,
+                    false,
+                    STAGING_WAITING_REASON,
+                    &msg,
+                    backup.meta().generation,
+                );
+                io::patch_status(
+                    &api,
+                    &name,
+                    serde_json::json!({ "phase": "Pending", "conditions": conditions }),
+                )
+                .await?;
+                return Err(Error::MissingDependency(msg));
+            }
+            io::StagingOutcome::Failed { reason, message } => {
+                // Stack/class missing or the VolumeSnapshot errored: a clear, actionable
+                // Failed condition + Warning Event. Returned as a Validation error so the
+                // structural-cadence requeue re-checks and RECOVERS once the cluster is
+                // fixed (e.g. a VolumeSnapshotClass is installed) — no spec change needed.
+                let existing = backup
+                    .status
+                    .as_ref()
+                    .map(|s| s.conditions.clone())
+                    .unwrap_or_default();
+                let conditions = io::upsert_condition(
+                    &existing,
+                    SOURCE_STAGED_CONDITION,
+                    false,
+                    reason,
+                    &message,
+                    backup.meta().generation,
+                );
+                let current = serde_json::to_value(&backup.status).ok();
+                let wrote = io::patch_status_if_changed(
+                    &api,
+                    &name,
+                    current.as_ref(),
+                    serde_json::json!({ "phase": "Failed", "conditions": conditions }),
+                )
+                .await?;
+                if wrote {
+                    let _ = ctx
+                        .recorder
+                        .publish(
+                            &Event {
+                                type_: EventType::Warning,
+                                reason: reason.to_string(),
+                                note: Some(message.clone()),
+                                action: FIX_SNAPSHOT_STACK_ACTION.into(),
+                                secondary: None,
+                            },
+                            &io::event_ref(backup),
+                        )
+                        .await;
+                    tracing::warn!(backup = %name, reason, "source staging failed: {message}");
+                }
+                return Err(Error::Validation(message));
+            }
+        };
+
     let labels = run_labels(&config, origin);
     let mut limits = job_limits(backup);
     // moverDefaults.ttlSecondsAfterFinished applies unless the recipe's FailurePolicy
@@ -936,27 +1076,38 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
     // Only the single-`pvc` source needs this — an NFS source is network-mounted, so
     // a Multi-Attach error is impossible. The resolved `sourceColocation` mode
     // (default `Auto`) decides whether/how to pin. RWO multi-attach fix.
-    let (mover_affinity, mover_tolerations) =
-        match config.spec.sources.first().and_then(|s| s.pvc.as_ref()) {
-            Some(pvc) => {
-                let decision = io::resolve_source_colocation(
-                    &ctx.client,
-                    &namespace,
-                    &pvc.name,
-                    resolved_mover.source_colocation,
-                )
-                .await?;
-                io::apply_colocation(
-                    decision,
-                    resolved_mover.affinity.clone(),
-                    resolved_mover.tolerations.clone(),
-                )?
-            }
-            None => (
+    // Co-locate on the EFFECTIVE source claim: the staged PVC when `copyMethod`
+    // snapshotted/cloned (a fresh, unheld PVC → resolves to "no pin", so a staged backup
+    // schedules freely and is fully decoupled from the source node), else the live PVC
+    // (Direct → pin to the node already holding the RWO volume).
+    let colo_claim = staged_claim.clone().or_else(|| {
+        config
+            .spec
+            .sources
+            .first()
+            .and_then(|s| s.pvc.as_ref())
+            .map(|p| p.name.clone())
+    });
+    let (mover_affinity, mover_tolerations) = match colo_claim {
+        Some(claim) => {
+            let decision = io::resolve_source_colocation(
+                &ctx.client,
+                &namespace,
+                &claim,
+                resolved_mover.source_colocation,
+            )
+            .await?;
+            io::apply_colocation(
+                decision,
                 resolved_mover.affinity.clone(),
                 resolved_mover.tolerations.clone(),
-            ),
-        };
+            )?
+        }
+        None => (
+            resolved_mover.affinity.clone(),
+            resolved_mover.tolerations.clone(),
+        ),
+    };
     let inputs = MoverJobInputs {
         name: &name,
         namespace: &namespace,
@@ -1145,6 +1296,18 @@ async fn handle_deletion(
         .any(|f| f == SNAPSHOT_CLEANUP_FINALIZER)
     {
         return Ok(Action::await_change());
+    }
+
+    // Reap any CSI staging objects (with the Retain→Delete PV patch) before the kopia
+    // snapshot-deletion plan runs. OwnerRef GC removes the staged PVC/VolumeSnapshot when
+    // the CR is deleted, but it can't flip a Retain PV's reclaim policy — so do it here.
+    if backup
+        .status
+        .as_ref()
+        .and_then(|s| s.staged.as_ref())
+        .is_some()
+    {
+        io::cleanup_staged_source(&ctx.client, namespace, name).await?;
     }
 
     let base_plan = plan_deletion(policy, backup.annotations());

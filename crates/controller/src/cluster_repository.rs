@@ -595,6 +595,12 @@ async fn finalize_cluster_bootstrap(
         name,
         serde_json::json!({
             "phase": "Ready",
+            // Report the generation we just bootstrapped, so `observedGeneration` tracks
+            // `metadata.generation` after a successful first bootstrap (matching the
+            // already-bootstrapped path and the namespaced Repository). Without it a
+            // freshly-bootstrapped ClusterRepository shows no observedGeneration until the
+            // next spec change. (Fix originally from community PR #82, ChosenQuill.)
+            "observedGeneration": repo.metadata.generation,
             "backend": backend.kind_str(),
             "uniqueId": result.unique_id,
             "allowedNamespaceCount": allowed_count,

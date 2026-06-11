@@ -57,15 +57,18 @@ spec:
                     type: array
                 type: object
               copyMethod:
-                default: Snapshot
+                default: Direct
                 description: |-
-                  How the source volume is captured before kopia reads it: `Snapshot`
-                  (point-in-time CSI snapshot, default), `Clone`, or `Direct`. ADR §3.3.
+                  How the source volume is captured before kopia reads it: `Direct` (read the live
+                  PVC, the **default** — works on any storage), `Snapshot` (point-in-time CSI
+                  snapshot, opt-in), or `Clone` (CSI clone, opt-in). ADR §3.3 / [Copy methods].
 
-                  Carries a real OpenAPI `default: Snapshot` (ADR-0005 §1) so it materializes
-                  into the stored object and `kubectl explain`, and GitOps engines stop
-                  diff-thrashing on a controller-set value. A bare value (not `Option`) so the
-                  default is never dropped by `skip_serializing_if`.
+                  Carries a real OpenAPI `default: Direct` so it materializes into the stored object
+                  and `kubectl explain`, and GitOps engines stop diff-thrashing on a controller-set
+                  value. A bare value (not `Option`) so the default is never dropped by
+                  `skip_serializing_if`.
+
+                  [Copy methods]: https://github.com/home-operations/kopiur/blob/main/docs/copy-methods.md
                 enum:
                 - Snapshot
                 - Clone

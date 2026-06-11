@@ -93,7 +93,7 @@ docker exec "$NODE" sh -c '
   # PVC ROOT is the kopia repo — a subdir under one shared PVC gives no isolation.
   # Each scenario binds its own PVC over one of these dirs. KEEP IN LOCKSTEP with
   # crates/e2e/src/consts.rs::REPO_SUBPATHS.
-  for s in moverdefaults nsdel-orphan nsdel-delete pin populator readonly kstatus verify repl-src repl-dst projgate hooks gfs errh colocation colocation-off; do
+  for s in moverdefaults nsdel-orphan nsdel-delete pin populator readonly kstatus verify repl-src repl-dst projgate hooks gfs errh colocation colocation-off copymethod copymethod-csi; do
     mkdir -p "/kopiur-e2e/repos/$s"
   done
   # Source dir with one UNREADABLE file for the errorHandling.ignoreFileErrors
@@ -122,6 +122,59 @@ docker save "$BUSYBOX" | docker exec -i "$NODE" ctr --namespace=k8s.io images im
   && echo "   preloaded $BUSYBOX" || echo "   warn: could not preload $BUSYBOX (will pull in-cluster)"
 '''
 
+[tasks.snapshot-stack]
+description = "Install the CSI snapshot stack (external-snapshotter + csi-driver-host-path + a default VolumeSnapshotClass) so copyMethod: Snapshot/Clone e2e tests run. HERMETIC: applies VENDORED pinned manifests (crates/e2e/manifests/csi-snapshot) and PRELOADS the pinned sidecar images into the node — no network at provision."
+dir = "{{config_root}}/../.."
+env = { KUBECONFIG = "{{config_root}}/../../target/e2e/kubeconfig" }
+run = """
+set -eu
+NODE=kopiur-e2e-control-plane
+MANIFESTS=crates/e2e/manifests/csi-snapshot
+
+# Preload the pinned sidecar + controller images into the node's containerd (same
+# technique as minio-preload). Pinned to the VENDORED manifests' tags (sig-storage
+# release tags are immutable) — keep in lockstep with the `image:` refs under
+# $MANIFESTS. imagePullPolicy is IfNotPresent, so a preloaded image is never re-pulled.
+preload() {
+  img="$1"
+  for a in 1 2 3; do docker pull "$img" >/dev/null 2>&1 && break; echo "   (retry $a) $img"; sleep 3; done
+  docker save "$img" | docker exec -i "$NODE" ctr --namespace=k8s.io images import - >/dev/null 2>&1 \\
+    && echo "   preloaded $img" || echo "   warn: could not preload $img (will pull in-cluster)"
+}
+echo "==> preloading CSI snapshot-stack images"
+preload registry.k8s.io/sig-storage/snapshot-controller:v8.0.1
+preload registry.k8s.io/sig-storage/hostpathplugin:v1.14.1
+preload registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+preload registry.k8s.io/sig-storage/csi-attacher:v4.7.0
+preload registry.k8s.io/sig-storage/csi-snapshotter:v8.1.0
+preload registry.k8s.io/sig-storage/csi-resizer:v1.12.0
+preload registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.12.0
+preload registry.k8s.io/sig-storage/csi-external-health-monitor-controller:v0.13.0
+preload registry.k8s.io/sig-storage/livenessprobe:v2.14.0
+
+echo "==> applying snapshot CRDs (vendored) + waiting for establishment"
+kubectl apply -f "$MANIFESTS/01-crd-volumesnapshotclasses.yaml" \\
+              -f "$MANIFESTS/02-crd-volumesnapshotcontents.yaml" \\
+              -f "$MANIFESTS/03-crd-volumesnapshots.yaml"
+kubectl wait --for=condition=established --timeout=60s \\
+  crd/volumesnapshotclasses.snapshot.storage.k8s.io \\
+  crd/volumesnapshotcontents.snapshot.storage.k8s.io \\
+  crd/volumesnapshots.snapshot.storage.k8s.io
+
+echo "==> applying snapshot-controller + csi-driver-host-path + classes (vendored)"
+kubectl apply -f "$MANIFESTS"
+
+# Make the hostpath snapshot class the default so an unset volumeSnapshotClassName
+# resolves it via the default-for-driver path.
+kubectl annotate volumesnapshotclass csi-hostpath-snapclass \\
+  snapshot.storage.kubernetes.io/is-default-class=true --overwrite
+
+echo "==> waiting for snapshot-controller + csi-hostpathplugin"
+kubectl -n kube-system rollout status deploy/snapshot-controller --timeout=150s
+kubectl -n default     rollout status statefulset/csi-hostpathplugin --timeout=180s
+echo "==> CSI snapshot stack ready (storageclass csi-hostpath-sc, snapclass csi-hostpath-snapclass)"
+"""
+
 [tasks.helm]
 description = "Install the operator chart into the kopiur-e2e cluster (deploy/e2e/values.yaml)"
 dir = "{{config_root}}/../.."
@@ -147,24 +200,47 @@ rm -f "$KUBECONFIG" || true
 """
 
 [tasks.diagnostics]
-description = "Dump kopiur-e2e cluster state (CRs/Jobs/pods/events/logs) for debugging"
+description = "Dump kopiur-e2e cluster state (CRs + status/conditions, storage, CSI snapshots, events, logs) for debugging a failed e2e"
 dir = "{{config_root}}/../.."
 env = { KUBECONFIG = "{{config_root}}/../../target/e2e/kubeconfig" }
 run = '''
 set +e
 NS=kopiur-e2e
 echo "================ E2E DIAGNOSTICS ================" >&2
-kubectl get repositories,clusterrepositories,backupconfigs,backups,backupschedules,restores,maintenances -A -o wide >&2 2>&1
-kubectl get jobs,pods,serviceaccounts,rolebindings -A -o wide >&2 2>&1
-echo "---- Warning Events ----" >&2
+echo "---- kopiur CRs (all namespaces) ----" >&2
+kubectl get repositories,clusterrepositories,snapshotpolicies,snapshots,snapshotschedules,restores,maintenances,repositoryreplications -A -o wide >&2 2>&1
+# The actionable bits live in Snapshot/Restore .status — phase, conditions (reason +
+# message: e.g. SourceStaged=False/SnapshotStackMissing), the staged objects, and the
+# structured failure block.
+echo "---- Snapshot / Restore status (phase, conditions, staged, failure) ----" >&2
+kubectl get snapshots,restores -A -o yaml 2>/dev/null \
+  | grep -E "^( +)(name|namespace|phase|reason|message|type|status|kopiaErrorClass|copyMethod|pvcName|volumeSnapshotName|logTail):" >&2 2>&1
+echo "---- workloads + storage (jobs/pods/pvc/pv/statefulsets) ----" >&2
+kubectl get jobs,pods,pvc,statefulset -A -o wide >&2 2>&1
+kubectl get pv -o wide >&2 2>&1
+echo "---- CSI snapshots + classes ----" >&2
+kubectl get volumesnapshots -A -o wide >&2 2>&1
+kubectl get volumesnapshotcontents -o wide >&2 2>&1
+kubectl get storageclass,volumesnapshotclass -o wide >&2 2>&1
+echo "---- Warning Events (chronological) ----" >&2
 kubectl get events -A --field-selector type=Warning --sort-by=.lastTimestamp >&2 2>&1
-echo "---- controller logs ----" >&2
+# Describe anything stuck: pods not Running/Succeeded, and PVCs not Bound (the events on
+# the object explain WHY — FailedScheduling, Multi-Attach, ProvisioningFailed, …).
+echo "---- describe: non-healthy pods ----" >&2
+kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded \
+  -o 'jsonpath={range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+  | while read -r dns dpod; do [ -n "$dpod" ] || continue; echo "== $dns/$dpod ==" >&2; kubectl describe pod -n "$dns" "$dpod" >&2 2>&1; done
+echo "---- describe: unbound/terminating PVCs ----" >&2
+kubectl get pvc -A -o 'jsonpath={range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{" "}{.status.phase}{"\n"}{end}' 2>/dev/null \
+  | while read -r pns ppvc pphase; do [ -n "$ppvc" ] || continue; [ "$pphase" = "Bound" ] && continue; echo "== $pns/$ppvc ($pphase) ==" >&2; kubectl describe pvc -n "$pns" "$ppvc" >&2 2>&1; done
+echo "---- controller logs (tail 400) ----" >&2
 kubectl logs -n "$NS" -l app.kubernetes.io/component=controller --tail=400 --all-containers >&2 2>&1
-echo "---- Job pod logs (all namespaces) ----" >&2
+echo "---- snapshot-controller + csi-hostpathplugin logs ----" >&2
+kubectl logs -n kube-system -l app.kubernetes.io/name=snapshot-controller --tail=120 >&2 2>&1
+kubectl logs -n default -l app.kubernetes.io/name=csi-hostpathplugin --tail=120 --all-containers --max-log-requests=12 >&2 2>&1
+echo "---- mover Job pod logs (all namespaces) ----" >&2
 kubectl get pods -A -l batch.kubernetes.io/job-name -o 'jsonpath={range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null \
   | while read -r mns mpod; do [ -n "$mpod" ] || continue; echo "-- $mns/$mpod --" >&2; kubectl logs -n "$mns" "$mpod" --tail=200 --all-containers >&2 2>&1; done
-echo "---- Job descriptions ----" >&2
-kubectl describe jobs -A >&2 2>&1
 echo "================ END DIAGNOSTICS ================" >&2
 true
 '''
@@ -175,6 +251,12 @@ dir = "{{config_root}}/../.."
 env = { KUBECONFIG = "{{config_root}}/../../target/e2e/kubeconfig" }
 run = '''
 set -eu
+# On ANY test failure, dump cluster diagnostics BEFORE returning — so a direct
+# `mise run //crates/e2e:run` in CI (the common shard invocation, where the `:test`
+# trap never runs) still shows cluster/status/logs, not just the Rust panic. The marker
+# lets the `:test` wrapper skip a second dump.
+mkdir -p target/e2e; rm -f target/e2e/.diag-done
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "==> e2e tests FAILED (rc=$rc) — dumping cluster diagnostics" >&2; mise run //crates/e2e:diagnostics || true; touch target/e2e/.diag-done; fi; exit $rc' EXIT
 # KOPIUR_E2E_BINS — space-separated test-binary (file) names, expanded to repeated
 # `--test <name>` flags BEFORE `--`, so a CI shard runs only its files. Empty ⇒ all.
 # KOPIUR_E2E_TESTFILTER — libtest name-substring filter, kept AFTER `--`.
@@ -199,7 +281,10 @@ done
 cleanup() {
   rc=$?
   # Dump state before teardown so a CI failure is debuggable (the cluster is gone after).
-  [ "$rc" -ne 0 ] && mise run //crates/e2e:diagnostics || true
+  # Skip if the `run` task already dumped (its trap fires first on a test-phase failure);
+  # this still covers PROVISIONING failures (cluster-create/helm/snapshot-stack), where
+  # `run` never executed.
+  if [ "$rc" -ne 0 ] && [ ! -f target/e2e/.diag-done ]; then mise run //crates/e2e:diagnostics || true; fi
   if [ "${KOPIUR_KEEP_KIND:-0}" != "1" ]; then
     mise run //crates/e2e:down || true
   else
@@ -214,6 +299,12 @@ mise run //crates/e2e:cluster-create
 mise run //crates/e2e:images-load
 mise run //crates/e2e:minio-preload
 mise run //crates/e2e:node-seed
+# CSI snapshot stack (vendored, hermetic) for the copyMethod: Snapshot/Clone tests — a
+# required step. Set KOPIUR_E2E_SKIP_SNAPSHOT_STACK=1 only for a shard that excludes
+# copy_methods.rs (the positive test then hard-fails with a "run snapshot-stack" hint).
+if [ "${KOPIUR_E2E_SKIP_SNAPSHOT_STACK:-0}" != "1" ]; then
+  mise run //crates/e2e:snapshot-stack
+fi
 mise run //crates/e2e:helm
 
 mise run //crates/e2e:run

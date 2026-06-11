@@ -1,0 +1,43 @@
+# Example 21 — copyMethod: Snapshot (point-in-time CSI VolumeSnapshot)
+#
+# An OPT-IN method (the default is Direct) recommended for stateful apps when you have
+# the CSI snapshot stack. Kopiur takes a CSI VolumeSnapshot of the source PVC, restores
+# it into a temporary staged PVC, and runs the mover against that stage — never the live
+# volume. The backup is
+# point-in-time and fully decoupled from the node your app runs on; the staged
+# objects are cleaned up automatically when the backup finishes.
+#
+# REQUIRES the cluster CSI snapshot stack (external-snapshotter + CRDs) and a
+# VolumeSnapshotClass whose driver matches the source PVC's StorageClass provisioner.
+# Without it the backup fails with a clear, actionable condition (it never silently
+# falls back). See docs/copy-methods.md.
+#
+# Leave volumeSnapshotClassName UNSET to auto-select your driver's default class;
+# set it (as below) to pin a specific one.
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: SnapshotPolicy
+metadata:
+  name: postgres
+  namespace: databases
+spec:
+  repository:
+    name: primary
+  copyMethod: Snapshot
+  volumeSnapshotClassName: csi-rbd-snapclass # optional; omit to use the driver default
+  sources:
+    - pvc:
+        name: postgres-data
+  retention:
+    keepDaily: 14
+    keepWeekly: 8
+  # For application consistency, quiesce the database before the snapshot is taken
+  # (the VolumeSnapshot is captured AFTER beforeSnapshot hooks).
+  hooks:
+    beforeSnapshot:
+      - workloadExec:
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+          command: ["/bin/sh", "-c", "psql -c 'CHECKPOINT;'"]
+          continueOnFailure: false
