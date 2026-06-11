@@ -24,6 +24,12 @@ allow = [
     "MPL-2.0",
     "CC0-1.0",
     "OpenSSL",
+    # Community Data License Agreement — Permissive 2.0. Carried by
+    # `webpki-roots` (the Mozilla CA root bundle), an unavoidable transitive
+    # dependency via `kube`'s hyper-rustls and `reqwest`. The 1.0 line
+    # relicensed the bundled CA data to CDLA-Permissive-2.0; the license is
+    # permissive and imposes no copyleft on our code.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 
