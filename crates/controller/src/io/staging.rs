@@ -26,8 +26,8 @@
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::{
-    PersistentVolume, PersistentVolumeClaim, PersistentVolumeClaimSpec, TypedLocalObjectReference,
-    VolumeResourceRequirements,
+    PersistentVolume, PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod,
+    TypedLocalObjectReference, VolumeResourceRequirements,
 };
 use k8s_openapi::api::storage::v1::StorageClass;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -625,9 +625,13 @@ pub async fn resolve_staging(
     }))
 }
 
-/// Reap the staged objects a backup created (idempotent; 404-tolerant). Patches a bound
-/// staged PV `Retain → Delete` first (so a `Retain` StorageClass doesn't leak the PV +
-/// backend volume), then deletes the staged PVC and the VolumeSnapshot. Safe to call on
+/// Reap the staged objects a backup created (idempotent; 404-tolerant). Deletes the
+/// finished mover **pod** first (a completed Job pod still references the staged PVC via
+/// `spec.volumes`, so `kubernetes.io/pvc-protection` blocks the PVC's deletion until the
+/// pod is gone — but the Job object is left intact so the reconcile's terminal-state
+/// detection still sees a completed Job and does NOT re-run the backup). Then patches a
+/// bound staged PV `Retain → Delete` (so a `Retain` StorageClass doesn't leak the PV +
+/// backend volume), and deletes the staged PVC and the VolumeSnapshot. Safe to call on
 /// every terminal reconcile — once the objects are gone it is a no-op.
 pub async fn cleanup_staged_source(
     client: &kube::Client,
@@ -639,6 +643,24 @@ pub async fn cleanup_staged_source(
 
     let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
     if let Some(pvc) = pvc_api.get_opt(&staged_pvc).await? {
+        // Release pvc-protection: delete the finished mover pod(s) (the backup Job is
+        // named after the Snapshot CR). The Job object itself is preserved. Use
+        // list + delete-by-name (not delete_collection), since the controller is granted
+        // the `delete`/`list` verbs but NOT the distinct `deletecollection` verb.
+        let pod_api: Api<Pod> = Api::namespaced(client.clone(), ns);
+        let mover_pods = pod_api
+            .list(
+                &ListParams::default()
+                    .labels(&format!("batch.kubernetes.io/job-name={snapshot_cr}")),
+            )
+            .await
+            .map(|l| l.items)
+            .unwrap_or_default();
+        for pod in mover_pods {
+            if let Some(pod_name) = pod.metadata.name {
+                delete_ignore_404(&pod_api, &pod_name).await?;
+            }
+        }
         // Patch the bound PV to Delete so the underlying volume is reclaimed even on a
         // Retain StorageClass (the #82 OpenEBS-ZFS leak).
         if let Some(pv_name) = cleanup_plan(&pvc).reclaim_pv {

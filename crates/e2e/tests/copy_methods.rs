@@ -5,10 +5,10 @@
 //! 1. **Fail-loud** (always runs): `copyMethod: Snapshot` over a source PVC that is NOT
 //!    CSI-provisioned (the static hostPath `e2e-src`) must FAIL with an actionable
 //!    `SourceStaged=False` condition — never silently fall back to a live read.
-//! 2. **Stage + cleanup** (runs only when the CSI snapshot stack is installed — see the
-//!    `snapshot-stack` mise task; skips gracefully otherwise): `copyMethod: Snapshot`
-//!    over a CSI-provisioned PVC creates a VolumeSnapshot + staged PVC, the mover reads
-//!    the stage, the Snapshot Succeeds, and the staged objects are reaped.
+//! 2. **Stage + cleanup**: `copyMethod: Snapshot` over a CSI-provisioned PVC creates a
+//!    VolumeSnapshot + staged PVC, the mover reads the stage, the Snapshot Succeeds, and
+//!    the staged objects are reaped. The harness installs the CSI snapshot stack (the
+//!    vendored, hermetic `snapshot-stack` mise task), so this is a hard requirement.
 //!
 //! Gated by `#[cfg(feature = "e2e")]` + `#[ignore]`; driven by
 //! `mise run //crates/e2e:test`. Skips gracefully without a cluster.
@@ -132,7 +132,8 @@ async fn snapshot_mode_on_non_csi_source_fails_with_actionable_condition() {
 
 /// STAGE + CLEANUP: `copyMethod: Snapshot` over a CSI-provisioned PVC creates a
 /// VolumeSnapshot + staged PVC, the mover reads the stage, the Snapshot Succeeds, and
-/// the staged objects are reaped. SKIPS when the CSI snapshot stack isn't installed.
+/// the staged objects are reaped. The harness installs the CSI snapshot stack
+/// (`mise run //crates/e2e:snapshot-stack`), so this is a hard requirement.
 #[tokio::test]
 #[ignore = "requires the e2e harness + the CSI snapshot stack (mise run //crates/e2e:snapshot-stack)"]
 async fn snapshot_mode_stages_a_csi_volumesnapshot_and_cleans_up() {
@@ -142,19 +143,18 @@ async fn snapshot_mode_stages_a_csi_volumesnapshot_and_cleans_up() {
     world.ensure(&[Need::Filesystem]).await.expect("fixtures");
     let client = world.client().clone();
 
-    // Skip gracefully unless the CSI hostpath StorageClass is present.
+    // The CSI hostpath StorageClass MUST be present (installed by the snapshot-stack
+    // harness step). Fail loudly with the fix if it isn't — this is a required test, not
+    // a skip, so a broken harness can't masquerade as a pass.
     let scs: Api<StorageClass> = Api::all(client.clone());
-    if scs
-        .get_opt(CSI_STORAGE_CLASS)
-        .await
-        .expect("list storageclasses")
-        .is_none()
-    {
-        eprintln!(
-            "SKIP: storageclass {CSI_STORAGE_CLASS} not found — run `mise run //crates/e2e:snapshot-stack`"
-        );
-        return;
-    }
+    assert!(
+        scs.get_opt(CSI_STORAGE_CLASS)
+            .await
+            .expect("list storageclasses")
+            .is_some(),
+        "storageclass {CSI_STORAGE_CLASS} not found — run `mise run //crates/e2e:snapshot-stack` \
+         (or set KOPIUR_E2E_SKIP_SNAPSHOT_STACK=1 only for shards excluding copy_methods.rs)"
+    );
 
     ensure_repo(&client, "copymethod-csi").await;
     let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), E2E_NAMESPACE);
