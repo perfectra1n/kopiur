@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.3](https://github.com/home-operations/kopiur/compare/0.3.2...0.3.3) (2026-06-11)
+
+
+### Features
+
+* **csi:** add csi snapshots ([#89](https://github.com/home-operations/kopiur/issues/89)) ([2bf8626](https://github.com/home-operations/kopiur/commit/2bf862607c21c24aad4c21bfd2ca4042c1bbae60))
+* **mover:** support rwo and pvcs tied to a node ([#85](https://github.com/home-operations/kopiur/issues/85)) ([8926f94](https://github.com/home-operations/kopiur/commit/8926f946f4c2287dcb7fe4df42be083a5b65206d))
+
+
+### Bug Fixes
+
+* **readme:** update readme to clarify still under heavy dev ([becf173](https://github.com/home-operations/kopiur/commit/becf173fa404028794987864e7f2667bdf0b97fb))
+
 ## [0.3.2](https://github.com/home-operations/kopiur/compare/0.3.1...0.3.2) (2026-06-11)
 
 
