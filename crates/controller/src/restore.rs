@@ -651,6 +651,25 @@ async fn drive_direct_restore(
         effective_cache.as_ref(),
     )
     .await?;
+    // RWO Multi-Attach avoidance for the restore DESTINATION PVC: when restoring into
+    // an existing ReadWriteOnce PVC held by a running app pod, pin the restore mover to
+    // that node so the kubelet can attach the volume (a freshly-created `target.pvc`
+    // has no holder → no pin). The resolved `sourceColocation` mode (default `Auto`)
+    // decides. RWO multi-attach fix.
+    let (mover_affinity, mover_tolerations) = {
+        let decision = io::resolve_source_colocation(
+            &ctx.client,
+            namespace,
+            &target_pvc,
+            resolved_mover.source_colocation,
+        )
+        .await?;
+        io::apply_colocation(
+            decision,
+            resolved_mover.affinity.clone(),
+            resolved_mover.tolerations.clone(),
+        )?
+    };
     let inputs = MoverJobInputs {
         name,
         namespace,
@@ -671,8 +690,8 @@ async fn drive_direct_restore(
         security_context: resolved_mover.security_context.clone(),
         pod_security_context: resolved_mover.pod_security_context.clone(),
         node_selector: resolved_mover.node_selector.clone(),
-        tolerations: resolved_mover.tolerations.clone(),
-        affinity: resolved_mover.affinity.clone(),
+        tolerations: mover_tolerations,
+        affinity: mover_affinity,
         labels: io::child_labels(&[("kopiur.home-operations.com/op", "restore")]),
         // Restore writes INTO the target PVC, mounted read-write at /restore.
         source_volume: Some(VolumeMountSpec::pvc(target_pvc, target_path, false)),

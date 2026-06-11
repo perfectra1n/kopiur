@@ -749,6 +749,46 @@ pub fn merge_resources_opt(
     }
 }
 
+/// How the mover pod co-locates with the node a `ReadWriteOnce` source/destination
+/// PVC is attached to, to avoid a Kubernetes **Multi-Attach error**.
+///
+/// A `ReadWriteOnce` (RWO) PVC can only be attached to one node at a time, but it
+/// *can* be mounted by multiple pods **on that same node**. When an app pod already
+/// holds an RWO PVC on node A and the mover lands on node B, the kubelet on B cannot
+/// attach the volume and the mover pod is stuck `Multi-Attach error`. The controller
+/// resolves the node the PVC is attached to (consuming pod → PV `nodeAffinity` →
+/// `VolumeAttachment`) and pins the mover there so it co-locates with the workload.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
+pub enum SourceColocationMode {
+    /// Pin an RWO PVC's mover to the node the PVC is attached to **when** that node
+    /// is discoverable; otherwise schedule freely (nothing holds the volume, so the
+    /// mover can attach it anywhere). `ReadWriteMany`/`ReadOnlyMany` are never pinned.
+    /// A `ReadWriteOncePod` PVC that is already held by a live pod fails with guidance
+    /// (a second pod cannot mount it even on the same node). The default — fixes the
+    /// Multi-Attach error with no configuration.
+    #[default]
+    Auto,
+    /// Like `Auto`, but if an RWO PVC's node cannot be determined, **fail** the run
+    /// with an actionable error instead of scheduling freely. Use when an RWO source
+    /// must never be backed up from the wrong node.
+    Required,
+    /// Never compute a node pin; the mover uses only the explicit
+    /// `nodeSelector`/`affinity`/`tolerations`. The pre-fix behavior — an escape hatch
+    /// for topologies that manage placement themselves.
+    Disabled,
+}
+
+/// Controls mover/source-PVC node co-location (RWO Multi-Attach avoidance). A
+/// sub-object (not a bare enum) so future knobs — e.g. a custom hostname label key
+/// for non-standard topologies — slot in without an API break (ADR §4.11).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceColocation {
+    /// The co-location strategy. Defaults to [`SourceColocationMode::Auto`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<SourceColocationMode>,
+}
+
 /// Repository-wide mover defaults inherited by **every** mover the repository spawns —
 /// bootstrap, backup, restore, maintenance — overridable per-recipe via `mover`
 /// (ADR-0004 §1). Replaces the former `cacheDefaults`: the cache lives at
@@ -790,6 +830,11 @@ pub struct MoverDefaults {
     /// Pod affinity for every mover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub affinity: Option<Affinity>,
+    /// How a mover co-locates with the node its RWO source/destination PVC is
+    /// attached to, to avoid a Multi-Attach error. Defaults to
+    /// [`SourceColocationMode::Auto`] when unset. ADR §3.7 / RWO multi-attach fix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_colocation: Option<SourceColocation>,
     /// `Job.spec.ttlSecondsAfterFinished` for every mover Job, so finished
     /// backup/restore/maintenance Jobs self-GC (ADR-0005 §12). A recipe's
     /// `mover` can override it.
@@ -848,6 +893,10 @@ pub struct ResolvedMover {
     pub tolerations: Option<Vec<Toleration>>,
     /// Pod affinity from `moverDefaults`.
     pub affinity: Option<Affinity>,
+    /// Resolved RWO source/destination co-location mode (`moverDefaults.sourceColocation.mode`),
+    /// defaulting to [`SourceColocationMode::Auto`]. Always `Some` so the reconciler
+    /// has a concrete strategy. RWO multi-attach fix.
+    pub source_colocation: SourceColocationMode,
     /// Resolved Job TTL (recipe `mover.ttlSecondsAfterFinished` wins over
     /// `moverDefaults.ttlSecondsAfterFinished`, falling back to
     /// [`DEFAULT_JOB_TTL_SECONDS`]). Always `Some` so finished Jobs self-GC. §12.
@@ -917,6 +966,12 @@ pub fn resolve_mover(
         node_selector: defaults.and_then(|d| d.node_selector.clone()),
         tolerations: defaults.and_then(|d| d.tolerations.clone()),
         affinity: defaults.and_then(|d| d.affinity.clone()),
+        // `moverDefaults.sourceColocation.mode`, defaulting to `Auto` so RWO movers
+        // co-locate with their source PVC's node out of the box (RWO multi-attach fix).
+        source_colocation: defaults
+            .and_then(|d| d.source_colocation.as_ref())
+            .and_then(|c| c.mode)
+            .unwrap_or_default(),
         // Recipe TTL wins over the repo default; a built-in default applies when
         // neither sets one so every finished Job self-GCs (ADR-0005 §12).
         ttl_seconds_after_finished: Some(
@@ -1616,6 +1671,64 @@ mod tests {
         assert_eq!(m.cache.unwrap().capacity.as_deref(), Some("10Gi"));
         assert_eq!(m.node_selector.unwrap()["disktype"], "ssd");
         assert_eq!(m.ttl_seconds_after_finished, Some(3600));
+    }
+
+    // --- RWO multi-attach: sourceColocation flows from moverDefaults, defaults to Auto ---
+
+    #[test]
+    fn source_colocation_defaults_to_auto_when_unset() {
+        // No moverDefaults at all → Auto (the bug-fixing default).
+        let none = resolve_mover(None, None, None, None, None, None);
+        assert_eq!(none.source_colocation, SourceColocationMode::Auto);
+        // moverDefaults present but sourceColocation unset → still Auto.
+        let defaults = MoverDefaults {
+            node_selector: Some(std::collections::BTreeMap::from([(
+                "disktype".to_string(),
+                "ssd".to_string(),
+            )])),
+            ..Default::default()
+        };
+        let m = resolve_mover(Some(&defaults), None, None, None, None, None);
+        assert_eq!(m.source_colocation, SourceColocationMode::Auto);
+    }
+
+    #[test]
+    fn source_colocation_mode_flows_from_defaults() {
+        let defaults = MoverDefaults {
+            source_colocation: Some(SourceColocation {
+                mode: Some(SourceColocationMode::Disabled),
+            }),
+            ..Default::default()
+        };
+        let m = resolve_mover(Some(&defaults), None, None, None, None, None);
+        assert_eq!(m.source_colocation, SourceColocationMode::Disabled);
+    }
+
+    #[test]
+    fn source_colocation_parses_the_cluster_way() {
+        // YAML → serde_json::Value → typed (the cluster's path), never serde_yaml direct.
+        let defaults: MoverDefaults = crate::testutil::from_yaml(
+            r#"
+            sourceColocation:
+              mode: Required
+            "#,
+        );
+        assert_eq!(
+            defaults.source_colocation,
+            Some(SourceColocation {
+                mode: Some(SourceColocationMode::Required),
+            })
+        );
+        // An empty sub-object resolves to Auto (mode unset).
+        let bare: MoverDefaults = crate::testutil::from_yaml(
+            r#"
+            sourceColocation: {}
+            "#,
+        );
+        assert_eq!(
+            resolve_mover(Some(&bare), None, None, None, None, None).source_colocation,
+            SourceColocationMode::Auto,
+        );
     }
 
     // --- §12 mover Job TTL precedence (recipe over default over built-in) ---

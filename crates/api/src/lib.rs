@@ -30,8 +30,9 @@ pub use cluster_repository::{
 };
 pub use common::{
     CacheDefaults, CacheVolumeMode, CronSpec, DeletionPolicy, MoverDefaults, NamespaceDeletePolicy,
-    ObjectRef, PhaseLabel, PolicyRef, ResolvedMover, hardened_security_context,
-    merge_pod_security_context, merge_resources, merge_security_context, resolve_mover,
+    ObjectRef, PhaseLabel, PolicyRef, ResolvedMover, SourceColocation, SourceColocationMode,
+    hardened_security_context, merge_pod_security_context, merge_resources, merge_security_context,
+    resolve_mover,
 };
 pub use maintenance::{
     LeaseAction, Maintenance, MaintenanceSchedule, MaintenanceSpec, MaintenanceStatus, Ownership,

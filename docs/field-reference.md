@@ -338,6 +338,7 @@ referrer's namespace (required on cluster-scoped CRs).
 | `resources` | core/v1 ResourceRequirements | Mover container resources base. |
 | `cache` | [CacheDefaults](#cachedefaults) | kopia cache backing every mover. |
 | `nodeSelector` / `tolerations` / `affinity` | core/v1 | Pod scheduling for every mover. |
+| `sourceColocation` | {`mode`: `Auto`\|`Required`\|`Disabled`} | Pin an RWO source/destination mover to the node its PVC is attached to, avoiding a `Multi-Attach error`. Default `Auto`. See [Repositories](repositories.md#sourcecolocation-avoid-the-rwo-multi-attach-error). |
 | `ttlSecondsAfterFinished` | int | Finished mover Jobs self-GC (built-in default `3600`). §12 |
 | `throttle` | {`uploadBytesPerSecond`?,`downloadBytesPerSecond`?,`readOpsPerSecond`?,`writeOpsPerSecond`?} | kopia repository throttle. §13(e) |
 

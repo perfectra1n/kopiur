@@ -83,6 +83,18 @@ rules:
     resources:
       - jobs
     verbs: [get, list, watch, create, update, patch, delete]
+  # RWO Multi-Attach avoidance: discover the node a ReadWriteOnce source/destination
+  # PVC is attached to so the mover can be pinned there. The bound PV's nodeAffinity
+  # (topology-pinned volumes) and the CSI VolumeAttachment (ground-truth attached node)
+  # are read-only fallbacks when no consuming pod is found. Both are cluster-scoped.
+  - apiGroups: [""]
+    resources:
+      - persistentvolumes
+    verbs: [get, list, watch]
+  - apiGroups: [storage.k8s.io]
+    resources:
+      - volumeattachments
+    verbs: [get, list, watch]
   - apiGroups: [snapshot.storage.k8s.io]
     resources:
       - volumesnapshots
