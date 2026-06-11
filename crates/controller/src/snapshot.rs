@@ -1909,10 +1909,10 @@ async fn prepare_source_capture(
     )?;
     io::apply(&pvc_api, &capture_name, &staged_pvc).await?;
     let staged = pvc_api.get(&capture_name).await?;
-    let phase = staged.status.as_ref().and_then(|s| s.phase.as_deref());
-    if phase != Some("Bound") {
+    if !staged_source_pvc_allows_mover_start(&staged) {
+        let phase = staged.status.as_ref().and_then(|s| s.phase.as_deref());
         return Err(Error::MissingDependency(format!(
-            "staged source PVC {namespace}/{capture_name} is not Bound yet (phase: {})",
+            "staged source PVC {namespace}/{capture_name} is not usable as a backup source (phase: {})",
             phase.unwrap_or("unknown")
         )));
     }
@@ -1925,6 +1925,13 @@ async fn prepare_source_capture(
         "prepared staged source PVC for backup"
     );
     Ok(Some(capture_name))
+}
+
+fn staged_source_pvc_allows_mover_start(staged: &PersistentVolumeClaim) -> bool {
+    let phase = staged.status.as_ref().and_then(|s| s.phase.as_deref());
+    // WaitForFirstConsumer classes keep clone/snapshot PVCs Pending until the
+    // mover pod exists, so Pending is a valid handoff point.
+    matches!(phase, None | Some("Pending") | Some("Bound"))
 }
 
 fn owned_by_uid(owner_refs: Option<&Vec<OwnerReference>>, uid: &str) -> bool {
@@ -2706,6 +2713,19 @@ mod tests {
         );
         assert_eq!(data_source.kind, "VolumeSnapshot");
         assert_eq!(data_source.name, "pg-manual-source");
+    }
+
+    #[test]
+    fn pending_staged_source_pvc_can_start_mover_for_wait_for_first_consumer() {
+        use k8s_openapi::api::core::v1::PersistentVolumeClaimStatus;
+
+        let mut pvc = source_pvc();
+        pvc.status = Some(PersistentVolumeClaimStatus {
+            phase: Some("Pending".into()),
+            ..Default::default()
+        });
+
+        assert!(staged_source_pvc_allows_mover_start(&pvc));
     }
 
     #[test]
