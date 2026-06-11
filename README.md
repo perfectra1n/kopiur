@@ -1,5 +1,19 @@
 # kopiur
 
+> [!WARNING]
+>
+> ## 🚧 Heavy construction — this repo is less than a month old 🚧
+>
+> **Kopiur is brand new and under active, breaking development.** Things are
+> incomplete, untested in the wild, and the CRD surface, behavior, and APIs
+> **will change without notice**. Do **not** run this against data you care about.
+>
+> **Please do not open Pull Requests.** The codebase is moving too fast for
+> external PRs to be reviewable right now — they'll likely conflict or target
+> code that's about to be rewritten. **[Open an Issue instead](../../issues/new)**
+> to report a bug, request a feature, or start a discussion. Issues are very
+> welcome; PRs will be politely closed with a pointer back here for the time being.
+
 **Kopiur** (Kopia + Rust) is a Kopia-native Kubernetes backup operator written in Rust on [`kube-rs`](https://github.com/kube-rs/kube). It makes a kopia repository a first-class Kubernetes resource and separates the backup **recipe** from its **invocation** from its **schedule**, so backups can be triggered by cron, `kubectl create`, Argo Events, or a Helm hook — and a kopia snapshot's lifecycle is tied to its `Backup` CR by a finalizer + `deletionPolicy`. The whole CRD surface is modeled as Rust enums so invalid states are unrepresentable and reconcilers handle every variant at compile time. See [ADR-0003](docs/adr/0003-kopiur-rust-operator.md) for the full design.
 
 > Status: **alpha** — API group `kopiur.home-operations.com`, version `v1alpha1`. The CRD surface may still change between releases.
