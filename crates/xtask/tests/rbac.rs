@@ -225,6 +225,25 @@ fn operator_role_can_server_side_apply_staged_source_snapshots() {
     }
 }
 
+#[test]
+fn clusterrole_can_patch_staged_source_pvs_for_delete_reclaim() {
+    let artifacts = xtask::rbac::artifacts().expect("generate RBAC artifacts");
+    let a = artifact(&artifacts, "rbac/operator-clusterrole.yaml");
+    let rules = docs(&a.content)
+        .into_iter()
+        .find_map(|d| {
+            let v: serde_yaml::Value = serde_yaml::from_str(&d).ok()?;
+            (v.get("kind").and_then(|k| k.as_str()) == Some("ClusterRole")).then_some(())?;
+            serde_yaml::from_str::<ClusterRole>(&d).ok()?.rules
+        })
+        .expect("ClusterRole rules must parse");
+
+    assert!(
+        rule_grants_verb(&rules, "", "persistentvolumes", "patch"),
+        "cluster role must patch staged source PVs to Delete before deleting Retain-backed PVCs"
+    );
+}
+
 /// The dedicated, least-privilege mover role is generated for both install modes
 /// and grants ONLY what the mover uses (status patch on the owning CRDs + the
 /// bootstrap-result configmap patch) — never the operator's broad rule set.

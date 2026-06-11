@@ -19,10 +19,11 @@ use std::time::Duration;
 
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{
-    ConfigMap, PersistentVolumeClaim, PersistentVolumeClaimSpec, TypedLocalObjectReference,
+    ConfigMap, PersistentVolume, PersistentVolumeClaim, PersistentVolumeClaimSpec,
+    TypedLocalObjectReference,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::api::DeleteParams;
+use kube::api::{DeleteParams, Patch, PatchParams};
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType};
@@ -1934,6 +1935,58 @@ fn staged_source_pvc_allows_mover_start(staged: &PersistentVolumeClaim) -> bool 
     matches!(phase, None | Some("Pending") | Some("Bound"))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct StagedSourcePvCleanupPlan {
+    volume_name: String,
+    patch: serde_json::Value,
+}
+
+fn staged_source_pv_cleanup_plan(
+    staged: &PersistentVolumeClaim,
+) -> Option<StagedSourcePvCleanupPlan> {
+    staged
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.volume_name.as_ref())
+        .map(|volume_name| StagedSourcePvCleanupPlan {
+            volume_name: volume_name.clone(),
+            patch: serde_json::json!({
+                "spec": {
+                    "persistentVolumeReclaimPolicy": "Delete",
+                },
+            }),
+        })
+}
+
+async fn mark_staged_source_pv_for_delete(
+    ctx: &Context,
+    staged: &PersistentVolumeClaim,
+) -> Result<()> {
+    let Some(plan) = staged_source_pv_cleanup_plan(staged) else {
+        return Ok(());
+    };
+
+    let pv_api: Api<PersistentVolume> = Api::all(ctx.client.clone());
+    match pv_api
+        .patch(
+            &plan.volume_name,
+            &PatchParams::default(),
+            &Patch::Merge(&plan.patch),
+        )
+        .await
+    {
+        Ok(_) => {
+            tracing::info!(
+                pv = %plan.volume_name,
+                "marked staged source PV for deletion"
+            );
+            Ok(())
+        }
+        Err(kube::Error::Api(error)) if error.code == 404 => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn owned_by_uid(owner_refs: Option<&Vec<OwnerReference>>, uid: &str) -> bool {
     owner_refs
         .into_iter()
@@ -1975,7 +2028,8 @@ async fn cleanup_source_capture(
         }
     }
 
-    if owned_staged_pvc.is_some() {
+    if let Some(staged_pvc) = owned_staged_pvc.as_ref() {
+        mark_staged_source_pv_for_delete(ctx, staged_pvc).await?;
         match pvc_api
             .delete(&capture_name, &DeleteParams::background())
             .await
@@ -2726,6 +2780,27 @@ mod tests {
         });
 
         assert!(staged_source_pvc_allows_mover_start(&pvc));
+    }
+
+    #[test]
+    fn staged_source_pv_cleanup_plan_marks_bound_pv_for_delete() {
+        let mut pvc = source_pvc();
+
+        assert_eq!(staged_source_pv_cleanup_plan(&pvc), None);
+
+        pvc.spec.as_mut().unwrap().volume_name = Some("pvc-123".into());
+
+        assert_eq!(
+            staged_source_pv_cleanup_plan(&pvc),
+            Some(StagedSourcePvCleanupPlan {
+                volume_name: "pvc-123".into(),
+                patch: serde_json::json!({
+                    "spec": {
+                        "persistentVolumeReclaimPolicy": "Delete",
+                    },
+                }),
+            })
+        );
     }
 
     #[test]

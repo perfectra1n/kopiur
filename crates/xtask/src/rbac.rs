@@ -222,6 +222,10 @@ fn workload_rules() -> Vec<PolicyRule> {
     ]
 }
 
+fn cluster_pv_rules() -> Vec<PolicyRule> {
+    vec![rule(&[""], &["persistentvolumes".into()], &["patch"])]
+}
+
 /// RBAC for self-managed webhook TLS (`webhook.tls.mode: self`): the controller
 /// mints its own serving certificate and injects the `caBundle` into its webhook
 /// configurations, removing the cert-manager dependency. Carried by both install
@@ -323,6 +327,10 @@ fn metadata(name: &str, namespace: Option<&str>) -> ObjectMeta {
 fn cluster_artifact() -> Result<Artifact> {
     let mut rules = kopia_crd_rules(true);
     rules.extend(workload_rules());
+    // Staged source PVCs may inherit a StorageClass with `Retain`. Before the
+    // controller deletes those temporary PVCs, it patches their bound PVs to
+    // `Delete` so CSI can remove clone-backed volumes and unblock snapshot GC.
+    rules.extend(cluster_pv_rules());
     // Read Namespaces to check the privileged-movers opt-in annotation (ADR
     // §4.11/§G16). Cluster-scoped resource → cluster install only; a namespaced
     // install can't grant it and the controller fails the check open there.

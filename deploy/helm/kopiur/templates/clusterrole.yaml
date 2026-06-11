@@ -91,6 +91,13 @@ rules:
     resources:
       - volumegroupsnapshots
     verbs: [get, list, watch, create, delete]
+  # Staged source PVCs can inherit a Retain-backed StorageClass. The controller
+  # patches their bound PVs to Delete before deleting the temporary PVC, so CSI
+  # removes clone-backed volumes and OpenEBS can garbage-collect snapshots.
+  - apiGroups: [""]
+    resources:
+      - persistentvolumes
+    verbs: [patch]
   # Per-namespace mover RBAC minted by the controller (§4.12): a least-privilege
   # `kopiur-mover` ServiceAccount + a RoleBinding (to the mover ClusterRole) created
   # in each mover Job's namespace. Without these the mover Job's SA does not exist in

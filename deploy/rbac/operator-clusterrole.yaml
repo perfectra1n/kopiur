@@ -155,6 +155,12 @@ rules:
 - apiGroups:
   - ''
   resources:
+  - persistentvolumes
+  verbs:
+  - patch
+- apiGroups:
+  - ''
+  resources:
   - namespaces
   verbs:
   - get
