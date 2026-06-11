@@ -13,10 +13,11 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Affinity, ConfigMap, ConfigMapVolumeSource, Container, EmptyDirVolumeSource, EnvFromSource,
-    EphemeralVolumeSource, NFSVolumeSource, PersistentVolumeClaimSpec,
-    PersistentVolumeClaimTemplate, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec,
-    PodTemplateSpec, ResourceRequirements, SecretEnvSource, SecurityContext, Toleration, Volume,
-    VolumeMount, VolumeResourceRequirements,
+    EphemeralVolumeSource, NFSVolumeSource, NodeAffinity, NodeSelector, NodeSelectorRequirement,
+    NodeSelectorTerm, PersistentVolumeClaimSpec, PersistentVolumeClaimTemplate,
+    PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
+    ResourceRequirements, SecretEnvSource, SecurityContext, Toleration, Volume, VolumeMount,
+    VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
@@ -505,6 +506,62 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Job {
     }
 }
 
+/// The well-known node label carrying a node's hostname — the topology key a
+/// mover is pinned to so it co-locates with the node an RWO PVC is attached to.
+pub const HOSTNAME_LABEL: &str = "kubernetes.io/hostname";
+
+/// Merge a **hard** `kubernetes.io/hostname == node` constraint into `existing`
+/// affinity, pinning a mover pod to the node a `ReadWriteOnce` source/destination
+/// PVC is attached to (RWO Multi-Attach fix). RWO allows multiple pods on one node,
+/// so this co-locates the mover with the app pod already holding the volume.
+///
+/// **Kubernetes semantics are load-bearing here:** within
+/// `requiredDuringSchedulingIgnoredDuringExecution`, multiple `nodeSelectorTerms` are
+/// **OR'd** while `matchExpressions` within one term are **AND'd**. To *constrain*
+/// (AND) the hostname requirement onto any user-supplied required nodeAffinity we
+/// append the `hostname In [node]` expression to **every** existing term (creating a
+/// single term when none exist). Appending a new *term* would OR it — letting the
+/// scheduler satisfy the user's term *instead of* the hostname pin and defeating
+/// co-location. `podAffinity`, the `preferred*` lists, and the flat `nodeSelector`
+/// are preserved untouched. A hard (not preferred) pin is required: a soft pin lets
+/// the scheduler pick another node, guaranteeing the Multi-Attach error.
+pub fn pin_affinity_to_node(existing: Option<Affinity>, node: &str) -> Affinity {
+    let requirement = NodeSelectorRequirement {
+        key: HOSTNAME_LABEL.to_string(),
+        operator: "In".to_string(),
+        values: Some(vec![node.to_string()]),
+    };
+    let mut affinity = existing.unwrap_or_default();
+    let node_affinity = affinity
+        .node_affinity
+        .get_or_insert_with(NodeAffinity::default);
+    match node_affinity
+        .required_during_scheduling_ignored_during_execution
+        .as_mut()
+    {
+        // AND the hostname requirement into each existing term (OR'd terms stay OR'd,
+        // but every alternative now also demands our node).
+        Some(selector) if !selector.node_selector_terms.is_empty() => {
+            for term in &mut selector.node_selector_terms {
+                term.match_expressions
+                    .get_or_insert_with(Vec::new)
+                    .push(requirement.clone());
+            }
+        }
+        // No required selector (or an empty term list): create one term carrying it.
+        _ => {
+            node_affinity.required_during_scheduling_ignored_during_execution =
+                Some(NodeSelector {
+                    node_selector_terms: vec![NodeSelectorTerm {
+                        match_expressions: Some(vec![requirement]),
+                        ..Default::default()
+                    }],
+                });
+        }
+    }
+    affinity
+}
+
 /// Build an [`OwnerReference`] to a CR so child Job/ConfigMap are garbage
 /// collected with it (controller owner reference, blocking-owner-deletion off).
 pub fn owner_ref(kind: &str, name: &str, uid: &str) -> OwnerReference {
@@ -524,6 +581,101 @@ mod tests {
     use kopiur_mover::workspec::{
         MoverOptions, Operation, RepositoryConnect, ResolvedIdentity, SnapshotOp, TargetRef,
     };
+
+    // --- RWO multi-attach: pin_affinity_to_node hostname merge ---
+
+    /// Extract the required nodeAffinity terms for assertions.
+    fn required_terms(a: &Affinity) -> Vec<NodeSelectorTerm> {
+        a.node_affinity
+            .as_ref()
+            .and_then(|na| {
+                na.required_during_scheduling_ignored_during_execution
+                    .as_ref()
+            })
+            .map(|sel| sel.node_selector_terms.clone())
+            .unwrap_or_default()
+    }
+
+    fn hostname_req(node: &str) -> NodeSelectorRequirement {
+        NodeSelectorRequirement {
+            key: HOSTNAME_LABEL.to_string(),
+            operator: "In".to_string(),
+            values: Some(vec![node.to_string()]),
+        }
+    }
+
+    #[test]
+    fn pin_affinity_from_none_creates_single_hostname_term() {
+        let a = pin_affinity_to_node(None, "node-a");
+        let terms = required_terms(&a);
+        assert_eq!(terms.len(), 1, "exactly one term");
+        assert_eq!(
+            terms[0].match_expressions.as_deref(),
+            Some([hostname_req("node-a")].as_slice()),
+        );
+    }
+
+    #[test]
+    fn pin_affinity_ands_into_every_existing_term() {
+        // Two OR'd user terms (zoneA OR zoneB). The hostname pin must AND into BOTH,
+        // not become a third OR'd term (which would let the scheduler ignore it).
+        let zone_req = |z: &str| NodeSelectorRequirement {
+            key: "topology.kubernetes.io/zone".to_string(),
+            operator: "In".to_string(),
+            values: Some(vec![z.to_string()]),
+        };
+        let existing = Affinity {
+            node_affinity: Some(NodeAffinity {
+                required_during_scheduling_ignored_during_execution: Some(NodeSelector {
+                    node_selector_terms: vec![
+                        NodeSelectorTerm {
+                            match_expressions: Some(vec![zone_req("a")]),
+                            ..Default::default()
+                        },
+                        NodeSelectorTerm {
+                            match_expressions: Some(vec![zone_req("b")]),
+                            ..Default::default()
+                        },
+                    ],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let a = pin_affinity_to_node(Some(existing), "node-a");
+        let terms = required_terms(&a);
+        assert_eq!(
+            terms.len(),
+            2,
+            "still two OR'd terms — no new term appended"
+        );
+        for (term, zone) in terms.iter().zip(["a", "b"]) {
+            let exprs = term.match_expressions.as_ref().unwrap();
+            assert_eq!(exprs.len(), 2, "zone AND hostname");
+            assert_eq!(exprs[0], zone_req(zone));
+            assert_eq!(exprs[1], hostname_req("node-a"));
+        }
+    }
+
+    #[test]
+    fn pin_affinity_preserves_pod_affinity() {
+        use k8s_openapi::api::core::v1::{PodAffinity, PodAffinityTerm};
+        let existing = Affinity {
+            pod_affinity: Some(PodAffinity {
+                required_during_scheduling_ignored_during_execution: Some(vec![PodAffinityTerm {
+                    topology_key: "kubernetes.io/hostname".to_string(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let a = pin_affinity_to_node(Some(existing), "node-a");
+        // podAffinity untouched.
+        assert!(a.pod_affinity.is_some());
+        // nodeAffinity now carries the hostname pin.
+        assert_eq!(required_terms(&a).len(), 1);
+    }
 
     fn sample_work_spec() -> MoverWorkSpec {
         MoverWorkSpec {

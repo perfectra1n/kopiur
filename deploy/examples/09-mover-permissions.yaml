@@ -73,6 +73,15 @@ spec:
     cache:
       capacity: 10Gi
       storageClassName: fast-ssd
+    # ── RWO Multi-Attach avoidance (default on) ─────────────────────────────────
+    # A ReadWriteOnce PVC attaches to one node at a time. If your app pod holds it
+    # on node A and the mover lands on node B, the mover pod is stuck
+    # "Multi-Attach error". `Auto` (the default — shown here for clarity) pins the
+    # mover to the node the source PVC is attached to, so it co-locates with the
+    # app. Set `Disabled` to opt out, or `Required` to fail loudly when the node
+    # can't be determined for an RWO source.
+    sourceColocation:
+      mode: Auto
 ---
 apiVersion: kopiur.home-operations.com/v1alpha1
 kind: SnapshotPolicy

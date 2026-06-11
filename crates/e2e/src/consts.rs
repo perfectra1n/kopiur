@@ -65,6 +65,8 @@ pub const REPO_SUBPATHS: &[&str] = &[
     "hooks",
     "gfs",
     "errh",
+    "colocation",
+    "colocation-off",
 ];
 /// The in-pod mount path for an isolated per-scenario repo: the PVC root is mounted
 /// here and `kopia --path` points here, so the kopia repo IS this dir (one repo per

@@ -173,6 +173,7 @@ spec:
         nodeSelector: { kubernetes.io/arch: amd64 }
         tolerations: [{ key: backup, operator: Exists }]
         affinity: { ... }
+        sourceColocation: { mode: Auto } # avoid RWO Multi-Attach (default Auto)
         ttlSecondsAfterFinished: 3600 # finished mover Jobs self-GC (ADR-0005 §12)
         throttle: # cap kopia's bandwidth/ops so a run doesn't saturate the link
             uploadBytesPerSecond: 10485760
@@ -184,6 +185,33 @@ spec:
 Set the UID/GID **once** on `moverDefaults.securityContext.runAsUser/runAsGroup` (and `podSecurityContext.fsGroup`), and every mover the repository spawns — **including the bootstrap (connect/create) Job** — inherits it. That means a filesystem/NFS repository on a directory not owned by `65532` is bootstrappable with no special-case knob: the bootstrap mover runs as the UID you set here. A per-recipe `mover` block can still tighten any of these for an individual `SnapshotPolicy`/`Restore`/`Maintenance`. See [example 09](examples.md#example-09--mover-uidgid--permissions) and [Permissions](permissions.md).
 
 `podSecurityContext.fsGroup` already **defaults to `65532`** (the mover image's GID), so the operator-managed kopia cache is writable out of the box — you only set it here to match a non-default mover UID. Note `fsGroup` can't fix a root-squashed **NFS** cache StorageClass; keep `moverDefaults.cache` unset (node-local `emptyDir`) or use a block class for a sized cache (see [Security context](security-context.md#the-default-hardened-context)).
+
+### `sourceColocation`: avoid the RWO Multi-Attach error
+
+A `ReadWriteOnce` (RWO) PVC can only be **attached to one node at a time**, though it can be mounted by several pods **on that same node**. When your app pod already holds an RWO PVC on node A and Kopiur's mover lands on node B, the kubelet on B can't attach the volume and the mover pod is stuck with a `Multi-Attach error` (it never starts).
+
+By default Kopiur prevents this: it finds the node the source PVC is attached to and **pins the mover there** (a required `kubernetes.io/hostname` nodeAffinity, plus the holder pod's tolerations), so the mover co-locates with your workload. This is automatic — you don't need to set anything.
+
+```yaml
+spec:
+    moverDefaults:
+        sourceColocation:
+            mode: Auto # Auto (default) | Required | Disabled
+```
+
+- **`Auto`** (default): pin an RWO source/destination PVC to the node it's attached to when that node is discoverable (via the consuming pod, the bound PV's `nodeAffinity`, or a CSI `VolumeAttachment`). `ReadWriteMany`/`ReadOnlyMany` volumes and unheld RWO volumes are scheduled freely (no Multi-Attach risk). A `ReadWriteOncePod` volume **held by a running pod** fails with guidance — a second pod can't mount it even on the same node, so scale the workload down or switch the PVC to `ReadWriteMany`.
+- **`Required`**: like `Auto`, but if an RWO PVC's node can't be determined, the run **fails** with an actionable error instead of scheduling freely. Use when an RWO source must never be backed up from the wrong node.
+- **`Disabled`**: never compute a node pin; the mover uses only the explicit `nodeSelector`/`affinity`/`tolerations`. The pre-fix behavior — an escape hatch for topologies that manage placement themselves.
+
+/// note | Discovery needs read access to PVs and VolumeAttachments
+
+The fallbacks read cluster-scoped `persistentvolumes` and `storage.k8s.io/volumeattachments`. The shipped RBAC already grants this; if you run a hand-trimmed ClusterRole, add `get,list,watch` on both, or co-location silently degrades to "no pin found". See [RBAC](rbac.md).
+///
+
+/// warning | Application consistency
+
+Co-location lets the mover read a **live** volume — that snapshot is crash-consistent at best. For application-consistent backups (databases), quiesce the app with pre/post [snapshot hooks](backups.md).
+///
 
 ///
 
