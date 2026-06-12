@@ -545,6 +545,35 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
                 )
                 .await;
             }
+            // The kstatus conditions come from the controller's transition patch
+            // (`finalize_succeeded`) — which the mover's own `phase: Succeeded`
+            // stamp can race past (the Job-completion reconcile then already
+            // sees Succeeded and lands here, never in the Job branch below).
+            // Heal once: patch ONLY phase + conditions (`snapshot_ready_status`
+            // carries no `snapshot` key, so the merge preserves the id/identity
+            // the mover recorded). Never call `finalize_succeeded` here: its
+            // resolve picks the NEWEST manifest for the source path, and
+            // healing N sibling Snapshots after the fact would converge them
+            // all onto one shared id — corrupting the CR↔manifest binding the
+            // deletion finalizer depends on.
+            let ready = backup.status.as_ref().is_some_and(|s| {
+                s.conditions
+                    .iter()
+                    .any(|c| c.type_ == crate::consts::READY_CONDITION && c.status == "True")
+            });
+            if !ready {
+                io::patch_status(
+                    &api,
+                    &name,
+                    snapshot_ready_status(
+                        backup,
+                        SnapshotPhase::Succeeded,
+                        "SnapshotCreated",
+                        "the kopia snapshot was created successfully",
+                    ),
+                )
+                .await?;
+            }
             // Staged-source reap is normally done at the Succeeded transition;
             // re-issuing here covers a crash between the phase patch and the
             // cleanup (idempotent, no-op for Direct).

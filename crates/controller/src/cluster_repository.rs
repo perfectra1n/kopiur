@@ -300,7 +300,13 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
             // `catalog.fallbackNamespace`, else it is skipped with a Warning
             // Event ([`placement_namespace`] + `crate::catalog`).
             let interval = CatalogBounds::effective_refresh_interval(repo.spec.catalog.as_ref());
-            if catalog::refresh_due(cluster_last_refresh_at(repo), interval, chrono::Utc::now()) {
+            if catalog::scan_due(
+                repo.metadata.generation,
+                repo.status.as_ref().and_then(|s| s.observed_generation),
+                cluster_last_refresh_at(repo),
+                interval,
+                chrono::Utc::now(),
+            ) {
                 let listing = client.snapshot_list(None).await?;
                 let total = listing.len() as i64;
                 run_cluster_catalog_scan(ctx, repo, &name, &listing, total, false).await?;
@@ -775,9 +781,17 @@ async fn finalize_cluster_bootstrap(
     // Materialize/expire discovered Snapshots from the snapshots the Job
     // returned — once per result: after the first scan stamps `lastRefreshAt`,
     // re-reads of the same finished Job skip the (stale) listing, and the next
-    // due refresh recycles the Job for a fresh one.
+    // due refresh recycles the Job for a fresh one. `scan_due`'s generation arm
+    // covers the spec-change recycle (see the Repository twin): the fresh
+    // result must be scanned NOW, not at the next timed refresh.
     let interval = CatalogBounds::effective_refresh_interval(repo.spec.catalog.as_ref());
-    if catalog::refresh_due(cluster_last_refresh_at(repo), interval, chrono::Utc::now()) {
+    if catalog::scan_due(
+        repo.metadata.generation,
+        repo.status.as_ref().and_then(|s| s.observed_generation),
+        cluster_last_refresh_at(repo),
+        interval,
+        chrono::Utc::now(),
+    ) {
         run_cluster_catalog_scan(
             ctx,
             repo,

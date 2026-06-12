@@ -314,13 +314,22 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
             )
             .await?;
 
-            // Catalog scan on the `catalog.refreshInterval` cadence: a bare-path
-            // filesystem repo re-lists in-process (cheap), materializing/expiring
-            // discovered Snapshots per `catalog.retain`. Gating the scan also gates
-            // the `lastRefreshAt` write, so a Ready repo's status is byte-stable
-            // between refreshes (no self-triggered reconcile hot-loop).
+            // Catalog scan on the `catalog.refreshInterval` cadence — or
+            // immediately on a spec change (`scan_due`'s generation arm: a
+            // `catalog.retain` edit must expire rows NOW, not at the next timed
+            // refresh): a bare-path filesystem repo re-lists in-process (cheap),
+            // materializing/expiring discovered Snapshots per `catalog.retain`.
+            // Gating the scan also gates the `lastRefreshAt` write, so a Ready
+            // repo's status is byte-stable between refreshes (no self-triggered
+            // reconcile hot-loop).
             let interval = CatalogBounds::effective_refresh_interval(repo.spec.catalog.as_ref());
-            if catalog::refresh_due(last_refresh_at(repo), interval, chrono::Utc::now()) {
+            if catalog::scan_due(
+                repo.metadata.generation,
+                repo.status.as_ref().and_then(|s| s.observed_generation),
+                last_refresh_at(repo),
+                interval,
+                chrono::Utc::now(),
+            ) {
                 let listing = client.snapshot_list(None).await?;
                 let total = listing.len() as i64;
                 run_catalog_scan(
@@ -773,9 +782,19 @@ async fn finalize_bootstrap(
     // Materialize/expire discovered Snapshots from the snapshots the Job
     // returned — once per result: after the first scan stamps `lastRefreshAt`,
     // re-reads of the same finished Job skip the (stale) listing, and the next
-    // due refresh recycles the Job for a fresh one.
+    // due refresh recycles the Job for a fresh one. `scan_due`'s generation arm
+    // covers the spec-change recycle: that fresh result must be scanned NOW
+    // (e.g. a tightened `catalog.retain` expires rows), not at the next timed
+    // refresh — `repo` is the pre-reconcile cache, so its observedGeneration is
+    // still the old one exactly once per spec change.
     let interval = CatalogBounds::effective_refresh_interval(repo.spec.catalog.as_ref());
-    if catalog::refresh_due(last_refresh_at(repo), interval, chrono::Utc::now()) {
+    if catalog::scan_due(
+        repo.metadata.generation,
+        repo.status.as_ref().and_then(|s| s.observed_generation),
+        last_refresh_at(repo),
+        interval,
+        chrono::Utc::now(),
+    ) {
         run_catalog_scan(
             ctx,
             repo,

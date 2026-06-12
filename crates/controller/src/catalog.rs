@@ -118,6 +118,29 @@ pub fn bootstrap_recycle_due(
     refresh_due(last_refresh_at, interval, now)
 }
 
+/// `true` when a fresh repository listing should actually be SCANNED into the
+/// catalog (materialize/expire discovered rows): the timed refresh is due, OR
+/// the spec changed since the last reconciled generation. The generation arm is
+/// load-bearing for `catalog.retain` edits: a tightened `perIdentity` recycles
+/// the bootstrap Job for a fresh listing ([`bootstrap_recycle_due`]'s own
+/// generation arm), but gating the scan on `refresh_due` alone then threw that
+/// fresh result away — the over-cap rows only expired at the NEXT timed
+/// refresh (up to `refreshInterval` later), not on the spec change that asked
+/// for it. The caller passes the PRE-reconcile `status.observedGeneration`
+/// (the cached object), so the scan runs exactly once per spec change.
+pub fn scan_due(
+    generation: Option<i64>,
+    observed_generation: Option<i64>,
+    last_refresh_at: Option<&str>,
+    interval: std::time::Duration,
+    now: DateTime<Utc>,
+) -> bool {
+    if generation != observed_generation {
+        return true;
+    }
+    refresh_due(last_refresh_at, interval, now)
+}
+
 /// `true` when the *no-Job* path may (re-)create the bootstrap Job. The finished
 /// Job normally lingers until [`bootstrap_recycle_due`] recycles it — but the
 /// kube TTL controller can reap it first (`ttlSecondsAfterFinished`), and an
@@ -845,6 +868,28 @@ mod tests {
             interval,
             now
         ));
+    }
+
+    // Regression guard (caught by the catalog_retain e2e): a spec change
+    // recycles the bootstrap Job for a fresh listing, but the SCAN of that
+    // result was gated on the timed refresh alone — a tightened
+    // `catalog.retain` only expired rows at the next refreshInterval, not on
+    // the edit that asked for it.
+    #[test]
+    fn scan_due_fires_on_spec_change_even_when_the_timed_refresh_is_not() {
+        let now = Utc::now();
+        let interval = std::time::Duration::from_secs(3600);
+        let fresh = (now - chrono::Duration::minutes(5)).to_rfc3339();
+        // Spec changed (gen != observed) + fresh stamp → scan NOW.
+        assert!(scan_due(Some(3), Some(2), Some(&fresh), interval, now));
+        // Settled generation + fresh stamp → byte-stable, no scan (the
+        // status-churn rule).
+        assert!(!scan_due(Some(3), Some(3), Some(&fresh), interval, now));
+        // Settled generation + stale stamp → the timed refresh still fires.
+        let stale = (now - chrono::Duration::minutes(61)).to_rfc3339();
+        assert!(scan_due(Some(3), Some(3), Some(&stale), interval, now));
+        // Never scanned → due regardless.
+        assert!(scan_due(Some(1), Some(1), None, interval, now));
     }
 
     // Regression guard for the TTL-reap loop: when the kube TTL controller
