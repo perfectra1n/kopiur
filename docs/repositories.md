@@ -62,7 +62,7 @@ A backend is selected by **which key you set** (`backend.s3`, `backend.azure`, �
 
 ### Credential Secret keys by backend
 
-The mover reads these **well-known keys** from the Secret you reference and feeds them to kopia. Put your credentials under these exact key names. `KOPIA_PASSWORD` (the repository encryption password) is required for **every** backend. See [Backend configuration](backends.md#credential-keys-at-a-glance) for the full per-backend setup and the env-vs-file credential detail.
+The mover reads these **well-known keys** from the Secret you reference and feeds them to kopia. Put your credentials under these exact key names. `KOPIA_PASSWORD` (the repository encryption password) is required for **every** backend. See [Backend configuration](backends/index.md#credential-keys-at-a-glance) for the full per-backend setup and the env-vs-file credential detail.
 
 | Backend        | Secret keys the mover reads                                               | Notes                                                                                                       |
 | -------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
@@ -98,7 +98,7 @@ Kopiur supports eight backends; each is selected by the `spec.backend.<key>` you
 
 /// tip | Per-backend setup lives on its own page
 
-For each backend — the **provider prerequisites**, the exact **Secret keys**, the knobs you'll actually change, and a **complete apply-ready manifest** (Secret + Repository in one file) — see [**Backend configuration**](backends.md). That page is the hands-on cookbook; this one is the concepts.
+For each backend — the **provider prerequisites**, the exact **Secret keys**, the knobs you'll actually change, and a **complete apply-ready manifest** (Secret + Repository in one file) — see [**Backend configuration**](backends/index.md). That page is the hands-on cookbook; this one is the concepts.
 
 ///
 
@@ -153,6 +153,41 @@ If the backend holds **no** repository yet and `create.enabled` is off, the `Rep
 - **No repository exists** → kopiur creates one (only because `create.enabled` is on). As a final backstop, kopia's own `repository create` refuses to overwrite an existing repository, so even a misclassified connect cannot clobber your data.
 
 So enabling `create.enabled` for a repository that turns out to already exist is safe: kopiur will adopt it, not re-initialize it.
+
+## The catalog — discovered snapshots
+
+A kopia repository can hold snapshots Kopiur didn't produce: an adopted repository's history, a workstation `kopia` CLI, another cluster, a cron job. The **catalog scan** surfaces them as `Snapshot` CRs with `origin: discovered`, so they show up in `kubectl get snapshots`, in `kubectl kopiur snapshots list`, and as restore sources — no timestamp guessing.
+
+```console
+$ kubectl get snapshots -l kopiur.home-operations.com/origin=discovered
+```
+
+How it behaves (all of this is automatic — there is nothing to install):
+
+- **Discovered means "not produced through this Repository CR".** Snapshots Kopiur itself takes via your `SnapshotPolicy`s already have their own `Snapshot` CRs and are never duplicated as discovered rows.
+- **Discovered rows are forced `deletionPolicy: Retain`.** Deleting a discovered `Snapshot` CR deletes only the CR — Kopiur **never** deletes a kopia snapshot it didn't create. (And because the row mirrors repository state, it reappears on the next refresh; to keep rows away permanently, bound them with `catalog.retain` below.)
+- **The scan repeats** every `catalog.refreshInterval` (default **1h**, minimum `30s`), so snapshots written out-of-band *after* adoption keep appearing — and rows whose snapshot was pruned repository-side are expired (the CR is removed).
+- **The row carries the real data**: the kopia snapshot ID, the foreign `username@hostname:path` identity, the snapshot's timing and logical size.
+
+The knobs, all under `spec.catalog`:
+
+```yaml
+spec:
+    catalog:
+        refreshInterval: 1h # how often to re-scan (default 1h, min 30s)
+        retain:
+            perIdentity: 100 # keep the newest N rows per username@hostname:path (0 = no rows)
+            maxAgeDays: 90 # no rows for snapshots older than this
+        fallbackNamespace: backups # ClusterRepository only — see below
+```
+
+`retain` bounds the **CR rows, never the data**: a row "expired" by `perIdentity`/`maxAgeDays` is just a deleted CR — the kopia snapshot stays in the repository and remains restorable via [`Restore.source.identity`](restores.md#restoring-a-snapshot-kopiur-didnt-create).
+
+/// note | Where a ClusterRepository puts discovered Snapshots
+
+A namespaced `Repository` materializes rows in its own namespace. A **`ClusterRepository`** places each row in the namespace named by the snapshot identity's **hostname** — when that namespace exists and passes the `allowedNamespaces` gate — so an adopted shared repository's snapshots land next to the workloads they belong to. Identities whose hostname maps to no allowed namespace go to `catalog.fallbackNamespace`; with no fallback configured they are skipped, and the `ClusterRepository` gets a Warning Event (`DiscoveredSnapshotUnplaced`) naming the hostnames and the fix.
+
+///
 
 ## `moverDefaults` — one place to configure every mover
 
@@ -339,7 +374,7 @@ A complete, apply-ready example is [`deploy/examples/02-cluster-repository.yaml`
 ## See also
 
 - [How Kopia works](concepts/how-kopia-works.md) — dedup, the identity model, and why one shared repository maximizes it.
-- [Backend configuration](backends.md) — per-backend setup cookbook (prereqs, Secret keys, apply-ready manifests).
+- [Backend configuration](backends/index.md) — per-backend setup cookbook (prereqs, Secret keys, apply-ready manifests).
 - [Movers, RBAC & credentials](movers.md) — where the credential Secret must live.
 - [Maintenance](maintenance.md) — the default-managed space reclamation per repo.
 - [`deploy/examples/01-single-pvc-scheduled.yaml`](examples.md#example-01--single-pvc-scheduled) — S3 `Repository`, end to end.

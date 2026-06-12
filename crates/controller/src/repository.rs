@@ -5,64 +5,39 @@
 //! 2. Ensure the repo exists: connect, and create it if `create.enabled` — via a
 //!    short-lived Job (ADR §5.4) so a controller restart never strands a kopia
 //!    process. Set `status.phase`/`uniqueID`/`backend`/`storageStats`.
-//! 3. Periodic catalog scan (`snapshot list`) materializing `origin: discovered`
-//!    `Snapshot` CRs, bounded by `catalog.retain`, deduplicated by
-//!    `(Repository.UID, kopiaSnapshotID)` (ADR §2.1).
-//!
-//! The catalog **dedup decision** is a pure function ([`catalog_dedup_key`] +
-//! [`needs_materialization`]) and is unit-tested here; the kopia `snapshot list`
-//! IO and `Snapshot` CR creation are the thin parts.
+//! 3. Periodic catalog scan (`snapshot list`) materializing/expiring
+//!    `origin: discovered` `Snapshot` CRs, bounded by `catalog.retain`, on the
+//!    `catalog.refreshInterval` cadence (ADR §2.1; rules + pure planner in
+//!    [`crate::catalog`]). A bare-path filesystem repo re-lists in-process; a
+//!    mover-bootstrapped repo (object store / volume-backed filesystem) re-lists
+//!    by recycling its finished bootstrap Job for a fresh result.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::ConfigMap;
-use kube::api::ListParams;
+use kube::api::DeleteParams;
 use kube::runtime::controller::Action;
 use kube::{Api, Resource, ResourceExt};
 
 use kopiur_api::backend::Backend;
-use kopiur_api::common::RepositoryKind;
-use kopiur_api::{Repository, RepositoryPhase, Snapshot, validate};
+use kopiur_api::common::{CatalogBounds, RepositoryKind};
+use kopiur_api::{Repository, RepositoryPhase, validate};
 use kopiur_kopia::{ConnectSpec, SnapshotListEntry};
 use kopiur_mover::bootstrap::{BootstrapResult, RESULT_CONFIGMAP_KEY};
 use kopiur_mover::workspec::{
     BootstrapRepositoryOp, MoverOptions, MoverWorkSpec, Operation, ResolvedIdentity, TargetRef,
 };
 
-use crate::consts::{
-    API_VERSION, BOOTSTRAP_JOB_DEADLINE_SECS, ORIGIN_LABEL, REPOSITORY_BOOTSTRAPPED_CONDITION,
-    REPOSITORY_UID_LABEL, SNAPSHOT_ID_LABEL,
-};
+use crate::catalog;
+use crate::consts::{API_VERSION, BOOTSTRAP_JOB_DEADLINE_SECS, REPOSITORY_BOOTSTRAPPED_CONDITION};
 use crate::context::Context;
 use crate::error::{Error, Result, TERMINAL_HEARTBEAT, error_policy_for};
 use crate::io;
 use crate::jobs::{self, JobLimits, MoverJobInputs};
 use crate::snapshot::{backend_to_repository_connect, mover_pull_policy_pub};
-
-/// The dedup key for a discovered snapshot: `(Repository.UID, kopiaSnapshotID)`
-/// (ADR §2.1). Two scans of the same repo never materialize the same snapshot
-/// twice, and the same snapshot id under a *different* repository is distinct.
-pub fn catalog_dedup_key(repo_uid: &str, snapshot_id: &str) -> (String, String) {
-    (repo_uid.to_string(), snapshot_id.to_string())
-}
-
-/// Given the snapshot ids already materialized as `Snapshot` CRs (the existing
-/// set, keyed by `(repo_uid, id)`) and a fresh `snapshot list`, return the
-/// entries that still need a `Snapshot` CR created. Pure; the caller does the
-/// `Snapshot` CR creation.
-pub fn needs_materialization<'a>(
-    repo_uid: &str,
-    existing: &BTreeSet<(String, String)>,
-    listing: &'a [SnapshotListEntry],
-) -> Vec<&'a SnapshotListEntry> {
-    listing
-        .iter()
-        .filter(|e| !existing.contains(&catalog_dedup_key(repo_uid, &e.id)))
-        .collect()
-}
 
 /// Logical bytes under management: the sum, over each distinct snapshot source,
 /// of the most-recent snapshot's logical `total_size`. Older snapshots of the
@@ -339,11 +314,20 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
             )
             .await?;
 
-            // Catalog scan: materialize discovered Snapshots for unseen snapshots,
-            // bounded by catalog.retain.perIdentity. Filesystem lists in-process.
-            let listing = client.snapshot_list(None).await?;
-            let total = listing.len() as i64;
-            scan_catalog(ctx, repo, &namespace, &name, &repo_uid, &listing, total).await?;
+            // Catalog scan on the `catalog.refreshInterval` cadence: a bare-path
+            // filesystem repo re-lists in-process (cheap), materializing/expiring
+            // discovered Snapshots per `catalog.retain`. Gating the scan also gates
+            // the `lastRefreshAt` write, so a Ready repo's status is byte-stable
+            // between refreshes (no self-triggered reconcile hot-loop).
+            let interval = CatalogBounds::effective_refresh_interval(repo.spec.catalog.as_ref());
+            if catalog::refresh_due(last_refresh_at(repo), interval, chrono::Utc::now()) {
+                let listing = client.snapshot_list(None).await?;
+                let total = listing.len() as i64;
+                run_catalog_scan(
+                    ctx, repo, &namespace, &name, &repo_uid, &listing, total, false,
+                )
+                .await?;
+            }
 
             // Now that the repo is Ready, ensure its managed Maintenance exists
             // (default-on) and surface the MaintenanceConfigured condition. A
@@ -385,7 +369,17 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
         }
     }
 
-    Ok(Action::requeue(Duration::from_secs(300)))
+    Ok(Action::requeue(catalog::reconcile_interval(
+        repo.spec.catalog.as_ref(),
+    )))
+}
+
+/// `status.catalog.lastRefreshAt` from the cached object (the refresh-due gate).
+fn last_refresh_at(repo: &Repository) -> Option<&str> {
+    repo.status
+        .as_ref()
+        .and_then(|s| s.catalog.as_ref())
+        .and_then(|c| c.last_refresh_at.as_deref())
 }
 
 /// Drive the mover-Job bootstrap state machine: launch the Job, then on each
@@ -408,19 +402,50 @@ async fn bootstrap_via_mover(
     let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), namespace);
 
     if let Some(job) = job_api.get_opt(&job_name).await? {
+        let already_ready =
+            repo.status.as_ref().and_then(|s| s.phase) == Some(RepositoryPhase::Ready);
         return match crate::snapshot::job_terminal_state(&job) {
-            // Still running: surface Initializing and poll.
+            // Still running: surface Initializing and poll. A catalog-refresh
+            // re-run of an already-Ready repo keeps its phase — flapping
+            // Ready→Initializing every refresh would be pure status churn.
             None => {
-                io::patch_status(
-                    api,
-                    name,
-                    serde_json::json!({ "phase": "Initializing", "backend": backend.kind_str() }),
-                )
-                .await?;
+                if !already_ready {
+                    io::patch_status(
+                        api,
+                        name,
+                        serde_json::json!({ "phase": "Initializing", "backend": backend.kind_str() }),
+                    )
+                    .await?;
+                }
                 Ok(Action::requeue(Duration::from_secs(15)))
             }
-            // Complete or backoff-exhausted: read the structured result.
+            // Complete or backoff-exhausted: read the structured result — unless
+            // the result is stale (catalog refresh due, or the spec changed since
+            // it was taken): then recycle the Job so the next reconcile re-runs
+            // the bootstrap for a fresh connect + `snapshot list`.
             Some(success) => {
+                let interval =
+                    CatalogBounds::effective_refresh_interval(repo.spec.catalog.as_ref());
+                if catalog::bootstrap_recycle_due(
+                    already_ready,
+                    repo.metadata.generation,
+                    repo.status.as_ref().and_then(|s| s.observed_generation),
+                    last_refresh_at(repo),
+                    interval,
+                    chrono::Utc::now(),
+                ) {
+                    tracing::debug!(repo = %name, "recycling finished bootstrap Job for a catalog refresh");
+                    job_api
+                        .delete(&job_name, &DeleteParams::background())
+                        .await?;
+                    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), namespace);
+                    match cm_api.delete(&job_name, &DeleteParams::default()).await {
+                        Ok(_) => {}
+                        Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+                        Err(e) => return Err(Error::Kube(e)),
+                    }
+                    return Ok(Action::requeue(Duration::from_secs(5)));
+                }
                 finalize_bootstrap(
                     ctx, repo, namespace, name, repo_uid, api, backend, &job_name, success,
                 )
@@ -711,6 +736,10 @@ async fn finalize_bootstrap(
             "phase": "Ready",
             "backend": backend.kind_str(),
             "uniqueId": result.unique_id,
+            // Track the generation this result was taken for — the recycle gate
+            // compares it so a spec edit re-runs the bootstrap instead of
+            // re-reporting the old repository's identity forever.
+            "observedGeneration": repo.metadata.generation,
             "conditions": conditions,
         }),
     )
@@ -723,17 +752,24 @@ async fn finalize_bootstrap(
         );
     }
 
-    // Materialize discovered Snapshots from the snapshots the Job returned.
-    scan_catalog(
-        ctx,
-        repo,
-        namespace,
-        name,
-        repo_uid,
-        &result.snapshots,
-        result.snapshot_count,
-    )
-    .await?;
+    // Materialize/expire discovered Snapshots from the snapshots the Job
+    // returned — once per result: after the first scan stamps `lastRefreshAt`,
+    // re-reads of the same finished Job skip the (stale) listing, and the next
+    // due refresh recycles the Job for a fresh one.
+    let interval = CatalogBounds::effective_refresh_interval(repo.spec.catalog.as_ref());
+    if catalog::refresh_due(last_refresh_at(repo), interval, chrono::Utc::now()) {
+        run_catalog_scan(
+            ctx,
+            repo,
+            namespace,
+            name,
+            repo_uid,
+            &result.snapshots,
+            result.snapshot_count,
+            result.snapshots_truncated,
+        )
+        .await?;
+    }
 
     // Ensure the managed Maintenance for this repo (ADR §3.7). Build on the
     // conditions we just patched (which include `Bootstrapped`), NOT the stale
@@ -759,7 +795,9 @@ async fn finalize_bootstrap(
         .await;
     }
 
-    Ok(Action::requeue(Duration::from_secs(300)))
+    Ok(Action::requeue(catalog::reconcile_interval(
+        repo.spec.catalog.as_ref(),
+    )))
 }
 
 /// Upsert the `Bootstrapped` condition onto the repository's existing conditions.
@@ -784,16 +822,18 @@ fn bootstrap_condition(
     )
 }
 
-/// Compute which snapshots in `listing` still need a `Snapshot` CR, and create the
-/// bounded `origin: discovered` set (forced `deletionPolicy: Retain`).
+/// Run the shared catalog scan ([`crate::catalog::scan`]) for a namespaced
+/// `Repository` and reflect the outcome: the discovered-row count +
+/// `lastRefreshAt` stamp on `status.catalog`, the repository-wide snapshot count
+/// on `storageStats`, and the size gauge.
 ///
-/// `listing` is the snapshot set to materialize from: produced in-process for the
-/// filesystem backend, or carried back from the bootstrap Job for object stores.
-/// `total_snapshot_count` is the authoritative repository-wide count for
-/// `storageStats` (may exceed `listing.len()` if the Job capped the returned
-/// entries — see `BootstrapResult::snapshots_truncated`).
+/// `listing` is the snapshot set to reconcile against: produced in-process for
+/// the bare-path filesystem backend, or carried back from the bootstrap Job for
+/// everything else. `total_snapshot_count` is the authoritative repository-wide
+/// count (may exceed `listing.len()` when the Job capped the returned entries —
+/// `listing_truncated`, see `BootstrapResult::snapshots_truncated`).
 #[allow(clippy::too_many_arguments)]
-async fn scan_catalog(
+async fn run_catalog_scan(
     ctx: &Context,
     repo: &Repository,
     namespace: &str,
@@ -801,46 +841,23 @@ async fn scan_catalog(
     repo_uid: &str,
     listing: &[SnapshotListEntry],
     total_snapshot_count: i64,
+    listing_truncated: bool,
 ) -> Result<()> {
-    // Existing discovered Snapshots keyed by (repo_uid, snapshot_id).
-    let backup_api: Api<Snapshot> = Api::namespaced(ctx.client.clone(), namespace);
-    let lp = ListParams::default().labels(&format!("{ORIGIN_LABEL}=discovered"));
-    let existing_crs = backup_api.list(&lp).await?.items;
-    let mut existing: BTreeSet<(String, String)> = BTreeSet::new();
-    for b in &existing_crs {
-        if let (Some(uid), Some(id)) = (
-            b.labels().get(REPOSITORY_UID_LABEL),
-            b.labels().get(SNAPSHOT_ID_LABEL),
-        ) {
-            existing.insert(catalog_dedup_key(uid, id));
-        }
-    }
-
-    let mut need = needs_materialization(repo_uid, &existing, listing);
-
-    // Bound by catalog.retain.perIdentity (most-recent N). We approximate the
-    // global cap by sorting newest-first and truncating; per-identity refinement
-    // is a documented follow-up.
-    let retain = repo
-        .spec
-        .catalog
-        .as_ref()
-        .and_then(|c| c.retain.as_ref())
-        .and_then(|r| r.per_identity)
-        .map(|n| n.max(0) as usize);
-    need.sort_by_key(|e| std::cmp::Reverse(e.end_time));
-    if let Some(cap) = retain {
-        need.truncate(cap);
-    }
-
-    let mut created = 0i64;
-    for entry in need {
-        create_discovered_backup(ctx, repo, namespace, repo_name, repo_uid, entry).await?;
-        created += 1;
-    }
-    if created > 0 {
-        tracing::info!(repo = %repo_name, created, "materialized discovered Snapshot CRs");
-    }
+    let owner_ref = io::owner_ref_for(repo, "Repository")?;
+    let outcome = catalog::scan(
+        ctx,
+        catalog::ScanOwner::Repository {
+            name: repo_name,
+            namespace,
+        },
+        owner_ref,
+        repo_uid,
+        catalog::Placement::Namespace(namespace),
+        repo.spec.catalog.as_ref(),
+        listing,
+        listing_truncated,
+    )
+    .await?;
 
     // Logical bytes under management is recorded directly from kopia's data
     // (the status field is a human string, so the gauge bypasses it).
@@ -850,90 +867,19 @@ async fn scan_catalog(
         logical_bytes_under_management(listing),
     );
 
-    // Report THIS repository's discovered count (the `existing` set is
-    // namespace-wide for cross-repo dedup; the status count must be per-repo).
-    let existing_this_repo = existing.iter().filter(|(uid, _)| uid == repo_uid).count() as i64;
     let api: Api<Repository> = Api::namespaced(ctx.client.clone(), namespace);
     io::patch_status(
         &api,
         repo_name,
         serde_json::json!({
             "catalog": {
-                "discoveredBackupCount": existing_this_repo + created,
+                "discoveredBackupCount": outcome.discovered,
                 "lastRefreshAt": chrono::Utc::now().to_rfc3339(),
             },
             "storageStats": { "snapshotCount": total_snapshot_count },
         }),
     )
     .await?;
-    Ok(())
-}
-
-/// Create one `origin: discovered` Snapshot CR for a snapshot. `deletionPolicy` is
-/// FORCED to `Retain` (the operator never deletes a discovered snapshot, §4.5).
-async fn create_discovered_backup(
-    ctx: &Context,
-    repo: &Repository,
-    namespace: &str,
-    repo_name: &str,
-    repo_uid: &str,
-    entry: &SnapshotListEntry,
-) -> Result<()> {
-    use kopiur_api::common::{DeletionPolicy, ResolvedIdentity};
-    use kopiur_api::snapshot::{SnapshotInfo, SnapshotSpec, SnapshotStatus};
-    use kopiur_api::{Origin, SnapshotPhase};
-
-    // CR name: stable from the (short) snapshot id, namespaced under repo.
-    let short = entry.id.chars().take(16).collect::<String>();
-    let cr_name = format!("{repo_name}-disc-{short}");
-
-    let mut labels = std::collections::BTreeMap::new();
-    labels.insert(ORIGIN_LABEL.to_string(), "discovered".to_string());
-    labels.insert(REPOSITORY_UID_LABEL.to_string(), repo_uid.to_string());
-    labels.insert(SNAPSHOT_ID_LABEL.to_string(), entry.id.clone());
-
-    let owner = io::owner_ref_for(repo, "Repository")?;
-    let mut backup = Snapshot::new(
-        &cr_name,
-        SnapshotSpec {
-            policy_ref: None,
-            tags: None,
-            failure_policy: None,
-            // Forced Retain for discovered (webhook would reject otherwise).
-            deletion_policy: Some(DeletionPolicy::Retain),
-            // Discovered snapshots are not pinned by the operator.
-            pin: false,
-        },
-    );
-    backup.metadata = io::child_meta(&cr_name, namespace, labels, Some(owner));
-    backup.status = Some(SnapshotStatus {
-        phase: Some(SnapshotPhase::Discovered),
-        origin: Some(Origin::Discovered),
-        snapshot: Some(SnapshotInfo {
-            kopia_snapshot_id: entry.id.clone(),
-            identity: ResolvedIdentity {
-                username: entry.source.user_name.clone(),
-                hostname: entry.source.host.clone(),
-                source_path: Some(entry.source.path.clone()),
-            },
-        }),
-        ..Default::default()
-    });
-
-    let api: Api<Snapshot> = Api::namespaced(ctx.client.clone(), namespace);
-    // Create the CR; the discovered status is then PATCHed onto the subresource.
-    match io::apply(&api, &cr_name, &backup).await {
-        Ok(_) => {}
-        Err(Error::Kube(kube::Error::Api(ae))) if ae.code == 409 => return Ok(()),
-        Err(e) => return Err(e),
-    }
-    io::patch_status(
-        &api,
-        &cr_name,
-        serde_json::to_value(backup.status.unwrap_or_default())?,
-    )
-    .await?;
-    let _ = repo; // repo retained for future per-identity bounding
     Ok(())
 }
 
@@ -991,48 +937,5 @@ mod tests {
         ];
         assert_eq!(logical_bytes_under_management(&listing), 190);
         assert_eq!(logical_bytes_under_management(&[]), 0);
-    }
-
-    #[test]
-    fn dedup_key_combines_repo_uid_and_snapshot_id() {
-        assert_eq!(
-            catalog_dedup_key("repo-uid", "snap-1"),
-            ("repo-uid".to_string(), "snap-1".to_string())
-        );
-        // Same snapshot id under a different repo is a distinct key.
-        assert_ne!(
-            catalog_dedup_key("repo-a", "snap-1"),
-            catalog_dedup_key("repo-b", "snap-1")
-        );
-    }
-
-    #[test]
-    fn only_unseen_snapshots_need_materialization() {
-        let listing = vec![entry("s1"), entry("s2"), entry("s3")];
-        let mut existing = BTreeSet::new();
-        existing.insert(catalog_dedup_key("repo-1", "s1"));
-        existing.insert(catalog_dedup_key("repo-1", "s3"));
-        let need = needs_materialization("repo-1", &existing, &listing);
-        let ids: Vec<&str> = need.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(ids, vec!["s2"], "only the unseen snapshot is materialized");
-    }
-
-    #[test]
-    fn same_id_under_other_repo_is_not_deduped() {
-        let listing = vec![entry("s1")];
-        let mut existing = BTreeSet::new();
-        // s1 already materialized, but under repo-OTHER.
-        existing.insert(catalog_dedup_key("repo-OTHER", "s1"));
-        let need = needs_materialization("repo-1", &existing, &listing);
-        assert_eq!(need.len(), 1, "different repo UID → still needs its own CR");
-    }
-
-    #[test]
-    fn nothing_to_do_when_all_present() {
-        let listing = vec![entry("s1"), entry("s2")];
-        let mut existing = BTreeSet::new();
-        existing.insert(catalog_dedup_key("r", "s1"));
-        existing.insert(catalog_dedup_key("r", "s2"));
-        assert!(needs_materialization("r", &existing, &listing).is_empty());
     }
 }

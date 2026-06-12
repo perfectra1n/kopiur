@@ -92,6 +92,18 @@ pub const STALLED_CONDITION: &str = "Stalled";
 /// plugin's `status` read it.
 pub const MAINTENANCE_CONFIGURED_CONDITION: &str = "MaintenanceConfigured";
 
+/// Default catalog re-scan cadence when `spec.catalog.refreshInterval` is unset:
+/// how often a `Ready` repository re-lists its kopia snapshots to materialize
+/// (and expire) `origin: discovered` `Snapshot` CRs. Part of the documented API
+/// contract (field-reference), so it lives here rather than in the controller.
+pub const DEFAULT_CATALOG_REFRESH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(3600);
+
+/// Floor for `spec.catalog.refreshInterval`, enforced at admission. Each re-scan
+/// of an object-store repository runs a short mover Job; anything faster than
+/// this is Job churn with no operational value.
+pub const MIN_CATALOG_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -453,6 +453,181 @@ pub fn one_shot_pod(ns: &str, name: &str, command: &[&str], pvc_mounts: &[(&str,
     }))
 }
 
+/// One step of a foreign-repo seeder pod ([`foreign_kopia_pod`]): each step runs
+/// as one sequential initContainer, so a multi-step seed (wipe → write → create →
+/// snapshot → connect-as-someone-else → snapshot) needs no shell in the
+/// distroless mover image.
+pub enum SeedStep<'a> {
+    /// Empty the MinIO bucket (mc, `--force`) so a reused cluster can't leak a
+    /// previous run's repository into a `kopia repository create`.
+    WipeBucket {
+        /// Bucket to empty (must already exist — `World::ensure(Minio)`).
+        bucket: &'a str,
+    },
+    /// Write `content` to `/data/<dir>/<file>` (busybox), creating the dir.
+    WriteFile {
+        /// Data dir under `/data` (becomes the kopia source path `/data/<dir>`).
+        dir: &'a str,
+        /// File name inside the dir.
+        file: &'a str,
+        /// File content (keep it shell-safe: alnum/dash/space).
+        content: &'a str,
+    },
+    /// `kopia repository create s3` against MinIO under the given identity —
+    /// a repository kopiur did NOT create.
+    CreateRepo {
+        /// Target bucket.
+        bucket: &'a str,
+        /// kopia `--override-username` (the foreign identity's user).
+        username: &'a str,
+        /// kopia `--override-hostname` (the foreign identity's host — for a
+        /// ClusterRepository this is the namespace the discovered Snapshot
+        /// should land in).
+        hostname: &'a str,
+    },
+    /// `kopia repository connect s3` — same flags as [`SeedStep::CreateRepo`]
+    /// but joins an EXISTING repository (out-of-band writers, new identities).
+    ConnectRepo {
+        /// Target bucket.
+        bucket: &'a str,
+        /// kopia `--override-username`.
+        username: &'a str,
+        /// kopia `--override-hostname`.
+        hostname: &'a str,
+    },
+    /// `kopia snapshot create /data/<dir>` under the identity of the most recent
+    /// create/connect step.
+    Snapshot {
+        /// Data dir under `/data` to snapshot.
+        dir: &'a str,
+    },
+}
+
+/// A one-shot Pod (`restartPolicy: Never`) that drives RAW kopia against the
+/// in-cluster MinIO to seed a *foreign* repository — snapshots kopiur didn't
+/// produce, under identities kopiur never resolved. The import e2e adopts the
+/// result. Drive it with `wait::pod_succeeded`.
+///
+/// Credentials are the e2e MinIO root keys + the shared e2e repo password
+/// (matching `kopia-s3-creds`, so a kopiur `Repository` can adopt the result);
+/// kopia's config/cache/logs live on a pod-local emptyDir.
+pub fn foreign_kopia_pod(ns: &str, name: &str, steps: &[SeedStep<'_>]) -> Pod {
+    let kopia_env = json!([
+        { "name": "KOPIA_PASSWORD", "value": consts::KOPIA_PASSWORD },
+        { "name": "KOPIA_CONFIG_PATH", "value": "/kopia/repository.config" },
+        { "name": "KOPIA_CACHE_DIRECTORY", "value": "/kopia/cache" },
+        { "name": "KOPIA_LOG_DIR", "value": "/kopia/logs" },
+        { "name": "KOPIA_CHECK_FOR_UPDATES", "value": "false" },
+    ]);
+    let kopia_mounts = json!([
+        { "name": "data", "mountPath": "/data" },
+        { "name": "kopia", "mountPath": "/kopia" },
+    ]);
+    let repo_args = |verb: &str, bucket: &str, username: &str, hostname: &str| {
+        json!([
+            consts::KOPIA_BIN,
+            "repository",
+            verb,
+            "s3",
+            "--bucket",
+            bucket,
+            "--endpoint",
+            consts::MINIO_ENDPOINT,
+            "--disable-tls",
+            "--access-key",
+            consts::MINIO_USER,
+            "--secret-access-key",
+            consts::MINIO_PASS,
+            "--override-username",
+            username,
+            "--override-hostname",
+            hostname,
+        ])
+    };
+    let init: Vec<serde_json::Value> = steps
+        .iter()
+        .enumerate()
+        .map(|(i, step)| match step {
+            SeedStep::WipeBucket { bucket } => json!({
+                "name": format!("step-{i}-wipe"),
+                "image": consts::MC_IMAGE,
+                "imagePullPolicy": "IfNotPresent",
+                "command": ["/bin/sh", "-c", format!(
+                    "mc alias set local http://{endpoint} {user} {pass} && \
+                     (mc rm -r --force local/{bucket} || true)",
+                    endpoint = consts::MINIO_ENDPOINT,
+                    user = consts::MINIO_USER,
+                    pass = consts::MINIO_PASS,
+                )],
+            }),
+            SeedStep::WriteFile { dir, file, content } => json!({
+                "name": format!("step-{i}-write"),
+                "image": consts::BUSYBOX_IMAGE,
+                "imagePullPolicy": "IfNotPresent",
+                "command": ["sh", "-c", format!(
+                    // 0777/0666 so the 65532 kopia containers can read what the
+                    // root busybox wrote into the shared emptyDir.
+                    "mkdir -p /data/{dir} && chmod 0777 /data/{dir} && \
+                     printf '%s' '{content}' > /data/{dir}/{file} && \
+                     chmod 0666 /data/{dir}/{file}"
+                )],
+                "volumeMounts": [ { "name": "data", "mountPath": "/data" } ],
+            }),
+            SeedStep::CreateRepo {
+                bucket,
+                username,
+                hostname,
+            } => json!({
+                "name": format!("step-{i}-create"),
+                "image": consts::MOVER_IMAGE,
+                "imagePullPolicy": "Never",
+                "command": repo_args("create", bucket, username, hostname),
+                "env": kopia_env.clone(),
+                "volumeMounts": kopia_mounts.clone(),
+            }),
+            SeedStep::ConnectRepo {
+                bucket,
+                username,
+                hostname,
+            } => json!({
+                "name": format!("step-{i}-connect"),
+                "image": consts::MOVER_IMAGE,
+                "imagePullPolicy": "Never",
+                "command": repo_args("connect", bucket, username, hostname),
+                "env": kopia_env.clone(),
+                "volumeMounts": kopia_mounts.clone(),
+            }),
+            SeedStep::Snapshot { dir } => json!({
+                "name": format!("step-{i}-snapshot"),
+                "image": consts::MOVER_IMAGE,
+                "imagePullPolicy": "Never",
+                "command": [consts::KOPIA_BIN, "snapshot", "create", &format!("/data/{dir}")],
+                "env": kopia_env.clone(),
+                "volumeMounts": kopia_mounts.clone(),
+            }),
+        })
+        .collect();
+    from_json(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": { "name": name, "namespace": ns },
+        "spec": {
+            "restartPolicy": "Never",
+            "initContainers": init,
+            "containers": [{
+                "name": "done",
+                "image": consts::BUSYBOX_IMAGE,
+                "imagePullPolicy": "IfNotPresent",
+                "command": ["true"],
+            }],
+            "volumes": [
+                { "name": "data", "emptyDir": {} },
+                { "name": "kopia", "emptyDir": {} },
+            ],
+        },
+    }))
+}
+
 /// A long-running labeled workload Pod (busybox `sleep`) mounting `pvc` at
 /// `mount_path` — the exec target for `workloadExec` hook scenarios.
 pub fn sleeper_pod(

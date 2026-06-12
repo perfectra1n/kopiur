@@ -304,7 +304,7 @@ Short name `kopiarepl`, plural `repositoryreplications`. The off-site mirror —
 ### Backend
 
 Externally tagged — set exactly one of: `s3`, `azure`, `gcs`, `b2`, `filesystem`,
-`sftp`, `webDav`, `rclone`. See [Backend configuration](backends.md) for each
+`sftp`, `webDav`, `rclone`. See [Backend configuration](backends/index.md) for each
 backend's fields and Secret keys.
 
 ### SecretKeyRef
@@ -363,8 +363,15 @@ mode? }` — `mode` is `enum(`**`Ephemeral`**`|Persistent)`.
 ### CatalogBounds
 
 `{ retain?: { perIdentity?, maxAgeDays? }, refreshInterval?, fallbackNamespace? }` —
-bounds materialized `discovered` `Snapshot`s. `fallbackNamespace` is
-ClusterRepository-only.
+bounds materialized `discovered` `Snapshot`s. `refreshInterval` is the re-scan
+cadence (Go-style duration; default **`1h`**, minimum `30s`, webhook-enforced).
+`retain.perIdentity` keeps the newest N rows per `username@hostname:path` (`0`
+disables materialization; negative rejected); `retain.maxAgeDays` (≥ 1) drops
+rows for snapshots older than N days. Bounds expire **CR rows only — never kopia
+snapshots** (discovered rows are forced `Retain`). `fallbackNamespace` is
+ClusterRepository-only (rejected on a namespaced `Repository`): where rows land
+when the identity hostname names no allowed namespace. See
+[The catalog](repositories.md#the-catalog--discovered-snapshots).
 
 ### RepositoryMaintenanceSpec
 

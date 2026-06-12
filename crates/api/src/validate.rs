@@ -760,6 +760,77 @@ pub fn validate_repository(spec: &RepositorySpec) -> Vec<ValidationError> {
     if let Some(m) = &spec.maintenance {
         errs.extend(validate_repository_maintenance(m, false));
     }
+    if let Some(c) = &spec.catalog {
+        errs.extend(validate_catalog_bounds(c, false));
+    }
+    errs
+}
+
+/// Validate `spec.catalog` (ADR §3.1/§3.2): the refresh interval must parse and
+/// respect the floor, the retain bounds must be enforceable, and
+/// `fallbackNamespace` only means something on a cluster-scoped repository
+/// (`cluster_scoped`). One validator for both kinds so the rules cannot fork.
+pub fn validate_catalog_bounds(
+    catalog: &crate::common::CatalogBounds,
+    cluster_scoped: bool,
+) -> Vec<ValidationError> {
+    let mut errs = Vec::new();
+    if let Some(raw) = catalog.refresh_interval.as_deref() {
+        match crate::duration::parse_go_duration(raw) {
+            None => errs.push(ValidationError::InvalidFieldValue {
+                field: "catalog.refreshInterval".to_string(),
+                reason: format!(
+                    "{raw:?} is not a valid duration. Use a Go-style duration like 30s, 5m, or \
+                     1h; omit the field for the default (1h)"
+                ),
+            }),
+            Some(d) if d < crate::consts::MIN_CATALOG_REFRESH_INTERVAL => {
+                errs.push(ValidationError::InvalidFieldValue {
+                    field: "catalog.refreshInterval".to_string(),
+                    reason: format!(
+                        "{raw:?} is shorter than the 30s minimum. Each re-scan of an \
+                         object-store repository runs a mover Job; use 30s or more (default 1h)"
+                    ),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    if let Some(retain) = &catalog.retain {
+        if let Some(n) = retain.per_identity
+            && n < 0
+        {
+            errs.push(ValidationError::InvalidFieldValue {
+                field: "catalog.retain.perIdentity".to_string(),
+                reason: format!(
+                    "{n} is negative. Use a positive count of discovered Snapshot CRs to keep \
+                     per identity, 0 to disable discovered-Snapshot materialization, or omit \
+                     the field to materialize everything"
+                ),
+            });
+        }
+        if let Some(d) = retain.max_age_days
+            && d < 1
+        {
+            errs.push(ValidationError::InvalidFieldValue {
+                field: "catalog.retain.maxAgeDays".to_string(),
+                reason: format!(
+                    "{d} is not a usable age bound. Use a positive number of days (snapshots \
+                     older than this get no discovered Snapshot CR), or omit the field for no \
+                     age bound"
+                ),
+            });
+        }
+    }
+    if !cluster_scoped && catalog.fallback_namespace.is_some() {
+        errs.push(ValidationError::InvalidFieldValue {
+            field: "catalog.fallbackNamespace".to_string(),
+            reason: "only a ClusterRepository places discovered Snapshots across namespaces; a \
+                     namespaced Repository always materializes into its own namespace — remove \
+                     the field (or move the repository to a ClusterRepository)"
+                .to_string(),
+        });
+    }
     errs
 }
 
@@ -907,6 +978,9 @@ pub fn validate_cluster_repository(spec: &ClusterRepositorySpec) -> Vec<Validati
         {
             errs.push(e);
         }
+    }
+    if let Some(c) = &spec.catalog {
+        errs.extend(validate_catalog_bounds(c, true));
     }
     errs
 }
@@ -2485,5 +2559,135 @@ mod tests {
             tls: None,
         });
         assert!(!replication_destination_differs(&s3, &s3b));
+    }
+
+    // --- validate_catalog_bounds ---
+
+    fn catalog(v: serde_json::Value) -> crate::common::CatalogBounds {
+        serde_json::from_value(v).expect("CatalogBounds parses")
+    }
+
+    #[test]
+    fn catalog_bounds_valid_passes_both_scopes() {
+        let c = catalog(serde_json::json!({
+            "retain": { "perIdentity": 100, "maxAgeDays": 90 },
+            "refreshInterval": "5m",
+        }));
+        assert!(validate_catalog_bounds(&c, false).is_empty());
+        assert!(validate_catalog_bounds(&c, true).is_empty());
+        // perIdentity: 0 = "materialize nothing" is a legal opt-out.
+        let off = catalog(serde_json::json!({ "retain": { "perIdentity": 0 } }));
+        assert!(validate_catalog_bounds(&off, false).is_empty());
+    }
+
+    #[test]
+    fn catalog_refresh_interval_must_parse_and_message_says_how_to_fix() {
+        let c = catalog(serde_json::json!({ "refreshInterval": "every-hour" }));
+        let errs = validate_catalog_bounds(&c, false);
+        assert_eq!(errs.len(), 1);
+        let msg = errs[0].to_string();
+        // What failed, why, how to fix — a human acts on this text.
+        assert!(msg.contains("catalog.refreshInterval"), "{msg}");
+        assert!(msg.contains("every-hour"), "{msg}");
+        assert!(msg.contains("30s, 5m, or 1h"), "{msg}");
+        assert!(msg.contains("default (1h)"), "{msg}");
+    }
+
+    #[test]
+    fn catalog_refresh_interval_floor_is_enforced() {
+        let c = catalog(serde_json::json!({ "refreshInterval": "5s" }));
+        let errs = validate_catalog_bounds(&c, false);
+        assert_eq!(errs.len(), 1);
+        let msg = errs[0].to_string();
+        assert!(msg.contains("30s minimum"), "{msg}");
+        // Exactly the floor is fine.
+        let ok = catalog(serde_json::json!({ "refreshInterval": "30s" }));
+        assert!(validate_catalog_bounds(&ok, false).is_empty());
+    }
+
+    #[test]
+    fn catalog_retain_bounds_must_be_enforceable() {
+        let c = catalog(serde_json::json!({
+            "retain": { "perIdentity": -3, "maxAgeDays": 0 },
+        }));
+        let errs = validate_catalog_bounds(&c, true);
+        assert_eq!(errs.len(), 2);
+        let all = errs.iter().map(|e| e.to_string()).collect::<Vec<_>>();
+        assert!(
+            all.iter().any(|m| m.contains("catalog.retain.perIdentity")),
+            "{all:?}"
+        );
+        assert!(
+            all.iter().any(|m| m.contains("catalog.retain.maxAgeDays")),
+            "{all:?}"
+        );
+    }
+
+    #[test]
+    fn catalog_fallback_namespace_is_cluster_repository_only() {
+        let c = catalog(serde_json::json!({ "fallbackNamespace": "backups" }));
+        // Allowed on the cluster-scoped kind…
+        assert!(validate_catalog_bounds(&c, true).is_empty());
+        // …rejected on a namespaced Repository, with the fix in the message.
+        let errs = validate_catalog_bounds(&c, false);
+        assert_eq!(errs.len(), 1);
+        let msg = errs[0].to_string();
+        assert!(msg.contains("catalog.fallbackNamespace"), "{msg}");
+        assert!(msg.contains("ClusterRepository"), "{msg}");
+        assert!(msg.contains("remove the field"), "{msg}");
+    }
+
+    #[test]
+    fn repository_validators_route_catalog_bounds() {
+        // The aggregate validators must actually call validate_catalog_bounds with
+        // the right scope, or the webhook silently admits what the docs forbid.
+        let repo: RepositorySpec = crate::testutil::from_yaml(
+            r#"
+backend:
+  filesystem:
+    path: /repo
+encryption:
+  passwordSecretRef:
+    name: creds
+catalog:
+  fallbackNamespace: backups
+"#,
+        );
+        let errs = validate_repository(&repo);
+        assert!(
+            errs.iter()
+                .any(|e| e.to_string().contains("catalog.fallbackNamespace")),
+            "{errs:?}"
+        );
+
+        let crepo: ClusterRepositorySpec = crate::testutil::from_yaml(
+            r#"
+backend:
+  filesystem:
+    path: /repo
+encryption:
+  passwordSecretRef:
+    name: creds
+    namespace: kopiur-system
+allowedNamespaces:
+  all: true
+catalog:
+  fallbackNamespace: backups
+  refreshInterval: bogus
+"#,
+        );
+        let errs = validate_cluster_repository(&crepo);
+        // fallbackNamespace is legal here; the bad interval is not.
+        assert!(
+            !errs
+                .iter()
+                .any(|e| e.to_string().contains("catalog.fallbackNamespace")),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.to_string().contains("catalog.refreshInterval")),
+            "{errs:?}"
+        );
     }
 }

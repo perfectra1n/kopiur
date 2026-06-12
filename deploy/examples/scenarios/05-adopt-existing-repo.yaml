@@ -56,6 +56,16 @@ spec:
       key: KOPIA_PASSWORD
   create:
     enabled: false # adopt: the repo already exists, never re-initialize it
+  # Discovery knobs (all optional — these are the defaults made explicit, except
+  # retain, which is unbounded by default). The catalog re-scans the repository on
+  # this cadence, so snapshots the OLD tooling keeps writing during the migration
+  # window appear too; retain bounds the discovered Snapshot CR ROWS for very
+  # large histories (expiring a row never deletes the kopia snapshot behind it).
+  catalog:
+    refreshInterval: 1h # default 1h, minimum 30s
+    retain:
+      perIdentity: 100 # newest N rows per username@hostname:path
+      maxAgeDays: 90 # no rows for snapshots older than this
   # Don't let the default-managed Maintenance auto-claim the lease here — we want
   # the deliberate, explicit takeover below instead. (An externally-authored
   # Maintenance like the one in this file is always honored and never duplicated.)

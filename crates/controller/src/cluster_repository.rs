@@ -20,14 +20,15 @@ use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
 use kopiur_api::backend::Backend;
-use kopiur_api::common::RepositoryKind;
+use kopiur_api::common::{CatalogBounds, RepositoryKind};
 use kopiur_api::{ClusterRepository, RepositoryPhase, validate};
-use kopiur_kopia::ConnectSpec;
+use kopiur_kopia::{ConnectSpec, SnapshotListEntry};
 use kopiur_mover::bootstrap::{BootstrapResult, RESULT_CONFIGMAP_KEY};
 use kopiur_mover::workspec::{
     BootstrapRepositoryOp, MoverOptions, MoverWorkSpec, Operation, ResolvedIdentity, TargetRef,
 };
 
+use crate::catalog;
 use crate::consts::{API_VERSION, BOOTSTRAP_JOB_DEADLINE_SECS, REPOSITORY_BOOTSTRAPPED_CONDITION};
 use crate::context::Context;
 use crate::error::{Error, Result, TERMINAL_HEARTBEAT, error_policy_for};
@@ -292,14 +293,18 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
             )
             .await?;
 
-            // NOTE: catalog placement for a ClusterRepository materializes each
-            // discovered Snapshot in the namespace named by the snapshot identity's
-            // hostname when it's allowed (placement_namespace + the tested
-            // validate_consumer_against_cluster_repo gate), else the catalog
-            // fallbackNamespace. The placement DECISION is implemented and tested
-            // (placement_namespace below); wiring the cross-namespace creation
-            // loop is a focused follow-up that reuses the namespaced Repository
-            // catalog scan with the placement function selecting the target ns.
+            // Catalog scan on the `catalog.refreshInterval` cadence: a bare-path
+            // filesystem repo re-lists in-process. Each discovered snapshot is
+            // placed in the namespace named by its identity hostname when that
+            // namespace exists and passes the tenancy gate, else
+            // `catalog.fallbackNamespace`, else it is skipped with a Warning
+            // Event ([`placement_namespace`] + `crate::catalog`).
+            let interval = CatalogBounds::effective_refresh_interval(repo.spec.catalog.as_ref());
+            if catalog::refresh_due(cluster_last_refresh_at(repo), interval, chrono::Utc::now()) {
+                let listing = client.snapshot_list(None).await?;
+                let total = listing.len() as i64;
+                run_cluster_catalog_scan(ctx, repo, &name, &listing, total, false).await?;
+            }
 
             // Ensure the managed Maintenance for this ClusterRepository (ADR §3.7).
             // Cluster-scoped, so the metric namespace label is empty and
@@ -340,7 +345,93 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
         }
     }
 
-    Ok(Action::requeue(Duration::from_secs(300)))
+    Ok(Action::requeue(catalog::reconcile_interval(
+        repo.spec.catalog.as_ref(),
+    )))
+}
+
+/// `status.catalog.lastRefreshAt` from the cached object (the refresh-due gate).
+fn cluster_last_refresh_at(repo: &ClusterRepository) -> Option<&str> {
+    repo.status
+        .as_ref()
+        .and_then(|s| s.catalog.as_ref())
+        .and_then(|c| c.last_refresh_at.as_deref())
+}
+
+/// Run the shared catalog scan ([`crate::catalog::scan`]) for a
+/// `ClusterRepository` and reflect the outcome: each discovered snapshot lands in
+/// the namespace named by its identity hostname when allowed, else
+/// `catalog.fallbackNamespace`; snapshots with neither are surfaced via a Warning
+/// Event naming the fix (never silently dropped).
+async fn run_cluster_catalog_scan(
+    ctx: &Context,
+    repo: &ClusterRepository,
+    name: &str,
+    listing: &[SnapshotListEntry],
+    total_snapshot_count: i64,
+    listing_truncated: bool,
+) -> Result<()> {
+    let repo_uid = repo
+        .uid()
+        .ok_or_else(|| Error::Invariant("ClusterRepository has no uid".into()))?;
+    let owner_ref = io::owner_ref_for(repo, "ClusterRepository")?;
+    let fallback = repo
+        .spec
+        .catalog
+        .as_ref()
+        .and_then(|c| c.fallback_namespace.as_deref());
+    let outcome = catalog::scan(
+        ctx,
+        catalog::ScanOwner::ClusterRepository { name },
+        owner_ref,
+        &repo_uid,
+        catalog::Placement::Cluster {
+            allowed: &repo.spec.allowed_namespaces,
+            fallback,
+        },
+        repo.spec.catalog.as_ref(),
+        listing,
+        listing_truncated,
+    )
+    .await?;
+
+    if !outcome.unplaced_hosts.is_empty() {
+        let hosts: Vec<&str> = outcome.unplaced_hosts.iter().map(String::as_str).collect();
+        let msg = format!(
+            "discovered snapshots were not materialized: identity hostname(s) [{}] name no \
+             existing namespace in spec.allowedNamespaces. Why: a ClusterRepository places each \
+             discovered Snapshot in the namespace its identity hostname names. Fix: create/allow \
+             those namespaces, or set spec.catalog.fallbackNamespace to collect foreign \
+             snapshots in one namespace",
+            hosts.join(", ")
+        );
+        tracing::warn!(repo = %name, hosts = ?hosts, "discovered snapshots skipped: no placement namespace");
+        io::publish_warning_event(ctx, repo, "DiscoveredSnapshotUnplaced", "CatalogScan", &msg)
+            .await;
+    }
+
+    // Cluster-scoped: the metric namespace label is empty, matching the
+    // phase/catalog gauges in `record_cluster_repository_status_metrics`.
+    ctx.metrics.set_repo_size_bytes(
+        "",
+        name,
+        crate::repository::logical_bytes_under_management(listing),
+    );
+
+    let api: Api<ClusterRepository> = Api::all(ctx.client.clone());
+    io::patch_status(
+        &api,
+        name,
+        serde_json::json!({
+            "catalog": {
+                "discoveredBackupCount": outcome.discovered,
+                "lastRefreshAt": chrono::Utc::now().to_rfc3339(),
+            },
+            "storageStats": { "snapshotCount": total_snapshot_count },
+        }),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Drive the mover-Job bootstrap for a `ClusterRepository` whose backend the
@@ -369,17 +460,52 @@ async fn bootstrap_cluster_via_mover(
     let job_api: Api<Job> = Api::namespaced(ctx.client.clone(), &job_ns);
 
     if let Some(job) = job_api.get_opt(&job_name).await? {
+        let already_ready =
+            repo.status.as_ref().and_then(|s| s.phase) == Some(RepositoryPhase::Ready);
         return match crate::snapshot::job_terminal_state(&job) {
+            // Still running. A catalog-refresh re-run of an already-Ready repo
+            // keeps its phase — flapping Ready→Initializing every refresh would
+            // be pure status churn.
             None => {
-                io::patch_status(
-                    api,
-                    name,
-                    serde_json::json!({ "phase": "Initializing", "backend": backend.kind_str() }),
-                )
-                .await?;
+                if !already_ready {
+                    io::patch_status(
+                        api,
+                        name,
+                        serde_json::json!({ "phase": "Initializing", "backend": backend.kind_str() }),
+                    )
+                    .await?;
+                }
                 Ok(Action::requeue(Duration::from_secs(15)))
             }
+            // Finished — unless the result is stale (catalog refresh due, or the
+            // spec changed since it was taken), in which case recycle the Job so
+            // the next reconcile re-runs the bootstrap for a fresh `snapshot list`.
             Some(success) => {
+                let interval =
+                    CatalogBounds::effective_refresh_interval(repo.spec.catalog.as_ref());
+                if catalog::bootstrap_recycle_due(
+                    already_ready,
+                    repo.metadata.generation,
+                    repo.status.as_ref().and_then(|s| s.observed_generation),
+                    cluster_last_refresh_at(repo),
+                    interval,
+                    chrono::Utc::now(),
+                ) {
+                    tracing::debug!(repo = %name, "recycling finished bootstrap Job for a catalog refresh");
+                    job_api
+                        .delete(&job_name, &kube::api::DeleteParams::background())
+                        .await?;
+                    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &job_ns);
+                    match cm_api
+                        .delete(&job_name, &kube::api::DeleteParams::default())
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+                        Err(e) => return Err(Error::Kube(e)),
+                    }
+                    return Ok(Action::requeue(Duration::from_secs(5)));
+                }
                 finalize_cluster_bootstrap(
                     ctx, repo, name, &job_ns, &job_name, api, backend, success,
                 )
@@ -394,7 +520,6 @@ async fn bootstrap_cluster_via_mover(
         .as_ref()
         .map(|c| c.enabled)
         .unwrap_or(false);
-    // ClusterRepository: no discovered-Snapshot materialization (scanCatalog off).
     let work_spec = cluster_bootstrap_work_spec(
         backend,
         name,
@@ -504,7 +629,10 @@ fn cluster_bootstrap_work_spec(
         version: 1,
         operation: Operation::BootstrapRepository(BootstrapRepositoryOp {
             auto_create,
-            scan_catalog: false,
+            // The Job returns the snapshot listing so `finalize_cluster_bootstrap`
+            // can materialize discovered Snapshots (placed per identity hostname —
+            // see `crate::catalog`).
+            scan_catalog: true,
             create_options: kopiur_mover::workspec::CreateOptionsSpec::from_create(create),
             // Stamped on CREATE only (see the Repository sibling).
             maintenance_owner: Some(kopiur_api::maintenance::kopia_owner_for_lease(
@@ -618,6 +746,30 @@ async fn finalize_cluster_bootstrap(
         }),
     )
     .await?;
+    if result.snapshots_truncated {
+        tracing::warn!(
+            repo = %name,
+            snapshot_count = result.snapshot_count,
+            "catalog larger than the materialization cap; not all snapshots were materialized"
+        );
+    }
+
+    // Materialize/expire discovered Snapshots from the snapshots the Job
+    // returned — once per result: after the first scan stamps `lastRefreshAt`,
+    // re-reads of the same finished Job skip the (stale) listing, and the next
+    // due refresh recycles the Job for a fresh one.
+    let interval = CatalogBounds::effective_refresh_interval(repo.spec.catalog.as_ref());
+    if catalog::refresh_due(cluster_last_refresh_at(repo), interval, chrono::Utc::now()) {
+        run_cluster_catalog_scan(
+            ctx,
+            repo,
+            name,
+            &result.snapshots,
+            result.snapshot_count,
+            result.snapshots_truncated,
+        )
+        .await?;
+    }
 
     // Ensure the managed Maintenance for this ClusterRepository (§3.7). Build on
     // the conditions we just patched (including `Bootstrapped`), not the stale
@@ -643,7 +795,9 @@ async fn finalize_cluster_bootstrap(
         .await;
     }
 
-    Ok(Action::requeue(Duration::from_secs(300)))
+    Ok(Action::requeue(catalog::reconcile_interval(
+        repo.spec.catalog.as_ref(),
+    )))
 }
 
 /// Read the [`BootstrapResult`] the mover wrote into the work-spec ConfigMap (in

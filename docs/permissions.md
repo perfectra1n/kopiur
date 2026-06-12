@@ -199,5 +199,5 @@ See [Restores → Mover, cache & failure policy](restores.md#mover-cache--failur
 ## See also
 
 - [Movers, RBAC & credentials](movers.md) — privileged movers, the minted ServiceAccount, credential placement.
-- [Backend configuration](backends.md) — filesystem & SFTP backends, where ownership matters most.
+- [Backend configuration](backends/index.md) — filesystem & SFTP backends, where ownership matters most.
 - [Restores](restores.md) — restore targets and options.

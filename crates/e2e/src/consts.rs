@@ -168,6 +168,12 @@ pub const BUCKETS: &[&str] = &[
     "kopiur-rclone",
     // Repository for the NFS-*source* scenario (the source is NFS; the repo is S3).
     "kopiur-nfssrc",
+    // Foreign-repo import scenarios (crates/e2e/tests/import.rs): repositories +
+    // snapshots created by RAW kopia (the seeder pod), then adopted by kopiur.
+    "kopiur-import",
+    "kopiur-import-retain",
+    "kopiur-import-refresh",
+    "kopiur-import-crepo",
 ];
 
 // --- SFTP backend (in-cluster atmoz/sftp server, key-based auth) ---------------
@@ -311,6 +317,17 @@ pub const NFS_EXPORT_PATH: &str = "/exports";
 pub const NFS_MOUNT_PATH: &str = "/";
 /// Secret holding just the repo password for the NFS/filesystem repo.
 pub const SECRET_NFS_CREDS: &str = "kopia-nfs-creds";
+
+// --- foreign-repo seeder (tests/import.rs) --------------------------------------
+/// The locally-built mover image (loaded into kind by `images-load`). The import
+/// e2e re-uses it to run RAW `kopia` against MinIO — creating a repository and
+/// snapshots OUTSIDE kopiur, under foreign identities — because it ships the
+/// exact kopia binary the operator runs (and the image is already in the node,
+/// so no extra pull). Distroless: every kopia invocation is one exec-style
+/// (init)container, no shell.
+pub const MOVER_IMAGE: &str = "kopiur/mover:e2e";
+/// Path of the kopia binary inside [`MOVER_IMAGE`] (see docker/Dockerfile.mover).
+pub const KOPIA_BIN: &str = "/usr/local/bin/kopia";
 
 // --- identity / apply ----------------------------------------------------------
 /// Distroless-nonroot uid the controller AND mover Jobs share so a hostPath repo

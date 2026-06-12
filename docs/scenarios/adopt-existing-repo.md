@@ -16,12 +16,15 @@ flowchart TB
   BC --> SCH[SnapshotSchedule]
 ```
 
-/// info | Discovery is automatic — and Retain-forced
+/// info | Discovery is automatic, repeating — and Retain-forced
 
 Once the `Repository` connects, Kopiur materializes snapshots it didn't create as
 `Snapshot` CRs with `origin=discovered`, in the repository's namespace. Discovered
 backups are **forced to `deletionPolicy: Retain`** — Kopiur never deletes data it
-didn't create. List them:
+didn't create. The scan repeats every `catalog.refreshInterval` (default 1h), so
+snapshots the old tooling keeps writing during the migration window show up too;
+bound the rows with `catalog.retain` for very large histories (see
+[The catalog](../repositories.md#the-catalog--discovered-snapshots)). List them:
 
 ```console
 $ kubectl get snapshots -n adopt -l kopiur.home-operations.com/origin=discovered

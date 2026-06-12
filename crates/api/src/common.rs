@@ -293,28 +293,50 @@ impl CacheDefaults {
 #[serde(rename_all = "camelCase")]
 pub struct CatalogBounds {
     /// How many discovered `Snapshot` CRs to keep materialized; bounds etcd footprint
-    /// for large repositories. Never deletes real snapshots (discovered snapshots are
-    /// always `deletionPolicy: Retain`). ADR §3.1/§4.5.
+    /// for large repositories. Expiring a CR row never deletes the kopia snapshot
+    /// behind it (discovered snapshots are always `deletionPolicy: Retain`).
+    /// ADR §3.1/§4.5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain: Option<CatalogRetain>,
-    /// How often to re-scan the repository for new snapshots to materialize
-    /// (Go-style duration, e.g. `1h`).
+    /// How often to re-scan the repository for snapshots to materialize as (or
+    /// expire from) `origin: discovered` `Snapshot` CRs. Go-style duration
+    /// (`30s`, `5m`, `1h`); minimum `30s` (webhook-enforced), default `1h`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_interval: Option<String>,
     /// Where to materialize discovered `Snapshot`s whose identity hostname does not
-    /// map to an allowed namespace (ClusterRepository only). ADR §3.2.
+    /// map to an allowed namespace (ClusterRepository only; rejected on a namespaced
+    /// `Repository`, which always materializes into its own namespace). ADR §3.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_namespace: Option<String>,
+}
+
+impl CatalogBounds {
+    /// The effective catalog re-scan cadence: `refreshInterval` when set and
+    /// parseable, else [`crate::consts::DEFAULT_CATALOG_REFRESH_INTERVAL`].
+    /// (The webhook rejects an unparseable value, so the fallback only covers
+    /// objects admitted before the validator existed.)
+    pub fn effective_refresh_interval(catalog: Option<&Self>) -> std::time::Duration {
+        catalog
+            .and_then(|c| c.refresh_interval.as_deref())
+            .and_then(crate::duration::parse_go_duration)
+            .unwrap_or(crate::consts::DEFAULT_CATALOG_REFRESH_INTERVAL)
+    }
 }
 
 /// Bounds on the *number* of discovered `Snapshot` CRs kept materialized. ADR §3.1 `catalog.retain`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogRetain {
-    /// Most-recent N per `username@hostname:path`.
+    /// Keep the most-recent N discovered `Snapshot` CRs per `username@hostname:path`
+    /// identity (snapshots this cluster produced don't count against N). `0` disables
+    /// discovered-Snapshot materialization entirely; negative values are rejected by
+    /// the webhook. Rows beyond N are expired (the CR is deleted; the kopia snapshot
+    /// is untouched and stays restorable via `Restore.source.identity`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_identity: Option<i64>,
-    /// Drop materialized discovered `Snapshot`s for snapshots older than this many days.
+    /// Don't materialize (and expire) discovered `Snapshot` CRs for snapshots whose
+    /// end time is older than this many days. Minimum 1 (webhook-enforced). The
+    /// kopia snapshots themselves are untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age_days: Option<i64>,
 }

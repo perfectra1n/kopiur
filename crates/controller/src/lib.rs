@@ -2,6 +2,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod cache;
+pub mod catalog;
 pub mod cluster_repository;
 pub mod config;
 pub mod consts;

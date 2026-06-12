@@ -45,7 +45,7 @@ Kopiur separates the backup **recipe** (`SnapshotPolicy`) from its **invocation*
 
 /// tip | Looking for a specific storage backend?
 
-Each backend (S3, Azure, GCS, B2, filesystem, SFTP, WebDAV, rclone) has its own dedicated page — provider prerequisites, the exact Secret shape, a field-by-field reference, and a complete apply-ready manifest — starting from the [Backend configuration](backends.md) index. The apply-ready manifests themselves live under [`deploy/examples/backends/`](https://github.com/home-operations/kopiur/tree/main/deploy/examples/backends). The numbered ladder below is the task/workflow tutorial.
+Each backend (S3, Azure, GCS, B2, filesystem, SFTP, WebDAV, rclone) has its own dedicated page — provider prerequisites, the exact Secret shape, a field-by-field reference, and a complete apply-ready manifest — starting from the [Backend configuration](backends/index.md) index. The apply-ready manifests themselves live under [`deploy/examples/backends/`](https://github.com/home-operations/kopiur/tree/main/deploy/examples/backends). The numbered ladder below is the task/workflow tutorial.
 
 ///
 
