@@ -123,6 +123,12 @@ jobs:
           - shard: misc
             bins: "object_store cache_and_events terminal_failure webhook observability"
             backends: true
+          # Workload identity (auth.workloadIdentity): full S3 pipeline with NO
+          # static keys via the anonymous-policy bucket + kopia's ambient chain,
+          # plus the Job-shape and missing-SA-condition assertions.
+          - shard: workload-identity
+            bins: "workload_identity"
+            backends: true
           # ADR-0004/0005 reshape scenarios (Filesystem only). Split in two so the
           # cron-driven verify/replication waits don't push one shard past the job
           # timeout.
