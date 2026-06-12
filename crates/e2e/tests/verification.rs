@@ -10,13 +10,11 @@
 mod common;
 use common::*;
 
-use std::time::Duration;
-
 use kube::Api;
 use kube::api::{Patch, PatchParams};
 
 use kopiur_api::SnapshotPolicy;
-use kopiur_e2e::{E2E_NAMESPACE, Need, World, poll_interval, wait_until};
+use kopiur_e2e::{E2E_NAMESPACE, Need, World, default_timeout, poll_interval, wait_until};
 
 /// Verification (ADR-0005 §4): a `SnapshotPolicy.spec.verification.quick` with an
 /// every-minute cron and a `successExpr` over the result drives a `kopia snapshot
@@ -60,7 +58,7 @@ async fn verification_quick_with_success_expr_stamps_last_verified() {
     // Within a couple of minutes a quick-verify Job runs and stamps lastVerified.
     wait_until(
         "SnapshotPolicy.status.lastVerified is stamped by a passing quick verify",
-        Duration::from_secs(240),
+        default_timeout(),
         poll_interval(),
         || async {
             let s = status_json(&policies, "e2e-verify-policy").await;

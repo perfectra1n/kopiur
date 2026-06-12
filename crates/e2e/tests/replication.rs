@@ -9,13 +9,11 @@
 mod common;
 use common::*;
 
-use std::time::Duration;
-
 use kube::Api;
 use kube::api::{DeleteParams, PostParams};
 
 use kopiur_api::RepositoryReplication;
-use kopiur_e2e::{E2E_NAMESPACE, Need, World, consts, poll_interval, wait_until};
+use kopiur_e2e::{E2E_NAMESPACE, Need, World, consts, default_timeout, poll_interval, wait_until};
 
 /// `RepositoryReplication` (ADR-0005 §13(d)): mirror a source filesystem repo to a
 /// SECOND filesystem repo on a schedule (`kopia repository sync-to`). An every-minute
@@ -73,7 +71,7 @@ async fn repository_replication_mirrors_to_second_filesystem_repo() {
     // Within a couple of minutes a replication runs and records lastReplicated.
     wait_until(
         "RepositoryReplication records a successful run (status.lastReplicated)",
-        Duration::from_secs(240),
+        default_timeout(),
         poll_interval(),
         || async {
             let s = status_json(&repls, name).await;
