@@ -265,9 +265,11 @@ pub struct MaintenanceRunArgs {
 /// `kubectl kopiur migrate …`
 #[derive(clap::Subcommand, Debug)]
 pub enum MigrateCommand {
-    /// Translate VolSync restic ReplicationSources/Destinations into kopiur
-    /// SnapshotPolicy/SnapshotSchedule/Restore manifests. CONFIG ONLY — no
-    /// backup data moves; the kopiur repository starts empty.
+    /// Translate VolSync ReplicationSources/Destinations into kopiur
+    /// SnapshotPolicy/SnapshotSchedule/Restore manifests. restic sources are
+    /// CONFIG ONLY (no backup data moves; the kopiur repository starts empty);
+    /// kopia sources (perfectra1n/volsync fork) ADOPT the existing kopia
+    /// repository in place — snapshots and identity continue seamlessly.
     Volsync(MigrateVolsyncArgs),
 }
 
@@ -293,9 +295,11 @@ pub struct MigrateVolsyncArgs {
     )]
     pub repository_kind: RepositoryKindArg,
 
-    /// Read each restic repository Secret and EMIT a kopiur Repository +
-    /// credential Secrets derived from it (the kopia password is a REPLACE_ME
-    /// placeholder you must set).
+    /// Read each repository Secret and EMIT a kopiur Repository derived from
+    /// it. restic: + credential Secrets, with a REPLACE_ME kopia password you
+    /// must set. kopia (fork): the existing repository is ADOPTED — its Secret
+    /// (password + matching credentials) is referenced in place, no
+    /// placeholder.
     #[arg(long, group = "repo_source")]
     pub resolve_secrets: bool,
 

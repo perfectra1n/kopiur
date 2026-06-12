@@ -124,3 +124,44 @@ pub async fn apply_all(client: &Client, fixtures: &[Fixture]) -> Result<()> {
     }
     Ok(())
 }
+
+/// Run a [`crate::builders::foreign_kopia_pod`] seeder to completion, deleting
+/// any leftover pod of the same name first (a reused cluster must not 409 or
+/// replay a finished pod). Shared by the import and CLI-migration e2e suites —
+/// it is how a test plants a repository/snapshots that kopiur did NOT produce.
+pub async fn run_foreign_seeder(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    steps: &[crate::builders::SeedStep<'_>],
+) -> Result<()> {
+    use k8s_openapi::api::core::v1::Pod;
+    use kube::api::{DeleteParams, PostParams};
+
+    let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
+    if pods
+        .get_opt(name)
+        .await
+        .context("query leftover seeder pod")?
+        .is_some()
+    {
+        let _ = pods.delete(name, &DeleteParams::default()).await;
+        crate::wait_until(
+            &format!("leftover seeder pod {name} is gone"),
+            crate::default_timeout(),
+            crate::poll_interval(),
+            || async { Ok(pods.get_opt(name).await?.is_none().then_some(())) },
+        )
+        .await
+        .context("leftover seeder pod should delete")?;
+    }
+    pods.create(
+        &PostParams::default(),
+        &crate::builders::foreign_kopia_pod(ns, name, steps),
+    )
+    .await
+    .context("create foreign kopia seeder pod")?;
+    crate::wait::pod_succeeded(client, ns, name)
+        .await
+        .context("foreign kopia seeder pod should succeed")
+}

@@ -25,7 +25,10 @@
 //! - `migrate volsync` translates a real ReplicationSource (string `last`!),
 //!   --strict refuses unmappables, --apply'd objects reconcile (proven by a
 //!   snapshot through the translated policy), --resolve-secrets refuses the
-//!   password placeholder;
+//!   password placeholder; the fork-kopia path ADOPTS a seeded repository in
+//!   place (no placeholder, Repository connects without create, the seeded
+//!   snapshot is discovered with its identity intact, and the next snapshot
+//!   CONTINUES that identity);
 //! - `ls`/`cat`/`download` through a read-only session pod (byte-exact,
 //!   mutating exec refused), `session end` GC, and the `--local` transport via
 //!   a port-forwarded MinIO;
@@ -1060,29 +1063,12 @@ fn volsync_crd_json(kind: &str, plural: &str) -> serde_json::Value {
     })
 }
 
-/// M6: `migrate volsync` translates a real ReplicationSource into kopiur
-/// objects that RECONCILE (the proof: a snapshot through the translated
-/// policy succeeds), `--strict` refuses unmappable fields, and
-/// `--resolve-secrets --apply` refuses the password placeholder.
-#[tokio::test]
-#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
-async fn cli_migrate_volsync() {
-    use k8s_openapi::api::core::v1::Secret;
+/// Apply the minimal schema-preserving VolSync CRDs and wait until they are
+/// Established — shared by the restic and fork-kopia migration scenarios.
+async fn ensure_volsync_crds(client: &kube::Client) {
     use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
-    use kube::api::{DynamicObject, GroupVersionKind, Patch, PatchParams};
-    use kube::discovery::ApiResource;
+    use kube::api::{Patch, PatchParams};
 
-    let Some(world) = World::connect().await else {
-        return;
-    };
-    world
-        .ensure(&[Need::Minio, Need::Filesystem])
-        .await
-        .expect("provision MinIO + buckets + source PVC");
-    let client = world.client().clone();
-    ensure_cli_fixtures(&client).await;
-
-    // --- VolSync CRDs (minimal, schema-preserving) + fixtures.
     let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
     let params = PatchParams::apply("kopiur-e2e").force();
     for (kind, plural) in [
@@ -1120,6 +1106,29 @@ async fn cli_migrate_volsync() {
     )
     .await
     .expect("CRDs establish");
+}
+
+/// M6: `migrate volsync` translates a real ReplicationSource into kopiur
+/// objects that RECONCILE (the proof: a snapshot through the translated
+/// policy succeeds), `--strict` refuses unmappable fields, and
+/// `--resolve-secrets --apply` refuses the password placeholder.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
+async fn cli_migrate_volsync() {
+    use k8s_openapi::api::core::v1::Secret;
+    use kube::api::{DynamicObject, GroupVersionKind};
+    use kube::discovery::ApiResource;
+
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Minio, Need::Filesystem])
+        .await
+        .expect("provision MinIO + buckets + source PVC");
+    let client = world.client().clone();
+    ensure_cli_fixtures(&client).await;
+    ensure_volsync_crds(&client).await;
 
     let secrets: Api<Secret> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let restic_secret: Secret = serde_json::from_value(serde_json::json!({
@@ -1287,6 +1296,304 @@ async fn cli_migrate_volsync() {
     ]);
     assert!(!out.success, "--apply must refuse REPLACE_ME placeholders");
     assert!(out.stderr.contains("REPLACE_ME"), "{}", out.stderr);
+}
+
+/// `migrate volsync` for the perfectra1n/volsync fork's **kopia** mover: the
+/// existing kopia repository is ADOPTED IN PLACE, proven end-to-end:
+/// 1. RAW kopia (standing in for the fork's mover) seeds a repository in MinIO
+///    with a snapshot under the fork's would-be identity
+///    `vs-kopia-app@<ns>:/data/app`.
+/// 2. A fully-mappable kopia source passes `--strict` (exit 0 — nothing about
+///    the kopia path is unmappable by design).
+/// 3. `--resolve-secrets --apply` succeeds in ONE shot (no password
+///    placeholder: the fork Secret is referenced in place) and the banner says
+///    ADOPTED, not config-only.
+/// 4. The emitted Repository (NO create block) reaches Ready by CONNECTING,
+///    and the seeded snapshot surfaces as an `origin: discovered` Snapshot
+///    carrying the EXACT fork identity.
+/// 5. A snapshot through the translated policy records the SAME identity —
+///    history continuity, the property this translation exists for.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
+async fn cli_migrate_volsync_kopia() {
+    use k8s_openapi::api::core::v1::Secret;
+    use kopiur_e2e::builders::SeedStep;
+    use kopiur_e2e::consts;
+    use kube::api::{DynamicObject, GroupVersionKind, Patch, PatchParams};
+    use kube::discovery::ApiResource;
+
+    const VSK_BUCKET: &str = "kopiur-vsk";
+    const VSK_SECRET: &str = "vs-kopia-secret";
+    const VSK_RS: &str = "vs-kopia-app";
+    const VSK_REPO: &str = "vs-kopia-secret-kopiur";
+    /// The identity the fork would have recorded: username = sanitized RS name,
+    /// hostname = sanitized namespace, path = the source's sourcePathOverride.
+    const VSK_IDENTITY: (&str, &str, &str) = (VSK_RS, E2E_NAMESPACE, "/data/app");
+
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Minio, Need::Filesystem])
+        .await
+        .expect("provision MinIO + buckets + source PVC");
+    let client = world.client().clone();
+    ensure_cli_fixtures(&client).await; // the EXISTING repo the --strict probe targets
+    ensure_volsync_crds(&client).await;
+
+    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let policies: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let schedules: Api<SnapshotSchedule> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let snapshots: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    // Rerun hygiene BEFORE seeding. Order matters: Snapshot CRs go FIRST,
+    // while their Repository still exists — a produced Snapshot's deletion
+    // finalizer needs the repository to delete its kopia snapshot, so deleting
+    // the Repository first would strand it. Discovered rows (forced Retain)
+    // and the schedule/policy/repo follow.
+    delete_and_wait_gone(&schedules, VSK_RS).await;
+    delete_and_wait_gone(&policies, VSK_RS).await;
+    delete_and_wait_gone(&snapshots, "vs-kopia-adopted").await;
+    for snap in snapshots
+        .list(&ListParams::default().labels("kopiur.home-operations.com/origin=discovered"))
+        .await
+        .expect("list discovered Snapshots")
+        .items
+    {
+        let v = serde_json::to_value(&snap).unwrap_or_default();
+        if v.pointer("/status/snapshot/identity/username")
+            .and_then(|u| u.as_str())
+            == Some(VSK_IDENTITY.0)
+        {
+            delete_and_wait_gone(&snapshots, &snap.metadata.name.clone().unwrap_or_default()).await;
+        }
+    }
+    delete_and_wait_gone(&repos, VSK_REPO).await;
+
+    // --- 1. Seed the "fork's" repository: a real kopia repo + one snapshot
+    // under the identity the fork would have used.
+    kopiur_e2e::apply::run_foreign_seeder(
+        &client,
+        E2E_NAMESPACE,
+        "vsk-seeder",
+        &[
+            SeedStep::WipeBucket { bucket: VSK_BUCKET },
+            SeedStep::WriteFile {
+                dir: "app",
+                file: "hello.txt",
+                content: "fork data v1",
+            },
+            SeedStep::CreateRepo {
+                bucket: VSK_BUCKET,
+                username: VSK_IDENTITY.0,
+                hostname: VSK_IDENTITY.1,
+            },
+            SeedStep::Snapshot { dir: "app" },
+        ],
+    )
+    .await
+    .expect("seed the fork kopia repository");
+
+    // --- The fork-shaped Secret (the REAL key surface: KOPIA_REPOSITORY URL,
+    // KOPIA_PASSWORD, kopia-named AWS creds + endpoint/region env).
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let params = PatchParams::apply("kopiur-e2e").force();
+    let secret: Secret = serde_json::from_value(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": { "name": VSK_SECRET, "namespace": E2E_NAMESPACE },
+        "stringData": {
+            "KOPIA_REPOSITORY": format!("s3://{VSK_BUCKET}"),
+            "KOPIA_PASSWORD": consts::KOPIA_PASSWORD,
+            "AWS_ACCESS_KEY_ID": consts::MINIO_USER,
+            "AWS_SECRET_ACCESS_KEY": consts::MINIO_PASS,
+            // http:// endpoint must derive endpoint + tls.disableTls.
+            "AWS_S3_ENDPOINT": format!("http://{}", consts::MINIO_ENDPOINT),
+            "AWS_REGION": "us-east-1"
+        }
+    }))
+    .unwrap();
+    secrets
+        .patch(VSK_SECRET, &params, &Patch::Apply(&secret))
+        .await
+        .expect("apply fork kopia Secret");
+
+    let rs_gvk = GroupVersionKind::gvk("volsync.backube", "v1alpha1", "ReplicationSource");
+    let rs_api: Api<DynamicObject> = Api::namespaced_with(
+        client.clone(),
+        E2E_NAMESPACE,
+        &ApiResource::from_gvk(&rs_gvk),
+    );
+    let rs: DynamicObject = serde_json::from_value(serde_json::json!({
+        "apiVersion": "volsync.backube/v1alpha1",
+        "kind": "ReplicationSource",
+        "metadata": { "name": VSK_RS, "namespace": E2E_NAMESPACE },
+        "spec": {
+            "sourcePVC": "e2e-src",
+            "trigger": { "schedule": "0 3 * * *" },
+            "kopia": {
+                "repository": VSK_SECRET,
+                "copyMethod": "Direct",
+                "retain": { "daily": 7, "latest": 3 },
+                "compression": "zstd",
+                // The seeder snapshots /data/app; the fork would have recorded
+                // that path via its sourcePathOverride.
+                "sourcePathOverride": "/data/app"
+            }
+        }
+    }))
+    .unwrap();
+    rs_api
+        .patch(VSK_RS, &params, &Patch::Apply(&rs))
+        .await
+        .expect("apply fork ReplicationSource");
+
+    // --- 2. A fully-mappable kopia source must PASS --strict (the restic test
+    // asserts the inverse). Probed against the existing fixture repository.
+    let out = run_cli(&[
+        "-n",
+        E2E_NAMESPACE,
+        "migrate",
+        "volsync",
+        "--name",
+        VSK_RS,
+        "--repository",
+        REPO,
+        "--strict",
+    ]);
+    assert!(
+        out.success,
+        "a fully-mappable kopia source must pass --strict: {}",
+        out.stderr
+    );
+
+    // --- 3. Adopt in one shot: --resolve-secrets --apply (NO placeholder).
+    let out = run_cli(&[
+        "-n",
+        E2E_NAMESPACE,
+        "migrate",
+        "volsync",
+        "--name",
+        VSK_RS,
+        "--resolve-secrets",
+        "--apply",
+    ]);
+    assert!(out.success, "kopia migrate --apply failed: {}", out.stderr);
+    assert!(
+        out.stdout.contains("REPOSITORY ADOPTED IN PLACE"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("REPLACE_ME"),
+        "the kopia path must have no placeholder: {}",
+        out.stdout
+    );
+    assert!(
+        out.stderr.contains("referenced IN PLACE") && out.stderr.contains("KEEP Secret"),
+        "accounting must carry the keep-the-secret warning: {}",
+        out.stderr
+    );
+
+    // The translated policy pins the fork identity + source path.
+    let policy = policies.get(VSK_RS).await.expect("translated policy");
+    let pv = serde_json::to_value(&policy).unwrap();
+    assert_eq!(pv["spec"]["identity"]["username"], VSK_IDENTITY.0);
+    assert_eq!(pv["spec"]["identity"]["hostname"], VSK_IDENTITY.1);
+    assert_eq!(
+        pv["spec"]["sources"][0]["sourcePathOverride"],
+        VSK_IDENTITY.2
+    );
+    assert_eq!(pv["spec"]["retention"]["keepLatest"], 3);
+    assert_eq!(pv["spec"]["retention"]["keepDaily"], 7);
+    assert_eq!(pv["spec"]["compression"]["compressor"], "zstd");
+    // Adoption semantics on the emitted Repository: in-place password ref, no
+    // create block, http endpoint derived into endpoint + disableTls.
+    let repo = repos.get(VSK_REPO).await.expect("adopting Repository");
+    let rv = serde_json::to_value(&repo).unwrap();
+    assert_eq!(
+        rv["spec"]["encryption"]["passwordSecretRef"]["name"],
+        VSK_SECRET
+    );
+    assert!(rv["spec"].get("create").is_none(), "{rv}");
+    assert_eq!(rv["spec"]["backend"]["s3"]["bucket"], VSK_BUCKET);
+    assert_eq!(rv["spec"]["backend"]["s3"]["tls"]["disableTls"], true);
+    assert_eq!(
+        rv["spec"]["backend"]["s3"]["auth"]["secretRef"]["name"],
+        VSK_SECRET
+    );
+
+    // --- 4. The Repository ADOPTS (connects, never creates) and the seeded
+    // snapshot surfaces as a discovered Snapshot with the EXACT fork identity.
+    wait_phase(&repos, VSK_REPO, "Ready")
+        .await
+        .expect("adopting repository Ready");
+    let repo_uid = repo.metadata.uid.clone().unwrap_or_default();
+    let identity_of = |s: &Snapshot| {
+        let v = serde_json::to_value(s).unwrap_or_default();
+        let id = v
+            .pointer("/status/snapshot/identity")
+            .cloned()
+            .unwrap_or_default();
+        format!(
+            "{}@{}:{}",
+            id["username"].as_str().unwrap_or(""),
+            id["hostname"].as_str().unwrap_or(""),
+            id["sourcePath"].as_str().unwrap_or("")
+        )
+    };
+    let want_identity = format!("{}@{}:{}", VSK_IDENTITY.0, VSK_IDENTITY.1, VSK_IDENTITY.2);
+    let discovered_selector = format!(
+        "kopiur.home-operations.com/origin=discovered,\
+         kopiur.home-operations.com/repository-uid={repo_uid}"
+    );
+    wait_until(
+        "the seeded fork snapshot is discovered with its identity intact",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let rows = snapshots
+                .list(&ListParams::default().labels(&discovered_selector))
+                .await?
+                .items;
+            Ok(rows
+                .iter()
+                .any(|s| identity_of(s) == want_identity)
+                .then_some(()))
+        },
+    )
+    .await
+    .expect("discovered Snapshot with the fork identity");
+
+    // --- 5. History continuity: the next snapshot through the translated
+    // policy records the SAME identity the fork was writing.
+    let out = run_cli(&[
+        "-n",
+        E2E_NAMESPACE,
+        "snapshot",
+        "now",
+        "--policy",
+        VSK_RS,
+        "--name",
+        "vs-kopia-adopted",
+        "--wait",
+        "--timeout",
+        "5m",
+    ]);
+    assert!(
+        out.success,
+        "a snapshot through the adopted repository must succeed: {}",
+        out.stderr
+    );
+    let produced = snapshots
+        .get("vs-kopia-adopted")
+        .await
+        .expect("produced Snapshot");
+    assert_eq!(
+        identity_of(&produced),
+        want_identity,
+        "the produced snapshot must CONTINUE the fork's identity"
+    );
 }
 
 /// Kill-on-drop guard for a background `kubectl port-forward`.

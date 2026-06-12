@@ -152,6 +152,9 @@ pub const BUCKETS: &[&str] = &[
     "kopiur",
     // kubectl-kopiur plugin e2e (crates/e2e/tests/cli.rs).
     "kopiur-cli",
+    // `migrate volsync` fork-kopia adoption: a foreign-seeded repository the
+    // translated Repository adopts in place (crates/e2e/tests/cli.rs).
+    "kopiur-vsk",
     "kopiur-guard",
     // Cluster-scoped safe-create guard: initialized once, then a wrong-password
     // ClusterRepository must NOT recreate over it.

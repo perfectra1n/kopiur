@@ -112,35 +112,12 @@ where
     }
 }
 
-/// Run a foreign seeder pod to completion (deleting any leftover of the same
-/// name first, so a reused cluster can't 409 or replay a finished pod).
+/// Run a foreign seeder pod to completion (the shared
+/// [`kopiur_e2e::apply::run_foreign_seeder`], expect-wrapped for test flow).
 async fn run_seeder(client: &Client, name: &str, steps: &[SeedStep<'_>]) {
-    let pods: Api<Pod> = Api::namespaced(client.clone(), E2E_NAMESPACE);
-    if pods
-        .get_opt(name)
+    kopiur_e2e::apply::run_foreign_seeder(client, E2E_NAMESPACE, name, steps)
         .await
-        .expect("query seeder pod")
-        .is_some()
-    {
-        let _ = pods.delete(name, &DeleteParams::default()).await;
-        wait_until(
-            &format!("leftover seeder pod {name} is gone"),
-            default_timeout(),
-            poll_interval(),
-            || async { Ok(pods.get_opt(name).await?.is_none().then_some(())) },
-        )
-        .await
-        .expect("leftover seeder pod should delete");
-    }
-    pods.create(
-        &PostParams::default(),
-        &builders::foreign_kopia_pod(E2E_NAMESPACE, name, steps),
-    )
-    .await
-    .expect("create foreign kopia seeder pod");
-    wait::pod_succeeded(client, E2E_NAMESPACE, name)
-        .await
-        .expect("foreign kopia seeder pod should succeed");
+        .expect("foreign kopia seeder");
 }
 
 /// This repository CR's discovered rows, via the dedup labels the catalog scan

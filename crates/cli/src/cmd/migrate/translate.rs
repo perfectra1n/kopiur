@@ -52,13 +52,13 @@ pub struct Translation {
 }
 
 impl Translation {
-    fn mapped(&mut self, field: &str, to: &str) {
+    pub(super) fn mapped(&mut self, field: &str, to: &str) {
         self.notes.push(FieldNote {
             field: field.into(),
             disposition: Disposition::Mapped { to: to.into() },
         });
     }
-    fn unmappable(&mut self, field: &str, reason: &str) {
+    pub(super) fn unmappable(&mut self, field: &str, reason: &str) {
         self.has_unmappable = true;
         self.notes.push(FieldNote {
             field: field.into(),
@@ -67,7 +67,7 @@ impl Translation {
             },
         });
     }
-    fn ignored(&mut self, field: &str, reason: &str) {
+    pub(super) fn ignored(&mut self, field: &str, reason: &str) {
         self.notes.push(FieldNote {
             field: field.into(),
             disposition: Disposition::Ignored {
@@ -327,6 +327,20 @@ pub fn translate_destination(
                 "spec.restic.destinationPVC",
                 "Restore.spec.target.pvcRef.name",
             );
+            // Provisioning knobs are moot when restoring into an existing PVC.
+            for (field, present) in [
+                ("capacity", restic.capacity.is_some()),
+                ("accessModes", restic.access_modes.is_some()),
+                ("storageClassName", restic.storage_class_name.is_some()),
+            ] {
+                if present {
+                    t.ignored(
+                        &format!("spec.restic.{field}"),
+                        "destinationPVC takes precedence; the restore writes into the \
+                         existing PVC and provisions nothing",
+                    );
+                }
+            }
             serde_json::json!({ "pvcRef": { "name": existing } })
         }
         (None, Some(capacity)) => {
