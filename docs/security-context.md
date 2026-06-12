@@ -193,6 +193,9 @@ Anything that makes the mover's **effective** context elevated requires a per-na
 $ kubectl annotate namespace <ns> kopiur.home-operations.com/privileged-movers=true
 ```
 
+The operator watches namespaces, so the annotation takes effect within seconds —
+the blocked Snapshot/Restore proceeds without being re-applied.
+
 Why the gate exists, and the revoke path, are covered in [Movers → Privileged movers](movers.md#privileged-movers). The rationale mirrors VolSync's `privileged-movers` model: the operator mints a mover ServiceAccount in the workload namespace, and a tenant there could otherwise reuse it at the mover's privilege.
 
 ## Complex circumstances

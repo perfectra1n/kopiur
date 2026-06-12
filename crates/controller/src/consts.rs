@@ -198,6 +198,13 @@ pub const INVALID_SCHEDULE_REASON: &str = "InvalidSchedule";
 pub const FIX_SCHEDULE_ACTION: &str = "FixSchedule";
 /// Event `reason` when an object lacked a field the reconciler requires.
 pub const INVARIANT_VIOLATED_REASON: &str = "InvariantViolated";
+/// Event `reason` when a reconcile is blocked on an out-of-band grant an admin
+/// applies on ANOTHER object (e.g. the `privileged-movers` namespace annotation).
+pub const BLOCKED_ON_GRANT_REASON: &str = "BlockedOnGrant";
+/// `action` for a blocked grant: apply the named grant on the named object —
+/// the granting object is watched, so the blocked CR re-reconciles the moment
+/// the grant lands.
+pub const APPLY_GRANT_ACTION: &str = "ApplyGrant";
 /// Event `reason` when self-managed webhook TLS setup failed.
 pub const WEBHOOK_SETUP_FAILED_REASON: &str = "WebhookSetupFailed";
 /// `action` for a webhook TLS setup failure: check the webhook configuration.

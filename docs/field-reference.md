@@ -453,7 +453,10 @@ alias on the wire). `snapshotRef` is `{ name }`.
 
 ### RunStatus
 
-`{ lastRunAt?, nextScheduledAt?, consecutiveFailures?, lastContentReclaimedBytes? }`.
+`{ lastRunAt?, nextScheduledAt?, lastHandledAt?, consecutiveFailures?, lastContentReclaimedBytes? }`.
+`lastHandledAt` records the most recent cron slot whose Job finished — including
+a *yield* to a foreign lease holder, which deliberately does not move `lastRunAt` —
+so a handled slot never re-fires after its Job self-reaps.
 
 ## See also
 

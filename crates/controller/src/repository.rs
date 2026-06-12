@@ -454,8 +454,26 @@ async fn bootstrap_via_mover(
         };
     }
 
-    // No Job yet: build + apply it (ConfigMap carries the work spec; the result
-    // is written back into the same ConfigMap under `result.json`).
+    // No Job: it either never ran, or the kube TTL controller reaped the finished
+    // one (`ttlSecondsAfterFinished`). An already-Ready repo only re-creates it
+    // when a re-run is actually warranted (`bootstrap_create_due`: catalog refresh
+    // due, or spec changed) — re-creating unconditionally would pin the refresh
+    // cadence to the Job TTL instead of `catalog.refreshInterval`.
+    if !catalog::bootstrap_create_due(
+        repo.status.as_ref().and_then(|s| s.phase) == Some(RepositoryPhase::Ready),
+        repo.metadata.generation,
+        repo.status.as_ref().and_then(|s| s.observed_generation),
+        last_refresh_at(repo),
+        CatalogBounds::effective_refresh_interval(repo.spec.catalog.as_ref()),
+        chrono::Utc::now(),
+    ) {
+        return Ok(Action::requeue(catalog::reconcile_interval(
+            repo.spec.catalog.as_ref(),
+        )));
+    }
+
+    // Build + apply the Job (ConfigMap carries the work spec; the result is
+    // written back into the same ConfigMap under `result.json`).
     let create_enabled = repo
         .spec
         .create

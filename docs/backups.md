@@ -339,6 +339,10 @@ spec:
 
 Failed `Snapshot` CRs from a schedule are bounded by `failedJobsHistoryLimit` (below); successful ones are pruned by GFS retention.
 
+### A `Snapshot` runs exactly once
+
+A `Snapshot` is **one-shot**: once it reaches `Succeeded` or `Failed`, the operator never runs its mover again. The finished mover `Job` self-removes after `ttlSecondsAfterFinished` (default 1h, see [mover](#mover--resources-cache-security-context)) — that cleanup does **not** re-trigger the backup, and the recorded `status.snapshot.kopiaSnapshotID` / timing never change afterwards. The only things the operator still reconciles on a `Succeeded` snapshot are [`pin`](#pin--exempt-a-snapshot-from-retention) changes and deletion. A `Failed` snapshot stays failed until you create a new `Snapshot` (typically after fixing the recipe) — retries *within* a run are the `failurePolicy` above, never a silent re-run of a finished one.
+
 ## SnapshotSchedule — the cron
 
 A schedule binds a recipe to a cadence and creates `Snapshot` CRs (see [example 01](examples.md#example-01--single-pvc-scheduled)):

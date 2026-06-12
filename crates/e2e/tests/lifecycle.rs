@@ -652,7 +652,13 @@ async fn privileged_mover_requires_namespace_optin() {
         "message must tell the admin which annotation to set"
     );
 
-    // Opt in → the gate clears.
+    // Opt in → the gate clears. The deadline is deliberately BELOW the 300s
+    // structural-backstop requeue: the blocked Snapshot only re-checks that
+    // fast because the Namespace watch (`watch::namespace_to_snapshots`)
+    // delivers the annotation — this used to be a 30s blind hot-loop instead.
+    // (Deliberate trade: a dropped Namespace watch event — the CI black-hole
+    // flake class — fails this test rather than hiding behind the backstop;
+    // a failure here means watch delivery, not the gate, regressed.)
     annotate_namespace(
         &client,
         APP_NS,
@@ -661,9 +667,17 @@ async fn privileged_mover_requires_namespace_optin() {
     )
     .await
     .expect("annotate namespace for privileged movers");
-    wait_condition(&backups, "e2e-priv-backup", "MoverPermitted", "True")
-        .await
-        .expect("MoverPermitted should clear once the namespace opts in");
+    wait_until(
+        "e2e-priv-backup MoverPermitted=True (watch-delivered, beats the 300s backstop)",
+        Duration::from_secs(240),
+        poll_interval(),
+        || async {
+            let s = status_json(&backups, "e2e-priv-backup").await;
+            Ok((condition_status(&s, "MoverPermitted").as_deref() == Some("True")).then_some(()))
+        },
+    )
+    .await
+    .expect("the namespace opt-in must un-stick the Snapshot via the Namespace watch");
 
     // Cleanup.
     let _ = crepos

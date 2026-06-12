@@ -1334,11 +1334,11 @@ mod reconcile_failure_events {
         EVENT_NOTE_MAX_BYTES, TRUNCATION_MARKER, event_ref, reconcile_failure_event,
     };
     use crate::consts::{
-        CHECK_API_SERVER_ACTION, CHECK_CREDENTIALS_ACTION, CHECK_REFERENCES_ACTION,
-        CHECK_WEBHOOK_CONFIGURATION_ACTION, FIX_SCHEDULE_ACTION, FIX_SPEC_ACTION,
-        INVALID_SCHEDULE_REASON, INVALID_SPEC_REASON, INVARIANT_VIOLATED_REASON,
-        KUBE_API_ERROR_REASON, MISSING_DEPENDENCY_REASON, REPORT_ISSUE_ACTION,
-        SERIALIZATION_FAILED_REASON, WEBHOOK_SETUP_FAILED_REASON,
+        APPLY_GRANT_ACTION, BLOCKED_ON_GRANT_REASON, CHECK_API_SERVER_ACTION,
+        CHECK_CREDENTIALS_ACTION, CHECK_REFERENCES_ACTION, CHECK_WEBHOOK_CONFIGURATION_ACTION,
+        FIX_SCHEDULE_ACTION, FIX_SPEC_ACTION, INVALID_SCHEDULE_REASON, INVALID_SPEC_REASON,
+        INVARIANT_VIOLATED_REASON, KUBE_API_ERROR_REASON, MISSING_DEPENDENCY_REASON,
+        REPORT_ISSUE_ACTION, SERIALIZATION_FAILED_REASON, WEBHOOK_SETUP_FAILED_REASON,
     };
     use crate::error::Error;
     use kopiur_kopia::{KopiaError, KopiaErrorClass};
@@ -1382,6 +1382,14 @@ mod reconcile_failure_events {
                 MISSING_DEPENDENCY_REASON,
                 CHECK_REFERENCES_ACTION,
                 "create it, or fix the reference",
+            ),
+            (
+                Error::BlockedOnGrant(
+                    "namespace `app` has not opted in to privileged movers".into(),
+                ),
+                BLOCKED_ON_GRANT_REASON,
+                APPLY_GRANT_ACTION,
+                "reconciles automatically",
             ),
             (
                 Error::Serialization(serde_error()),

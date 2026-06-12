@@ -5,10 +5,11 @@ use kube::runtime::events::{Event, EventType, Recorder};
 use kopiur_kopia::KopiaErrorClass;
 
 use crate::consts::{
-    BOOTSTRAP_JOB_FAILED_REASON, CHECK_API_SERVER_ACTION, CHECK_BACKEND_ACTION,
-    CHECK_CREDENTIALS_ACTION, CHECK_PERMISSIONS_ACTION, CHECK_REFERENCES_ACTION,
-    CHECK_WEBHOOK_CONFIGURATION_ACTION, ENABLE_CREATE_ACTION, FIX_SCHEDULE_ACTION, FIX_SPEC_ACTION,
-    INVALID_SCHEDULE_REASON, INVALID_SPEC_REASON, INVARIANT_VIOLATED_REASON, KUBE_API_ERROR_REASON,
+    APPLY_GRANT_ACTION, BLOCKED_ON_GRANT_REASON, BOOTSTRAP_JOB_FAILED_REASON,
+    CHECK_API_SERVER_ACTION, CHECK_BACKEND_ACTION, CHECK_CREDENTIALS_ACTION,
+    CHECK_PERMISSIONS_ACTION, CHECK_REFERENCES_ACTION, CHECK_WEBHOOK_CONFIGURATION_ACTION,
+    ENABLE_CREATE_ACTION, FIX_SCHEDULE_ACTION, FIX_SPEC_ACTION, INVALID_SCHEDULE_REASON,
+    INVALID_SPEC_REASON, INVARIANT_VIOLATED_REASON, KUBE_API_ERROR_REASON,
     MISSING_CREDENTIALS_REASON, MISSING_DEPENDENCY_REASON, REPORT_ISSUE_ACTION,
     REPOSITORY_NOT_INITIALIZED_REASON, SERIALIZATION_FAILED_REASON, WEBHOOK_SETUP_FAILED_REASON,
 };
@@ -235,6 +236,15 @@ pub(crate) fn reconcile_failure_event(err: &Error, uid: u32) -> FailureEvent {
             format!(
                 "{err} — create it, or fix the reference in this object's spec; the reconcile \
                  retries automatically."
+            ),
+        ),
+        Error::BlockedOnGrant(_) => (
+            BLOCKED_ON_GRANT_REASON,
+            APPLY_GRANT_ACTION,
+            format!(
+                "{err}. An administrator must apply the grant named above (it lives on another \
+                 object, e.g. a namespace annotation); the moment it lands this object \
+                 reconciles automatically — no re-apply needed."
             ),
         ),
         Error::Serialization(_) => (

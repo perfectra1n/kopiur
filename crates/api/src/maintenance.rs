@@ -196,6 +196,20 @@ pub fn managed_lease(kind: crate::common::RepositoryKind, namespace: &str, name:
     }
 }
 
+/// The mover-owned condition recording lease state on `Maintenance.status`:
+/// `True` (lease claimed, run proceeded) or `False` with one of the reasons
+/// below. Written by the mover, matched by the controller (Ready degradation)
+/// and the kubectl plugin — one definition so the producers and readers cannot
+/// drift.
+pub const LEASE_OWNED_CONDITION: &str = "LeaseOwned";
+/// `LeaseOwned=False` reason: a foreign owner holds the lease and
+/// `takeoverPolicy: Never` — the run yielded.
+pub const LEASE_HELD_BY_OTHER_REASON: &str = "LeaseHeldByOther";
+/// `LeaseOwned=False` reason: a foreign owner holds the lease and
+/// `takeoverPolicy: PromptCondition` — the run yielded, prompting the operator
+/// to set `Force`.
+pub const LEASE_TAKEOVER_PROMPT_REASON: &str = "LeaseTakeoverPrompt";
+
 /// The STABLE kopia client identity a maintenance mover assumes for `lease`
 /// (`(username, hostname)`); the mover sets it with `kopia repository
 /// set-client` so kopia's designated-owner check compares something stable —
@@ -452,6 +466,20 @@ pub struct RunStatus {
     /// RFC3339 instant of the next scheduled run of this kind (cron + jitter, pinned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_scheduled_at: Option<String>,
+    /// RFC3339 instant the controller last observed one of this kind's per-slot
+    /// Jobs reach terminal success — the mover either ran maintenance (which
+    /// also advances `lastRunAt`) or deliberately *yielded* the lease (which
+    /// does not). The scheduler measures the next slot from
+    /// `max(lastRunAt, lastHandledAt)`, so a handled slot never re-fires after
+    /// its Job self-reaps via `ttlSecondsAfterFinished`. Without this, a yielded
+    /// slot's only record was the (self-reaping) Job itself, and the same slot
+    /// respawned a yield Job every TTL period, forever. The stamp is the
+    /// *observation instant*, not the (possibly year-old, first-ever) slot
+    /// itself — anchoring at the slot would make a yield-only Maintenance march
+    /// through the entire backlog of historic slots one Job at a time. Same
+    /// catch-up-once semantics as the mover's `lastRunAt = now`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_handled_at: Option<String>,
     /// Count of back-to-back failed runs of this kind; resets on success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consecutive_failures: Option<i64>,

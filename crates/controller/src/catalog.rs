@@ -118,6 +118,42 @@ pub fn bootstrap_recycle_due(
     refresh_due(last_refresh_at, interval, now)
 }
 
+/// `true` when the *no-Job* path may (re-)create the bootstrap Job. The finished
+/// Job normally lingers until [`bootstrap_recycle_due`] recycles it — but the
+/// kube TTL controller can reap it first (`ttlSecondsAfterFinished`), and an
+/// unconditional re-create on that wake would pin the catalog refresh cadence to
+/// the Job TTL instead of `catalog.refreshInterval`. So: a repo that is not yet
+/// `Ready` always proceeds (first bootstrap / failure retry), and a `Ready` repo
+/// proceeds only when the same recycle predicate says a re-run is warranted
+/// (refresh due, or the spec changed since the last result was taken).
+///
+/// Deliberate: a `Failed`/`Degraded` mover-bootstrapped repo keeps re-trying on
+/// the Job-TTL cadence (default 1h) — a bounded, infrequent retry against a
+/// backend that may have been fixed out-of-band (creds repaired, bucket
+/// created). Unlike re-running *succeeded* work this converges, and the
+/// in-process filesystem path's stricter `terminal_gate_holds` hard-stop keys
+/// on a credential `resourceVersion` the mover path does not pin (yet).
+pub fn bootstrap_create_due(
+    phase_is_ready: bool,
+    generation: Option<i64>,
+    observed_generation: Option<i64>,
+    last_refresh_at: Option<&str>,
+    interval: std::time::Duration,
+    now: DateTime<Utc>,
+) -> bool {
+    if !phase_is_ready {
+        return true;
+    }
+    bootstrap_recycle_due(
+        true,
+        generation,
+        observed_generation,
+        last_refresh_at,
+        interval,
+        now,
+    )
+}
+
 /// A materialized discovered row (one `origin: discovered` `Snapshot` CR of this
 /// repository), as the planner sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -806,6 +842,64 @@ mod tests {
             Some(2),
             Some(2),
             Some(&stale),
+            interval,
+            now
+        ));
+    }
+
+    // Regression guard for the TTL-reap loop: when the kube TTL controller
+    // deletes the finished bootstrap Job before the refresh interval elapses,
+    // the no-Job path must NOT re-create it — otherwise the Job TTL (default
+    // 1h) silently overrides `catalog.refreshInterval`.
+    #[test]
+    fn bootstrap_create_after_ttl_reap_waits_for_the_refresh_interval() {
+        let now = Utc::now();
+        let interval = std::time::Duration::from_secs(3600);
+        let fresh = (now - chrono::Duration::minutes(5)).to_rfc3339();
+        let stale = (now - chrono::Duration::minutes(61)).to_rfc3339();
+        // Not Ready → always proceed (first bootstrap / failure retry).
+        assert!(bootstrap_create_due(
+            false,
+            Some(1),
+            None,
+            None,
+            interval,
+            now
+        ));
+        // Ready + same generation + fresh scan → HOLD: the reaped Job must not
+        // come back until the refresh is due.
+        assert!(!bootstrap_create_due(
+            true,
+            Some(2),
+            Some(2),
+            Some(&fresh),
+            interval,
+            now
+        ));
+        // Ready + refresh due → re-create for a fresh listing.
+        assert!(bootstrap_create_due(
+            true,
+            Some(2),
+            Some(2),
+            Some(&stale),
+            interval,
+            now
+        ));
+        // Ready + spec changed → re-create even when fresh.
+        assert!(bootstrap_create_due(
+            true,
+            Some(3),
+            Some(2),
+            Some(&fresh),
+            interval,
+            now
+        ));
+        // Ready but never stamped (e.g. pre-catalog status) → defensive re-run.
+        assert!(bootstrap_create_due(
+            true,
+            Some(2),
+            Some(2),
+            None,
             interval,
             now
         ));

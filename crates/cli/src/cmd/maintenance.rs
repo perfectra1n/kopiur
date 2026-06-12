@@ -98,7 +98,10 @@ pub fn yield_note(maint: &Maintenance) -> Option<String> {
         .map(|s| s.conditions.as_slice())
         .unwrap_or_default()
         .iter()
-        .find(|c| c.reason == "LeaseHeldByOther" || c.reason == "LeaseTakeoverPrompt")?;
+        .find(|c| {
+            c.reason == kopiur_api::maintenance::LEASE_HELD_BY_OTHER_REASON
+                || c.reason == kopiur_api::maintenance::LEASE_TAKEOVER_PROMPT_REASON
+        })?;
     Some(format!(
         "note: the Job succeeded by YIELDING the maintenance lease — no maintenance ran. {} \
          Set spec.ownership.takeoverPolicy=Force to claim it.",

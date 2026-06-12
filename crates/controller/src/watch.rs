@@ -16,7 +16,7 @@
 //! non-matching event (most cluster `Secret`s) yields an empty set and triggers
 //! nothing.
 
-use k8s_openapi::api::core::v1::{ConfigMap, Secret};
+use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret};
 use kube::ResourceExt;
 use kube::runtime::reflector::{ObjectRef, Store};
 
@@ -345,6 +345,49 @@ pub fn policy_to_schedules(
     })
 }
 
+// --- Namespace -> privileged-mover-blocked Snapshot / Restore ----------------
+
+/// Whether `conditions` carry a `MoverPermitted != True` entry — the marker a
+/// reconciler leaves when it refuses a privileged mover because the namespace
+/// has not opted in (`kopiur.home-operations.com/privileged-movers`).
+fn mover_blocked(conditions: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition]) -> bool {
+    conditions
+        .iter()
+        .any(|c| c.type_ == crate::consts::MOVER_PERMITTED_CONDITION && c.status != "True")
+}
+
+/// Snapshots in the changed `Namespace` that are blocked on the
+/// privileged-movers opt-in. Re-enqueued so the annotation takes effect the
+/// moment an admin adds it — the blocked CR's own requeue is only a slow
+/// watch-desync backstop (`Error::BlockedOnGrant`).
+pub fn namespace_to_snapshots(
+    store: &Store<Snapshot>,
+    namespace: &Namespace,
+) -> Vec<ObjectRef<Snapshot>> {
+    let ns = namespace.name_any();
+    select(store, |s: &Snapshot| {
+        s.namespace().as_deref() == Some(ns.as_str())
+            && s.status
+                .as_ref()
+                .is_some_and(|st| mover_blocked(&st.conditions))
+    })
+}
+
+/// Restores in the changed `Namespace` blocked on the privileged-movers opt-in
+/// (same contract as [`namespace_to_snapshots`]).
+pub fn namespace_to_restores(
+    store: &Store<Restore>,
+    namespace: &Namespace,
+) -> Vec<ObjectRef<Restore>> {
+    let ns = namespace.name_any();
+    select(store, |r: &Restore| {
+        r.namespace().as_deref() == Some(ns.as_str())
+            && r.status
+                .as_ref()
+                .is_some_and(|st| mover_blocked(&st.conditions))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +441,34 @@ mod tests {
             "billing",
             "nas"
         ));
+    }
+
+    #[test]
+    fn namespace_mapper_targets_only_mover_blocked_objects() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
+        let refused = Condition {
+            type_: crate::consts::MOVER_PERMITTED_CONDITION.into(),
+            status: "False".into(),
+            reason: crate::consts::PRIVILEGED_MOVER_NOT_PERMITTED_REASON.into(),
+            message: String::new(),
+            last_transition_time: Time(k8s_openapi::jiff::Timestamp::now()),
+            observed_generation: None,
+        };
+        // The refusal marker → mapped (the namespace grant must re-enqueue it).
+        assert!(mover_blocked(std::slice::from_ref(&refused)));
+        // Permitted (True) or unrelated conditions → not mapped: a namespace
+        // event must not re-enqueue every Snapshot in the namespace.
+        let permitted = Condition {
+            status: "True".into(),
+            ..refused.clone()
+        };
+        assert!(!mover_blocked(&[permitted]));
+        let unrelated = Condition {
+            type_: "Ready".into(),
+            ..refused
+        };
+        assert!(!mover_blocked(&[unrelated]));
+        assert!(!mover_blocked(&[]));
     }
 
     #[test]

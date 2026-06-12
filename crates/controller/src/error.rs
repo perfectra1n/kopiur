@@ -48,6 +48,14 @@ pub enum Error {
     #[error("missing dependency: {0}")]
     MissingDependency(String),
 
+    /// Blocked on a grant an admin applies out-of-band on ANOTHER object (e.g.
+    /// the namespace `privileged-movers` opt-in annotation). The granting object
+    /// is watched, so the grant re-enqueues the blocked CR the moment it lands —
+    /// the requeue is only a watch-desync backstop, so it runs on the slow
+    /// structural cadence instead of hot-looping every 30s until a human acts.
+    #[error("blocked on an out-of-band grant: {0}")]
+    BlockedOnGrant(String),
+
     /// JSON (de)serialization of a spec/status/work-spec failed. Structural.
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -159,6 +167,7 @@ impl Error {
                 }
             }
             Error::Validation(_)
+            | Error::BlockedOnGrant(_)
             | Error::Serialization(_)
             | Error::InvalidSchedule(_)
             | Error::Invariant(_)
@@ -217,6 +226,18 @@ mod tests {
             Error::MissingDependency("repo".into()).class(),
             ErrorClass::Transient
         );
+    }
+
+    #[test]
+    fn blocked_on_grant_is_structural_not_a_hot_loop() {
+        // Regression: the privileged-mover namespace opt-in used to be
+        // MissingDependency (Transient), so a blocked Snapshot re-checked —
+        // and re-logged the refusal — every 30s, forever. The Namespace watch
+        // now delivers the grant immediately; the requeue is a slow backstop.
+        let err = Error::BlockedOnGrant("namespace `app` has not opted in".into());
+        assert_eq!(err.class(), ErrorClass::Structural);
+        assert!(err.to_string().contains("out-of-band grant"));
+        assert!(err.to_string().contains("namespace `app` has not opted in"));
     }
 
     #[test]

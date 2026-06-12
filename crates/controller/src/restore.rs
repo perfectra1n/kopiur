@@ -492,9 +492,10 @@ async fn drive_direct_restore(
             &msg,
         )
         .await;
-        // Like a missing creds Secret, the fix is an out-of-band namespace annotation —
-        // Transient, so the short requeue cadence picks up the opt-in within ~30s.
-        return Err(Error::MissingDependency(msg));
+        // The fix is an out-of-band namespace annotation; the Namespace watch
+        // (`watch::namespace_to_restores`) re-enqueues this Restore the moment
+        // the opt-in lands, so the requeue is only a watch-desync backstop.
+        return Err(Error::BlockedOnGrant(msg));
     }
     // Permitted: clear any stale `MoverPermitted=False` from a prior reconcile.
     if let Some(conds) = restore.status.as_ref().map(|s| s.conditions.as_slice())

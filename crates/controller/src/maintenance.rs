@@ -177,11 +177,15 @@ async fn reconcile_inner(maint: &Maintenance, ctx: &Context) -> Result<Action> {
     match job_api.get_opt(&job_name).await? {
         Some(job) => match job_terminal_state(&job) {
             // Succeeded: the slot was handled (the mover ran maintenance, or
-            // yielded the lease and recorded a condition). The work-spec
-            // ConfigMap is only needed while the pod runs — drop it so per-slot
-            // ConfigMaps do not accumulate (the Job self-reaps via TTL). Then
+            // yielded the lease and recorded a condition). Record that DURABLY in
+            // `status.<mode>.lastHandledSlot` — the Job self-reaps via its TTL,
+            // and a yield does not advance `lastRunAt`, so without the durable
+            // marker the same slot re-fired after every TTL reap (a yield Job per
+            // hour, forever). The work-spec ConfigMap is only needed while the
+            // pod runs — drop it so per-slot ConfigMaps do not accumulate. Then
             // sleep until the next slot.
             Some(true) => {
+                record_handled_slot(&api, &name, maint, mode, slot, now).await?;
                 delete_work_spec_cm(ctx, &namespace, &job_name).await;
                 Ok(Action::requeue(cap(next_wakeup(
                     maint,
@@ -659,10 +663,18 @@ fn due_mode(maint: &Maintenance, now: DateTime<Utc>) -> Option<(MaintenanceMode,
     None
 }
 
-/// The instant after which to search for `mode`'s next slot: its last run, or a
-/// year ago so the first-ever reconcile fires immediately.
+/// The instant after which to search for `mode`'s next slot: the later of its
+/// last *run* (mover actually ran maintenance) and its last *handled*
+/// observation (terminal-success Job seen — covers yields, which deliberately
+/// do not move `lastRunAt`). Falls back to a year ago so the first-ever
+/// reconcile fires immediately.
 fn mode_after(maint: &Maintenance, mode: MaintenanceMode) -> DateTime<Utc> {
-    last_run_at(maint, mode).unwrap_or_else(|| Utc::now() - chrono::Duration::days(365))
+    match (last_run_at(maint, mode), last_handled_at(maint, mode)) {
+        (Some(run), Some(handled)) => run.max(handled),
+        (Some(run), None) => run,
+        (None, Some(handled)) => handled,
+        (None, None) => Utc::now() - chrono::Duration::days(365),
+    }
 }
 
 /// The next cron slot for `mode` strictly after `after` (croner + jitter, seeded
@@ -692,6 +704,56 @@ fn last_run_at(maint: &Maintenance, mode: MaintenanceMode) -> Option<DateTime<Ut
         .as_deref()
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// Parse `status.<mode>.lastHandledAt` (RFC3339) into a `DateTime<Utc>`.
+fn last_handled_at(maint: &Maintenance, mode: MaintenanceMode) -> Option<DateTime<Utc>> {
+    let status = maint.status.as_ref()?;
+    let run = match mode {
+        MaintenanceMode::Quick => status.quick.as_ref(),
+        MaintenanceMode::Full => status.full.as_ref(),
+    }?;
+    run.last_handled_at
+        .as_deref()
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// Durably record that `mode`'s cron `slot` was handled to a terminal-success
+/// Job (real run OR yield). Merge-patches only the per-mode `lastHandledAt`
+/// (the mover owns `lastRunAt`/stats), guarded so repeat reconciles of the same
+/// finished Job are status no-ops (G6) — the stamp only moves when a NEWER slot
+/// than the recorded anchor was handled.
+///
+/// The recorded value is `now` (the observation instant), NOT the slot: a
+/// first-ever slot sits ~a year in the past (the [`mode_after`] lookback), and
+/// anchoring there would leave the next slot still in the past — a yield-only
+/// Maintenance would march through the whole historic backlog one Job at a
+/// time. Stamping `now` gives the same catch-up-once semantics as the mover's
+/// `lastRunAt = now` on a real run.
+async fn record_handled_slot(
+    api: &Api<Maintenance>,
+    name: &str,
+    maint: &Maintenance,
+    mode: MaintenanceMode,
+    slot: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    // Already anchored past this slot (this finished Job was seen before) —
+    // a repeat observation must not churn status.
+    if last_handled_at(maint, mode).is_some_and(|at| at >= slot) {
+        return Ok(());
+    }
+    let mode_key = match mode {
+        MaintenanceMode::Quick => "quick",
+        MaintenanceMode::Full => "full",
+    };
+    io::patch_status(
+        api,
+        name,
+        serde_json::json!({ mode_key: { "lastHandledAt": now.to_rfc3339() } }),
+    )
+    .await
 }
 
 /// How long until the controller should reconcile again. When `handled` is set,
@@ -835,21 +897,54 @@ async fn set_ready_if_changed(
         .as_ref()
         .map(|s| s.conditions.clone())
         .unwrap_or_default();
-    let already_ready = existing
+    // A mover-recorded lease block (`LeaseOwned=False` with a lease-holder
+    // reason) means runs are *yielding*: kopia's recorded maintenance owner is a
+    // foreign identity and the takeover policy forbids claiming it. Repository
+    // GC/compaction is NOT happening and waiting cannot fix it, so surface
+    // Stalled (kstatus, ADR-0005 §2) with the remediation instead of a
+    // misleading Ready=True. Other `LeaseOwned=False` reasons (e.g.
+    // WaitingForRepository, MaintenanceFailed) keep their own flows.
+    let lease_blocked = existing
+        .iter()
+        .find(|c| {
+            c.type_ == kopiur_api::maintenance::LEASE_OWNED_CONDITION
+                && c.status == "False"
+                && (c.reason == kopiur_api::maintenance::LEASE_HELD_BY_OTHER_REASON
+                    || c.reason == kopiur_api::maintenance::LEASE_TAKEOVER_PROMPT_REASON)
+        })
+        .map(|c| c.message.clone());
+    let (outcome, reason, message) = match &lease_blocked {
+        Some(holder) => (
+            io::ReadyOutcome::Stalled,
+            "MaintenanceYielding",
+            format!(
+                "maintenance Jobs are yielding without running ({holder}); repository \
+                 GC/compaction is not happening. Fix: set \
+                 spec.ownership.takeoverPolicy=Force once so the operator claims kopia's \
+                 maintenance ownership, then revert it"
+            ),
+        ),
+        None => (
+            io::ReadyOutcome::Ready,
+            "Reconciled",
+            "maintenance is reconciled; the repository is Ready".to_string(),
+        ),
+    };
+    // Transition guard (G6): only write when Ready does not already reflect
+    // this outcome + reason.
+    let desired_ready = match outcome {
+        io::ReadyOutcome::Ready => "True",
+        io::ReadyOutcome::Reconciling | io::ReadyOutcome::Stalled => "False",
+    };
+    let unchanged = existing
         .iter()
         .find(|c| c.type_ == "Ready")
-        .is_some_and(|c| c.status == "True");
-    if already_ready {
+        .is_some_and(|c| c.status == desired_ready && c.reason == reason);
+    if unchanged {
         return Ok(());
     }
     let observed_gen = maint.metadata.generation.unwrap_or(0);
-    let conditions = io::set_ready(
-        &existing,
-        Some(observed_gen),
-        io::ReadyOutcome::Ready,
-        "Reconciled",
-        "maintenance is reconciled; the repository is Ready",
-    );
+    let conditions = io::set_ready(&existing, Some(observed_gen), outcome, reason, &message);
     io::patch_status(
         api,
         name,
@@ -921,6 +1016,90 @@ mod tests {
             last_run_at: Some(ts.into()),
             ..Default::default()
         }
+    }
+
+    fn handled_at(ts: &str) -> RunStatus {
+        RunStatus {
+            last_handled_at: Some(ts.into()),
+            ..Default::default()
+        }
+    }
+
+    // Regression guard for the TTL-reap loop: a YIELDED slot advances
+    // `lastHandledAt` but never `lastRunAt`. Once the slot's Job self-reaps
+    // (ttlSecondsAfterFinished), the durable marker — not the Job's existence —
+    // must keep the slot from re-firing, or a lease-blocked Maintenance spawns
+    // a yield Job every TTL period forever.
+    #[test]
+    fn handled_slot_does_not_refire_after_its_job_is_ttl_reaped() {
+        let now = Utc::now();
+        let just = (now - chrono::Duration::seconds(1)).to_rfc3339();
+        let status = MaintenanceStatus {
+            quick: Some(handled_at(&just)),
+            full: Some(handled_at(&just)),
+            ..Default::default()
+        };
+        let m = maint_with("*/5 * * * *", "0 3 * * *", Some(status));
+        assert!(
+            due_mode(&m, now).is_none(),
+            "a handled (yielded) slot must not re-fire after its Job is TTL-reaped"
+        );
+    }
+
+    // The handled anchor must be the OBSERVATION instant, not the slot: a
+    // first-ever slot sits ~a year back (the lookback fallback), and anchoring
+    // there leaves the next slot still in the past — a yield-only Maintenance
+    // would march through the whole historic backlog one Job at a time.
+    #[test]
+    fn handling_a_year_old_slot_does_not_start_a_backlog_march() {
+        let now = Utc::now();
+        // What record_handled_slot writes for the first-ever (year-old) slot:
+        // the observation instant `now`, never the slot itself.
+        let status = MaintenanceStatus {
+            quick: Some(handled_at(&now.to_rfc3339())),
+            full: Some(handled_at(&now.to_rfc3339())),
+            ..Default::default()
+        };
+        let m = maint_with("0 3 * * *", "30 4 * * 0", Some(status));
+        assert!(
+            due_mode(&m, now).is_none(),
+            "after handling the first-ever slot, the next due slot must be in \
+             the FUTURE — not the next entry of a year-long backlog"
+        );
+    }
+
+    #[test]
+    fn mode_after_takes_the_later_of_run_and_handled() {
+        let now = Utc::now();
+        let old = (now - chrono::Duration::days(3)).to_rfc3339();
+        let recent = (now - chrono::Duration::hours(1)).to_rfc3339();
+        // Run long ago, handled recently (yield path) → handled wins.
+        let status = MaintenanceStatus {
+            full: Some(RunStatus {
+                last_run_at: Some(old.clone()),
+                last_handled_at: Some(recent.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let m = maint_with("*/5 * * * *", "0 3 * * *", Some(status));
+        let after = mode_after(&m, MaintenanceMode::Full);
+        assert_eq!(after.to_rfc3339(), recent);
+        // Handled long ago, run recently (real-run path) → run wins.
+        let status = MaintenanceStatus {
+            full: Some(RunStatus {
+                last_run_at: Some(recent.clone()),
+                last_handled_at: Some(old),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let m = maint_with("*/5 * * * *", "0 3 * * *", Some(status));
+        assert_eq!(mode_after(&m, MaintenanceMode::Full).to_rfc3339(), recent);
+        // Neither recorded → first-ever fires immediately (a slot exists in the
+        // year-long lookback window).
+        let m = maint_with("*/5 * * * *", "0 3 * * *", None);
+        assert!(due_mode(&m, now).is_some());
     }
 
     #[test]

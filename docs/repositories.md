@@ -166,7 +166,7 @@ How it behaves (all of this is automatic — there is nothing to install):
 
 - **Discovered means "not produced through this Repository CR".** Snapshots Kopiur itself takes via your `SnapshotPolicy`s already have their own `Snapshot` CRs and are never duplicated as discovered rows.
 - **Discovered rows are forced `deletionPolicy: Retain`.** Deleting a discovered `Snapshot` CR deletes only the CR — Kopiur **never** deletes a kopia snapshot it didn't create. (And because the row mirrors repository state, it reappears on the next refresh; to keep rows away permanently, bound them with `catalog.retain` below.)
-- **The scan repeats** every `catalog.refreshInterval` (default **1h**, minimum `30s`), so snapshots written out-of-band *after* adoption keep appearing — and rows whose snapshot was pruned repository-side are expired (the CR is removed).
+- **The scan repeats** every `catalog.refreshInterval` (default **1h**, minimum `30s`), so snapshots written out-of-band *after* adoption keep appearing — and rows whose snapshot was pruned repository-side are expired (the CR is removed). The interval is the *only* thing that drives re-scans: object-store repositories re-list by re-running their (self-cleaning) bootstrap Job, and a Job removed early by its `ttlSecondsAfterFinished` does **not** trigger an extra scan — set `refreshInterval: 24h` and you get one scan a day, regardless of the Job TTL.
 - **The row carries the real data**: the kopia snapshot ID, the foreign `username@hostname:path` identity, the snapshot's timing and logical size.
 
 The knobs, all under `spec.catalog`:

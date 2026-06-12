@@ -165,6 +165,7 @@ Key `status` fields:
 | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ownership.owner` / `ownership.claimedAt`                            | Current lease holder and when it was claimed.                                                                                                 |
 | `quick.lastRunAt` / `full.lastRunAt`                                 | Timestamp of the most recent run of each pass.                                                                                                |
+| `quick.lastHandledAt` / `full.lastHandledAt`                     | The most recent cron slot whose Job finished — including a *yield* (which doesn't move `lastRunAt`), so a handled slot never re-fires.        |
 | `quick.lastContentReclaimedBytes` / `full.lastContentReclaimedBytes` | Storage reclaimed — **the only place this is surfaced.**                                                                                      |
 | `conditions[type=LeaseOwned]`                                        | `True` when this resource holds the lease and is running; `False` (with a reason) when waiting on the repository, a held lease, or a failure. |
 
@@ -187,6 +188,8 @@ $ kubectl get jobs -n billing -l app.kubernetes.io/component=maintenance
 - **One run at a time.** The operator never starts a second maintenance Job for a repository while one is in flight.
 - **Catches up after downtime — once.** If the operator is down across several scheduled slots, it runs a single catch-up pass on recovery, not a storm of missed runs.
 - **Self-cleaning Jobs.** Finished maintenance Jobs are removed automatically (`ttlSecondsAfterFinished`); a failed run is retried with backoff.
+- **A handled slot never re-fires.** Each scheduled slot runs once — its outcome (a real run *or* a deliberate yield to a foreign lease holder) is recorded durably in `status.<quick|full>.lastHandledAt`, so the Job self-cleanup above cannot make the same slot run again. Only a *failed* slot is retried.
+- **Yielding is loud, not silent.** When every run yields (a foreign owner holds the lease and `takeoverPolicy: Never`), kopia GC/compaction is **not** happening — the resource reports `Ready=False`, reason `MaintenanceYielding`, with the `takeoverPolicy: Force` remediation in the message, instead of a misleading `Ready=True`.
 
 ## See also
 

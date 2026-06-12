@@ -194,7 +194,15 @@ $ kubectl describe maintenance <name> -n <ns>
 | `WaitingForRepository`    | The repository isn't `Ready` yet — fix that first.                                                                             |
 | lease held elsewhere      | Another owner holds the maintenance lease (shared repo). Adjust `takeoverPolicy` only if you're sure no one else maintains it. |
 
-`status.full.lastRunAt` shows the last full pass. See the [Maintenance guide](maintenance.md) for ownership and the schedule model.
+If **every** run yields (`Ready=False`, reason `MaintenanceYielding`), kopia
+GC/compaction is not running at all — typically a repository whose kopia-side
+maintenance owner is a stale/foreign identity (e.g. created by an old kopiur
+bootstrap or a workstation). Set `spec.ownership.takeoverPolicy: Force` once so
+the operator claims the lease, then revert to `Never`.
+
+`status.full.lastRunAt` shows the last full pass (`status.<mode>.lastHandledAt`
+additionally records slots that were handled by *yielding*). See the
+[Maintenance guide](maintenance.md) for ownership and the schedule model.
 
 ## Webhook admission fails or the webhook won't start
 

@@ -17945,6 +17945,22 @@ spec:
                     format: int64
                     nullable: true
                     type: integer
+                  lastHandledAt:
+                    description: |-
+                      RFC3339 instant the controller last observed one of this kind's per-slot
+                      Jobs reach terminal success — the mover either ran maintenance (which
+                      also advances `lastRunAt`) or deliberately *yielded* the lease (which
+                      does not). The scheduler measures the next slot from
+                      `max(lastRunAt, lastHandledAt)`, so a handled slot never re-fires after
+                      its Job self-reaps via `ttlSecondsAfterFinished`. Without this, a yielded
+                      slot's only record was the (self-reaping) Job itself, and the same slot
+                      respawned a yield Job every TTL period, forever. The stamp is the
+                      *observation instant*, not the (possibly year-old, first-ever) slot
+                      itself — anchoring at the slot would make a yield-only Maintenance march
+                      through the entire backlog of historic slots one Job at a time. Same
+                      catch-up-once semantics as the mover's `lastRunAt = now`.
+                    nullable: true
+                    type: string
                   lastRunAt:
                     description: RFC3339 instant of the most recent run of this kind.
                     nullable: true
@@ -18027,6 +18043,22 @@ spec:
                     format: int64
                     nullable: true
                     type: integer
+                  lastHandledAt:
+                    description: |-
+                      RFC3339 instant the controller last observed one of this kind's per-slot
+                      Jobs reach terminal success — the mover either ran maintenance (which
+                      also advances `lastRunAt`) or deliberately *yielded* the lease (which
+                      does not). The scheduler measures the next slot from
+                      `max(lastRunAt, lastHandledAt)`, so a handled slot never re-fires after
+                      its Job self-reaps via `ttlSecondsAfterFinished`. Without this, a yielded
+                      slot's only record was the (self-reaping) Job itself, and the same slot
+                      respawned a yield Job every TTL period, forever. The stamp is the
+                      *observation instant*, not the (possibly year-old, first-ever) slot
+                      itself — anchoring at the slot would make a yield-only Maintenance march
+                      through the entire backlog of historic slots one Job at a time. Same
+                      catch-up-once semantics as the mover's `lastRunAt = now`.
+                    nullable: true
+                    type: string
                   lastRunAt:
                     description: RFC3339 instant of the most recent run of this kind.
                     nullable: true

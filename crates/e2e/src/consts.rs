@@ -174,6 +174,10 @@ pub const BUCKETS: &[&str] = &[
     "kopiur-import-retain",
     "kopiur-import-refresh",
     "kopiur-import-crepo",
+    // TTL-rerun regression (crates/e2e/tests/ttl_rerun.rs): a foreign-owned
+    // repository whose Maintenance must yield (and stay quiet after the yield
+    // Job self-reaps).
+    "kopiur-ttl-maint",
 ];
 
 // --- SFTP backend (in-cluster atmoz/sftp server, key-based auth) ---------------

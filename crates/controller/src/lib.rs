@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::{ConfigMap, Secret};
+use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret};
 use kube::runtime::events::{Recorder, Reporter};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher::Config as WatcherConfig;
@@ -345,6 +345,13 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
             let store = snapshot_store.clone();
             move |p: SnapshotPolicy| watch::policy_to_snapshots(&store, &p)
         })
+        // A Snapshot refused for an elevated mover waits on the namespace's
+        // privileged-movers opt-in annotation — deliver that grant the moment it
+        // lands instead of leaving the CR to its slow backstop requeue.
+        .watches(Api::<Namespace>::all(client.clone()), cfg.clone(), {
+            let store = snapshot_store.clone();
+            move |n: Namespace| watch::namespace_to_snapshots(&store, &n)
+        })
         .run(snapshot::reconcile, snapshot::error_policy, snapshot_ctx)
         .for_each(|res| async move {
             if let Err(e) = res {
@@ -526,6 +533,11 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
                 move |r: ClusterRepository| watch::cluster_repository_to_restores(&store, &r)
             },
         )
+        // Same privileged-mover opt-in delivery as the Snapshot controller.
+        .watches(Api::<Namespace>::all(client.clone()), cfg.clone(), {
+            let store = restore_store.clone();
+            move |n: Namespace| watch::namespace_to_restores(&store, &n)
+        })
         .run(restore::reconcile, restore::error_policy, restore_ctx)
         .for_each(|res| async move {
             if let Err(e) = res {

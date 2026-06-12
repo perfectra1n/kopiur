@@ -599,7 +599,7 @@ async fn run_maintenance_flow(
                 &spec.target_ref,
                 &lease_blocked_body(
                     &info.owner,
-                    "LeaseHeldByOther",
+                    kopiur_api::maintenance::LEASE_HELD_BY_OTHER_REASON,
                     &format!(
                         "maintenance lease held by {}; takeoverPolicy=Never",
                         info.owner
@@ -615,7 +615,7 @@ async fn run_maintenance_flow(
                 &spec.target_ref,
                 &lease_blocked_body(
                     &info.owner,
-                    "LeaseTakeoverPrompt",
+                    kopiur_api::maintenance::LEASE_TAKEOVER_PROMPT_REASON,
                     &format!(
                         "lease held by {}; set takeoverPolicy=Force to claim",
                         info.owner
@@ -1096,7 +1096,7 @@ fn lease_condition_body(
     now: &chrono::DateTime<chrono::Utc>,
 ) -> serde_json::Value {
     serde_json::json!({
-        "type": "LeaseOwned",
+        "type": kopiur_api::maintenance::LEASE_OWNED_CONDITION,
         "status": status,
         "reason": reason,
         "message": message,

@@ -283,6 +283,44 @@ pub fn snapshot_ready_outcome(phase: SnapshotPhase) -> io::ReadyOutcome {
     }
 }
 
+/// What the reconcile body may do for a produced `Snapshot` in `phase`, decided
+/// BEFORE the mover Job is consulted. Pure + exhaustive: a new phase cannot
+/// compile until its job-creation policy is chosen.
+///
+/// This is the one-shot discipline the `Restore` reconciler already applies: a
+/// Snapshot that reached a terminal phase must NEVER mint another mover Job. The
+/// owned Job self-reaps via `ttlSecondsAfterFinished`, and that deletion event
+/// re-triggers this reconciler — keying "the work is done" on the Job's
+/// *existence* (ephemeral) instead of the phase (durable) re-created the Job and
+/// re-ran the whole backup after every TTL reap, forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunDecision {
+    /// `Pending`/`Running`/no status yet: drive the mover Job (create or track).
+    /// `Running` with a *missing* Job is the resume path — a mid-run Job can only
+    /// vanish through outside deletion (the TTL applies after it finishes).
+    Run,
+    /// `Succeeded`: the kopia snapshot exists. Never touch the Job again; the
+    /// only live surfaces are the staged-source reap and `spec.pin` drift.
+    SucceededSteadyState,
+    /// `Failed`: terminal until the spec changes (ADR: `Failed` → kstatus
+    /// `Stalled`); a NEW Snapshot is how a retry happens.
+    TerminalFailed,
+    /// `Deleting`/`Discovered`: owned by earlier gates (the finalizer path and
+    /// the Discovered pin). Reaching the run body in these phases is a watch
+    /// desync — wait for a real change rather than acting on stale state.
+    Wait,
+}
+
+/// Decide [`RunDecision`] from the observed phase (see the enum for semantics).
+pub fn run_decision(phase: Option<SnapshotPhase>) -> RunDecision {
+    match phase {
+        None | Some(SnapshotPhase::Pending) | Some(SnapshotPhase::Running) => RunDecision::Run,
+        Some(SnapshotPhase::Succeeded) => RunDecision::SucceededSteadyState,
+        Some(SnapshotPhase::Failed) => RunDecision::TerminalFailed,
+        Some(SnapshotPhase::Deleting) | Some(SnapshotPhase::Discovered) => RunDecision::Wait,
+    }
+}
+
 /// Build the `(phase, observedGeneration, conditions)` status JSON for a `Snapshot`
 /// reaching `phase`, deriving the kstatus Ready/Reconciling/Stalled conditions via
 /// [`snapshot_ready_outcome`] + [`io::set_ready`]. Existing conditions (e.g.
@@ -476,22 +514,32 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
         return Ok(Action::requeue(Duration::from_secs(1)));
     }
 
-    // A hook failure is TERMINAL for this one-shot Snapshot (ADR §4.8): the fix
-    // lives in the SnapshotPolicy, and a NEW Snapshot picks it up. Without this
-    // gate the next reconcile would re-run side-effecting hooks (quiesce/exec)
-    // or resurrect the Failed phase to Succeeded.
-    if backup.status.as_ref().and_then(|s| s.phase) == Some(SnapshotPhase::Failed)
-        && backup
-            .status
-            .as_ref()
-            .map(|s| {
-                s.conditions
-                    .iter()
-                    .any(|c| c.type_ == HOOKS_SUCCEEDED_CONDITION && c.status == "False")
-            })
-            .unwrap_or(false)
-    {
-        return Ok(Action::await_change());
+    // One-shot discipline (see [`run_decision`]): a terminal Snapshot must never
+    // mint another mover Job — the TTL-reaped Job's deletion event would
+    // otherwise re-create it and re-run the backup, forever. This also covers
+    // the hook-failure case (ADR §4.8): a hook abort is `Failed`, and without
+    // the gate the next reconcile would re-run side-effecting hooks
+    // (quiesce/exec) or resurrect the Failed phase to Succeeded — the fix lives
+    // in the SnapshotPolicy, and a NEW Snapshot picks it up.
+    match run_decision(backup.status.as_ref().and_then(|s| s.phase)) {
+        RunDecision::Run => {}
+        RunDecision::SucceededSteadyState => {
+            // Staged-source reap is normally done at the Succeeded transition;
+            // re-issuing here covers a crash between the phase patch and the
+            // cleanup (idempotent, no-op for Direct).
+            if backup
+                .status
+                .as_ref()
+                .and_then(|s| s.staged.as_ref())
+                .is_some()
+            {
+                io::cleanup_staged_source(&ctx.client, &namespace, &name).await?;
+            }
+            // §13(c): spec.pin stays live after the mover Job is gone.
+            return reconcile_pin(backup, ctx, &api, &namespace, &name).await;
+        }
+        RunDecision::TerminalFailed => return Ok(Action::await_change()),
+        RunDecision::Wait => return Ok(Action::await_change()),
     }
 
     // If the owned mover Job already reached a terminal state, copy phase/stats
@@ -771,13 +819,12 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
             )
             .await;
         }
-        // The missing dependency is the namespace opt-in annotation an admin adds
-        // out-of-band (like a missing creds Secret) — Transient, NOT Structural, so
-        // it is re-checked on the short transient cadence and the opt-in takes
-        // effect within ~30s instead of a 5-minute structural backoff. (A namespace
-        // annotation does not enqueue this Snapshot, so the requeue is what picks it
-        // up.) Mirrors the `CredentialsAvailable=False` gate above.
-        return Err(Error::MissingDependency(msg));
+        // The blocker is the namespace opt-in annotation an admin adds
+        // out-of-band. The Namespace watch (`watch::namespace_to_snapshots`)
+        // re-enqueues this Snapshot the moment the annotation lands, so the
+        // requeue is only a watch-desync backstop — slow structural cadence,
+        // not a 30s hot-loop that re-logs the refusal until a human acts.
+        return Err(Error::BlockedOnGrant(msg));
     }
     // Permitted: clear any stale `MoverPermitted=False` from a prior reconcile.
     if let Some(conds) = backup.status.as_ref().map(|s| s.conditions.as_slice())
@@ -2280,6 +2327,39 @@ mod tests {
         // Desired unpinned, never pinned / observed unpinned → no-op.
         assert_eq!(pin_decision(false, None), PinAction::NoOp);
         assert_eq!(pin_decision(false, Some(false)), PinAction::NoOp);
+    }
+
+    // --- one-shot run decision: terminal phases never mint another mover Job ---
+    // Regression guard for the TTL-reap loop: every Snapshot in a live cluster
+    // re-ran its backup each `ttlSecondsAfterFinished` because the reconciler
+    // keyed "work is done" on the (self-reaping) Job's existence, not the phase.
+
+    #[test]
+    fn run_decision_covers_every_phase() {
+        use kopiur_api::snapshot::SnapshotPhase;
+        // Not started / in flight → drive the Job.
+        assert_eq!(run_decision(None), RunDecision::Run);
+        assert_eq!(run_decision(Some(SnapshotPhase::Pending)), RunDecision::Run);
+        assert_eq!(run_decision(Some(SnapshotPhase::Running)), RunDecision::Run);
+        // Succeeded → steady state (pin/staged only); NEVER a new mover Job.
+        assert_eq!(
+            run_decision(Some(SnapshotPhase::Succeeded)),
+            RunDecision::SucceededSteadyState
+        );
+        // Failed → terminal until the spec changes; no TTL-driven retry loop.
+        assert_eq!(
+            run_decision(Some(SnapshotPhase::Failed)),
+            RunDecision::TerminalFailed
+        );
+        // Phases owned by earlier gates → wait, don't act on a desynced view.
+        assert_eq!(
+            run_decision(Some(SnapshotPhase::Deleting)),
+            RunDecision::Wait
+        );
+        assert_eq!(
+            run_decision(Some(SnapshotPhase::Discovered)),
+            RunDecision::Wait
+        );
     }
 
     // --- §2 phase → Ready mapping ---

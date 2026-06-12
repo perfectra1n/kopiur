@@ -39,9 +39,15 @@ pub async fn try_client() -> Option<Client> {
 }
 
 /// Poll `f` every `interval` until it returns `Ok(Some(value))`, giving up after
-/// `timeout`. `f` returning `Ok(None)` means "not ready yet, keep waiting";
-/// `Err` is a hard failure (e.g. the API server rejected the request). On
-/// timeout returns an `anyhow` error tagged with `what` for a useful message.
+/// `timeout`. `f` returning `Ok(None)` means "not ready yet, keep waiting".
+///
+/// An `Err` from `f` is treated as "not ready yet" too, NOT as a hard failure:
+/// on a loaded kind node (WSL2 / CI) the apiserver connection drops for a beat
+/// every so often, and one transient `Connect` blip mid-poll used to kill a
+/// random test that would have passed two seconds later. The poll keeps going
+/// until the deadline; if the condition never holds, the timeout error carries
+/// the LAST poll error so a *persistent* API failure (RBAC, bad kubeconfig) is
+/// still fully diagnosable — it just costs the timeout instead of failing fast.
 pub async fn wait_until<T, F, Fut>(
     what: &str,
     timeout: Duration,
@@ -53,17 +59,26 @@ where
     Fut: std::future::Future<Output = Result<Option<T>, Error>>,
 {
     let deadline = Instant::now() + timeout;
+    #[allow(unused_assignments)]
+    let mut last_err: Option<Error> = None;
     loop {
         match f().await {
             Ok(Some(v)) => return Ok(v),
-            Ok(None) => {}
-            Err(e) => return Err(anyhow::anyhow!("{what}: API error while polling: {e}")),
+            Ok(None) => last_err = None,
+            Err(e) => {
+                eprintln!("[wait_until] {what}: poll error (retrying until deadline): {e}");
+                last_err = Some(e);
+            }
         }
         if Instant::now() >= deadline {
-            return Err(anyhow::anyhow!(
-                "{what}: condition not met within {:?}",
-                timeout
-            ));
+            return match last_err {
+                Some(e) => Err(anyhow::anyhow!(
+                    "{what}: condition not met within {timeout:?}; last poll error: {e}"
+                )),
+                None => Err(anyhow::anyhow!(
+                    "{what}: condition not met within {timeout:?}"
+                )),
+            };
         }
         tokio::time::sleep(interval).await;
     }
