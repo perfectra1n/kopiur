@@ -109,6 +109,11 @@ pub const BOOTSTRAP_JOB_FAILED_REASON: &str = "BootstrapJobFailed";
 pub const CREDENTIALS_AVAILABLE_CONDITION: &str = "CredentialsAvailable";
 /// `reason`/Event reason for [`CREDENTIALS_AVAILABLE_CONDITION`] = `False`.
 pub const MISSING_CREDENTIALS_REASON: &str = "MissingCredentialsSecret";
+/// `reason`/Event reason for [`CREDENTIALS_AVAILABLE_CONDITION`] = `False` when
+/// the missing dependency is the **workload-identity ServiceAccount** the
+/// backend's `auth.workloadIdentity` names (the user creates it; kopiur never
+/// does — its cloud annotations are the user's federation contract).
+pub const MISSING_SERVICE_ACCOUNT_REASON: &str = "MissingServiceAccount";
 /// `reason` for [`CREDENTIALS_AVAILABLE_CONDITION`] = `True` when the operator
 /// supplied the credential Secret(s) itself via projection (opt-in
 /// `spec.credentialProjection`), rather than the user pre-creating them.

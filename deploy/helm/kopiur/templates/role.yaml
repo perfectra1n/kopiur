@@ -92,10 +92,11 @@ rules:
     verbs: [get, list, watch, create, delete]
   # Per-namespace mover RBAC minted by the controller (§4.12). Minted via
   # server-side apply (PATCH), so `patch`/`update` are required, not just create/get.
+  # `list`/`watch` for workload identity (SA watch — see clusterrole.yaml).
   - apiGroups: [""]
     resources:
       - serviceaccounts
-    verbs: [get, create, update, patch]
+    verbs: [get, list, watch, create, update, patch]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources:
       - rolebindings

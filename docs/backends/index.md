@@ -66,6 +66,18 @@ The mover reads these **exact** key names from the Secret you reference and feed
 | [WebDAV](webdav.md)            | `KOPIA_WEBDAV_USERNAME`, `KOPIA_WEBDAV_PASSWORD`                          | `backend.webDav`     |
 | [rclone](rclone.md)            | `KOPIA_RCLONE_CONFIG` _(via `configSecretRef`)_                           | `backend.rclone`     |
 
+/// tip | Cloud clusters: workload identity instead of static keys
+
+On EKS, AKS, or GKE the three cloud backends can skip the static keys entirely:
+`auth.workloadIdentity.serviceAccountName` runs the mover Jobs as a
+user-supplied, IAM-federated ServiceAccount, and only `KOPIA_PASSWORD` remains
+in the cluster. See [S3 / IRSA](s3.md#workload-identity-irsa--eks-pod-identity),
+[Azure / AKS](azure.md#workload-identity-aks), and
+[GCS / GKE](gcs.md#workload-identity-gke). The non-cloud backends (B2, SFTP,
+WebDAV) are Secret-only — they have no IAM plane to federate with.
+
+///
+
 /// info | Env-delivered vs. file-delivered credentials
 
 Most backends authenticate via environment variables kopia reads directly — the mover loads the Secret with `envFrom`, so the keys above become env vars. Three backends need their credentials as **files** instead (kopia's SFTP/GCS/rclone flags have no env form, and a Secret key like `ssh-privatekey` isn't a valid env-var name so `envFrom` would silently drop it). For those, the mover reads a well-known env key and writes it to a private (`0600`) file, then points kopia at the path:

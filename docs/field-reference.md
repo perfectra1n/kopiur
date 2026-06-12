@@ -307,6 +307,23 @@ Externally tagged — set exactly one of: `s3`, `azure`, `gcs`, `b2`, `filesyste
 `sftp`, `webDav`, `rclone`. See [Backend configuration](backends/index.md) for each
 backend's fields and Secret keys.
 
+### BackendAuth (cloud backends: `s3`/`azure`/`gcs`)
+
+`{ secretRef?, workloadIdentity? }` — exactly one of (webhook-enforced; `auth`
+itself may be omitted when the keys ride the password Secret):
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `secretRef` | [SecretKeyRef](#secretkeyref) (no `key`) | Static keys read by well-known names (`AWS_*`, `AZURE_*`, `KOPIA_GCS_CREDENTIALS`). |
+| `workloadIdentity.serviceAccountName` | string (DNS-1123) | Mover Jobs run as this user-created, cloud-federated ServiceAccount (IRSA/EKS Pod Identity, AKS Workload Identity, GKE WI) — no static keys. Azure additionally requires `storageAccount` (webhook-enforced). The operator preflights the SA and binds the mover role to it; it never creates it. |
+
+The non-cloud backends (`b2`, `sftp`, `webDav`) take a **Secret-only** auth
+(`{ secretRef? }`) — `workloadIdentity` is not in their schema (the API server
+prunes it). `rclone` uses `configSecretRef` instead of `auth`. A
+`RepositoryReplication` whose source and destination are the same cloud kind
+must not mix static and workload-identity auth (webhook-enforced; the
+replication pod's env would leak the static keys into the ambient chain).
+
 ### SecretKeyRef
 
 `{ name, namespace?, key? }` — a key within a `Secret`. `namespace` defaults to the

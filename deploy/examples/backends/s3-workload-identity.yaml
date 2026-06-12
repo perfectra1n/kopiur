@@ -1,0 +1,61 @@
+# Backend: S3 with workload identity — IRSA / EKS Pod Identity (ADR-0003 §3.1, §4.11)
+#
+# No static AWS keys anywhere: the mover Jobs run as a ServiceAccount federated
+# to an IAM role, and kopia resolves credentials through the ambient AWS chain
+# (IRSA web-identity token or EKS Pod Identity). The only secret left in the
+# cluster is the kopia repository encryption password.
+#
+# Prerequisites (AWS side):
+#   - an IAM role with the bucket policy (see the S3 docs page), trust-federated
+#     to this ServiceAccount via your cluster's OIDC provider (IRSA), OR an EKS
+#     Pod Identity association pointing at it.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.s3`); `auth.workloadIdentity` is mutually exclusive with
+# `auth.secretRef` (webhook-enforced).
+---
+# You own this ServiceAccount — Kopiur preflights it and binds the mover role to
+# it, but never creates or modifies it (the annotation is your contract with the
+# cloud's identity webhook). It must exist in every namespace mover Jobs run in.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-mover
+  namespace: backups
+  annotations:
+    # IRSA: the IAM role this SA may assume. For EKS Pod Identity, omit the
+    # annotation and create a pod-identity association instead.
+    eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/kopia-backups
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-wi-repo-creds
+  namespace: backups
+type: Opaque
+stringData:
+  # Workload identity replaces the AWS_* keys — but the repository encryption
+  # password is kopia's, not the cloud's, and is still required.
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: s3-wi
+  namespace: backups
+spec:
+  backend:
+    s3:
+      bucket: my-backups
+      region: us-east-1 # the bucket's region (kopia derives the AWS endpoint)
+      auth:
+        # Instead of secretRef: the mover Jobs run AS this ServiceAccount and
+        # kopia authenticates via the ambient AWS credential chain.
+        workloadIdentity:
+          serviceAccountName: backup-mover
+  encryption:
+    passwordSecretRef:
+      name: s3-wi-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true

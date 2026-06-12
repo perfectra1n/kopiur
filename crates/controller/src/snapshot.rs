@@ -785,20 +785,47 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
         build_backup_run(backup, &config, &repo, &namespace, &name)?;
 
     // The mover Job runs in THIS (workload) namespace, where the operator SA does
-    // not exist. Mint the least-privilege mover SA + RoleBinding here, then verify
-    // the credential Secret(s) the mover loads via envFrom are present — otherwise
-    // surface a clear `CredentialsAvailable=False` condition + Warning Event and
-    // requeue, instead of launching a Job that hangs (ADR §4.12).
-    if let Some(sa) = ctx.mover_service_account.as_deref() {
-        io::ensure_mover_rbac(
-            &ctx.client,
-            &namespace,
-            sa,
-            &ctx.mover_role_kind,
-            &ctx.mover_clusterrole,
-        )
-        .await?;
-    }
+    // not exist. Resolve its run identity here — the user's workload-identity SA
+    // (preflighted + bound to the mover role) or the minted mover SA — then verify
+    // the credential Secret(s) the mover loads via envFrom are present. Either
+    // problem surfaces as a clear `CredentialsAvailable=False` condition + Warning
+    // Event and a requeue, instead of launching a Job that hangs (ADR §4.12).
+    let mover_identity = match io::ensure_mover_identity(
+        &ctx.client,
+        &namespace,
+        &[&repo.backend],
+        ctx.mover_service_account.as_deref(),
+        &ctx.mover_role_kind,
+        &ctx.mover_clusterrole,
+    )
+    .await
+    {
+        Ok(identity) => identity,
+        Err(Error::MissingDependency(msg)) => {
+            let existing = backup
+                .status
+                .as_ref()
+                .map(|s| s.conditions.clone())
+                .unwrap_or_default();
+            let conditions = io::upsert_condition(
+                &existing,
+                CREDENTIALS_AVAILABLE_CONDITION,
+                false,
+                crate::consts::MISSING_SERVICE_ACCOUNT_REASON,
+                &msg,
+                backup.meta().generation,
+            );
+            io::patch_status(
+                &api,
+                &name,
+                serde_json::json!({ "phase": "Pending", "conditions": conditions }),
+            )
+            .await?;
+            io::publish_missing_sa_event(ctx, backup, &msg).await;
+            return Err(Error::MissingDependency(msg));
+        }
+        Err(e) => return Err(e),
+    };
 
     // Resolve the mover's EFFECTIVE security context once: the explicit
     // `securityContext`, or the one inherited from a workload pod via
@@ -1169,7 +1196,8 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
             }
         };
 
-    let labels = run_labels(&config, origin);
+    let mut labels = run_labels(&config, origin);
+    mover_identity.decorate_labels(&mut labels);
     let mut limits = job_limits(backup);
     // moverDefaults.ttlSecondsAfterFinished applies unless the recipe's FailurePolicy
     // already set a TTL (ADR-0005 §12).
@@ -1249,7 +1277,7 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
         repo_volume,
         creds_secrets,
         result_configmap: None,
-        service_account: ctx.mover_service_account.as_deref(),
+        service_account: mover_identity.service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
         cache_volume,
@@ -1758,6 +1786,18 @@ async fn delete_snapshot_via_job(
         ttl_seconds_after_finished: resolved_mover.ttl_seconds_after_finished,
         ..JobLimits::default()
     };
+    // Resolve the delete Job's run identity in its namespace before launching
+    // (its credential Secret(s) were resolved/projected above).
+    let mover_identity = io::ensure_mover_identity(
+        &ctx.client,
+        job_ns,
+        &[&repo.backend],
+        ctx.mover_service_account.as_deref(),
+        &ctx.mover_role_kind,
+        &ctx.mover_clusterrole,
+    )
+    .await?;
+    mover_identity.decorate_labels(&mut labels);
     let inputs = MoverJobInputs {
         name: &job_name,
         namespace: job_ns,
@@ -1777,25 +1817,13 @@ async fn delete_snapshot_via_job(
         repo_volume,
         creds_secrets,
         result_configmap: None,
-        service_account: ctx.mover_service_account.as_deref(),
+        service_account: mover_identity.service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
         // A one-shot finalizer delete: an ephemeral emptyDir cache is fine.
         cache_volume: Default::default(),
         readiness_exec: None,
     };
-    // Mint the mover SA in the Job's namespace before launching (its credential
-    // Secret(s) were resolved/projected above).
-    if let Some(sa) = ctx.mover_service_account.as_deref() {
-        io::ensure_mover_rbac(
-            &ctx.client,
-            job_ns,
-            sa,
-            &ctx.mover_role_kind,
-            &ctx.mover_clusterrole,
-        )
-        .await?;
-    }
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
     io::apply_mover_objects(&ctx.client, job_ns, &job_name, &cm, &job).await?;
@@ -1919,6 +1947,16 @@ async fn reconcile_pin(
         ttl_seconds_after_finished: resolved_mover.ttl_seconds_after_finished,
         ..JobLimits::default()
     };
+    let mover_identity = io::ensure_mover_identity(
+        &ctx.client,
+        namespace,
+        &[&repo.backend],
+        ctx.mover_service_account.as_deref(),
+        &ctx.mover_role_kind,
+        &ctx.mover_clusterrole,
+    )
+    .await?;
+    mover_identity.decorate_labels(&mut labels);
     let inputs = MoverJobInputs {
         name: &job_name,
         namespace,
@@ -1938,22 +1976,12 @@ async fn reconcile_pin(
         repo_volume,
         creds_secrets,
         result_configmap: None,
-        service_account: ctx.mover_service_account.as_deref(),
+        service_account: mover_identity.service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
         cache_volume: Default::default(),
         readiness_exec: None,
     };
-    if let Some(sa) = ctx.mover_service_account.as_deref() {
-        io::ensure_mover_rbac(
-            &ctx.client,
-            namespace,
-            sa,
-            &ctx.mover_role_kind,
-            &ctx.mover_clusterrole,
-        )
-        .await?;
-    }
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
     io::apply_mover_objects(&ctx.client, namespace, &job_name, &cm, &job).await?;

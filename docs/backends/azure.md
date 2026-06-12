@@ -72,7 +72,12 @@ outside the cluster and back up the Secret. See [Encryption](../repositories.md#
 | `container`      | yes      | —              | `kopia-backups`              | The blob container holding the repository. The container name only — not a URL, not `account/container`.        |
 | `prefix`         | no       | container root | `prod/`                      | Blob-name prefix so several repos can share one container. End it with `/`.                                     |
 | `storageAccount` | no       | inferred       | `mystorageacct`              | Account name. In practice set it always: SAS tokens don't carry it, and being explicit costs nothing with a key. |
-| `auth.secretRef` | no       | —              | `{ name: azure-repo-creds }` | Names the credential Secret above. Same namespace as the `Repository`; a `ClusterRepository` adds `namespace:`. |
+| `auth.secretRef` | no¹      | —              | `{ name: azure-repo-creds }` | Names the credential Secret above. Same namespace as the `Repository`; a `ClusterRepository` adds `namespace:`. Mutually exclusive with `workloadIdentity`. |
+| `auth.workloadIdentity.serviceAccountName` | no¹ | — | `backup-mover`        | Run the mover Jobs as this (user-created, Entra-federated) ServiceAccount instead of a key/SAS — see [Workload identity](#workload-identity-aks). Requires `storageAccount`. |
+
+¹ Set **exactly one** of `auth.secretRef` or `auth.workloadIdentity`
+(webhook-enforced). `auth` itself may be omitted when the `AZURE_*` key rides
+the encryption-password Secret.
 
 ## Customization — the values you actually change
 
@@ -90,6 +95,42 @@ full account key:
 ```yaml
 --8<-- "deploy/examples/backends/azure-sas.yaml"
 ```
+
+## Workload identity (AKS) { #workload-identity-aks }
+
+On AKS with the workload-identity add-on (or any cluster running the
+azure-workload-identity webhook), you can drop the storage key and SAS token
+entirely: set `auth.workloadIdentity.serviceAccountName` and every mover Job
+runs **as that ServiceAccount**. Kopiur stamps the mover pods with the
+`azure.workload.identity/use: "true"` label, the Azure webhook injects
+`AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_FEDERATED_TOKEN_FILE`, and kopia
+authenticates with the federated token. The only secret left in the cluster is
+`KOPIA_PASSWORD`.
+
+What you provide:
+
+1. A **managed identity** (or app registration) with
+   `Storage Blob Data Contributor` on the container, plus a **federated
+   credential** for `system:serviceaccount:<namespace>:<sa-name>`.
+2. A **ServiceAccount** annotated `azure.workload.identity/client-id: <id>`,
+   present in every namespace mover Jobs run in.
+3. `auth.workloadIdentity.serviceAccountName` on the backend — and
+   **`storageAccount` becomes required** (webhook-enforced): the identity
+   webhook injects the tenant, client id, and token, but not the account name.
+
+```yaml
+--8<-- "deploy/examples/backends/azure-workload-identity.yaml"
+```
+
+/// warning | Replication: don't mix static and workload-identity Azure pairs
+
+A `RepositoryReplication` between two Azure backends must use the same auth
+style on both sides (or both `workloadIdentity` with the same ServiceAccount) —
+a mixed pair is rejected at admission, because the replication pod's env would
+carry the static side's `AZURE_*` credentials where the federated side's
+env-driven flags would pick them up.
+
+///
 
 ## As a `ClusterRepository`
 

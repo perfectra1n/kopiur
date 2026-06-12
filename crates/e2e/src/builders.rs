@@ -401,6 +401,12 @@ pub fn mc_bucket_pod(ns: &str, name: &str) -> Pod {
     for bucket in consts::BUCKETS {
         script.push_str(&format!("mc mb --ignore-existing local/{bucket}\n"));
     }
+    // Workload-identity scenario: anonymous read-write on exactly this bucket,
+    // so kopia's ambient credential chain (no static keys) can reach it in kind.
+    script.push_str(&format!(
+        "mc anonymous set public local/{}\n",
+        consts::WI_BUCKET
+    ));
     from_json(json!({
         "apiVersion": "v1",
         "kind": "Pod",
@@ -918,5 +924,18 @@ mod tests {
             );
         }
         assert!(script.contains("--ignore-existing"));
+        // The anonymous policy is scoped to exactly the workload-identity bucket.
+        assert!(
+            script.contains(&format!(
+                "mc anonymous set public local/{}",
+                consts::WI_BUCKET
+            )),
+            "script missing the workload-identity anonymous policy"
+        );
+        assert_eq!(
+            script.matches("mc anonymous").count(),
+            1,
+            "anonymous access must apply to ONE bucket only"
+        );
     }
 }

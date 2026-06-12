@@ -181,7 +181,16 @@ pub const BUCKETS: &[&str] = &[
     // repository whose Maintenance must yield (and stay quiet after the yield
     // Job self-reaps).
     "kopiur-ttl-maint",
+    // Workload identity (crates/e2e/tests/workload_identity.rs): the ONE bucket
+    // with an anonymous read-write policy, so a Repository with NO static keys
+    // (`auth.workloadIdentity`) round-trips through kopia's ambient credential
+    // chain — the empty `--access-key=` flags resolve to anonymous in kind.
+    WI_BUCKET,
 ];
+
+/// The anonymous-policy bucket for the workload-identity scenario (see
+/// [`BUCKETS`]); `mc anonymous set public` is applied to exactly this bucket.
+pub const WI_BUCKET: &str = "kopiur-wi";
 
 // --- SFTP backend (in-cluster atmoz/sftp server, key-based auth) ---------------
 // kopia's SFTP backend has no env-var credential form, so the mover materializes

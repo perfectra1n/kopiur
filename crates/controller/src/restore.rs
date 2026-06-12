@@ -599,21 +599,48 @@ async fn drive_direct_restore(
     };
     let target_path = "/restore".to_string();
 
-    // The restore mover Job runs in this (workload) namespace: mint the mover SA +
-    // RoleBinding here, then resolve the credential Secret(s) it loads via envFrom —
-    // verifying the user-managed ones are present, or (with
+    // The restore mover Job runs in this (workload) namespace: resolve its run
+    // identity here — the user's workload-identity SA (preflighted + bound to the
+    // mover role) or the minted mover SA — then resolve the credential Secret(s)
+    // it loads via envFrom — verifying the user-managed ones are present, or (with
     // `spec.credentialProjection`) projecting the repository's Secret(s) here owned
     // by this Restore. A problem surfaces as a clear condition + Event (ADR §4.12).
-    if let Some(sa) = ctx.mover_service_account.as_deref() {
-        io::ensure_mover_rbac(
-            &ctx.client,
-            namespace,
-            sa,
-            &ctx.mover_role_kind,
-            &ctx.mover_clusterrole,
-        )
-        .await?;
-    }
+    let mover_identity = match io::ensure_mover_identity(
+        &ctx.client,
+        namespace,
+        &[&repo.backend],
+        ctx.mover_service_account.as_deref(),
+        &ctx.mover_role_kind,
+        &ctx.mover_clusterrole,
+    )
+    .await
+    {
+        Ok(identity) => identity,
+        Err(Error::MissingDependency(msg)) => {
+            let existing = restore
+                .status
+                .as_ref()
+                .map(|s| s.conditions.clone())
+                .unwrap_or_default();
+            let conditions = io::upsert_condition(
+                &existing,
+                CREDENTIALS_AVAILABLE_CONDITION,
+                false,
+                crate::consts::MISSING_SERVICE_ACCOUNT_REASON,
+                &msg,
+                restore.metadata.generation,
+            );
+            io::patch_status(
+                api,
+                name,
+                serde_json::json!({ "phase": "Pending", "conditions": conditions }),
+            )
+            .await?;
+            io::publish_missing_sa_event(ctx, restore, &msg).await;
+            return Err(Error::MissingDependency(msg));
+        }
+        Err(e) => return Err(e),
+    };
 
     // Resolve the restore mover's EFFECTIVE security context once (explicit, or
     // inherited from a workload pod via `inheritSecurityContextFrom`). Both the gate
@@ -890,13 +917,18 @@ async fn drive_direct_restore(
         node_selector: resolved_mover.node_selector.clone(),
         tolerations: mover_tolerations,
         affinity: mover_affinity,
-        labels: io::child_labels(&[(crate::consts::OP_LABEL, crate::consts::OP_RESTORE)]),
+        labels: {
+            let mut labels =
+                io::child_labels(&[(crate::consts::OP_LABEL, crate::consts::OP_RESTORE)]);
+            mover_identity.decorate_labels(&mut labels);
+            labels
+        },
         // Restore writes INTO the target PVC, mounted read-write at /restore.
         source_volume: Some(VolumeMountSpec::pvc(target_pvc, target_path, false)),
         repo_volume,
         creds_secrets,
         result_configmap: None,
-        service_account: ctx.mover_service_account.as_deref(),
+        service_account: mover_identity.service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
         cache_volume,

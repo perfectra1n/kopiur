@@ -138,6 +138,41 @@ pub fn secret_to_cluster_repositories(
     })
 }
 
+/// Repositories whose backend's `auth.workloadIdentity` names the changed
+/// ServiceAccount (matched in the repository's own namespace, where its
+/// bootstrap mover runs). Creating the SA un-sticks a repository blocked on the
+/// `MissingDependency` preflight immediately, instead of waiting out the
+/// requeue backoff (the reconcile-on-referent-change rule).
+pub fn serviceaccount_to_repositories(
+    store: &Store<Repository>,
+    sa: &k8s_openapi::api::core::v1::ServiceAccount,
+) -> Vec<ObjectRef<Repository>> {
+    let (Some(sa_ns), sa_name) = (sa.namespace(), sa.name_any()) else {
+        return Vec::new();
+    };
+    select(store, |r: &Repository| {
+        kopiur_api::creds::backend_workload_identity(&r.spec.backend).is_some_and(|(wi, _)| {
+            wi.service_account_name == sa_name && r.namespace().as_deref() == Some(sa_ns.as_str())
+        })
+    })
+}
+
+/// ClusterRepositories whose backend's `auth.workloadIdentity` names the changed
+/// ServiceAccount. Matched by **name only**: a ClusterRepository's movers run in
+/// many namespaces (bootstrap in the placement namespace, consumers in theirs),
+/// so any namespace's SA of that name may be the one a blocked reconcile waits
+/// on — a rare spurious re-reconcile is cheap and idempotent.
+pub fn serviceaccount_to_cluster_repositories(
+    store: &Store<ClusterRepository>,
+    sa: &k8s_openapi::api::core::v1::ServiceAccount,
+) -> Vec<ObjectRef<ClusterRepository>> {
+    let sa_name = sa.name_any();
+    select(store, |r: &ClusterRepository| {
+        kopiur_api::creds::backend_workload_identity(&r.spec.backend)
+            .is_some_and(|(wi, _)| wi.service_account_name == sa_name)
+    })
+}
+
 /// RepositoryReplications that reference the changed `secret` as a *destination*
 /// credential (the destination encryption password and/or destination backend
 /// auth). A change to the *source* repository's Secret instead re-reconciles the

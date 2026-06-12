@@ -67,6 +67,18 @@ pub const RUN_MODE_ANNOTATION: &str = "kopiur.home-operations.com/run-mode";
 /// `kubectl -o name`-style output).
 pub const API_VERSION: &str = "kopiur.home-operations.com/v1alpha1";
 
+/// Pod label opting a mover pod into the **azure-workload-identity** mutating
+/// webhook: pods carrying `azure.workload.identity/use: "true"` and running as
+/// a federated `ServiceAccount` get `AZURE_TENANT_ID`/`AZURE_CLIENT_ID`/
+/// `AZURE_FEDERATED_TOKEN_FILE` (and the projected token volume) injected —
+/// exactly the env kopia's azure backend binds its credential flags to. Stamped
+/// by the operator (and the CLI's browse sessions) on every mover pod for a
+/// repository whose azure backend uses `auth.workloadIdentity`. Lives here
+/// because the operator and `kubectl kopiur` must agree on it byte-for-byte.
+pub const AZURE_WORKLOAD_IDENTITY_LABEL: &str = "azure.workload.identity/use";
+/// The [`AZURE_WORKLOAD_IDENTITY_LABEL`] value opting the pod in.
+pub const AZURE_WORKLOAD_IDENTITY_LABEL_VALUE: &str = "true";
+
 /// The standard `app.kubernetes.io/managed-by` label key. Stamped on **every**
 /// operator-created object (mover Jobs, work-spec ConfigMaps, cache PVC, minted
 /// mover SA/RoleBinding, projected credential Secret, CSI VolumeSnapshots) so

@@ -119,6 +119,169 @@ pub async fn ensure_mover_rbac(
     Ok(())
 }
 
+/// Build the `RoleBinding` that grants a user-supplied **workload-identity**
+/// ServiceAccount the mover role within `ns`. Named `kopiur-mover-wi-<sa>` —
+/// distinct from the minted-SA binding (named after the mover SA) so the two
+/// can never clobber each other, and truncated-with-hash when a long SA name
+/// would overflow the 253-char object-name limit. Pure (no IO) so the
+/// subject/roleRef wiring is unit-testable.
+pub fn build_wi_rolebinding(
+    ns: &str,
+    wi_sa: &str,
+    role_kind: &str,
+    role_name: &str,
+) -> RoleBinding {
+    let mut rb = build_mover_rolebinding(ns, wi_sa, role_kind, role_name);
+    rb.metadata.name = Some(wi_rolebinding_name(wi_sa));
+    rb
+}
+
+/// Deterministic, ≤253-char name for the workload-identity RoleBinding:
+/// `kopiur-mover-wi-<sa>`, truncating the SA component and appending a stable
+/// hash when the full name would overflow.
+pub fn wi_rolebinding_name(wi_sa: &str) -> String {
+    const PREFIX: &str = "kopiur-mover-wi-";
+    const MAX: usize = 253;
+    let budget = MAX - PREFIX.len();
+    if wi_sa.len() <= budget {
+        format!("{PREFIX}{wi_sa}")
+    } else {
+        let hash = short_hash(wi_sa); // 8 hex chars
+        let keep = budget.saturating_sub(hash.len() + 1); // room for "-<hash>"
+        let trunc: String = wi_sa.chars().take(keep).collect();
+        format!("{PREFIX}{trunc}-{hash}")
+    }
+}
+
+/// Stable 8-hex-char content hash for name truncation (same idiom as the
+/// maintenance/verification job names).
+fn short_hash(s: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    format!("{:08x}", h.finish() as u32)
+}
+
+/// The actionable message for a workload-identity ServiceAccount that does not
+/// exist in the mover namespace (what / why / how-to-fix). Pure so the exact
+/// text is unit-asserted. `cloud` selects the annotation hint the user needs.
+pub fn missing_workload_identity_sa_message(
+    sa: &str,
+    ns: &str,
+    cloud: kopiur_api::creds::WorkloadIdentityCloud,
+) -> String {
+    use kopiur_api::creds::WorkloadIdentityCloud;
+    let annotation = match cloud {
+        WorkloadIdentityCloud::S3 => {
+            "eks.amazonaws.com/role-arn (IRSA) or an EKS Pod Identity \
+                                      association"
+        }
+        WorkloadIdentityCloud::Azure => "azure.workload.identity/client-id",
+        WorkloadIdentityCloud::Gcs => "iam.gke.io/gcp-service-account",
+    };
+    format!(
+        "backend auth.workloadIdentity names ServiceAccount `{sa}`, but it does not exist in \
+         namespace `{ns}` where the mover Job runs. Kopiur never creates this ServiceAccount — \
+         its cloud-federation annotations are your contract with the cloud's identity webhook. \
+         Fix: create ServiceAccount `{sa}` in `{ns}` with the federation binding ({annotation})."
+    )
+}
+
+/// The identity a mover Job runs as, resolved from the repository backend(s):
+/// either the user's workload-identity ServiceAccount or the operator-minted
+/// mover SA. `azure_workload_identity` flags that the pod must carry the
+/// azure-workload-identity opt-in label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoverRunIdentity {
+    /// The ServiceAccount the mover Job runs as (`None` only when the operator
+    /// is configured without a mover SA and no workload identity is in play).
+    pub service_account: Option<String>,
+    /// Whether any workload-identity backend federates with Azure, so the pod
+    /// needs the `azure.workload.identity/use: "true"` label for the azure
+    /// webhook to inject the credential env.
+    pub azure_workload_identity: bool,
+}
+
+impl MoverRunIdentity {
+    /// Stamp the pod-reaching labels this identity requires onto a mover Job's
+    /// label set (today: the azure-workload-identity opt-in).
+    pub fn decorate_labels(&self, labels: &mut BTreeMap<String, String>) {
+        if self.azure_workload_identity {
+            labels.insert(
+                kopiur_api::consts::AZURE_WORKLOAD_IDENTITY_LABEL.to_string(),
+                kopiur_api::consts::AZURE_WORKLOAD_IDENTITY_LABEL_VALUE.to_string(),
+            );
+        }
+    }
+}
+
+/// Resolve the identity a mover Job runs as and ensure its RBAC, in the Job's
+/// namespace `ns`. The single launch-site helper (every reconciler calls this
+/// instead of `ensure_mover_rbac` directly):
+///
+/// * A backend with `auth.workloadIdentity` ⇒ the Job runs as the **user's**
+///   ServiceAccount. The SA is preflighted with a `get` (a Job naming a missing
+///   SA `FailedCreate`s with no pod and hangs) and **never applied** — its
+///   cloud annotations are user-owned; SSA would contend with them. Absent ⇒
+///   `Error::MissingDependency` with the what/why/fix message. Present ⇒ the
+///   mover role is bound to it (the mover PATCHes `*/status` and its result
+///   ConfigMap at runtime regardless of which SA it runs as).
+/// * Otherwise ⇒ today's behavior: mint the operator's mover SA + RoleBinding.
+///
+/// `backends` carries every backend the one mover pod touches — one for every
+/// reconciler except replication, which passes source **and** destination. The
+/// first workload-identity backend names the SA (admission guarantees a
+/// both-workload-identity pair agrees), while the Azure label is OR'd across
+/// all of them (an S3-WI → Azure-WI replication still needs the label).
+pub async fn ensure_mover_identity(
+    client: &kube::Client,
+    ns: &str,
+    backends: &[&kopiur_api::backend::Backend],
+    ctx_sa: Option<&str>,
+    role_kind: &str,
+    role_name: &str,
+) -> Result<MoverRunIdentity> {
+    use kopiur_api::creds::{WorkloadIdentityCloud, backend_workload_identity};
+    let wi: Vec<_> = backends
+        .iter()
+        .filter_map(|b| backend_workload_identity(b))
+        .collect();
+    let Some((first, _)) = wi.first() else {
+        if let Some(sa) = ctx_sa {
+            ensure_mover_rbac(client, ns, sa, role_kind, role_name).await?;
+        }
+        return Ok(MoverRunIdentity {
+            service_account: ctx_sa.map(str::to_string),
+            azure_workload_identity: false,
+        });
+    };
+    let sa_name = first.service_account_name.clone();
+    let azure = wi
+        .iter()
+        .any(|(_, cloud)| *cloud == WorkloadIdentityCloud::Azure);
+    // Preflight: the SA must already exist (user-created, cloud-annotated).
+    let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), ns);
+    if sa_api
+        .get_opt(&sa_name)
+        .await
+        .map_err(Error::Kube)?
+        .is_none()
+    {
+        let cloud = wi[0].1;
+        return Err(Error::MissingDependency(
+            missing_workload_identity_sa_message(&sa_name, ns, cloud),
+        ));
+    }
+    let rb = build_wi_rolebinding(ns, &sa_name, role_kind, role_name);
+    let rb_name = rb.metadata.name.clone().unwrap_or_default();
+    let rb_api: Api<RoleBinding> = Api::namespaced(client.clone(), ns);
+    apply(&rb_api, &rb_name, &rb).await?;
+    Ok(MoverRunIdentity {
+        service_account: Some(sa_name),
+        azure_workload_identity: azure,
+    })
+}
+
 /// Whether namespace `ns` has opted in to elevated (root/privileged) movers via the
 /// [`PRIVILEGED_MOVERS_ANNOTATION`]. If the namespace cannot be read because the
 /// operator lacks `namespaces get` (a namespaced-scope install, where the operator

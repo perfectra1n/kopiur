@@ -96,6 +96,10 @@ so Kopiur uses `KOPIA_SFTP_KEY_DATA` and `KOPIA_SFTP_KNOWN_HOSTS`. You provide t
 | `username`       | no       | —       | `kopia`                     | SSH user to connect as — the account whose `authorized_keys` holds the public key.                               |
 | `auth.secretRef` | no       | —       | `{ name: sftp-repo-creds }` | Names the Secret holding the key + known_hosts above. Same namespace as the `Repository`; a `ClusterRepository` adds `namespace:`. |
 
+SSH has no cloud-IAM federation, so SFTP's `auth` is **Secret-only** — there is
+no `workloadIdentity` here. A stray `auth.workloadIdentity` is silently
+**pruned** by the API server (it's not in the schema), not rejected.
+
 ## Customization — the values you actually change
 
 - **`host` / `port` / `path` / `username`** — the connection coordinates.

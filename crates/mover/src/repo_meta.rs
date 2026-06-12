@@ -86,6 +86,13 @@ pub fn backend_to_repository_connect(backend: &Backend) -> RepositoryConnect {
                 .as_ref()
                 .map(|t| t.insecure_skip_verify)
                 .unwrap_or(false),
+            // Workload identity: no static keys in the env — kopia is invoked
+            // with explicitly-empty key flags so its credential chain resolves
+            // ambiently (IRSA / EKS Pod Identity / IMDS).
+            ambient_credentials: s
+                .auth
+                .as_ref()
+                .is_some_and(|a| a.workload_identity.is_some()),
         },
         Backend::Azure(a) => RepositoryConnect::Azure {
             container: a.container.clone(),
@@ -170,6 +177,53 @@ mod tests {
         });
         assert_eq!(filesystem_repo_path(&b), None);
         assert_eq!(filesystem_repo_mount_source(&b), None);
+    }
+
+    #[test]
+    fn s3_workload_identity_maps_to_ambient_credentials() {
+        use kopiur_api::backend::{BackendAuth, S3Backend, WorkloadIdentity};
+        let s3 = |auth: Option<BackendAuth>| {
+            Backend::S3(S3Backend {
+                bucket: "b".into(),
+                prefix: None,
+                endpoint: None,
+                region: None,
+                auth,
+                tls: None,
+            })
+        };
+        let wi = s3(Some(BackendAuth {
+            secret_ref: None,
+            workload_identity: Some(WorkloadIdentity {
+                service_account_name: "backup-mover".into(),
+            }),
+        }));
+        match backend_to_repository_connect(&wi) {
+            RepositoryConnect::S3 {
+                ambient_credentials,
+                ..
+            } => assert!(ambient_credentials, "workload identity ⇒ ambient chain"),
+            other => panic!("expected S3, got {other:?}"),
+        }
+        // Static-Secret and auth-less repos keep the env-key path.
+        for backend in [
+            s3(None),
+            s3(Some(BackendAuth {
+                secret_ref: Some(kopiur_api::common::SecretRef {
+                    name: "creds".into(),
+                    namespace: None,
+                }),
+                workload_identity: None,
+            })),
+        ] {
+            match backend_to_repository_connect(&backend) {
+                RepositoryConnect::S3 {
+                    ambient_credentials,
+                    ..
+                } => assert!(!ambient_credentials),
+                other => panic!("expected S3, got {other:?}"),
+            }
+        }
     }
 
     // --- backend_to_repository_connect: every CRD Backend variant must map to a

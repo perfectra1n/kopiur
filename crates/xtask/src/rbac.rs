@@ -213,10 +213,13 @@ fn workload_rules() -> Vec<PolicyRule> {
         // mints via server-side apply (a PATCH), so `patch` (and `update`) are
         // REQUIRED alongside `create`/`get` — without `patch` the apply is 403'd
         // and the SA is never minted, so the mover Job FailedCreates.
+        // `list`/`watch` added for workload identity: the Repository /
+        // ClusterRepository controllers watch ServiceAccounts so creating the
+        // `auth.workloadIdentity` SA un-sticks a blocked repo immediately.
         rule(
             &[""],
             &["serviceaccounts".into()],
-            &["get", "create", "update", "patch"],
+            &["get", "list", "watch", "create", "update", "patch"],
         ),
         rule(
             &["rbac.authorization.k8s.io"],

@@ -342,6 +342,7 @@ mod tests {
             region: None,
             disable_tls: false,
             disable_tls_verification: false,
+            ambient_credentials: false,
         };
         materialize(&mut spec, &dir).expect("materialize s3");
         // No staging dir created for an env-only backend.

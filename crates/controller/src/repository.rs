@@ -498,18 +498,18 @@ async fn bootstrap_via_mover(
         repo.spec.create.as_ref(),
         repo.spec.mover_defaults.as_ref(),
     );
-    // Mint the mover SA + RoleBinding in the Repository's namespace before launching
-    // the bootstrap Job (ADR §4.12).
-    if let Some(sa) = ctx.mover_service_account.as_deref() {
-        io::ensure_mover_rbac(
-            &ctx.client,
-            namespace,
-            sa,
-            &ctx.mover_role_kind,
-            &ctx.mover_clusterrole,
-        )
-        .await?;
-    }
+    // Resolve the bootstrap Job's run identity in the Repository's namespace:
+    // the user's workload-identity SA (preflighted + bound to the mover role),
+    // or the minted mover SA + RoleBinding (ADR §4.12).
+    let mover_identity = io::ensure_mover_identity(
+        &ctx.client,
+        namespace,
+        &[backend],
+        ctx.mover_service_account.as_deref(),
+        &ctx.mover_role_kind,
+        &ctx.mover_clusterrole,
+    )
+    .await?;
     // Resolve the credential Secret(s) the bootstrap mover loads via envFrom:
     // verify the user-managed credential Secret is present. The bootstrap Job runs
     // in the Repository's own namespace, where its Secret already lives — so it
@@ -545,6 +545,7 @@ async fn bootstrap_via_mover(
         "kopiur.home-operations.com/repository".to_string(),
         name.to_string(),
     );
+    mover_identity.decorate_labels(&mut labels);
     // A filesystem backend mounts its repo volume (PVC / inline NFS) read-write so
     // the mover can create/connect the repository; object stores mount nothing.
     let repo_volume =
@@ -594,7 +595,7 @@ async fn bootstrap_via_mover(
         repo_volume,
         creds_secrets,
         result_configmap: Some(&job_name),
-        service_account: ctx.mover_service_account.as_deref(),
+        service_account: mover_identity.service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
         // Bootstrap is a short connect/create probe: an emptyDir cache suffices.

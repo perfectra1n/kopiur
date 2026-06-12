@@ -67,7 +67,7 @@ spec:
                             description: |-
                               Secret holding the backend's access credentials. The operator reads
                               well-known keys (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3).
-                              ADR §3.1.
+                              Mutually exclusive with `workloadIdentity`. ADR §3.1.
                             nullable: true
                             properties:
                               name:
@@ -84,14 +84,17 @@ spec:
                             type: object
                           workloadIdentity:
                             description: |-
-                              Advanced auth: workload identity (IRSA/WIF). Structurally present, deprioritized
-                              for the homelab default (ADR §4.11).
+                              Cloud workload identity: the mover Job runs as the named `ServiceAccount`
+                              and authenticates via the cloud's federation (IRSA / EKS Pod Identity,
+                              AKS Workload Identity, GKE Workload Identity) — no static keys in the
+                              cluster. Mutually exclusive with `secretRef`. ADR §4.11.
                             nullable: true
                             properties:
                               serviceAccountName:
                                 description: |-
                                   Name of the `ServiceAccount` the mover pod runs as, federated to the
-                                  cloud IAM role/identity that grants backend access.
+                                  cloud IAM role/identity that grants backend access. Resolved in the
+                                  mover Job's own namespace.
                                 type: string
                             required:
                             - serviceAccountName
@@ -115,14 +118,15 @@ spec:
                     description: Backblaze B2.
                     properties:
                       auth:
-                        description: Access credentials (application key ID/key Secret).
+                        description: |-
+                          Access credentials (application key ID/key Secret). B2 has no cloud IAM
+                          federation, so this is Secret-only.
                         nullable: true
                         properties:
                           secretRef:
                             description: |-
-                              Secret holding the backend's access credentials. The operator reads
-                              well-known keys (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3).
-                              ADR §3.1.
+                              Secret holding the backend's access credentials, read by well-known keys
+                              (e.g. `B2_KEY_ID`/`B2_KEY`, `KOPIA_SFTP_KEY_DATA`, `KOPIA_WEBDAV_USERNAME`).
                             nullable: true
                             properties:
                               name:
@@ -136,20 +140,6 @@ spec:
                                 type: string
                             required:
                             - name
-                            type: object
-                          workloadIdentity:
-                            description: |-
-                              Advanced auth: workload identity (IRSA/WIF). Structurally present, deprioritized
-                              for the homelab default (ADR §4.11).
-                            nullable: true
-                            properties:
-                              serviceAccountName:
-                                description: |-
-                                  Name of the `ServiceAccount` the mover pod runs as, federated to the
-                                  cloud IAM role/identity that grants backend access.
-                                type: string
-                            required:
-                            - serviceAccountName
                             type: object
                         type: object
                       bucket:
@@ -217,7 +207,7 @@ spec:
                             description: |-
                               Secret holding the backend's access credentials. The operator reads
                               well-known keys (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3).
-                              ADR §3.1.
+                              Mutually exclusive with `workloadIdentity`. ADR §3.1.
                             nullable: true
                             properties:
                               name:
@@ -234,14 +224,17 @@ spec:
                             type: object
                           workloadIdentity:
                             description: |-
-                              Advanced auth: workload identity (IRSA/WIF). Structurally present, deprioritized
-                              for the homelab default (ADR §4.11).
+                              Cloud workload identity: the mover Job runs as the named `ServiceAccount`
+                              and authenticates via the cloud's federation (IRSA / EKS Pod Identity,
+                              AKS Workload Identity, GKE Workload Identity) — no static keys in the
+                              cluster. Mutually exclusive with `secretRef`. ADR §4.11.
                             nullable: true
                             properties:
                               serviceAccountName:
                                 description: |-
                                   Name of the `ServiceAccount` the mover pod runs as, federated to the
-                                  cloud IAM role/identity that grants backend access.
+                                  cloud IAM role/identity that grants backend access. Resolved in the
+                                  mover Job's own namespace.
                                 type: string
                             required:
                             - serviceAccountName
@@ -299,7 +292,7 @@ spec:
                             description: |-
                               Secret holding the backend's access credentials. The operator reads
                               well-known keys (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3).
-                              ADR §3.1.
+                              Mutually exclusive with `workloadIdentity`. ADR §3.1.
                             nullable: true
                             properties:
                               name:
@@ -316,14 +309,17 @@ spec:
                             type: object
                           workloadIdentity:
                             description: |-
-                              Advanced auth: workload identity (IRSA/WIF). Structurally present, deprioritized
-                              for the homelab default (ADR §4.11).
+                              Cloud workload identity: the mover Job runs as the named `ServiceAccount`
+                              and authenticates via the cloud's federation (IRSA / EKS Pod Identity,
+                              AKS Workload Identity, GKE Workload Identity) — no static keys in the
+                              cluster. Mutually exclusive with `secretRef`. ADR §4.11.
                             nullable: true
                             properties:
                               serviceAccountName:
                                 description: |-
                                   Name of the `ServiceAccount` the mover pod runs as, federated to the
-                                  cloud IAM role/identity that grants backend access.
+                                  cloud IAM role/identity that grants backend access. Resolved in the
+                                  mover Job's own namespace.
                                 type: string
                             required:
                             - serviceAccountName
@@ -387,14 +383,15 @@ spec:
                     description: SFTP server.
                     properties:
                       auth:
-                        description: Credentials (e.g. SSH private key / known-hosts) sourced from a Secret.
+                        description: |-
+                          Credentials (SSH private key / known-hosts) sourced from a Secret. SSH
+                          has no cloud IAM federation, so this is Secret-only.
                         nullable: true
                         properties:
                           secretRef:
                             description: |-
-                              Secret holding the backend's access credentials. The operator reads
-                              well-known keys (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3).
-                              ADR §3.1.
+                              Secret holding the backend's access credentials, read by well-known keys
+                              (e.g. `B2_KEY_ID`/`B2_KEY`, `KOPIA_SFTP_KEY_DATA`, `KOPIA_WEBDAV_USERNAME`).
                             nullable: true
                             properties:
                               name:
@@ -408,20 +405,6 @@ spec:
                                 type: string
                             required:
                             - name
-                            type: object
-                          workloadIdentity:
-                            description: |-
-                              Advanced auth: workload identity (IRSA/WIF). Structurally present, deprioritized
-                              for the homelab default (ADR §4.11).
-                            nullable: true
-                            properties:
-                              serviceAccountName:
-                                description: |-
-                                  Name of the `ServiceAccount` the mover pod runs as, federated to the
-                                  cloud IAM role/identity that grants backend access.
-                                type: string
-                            required:
-                            - serviceAccountName
                             type: object
                         type: object
                       host:
@@ -449,14 +432,15 @@ spec:
                     description: WebDAV endpoint.
                     properties:
                       auth:
-                        description: HTTP basic-auth credentials sourced from a Secret.
+                        description: |-
+                          HTTP basic-auth credentials sourced from a Secret. WebDAV has no cloud
+                          IAM federation, so this is Secret-only.
                         nullable: true
                         properties:
                           secretRef:
                             description: |-
-                              Secret holding the backend's access credentials. The operator reads
-                              well-known keys (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3).
-                              ADR §3.1.
+                              Secret holding the backend's access credentials, read by well-known keys
+                              (e.g. `B2_KEY_ID`/`B2_KEY`, `KOPIA_SFTP_KEY_DATA`, `KOPIA_WEBDAV_USERNAME`).
                             nullable: true
                             properties:
                               name:
@@ -470,20 +454,6 @@ spec:
                                 type: string
                             required:
                             - name
-                            type: object
-                          workloadIdentity:
-                            description: |-
-                              Advanced auth: workload identity (IRSA/WIF). Structurally present, deprioritized
-                              for the homelab default (ADR §4.11).
-                            nullable: true
-                            properties:
-                              serviceAccountName:
-                                description: |-
-                                  Name of the `ServiceAccount` the mover pod runs as, federated to the
-                                  cloud IAM role/identity that grants backend access.
-                                type: string
-                            required:
-                            - serviceAccountName
                             type: object
                         type: object
                       url:

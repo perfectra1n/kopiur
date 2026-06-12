@@ -960,6 +960,86 @@ fn mover_rolebinding_uses_role_kind_for_namespaced_install() {
     assert_eq!(rb.role_ref.kind, "Role");
 }
 
+// --- workload-identity run identity (ADR §4.11): a backend with
+// `auth.workloadIdentity` runs the mover as the USER'S ServiceAccount. The
+// controller never creates that SA (its cloud annotations are the user's
+// federation contract) — it preflights it and binds the mover role to it. ---
+
+#[test]
+fn wi_rolebinding_binds_the_user_sa_under_a_distinct_name() {
+    let rb = build_wi_rolebinding("trilium", "backup-mover", "ClusterRole", "kopiur-mover");
+    // A name distinct from the minted-SA binding (named after the mover SA), so
+    // the two server-side applies can never clobber each other.
+    assert_eq!(
+        rb.metadata.name.as_deref(),
+        Some("kopiur-mover-wi-backup-mover")
+    );
+    assert_eq!(rb.metadata.namespace.as_deref(), Some("trilium"));
+    assert_eq!(rb.role_ref.name, "kopiur-mover");
+    let subjects = rb.subjects.expect("one subject");
+    assert_eq!(subjects.len(), 1);
+    assert_eq!(subjects[0].name, "backup-mover");
+    assert_eq!(subjects[0].namespace.as_deref(), Some("trilium"));
+}
+
+#[test]
+fn wi_rolebinding_name_truncates_long_sa_names_with_a_stable_hash() {
+    let long_sa = "a".repeat(260);
+    let name = wi_rolebinding_name(&long_sa);
+    assert!(name.len() <= 253, "got {} chars", name.len());
+    assert!(name.starts_with("kopiur-mover-wi-a"));
+    // Deterministic: the same SA always yields the same binding name (SSA idempotence).
+    assert_eq!(name, wi_rolebinding_name(&long_sa));
+    // Distinct long names stay distinct (the hash carries the difference).
+    assert_ne!(name, wi_rolebinding_name(&format!("{}b", "a".repeat(259))));
+}
+
+#[test]
+fn missing_wi_sa_message_is_actionable_per_cloud() {
+    use kopiur_api::creds::WorkloadIdentityCloud;
+    for (cloud, annotation) in [
+        (WorkloadIdentityCloud::S3, "eks.amazonaws.com/role-arn"),
+        (
+            WorkloadIdentityCloud::Azure,
+            "azure.workload.identity/client-id",
+        ),
+        (WorkloadIdentityCloud::Gcs, "iam.gke.io/gcp-service-account"),
+    ] {
+        let msg = missing_workload_identity_sa_message("backup-mover", "trilium", cloud);
+        // What: the exact SA and namespace.
+        assert!(msg.contains("`backup-mover`"), "{msg}");
+        assert!(msg.contains("`trilium`"), "{msg}");
+        // Why: kopiur never creates it.
+        assert!(msg.contains("never creates"), "{msg}");
+        // Fix: the cloud-specific federation annotation.
+        assert!(msg.contains(annotation), "{msg}");
+    }
+}
+
+#[test]
+fn mover_run_identity_decorates_the_azure_label_only_when_azure() {
+    let azure = MoverRunIdentity {
+        service_account: Some("backup-mover".into()),
+        azure_workload_identity: true,
+    };
+    let mut labels = std::collections::BTreeMap::new();
+    azure.decorate_labels(&mut labels);
+    assert_eq!(
+        labels
+            .get(kopiur_api::consts::AZURE_WORKLOAD_IDENTITY_LABEL)
+            .map(String::as_str),
+        Some("true")
+    );
+
+    let plain = MoverRunIdentity {
+        service_account: Some("kopiur-mover".into()),
+        azure_workload_identity: false,
+    };
+    let mut labels = std::collections::BTreeMap::new();
+    plain.decorate_labels(&mut labels);
+    assert!(labels.is_empty());
+}
+
 // --- missing-credentials message (load-bearing UX, ADR §4.12): names the
 // Secret + namespace, says WHY (namespace-local envFrom), says WHERE the repo
 // keeps it, and gives concrete fixes. ---

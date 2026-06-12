@@ -84,6 +84,22 @@ where
     .await;
 }
 
+/// Emit a `Warning` Event for a missing workload-identity ServiceAccount (see
+/// [`publish_warning_event`]).
+pub async fn publish_missing_sa_event<K>(ctx: &Context, obj: &K, message: &str)
+where
+    K: Resource<DynamicType = ()>,
+{
+    publish_warning_event(
+        ctx,
+        obj,
+        crate::consts::MISSING_SERVICE_ACCOUNT_REASON,
+        CHECK_CREDENTIALS_ACTION,
+        message,
+    )
+    .await;
+}
+
 /// Kubernetes caps an Event's `note` at 1024 bytes (the apiserver validates with
 /// Go's `len`, i.e. bytes). A longer note is rejected with a 422, so the
 /// *actionable* warning never reaches `kubectl describe`. We clamp every

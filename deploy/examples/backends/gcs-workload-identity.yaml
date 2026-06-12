@@ -1,0 +1,55 @@
+# Backend: GCS with workload identity — GKE Workload Identity (ADR-0003 §3.1, §4.11)
+#
+# No service-account key JSON: the mover Jobs run as a Kubernetes ServiceAccount
+# bound to a Google service account, and kopia (given no --credentials-file)
+# falls back to Application Default Credentials served by the GKE metadata
+# server. The only secret left in the cluster is the repository encryption
+# password.
+#
+# Prerequisites (GCP side, Workload Identity Federation for GKE):
+#   - Workload Identity enabled on the cluster/node pool,
+#   - a Google service account with `roles/storage.objectAdmin` on the bucket,
+#   - an IAM binding `roles/iam.workloadIdentityUser` from
+#     `PROJECT.svc.id.goog[backups/backup-mover]` to that GSA.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.gcs`).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-mover
+  namespace: backups
+  annotations:
+    # The Google service account this KSA impersonates.
+    iam.gke.io/gcp-service-account: kopia@REPLACE_ME.iam.gserviceaccount.com
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gcs-wi-repo-creds
+  namespace: backups
+type: Opaque
+stringData:
+  # Workload identity replaces KOPIA_GCS_CREDENTIALS — the repository
+  # encryption password is still required.
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: gcs-wi
+  namespace: backups
+spec:
+  backend:
+    gcs:
+      bucket: my-kopia-backups
+      auth:
+        workloadIdentity:
+          serviceAccountName: backup-mover
+  encryption:
+    passwordSecretRef:
+      name: gcs-wi-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true

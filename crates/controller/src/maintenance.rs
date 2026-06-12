@@ -505,24 +505,23 @@ async fn spawn_maintenance_job(
     let owner = io::owner_ref_for(maint, "Maintenance")?;
 
     // The maintenance mover Job runs in this namespace as the dedicated mover SA
-    // (not the operator SA, which does not exist here). Mint the least-privilege
-    // mover SA + RoleBinding FIRST — before resolving credentials, which can fail
-    // (e.g. a ClusterRepository's Secret is absent here and projection is off).
-    // The SA is a prerequisite independent of creds; minting it first means a
-    // missing-creds retry still leaves the RBAC in place, and every other mover
-    // path (Snapshot/Restore/bootstrap) establishes this too. Without it the Job
-    // FailedCreates with `serviceaccount ... not found` and never schedules a pod
-    // (ADR §4.12).
-    if let Some(sa) = ctx.mover_service_account.as_deref() {
-        io::ensure_mover_rbac(
-            &ctx.client,
-            namespace,
-            sa,
-            &ctx.mover_role_kind,
-            &ctx.mover_clusterrole,
-        )
-        .await?;
-    }
+    // or the user's workload-identity SA (not the operator SA, which does not
+    // exist here). Resolve the run identity FIRST — before resolving credentials,
+    // which can fail (e.g. a ClusterRepository's Secret is absent here and
+    // projection is off). The identity is a prerequisite independent of creds;
+    // establishing it first means a missing-creds retry still leaves the RBAC in
+    // place, and every other mover path (Snapshot/Restore/bootstrap) establishes
+    // this too. Without it the Job FailedCreates with `serviceaccount ... not
+    // found` and never schedules a pod (ADR §4.12).
+    let mover_identity = io::ensure_mover_identity(
+        &ctx.client,
+        namespace,
+        &[&repo.backend],
+        ctx.mover_service_account.as_deref(),
+        &ctx.mover_role_kind,
+        &ctx.mover_clusterrole,
+    )
+    .await?;
 
     // Resolve the credential Secret(s) the mover loads via envFrom. A maintenance
     // Job for a ClusterRepository lands in a namespace that often lacks the source
@@ -601,6 +600,7 @@ async fn spawn_maintenance_job(
     if let Some(ttl) = resolved_mover.ttl_seconds_after_finished {
         limits.ttl_seconds_after_finished = Some(ttl);
     }
+    mover_identity.decorate_labels(&mut labels);
     let inputs = MoverJobInputs {
         name: job_name,
         namespace,
@@ -620,7 +620,7 @@ async fn spawn_maintenance_job(
         repo_volume,
         creds_secrets,
         result_configmap: None,
-        service_account: ctx.mover_service_account.as_deref(),
+        service_account: mover_identity.service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations,
         cache_volume,

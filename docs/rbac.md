@@ -32,7 +32,7 @@ What each rule is **for**, grouped by purpose:
 | core → `secrets` | get, list, watch, create, patch | Read repository credential Secrets (and re-reconcile when they change); **create/patch** is the credential-projection feature (copying a repo's Secret into a consumer namespace) and the self-managed webhook TLS Secret. |
 | `batch` → `jobs` | get, list, watch, create, update, patch, delete | Create and track the mover Jobs; reap them per `failedJobsHistoryLimit`. |
 | `snapshot.storage.k8s.io` → `volumesnapshots`; `groupsnapshot.storage.k8s.io` → `volumegroupsnapshots` | get, list, watch, create, delete | CSI snapshot / group-snapshot copy methods (`SnapshotPolicy.spec.copyMethod`). |
-| core → `serviceaccounts`; `rbac.authorization.k8s.io` → `rolebindings` | get, create, update, patch | Mint the per-namespace mover ServiceAccount + RoleBinding on demand (see below). |
+| core → `serviceaccounts`; `rbac.authorization.k8s.io` → `rolebindings` | get, **list, watch** (SAs), create, update, patch | Mint the per-namespace mover ServiceAccount + RoleBinding on demand (see below). `list`/`watch` on ServiceAccounts re-reconciles a repository the moment its `auth.workloadIdentity` SA is created. |
 | core → `namespaces` | get, list, watch | Read the `kopiur.home-operations.com/privileged-movers` annotation (the elevated-mover opt-in) and drive `pvcSelector` namespace selection. *(Cluster scope only.)* |
 | `admissionregistration.k8s.io` → `validatingwebhookconfigurations`, `mutatingwebhookconfigurations` (names `kopiur-validating` / `kopiur-mutating` only) | get, patch | Inject the self-managed CA bundle into the webhook configurations (`webhook.tls.mode: self`). *(Cluster scope only.)* |
 | core → `secrets` (name `kopiur-webhook-tls` only) | update, patch | Rotate the self-managed webhook serving certificate. |
@@ -69,6 +69,12 @@ exactly why an **elevated** mover (root UID, `privilegedMode`, added capabilitie
 additionally requires the namespace to opt in with the
 `kopiur.home-operations.com/privileged-movers: "true"` annotation
 (see [Movers, RBAC & credentials](movers.md)).
+
+With **workload identity** (`auth.workloadIdentity` on a cloud backend) the Job
+runs as the *user's* federated ServiceAccount instead: the controller never
+creates or modifies that SA — it only `get`s it as a preflight and applies a
+RoleBinding `kopiur-mover-wi-<sa>` to the same `kopiur-mover` role, so the
+mover can still patch its own `.status`.
 
 /// note | Auditing tip
 `kubectl auth can-i --list --as=system:serviceaccount:kopiur-system:kopiur-controller`

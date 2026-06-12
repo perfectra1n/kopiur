@@ -1,0 +1,60 @@
+# Backend: Azure Blob with workload identity — AKS Workload Identity (ADR-0003 §3.1, §4.11)
+#
+# No storage key, no SAS token: the mover Jobs run as a ServiceAccount federated
+# to a Microsoft Entra application/managed identity. Kopiur labels the mover
+# pods `azure.workload.identity/use: "true"`, so the azure-workload-identity
+# webhook injects AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_FEDERATED_TOKEN_FILE
+# — exactly the env kopia's azure backend reads.
+#
+# Prerequisites (Azure side):
+#   - AKS with the workload-identity add-on (or the azure-workload-identity
+#     webhook installed),
+#   - a managed identity / app registration with `Storage Blob Data Contributor`
+#     on the container, federated to this ServiceAccount
+#     (`az identity federated-credential create ...`).
+#
+# NOTE: `storageAccount` is REQUIRED with workloadIdentity (webhook-enforced):
+# the identity webhook injects the tenant/client/token, not the account name.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.azure`).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-mover
+  namespace: backups
+  annotations:
+    # The client id of the federated managed identity / app registration.
+    azure.workload.identity/client-id: 00000000-0000-0000-0000-REPLACE_ME
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: azure-wi-repo-creds
+  namespace: backups
+type: Opaque
+stringData:
+  # Workload identity replaces AZURE_STORAGE_KEY/SAS — the repository
+  # encryption password is still required.
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: azure-wi
+  namespace: backups
+spec:
+  backend:
+    azure:
+      container: kopia-backups
+      storageAccount: mystorageacct # REQUIRED with workloadIdentity
+      auth:
+        workloadIdentity:
+          serviceAccountName: backup-mover
+  encryption:
+    passwordSecretRef:
+      name: azure-wi-repo-creds
+      key: KOPIA_PASSWORD
+  create:
+    enabled: true

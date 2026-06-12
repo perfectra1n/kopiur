@@ -11,30 +11,59 @@ use crate::common::{SecretRef, TlsConfig};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Credentials for an object-store backend. Always a Secret reference. ADR §3.1.
+/// Credentials for a cloud object-store backend with an IAM plane (S3 / Azure /
+/// GCS): **exactly one of** a static-key Secret reference or a workload-identity
+/// binding. Both are `Option` because the forms share the `auth` key, so the
+/// exactly-one rule is webhook-enforced (`validate::validate_backend_auth`), like
+/// the snapshot `Source`. An absent `auth` is also legal — the well-known keys may
+/// ride the encryption-password Secret. Backends without cloud IAM (B2, SFTP,
+/// WebDAV) use [`SecretAuth`] instead, so a workload identity on them is
+/// unrepresentable. ADR §3.1 / §4.11.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendAuth {
     /// Secret holding the backend's access credentials. The operator reads
     /// well-known keys (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for S3).
-    /// ADR §3.1.
+    /// Mutually exclusive with `workloadIdentity`. ADR §3.1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_ref: Option<SecretRef>,
-    /// Advanced auth: workload identity (IRSA/WIF). Structurally present, deprioritized
-    /// for the homelab default (ADR §4.11).
+    /// Cloud workload identity: the mover Job runs as the named `ServiceAccount`
+    /// and authenticates via the cloud's federation (IRSA / EKS Pod Identity,
+    /// AKS Workload Identity, GKE Workload Identity) — no static keys in the
+    /// cluster. Mutually exclusive with `secretRef`. ADR §4.11.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload_identity: Option<WorkloadIdentity>,
 }
 
-/// Cloud workload-identity binding (IRSA / GKE Workload Identity / Azure WIF):
-/// the mover authenticates as a Kubernetes `ServiceAccount` instead of a static
-/// Secret. Deprioritized for the homelab default. ADR §4.11.
+/// Cloud workload-identity binding (IRSA/EKS Pod Identity, AKS Workload
+/// Identity, GKE Workload Identity): the mover Job runs as a user-supplied
+/// Kubernetes `ServiceAccount` federated to the cloud IAM role/identity that
+/// grants backend access, instead of reading static keys from a Secret. The
+/// ServiceAccount must already exist in each namespace mover Jobs run in (the
+/// operator never creates it — its cloud annotations are the user's contract
+/// with the cloud webhook) and carries the cloud-specific annotation
+/// (`eks.amazonaws.com/role-arn`, `azure.workload.identity/client-id`,
+/// `iam.gke.io/gcp-service-account`). ADR §4.11.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkloadIdentity {
     /// Name of the `ServiceAccount` the mover pod runs as, federated to the
-    /// cloud IAM role/identity that grants backend access.
+    /// cloud IAM role/identity that grants backend access. Resolved in the
+    /// mover Job's own namespace.
     pub service_account_name: String,
+}
+
+/// Credentials for a backend **without** a cloud IAM plane (B2, SFTP, WebDAV):
+/// only a static Secret reference. A separate type from [`BackendAuth`] so a
+/// `workloadIdentity` on these backends is structurally unrepresentable — there
+/// is no cloud federation that could honor it. ADR §3.1 / §5.5.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretAuth {
+    /// Secret holding the backend's access credentials, read by well-known keys
+    /// (e.g. `B2_KEY_ID`/`B2_KEY`, `KOPIA_SFTP_KEY_DATA`, `KOPIA_WEBDAV_USERNAME`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<SecretRef>,
 }
 
 /// The discriminated backend union. Exactly one variant by construction.
@@ -181,9 +210,10 @@ pub struct B2Backend {
     /// Object-name prefix within the bucket; empty/absent means the bucket root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
-    /// Access credentials (application key ID/key Secret).
+    /// Access credentials (application key ID/key Secret). B2 has no cloud IAM
+    /// federation, so this is Secret-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth: Option<BackendAuth>,
+    pub auth: Option<SecretAuth>,
 }
 
 /// Local-filesystem backend: kopia writes the repository to a path inside the
@@ -264,9 +294,10 @@ pub struct SftpBackend {
     /// SSH username to connect as.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
-    /// Credentials (e.g. SSH private key / known-hosts) sourced from a Secret.
+    /// Credentials (SSH private key / known-hosts) sourced from a Secret. SSH
+    /// has no cloud IAM federation, so this is Secret-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth: Option<BackendAuth>,
+    pub auth: Option<SecretAuth>,
 }
 
 /// WebDAV backend. ADR §3.1.
@@ -275,9 +306,10 @@ pub struct SftpBackend {
 pub struct WebDavBackend {
     /// WebDAV collection URL holding the kopia repository.
     pub url: String,
-    /// HTTP basic-auth credentials sourced from a Secret.
+    /// HTTP basic-auth credentials sourced from a Secret. WebDAV has no cloud
+    /// IAM federation, so this is Secret-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth: Option<BackendAuth>,
+    pub auth: Option<SecretAuth>,
 }
 
 /// rclone-remote backend; kopia shells out to `rclone` so any rclone-supported

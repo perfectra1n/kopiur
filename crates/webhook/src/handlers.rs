@@ -418,20 +418,27 @@ async fn handle_repository_replication(
         return Err(denial.into());
     }
 
-    // §13(d): the destination must differ from the source's backend (no self-mirror).
+    // §13(d): the destination must differ from the source's backend (no self-mirror),
+    // and the source/destination auth pair must be safe in one mover pod (a same-kind
+    // static/workload-identity mix leaks the static env into the ambient chain).
     // Resolve the source backend via the client and compare. Best-effort — a missing
-    // client / unresolvable source skips this one check (the structural validations
+    // client / unresolvable source skips these checks (the structural validations
     // above already ran), mirroring how tenancy degrades when inputs are unavailable.
     if let Some(client) = client
         && let Some(source_backend) =
             resolve_source_backend(client, &spec.source_ref, req.namespace.as_deref()).await
-        && !api::validate::replication_destination_differs(&source_backend, &spec.destination)
     {
-        return Err(AdmissionError::Invalid(vec![
-            ValidationError::ReplicationDestinationSameAsSource {
-                backend: spec.destination.kind_str().to_string(),
-            },
-        ]));
+        if !api::validate::replication_destination_differs(&source_backend, &spec.destination) {
+            return Err(AdmissionError::Invalid(vec![
+                ValidationError::ReplicationDestinationSameAsSource {
+                    backend: spec.destination.kind_str().to_string(),
+                },
+            ]));
+        }
+        if let Err(e) = api::validate::validate_replication_auth(&source_backend, &spec.destination)
+        {
+            return Err(AdmissionError::Invalid(vec![e]));
+        }
     }
 
     Ok(resp)

@@ -413,6 +413,16 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
             let store = repo_store.clone();
             move |cm: ConfigMap| watch::configmap_to_repositories(&store, &cm)
         })
+        // Workload identity: creating the `auth.workloadIdentity` ServiceAccount
+        // un-sticks a repository blocked on the SA preflight immediately.
+        .watches(
+            Api::<k8s_openapi::api::core::v1::ServiceAccount>::all(client.clone()),
+            cfg.clone(),
+            {
+                let store = repo_store.clone();
+                move |sa| watch::serviceaccount_to_repositories(&store, &sa)
+            },
+        )
         .watches(
             Api::<Maintenance>::all(client.clone()),
             cfg.clone(),
@@ -450,6 +460,16 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
             let store = crepo_store.clone();
             move |cm: ConfigMap| watch::configmap_to_cluster_repositories(&store, &cm)
         })
+        // Workload identity: same SA-preflight un-stick as the Repository
+        // controller (name-only match; movers run in many namespaces).
+        .watches(
+            Api::<k8s_openapi::api::core::v1::ServiceAccount>::all(client.clone()),
+            cfg.clone(),
+            {
+                let store = crepo_store.clone();
+                move |sa| watch::serviceaccount_to_cluster_repositories(&store, &sa)
+            },
+        )
         .watches(
             Api::<Maintenance>::all(client.clone()),
             cfg.clone(),

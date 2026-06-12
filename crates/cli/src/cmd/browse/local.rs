@@ -98,6 +98,14 @@ impl LocalSession {
                 repository: target.repo.name.clone(),
             });
         }
+        // A workload-identity repo's federated credentials are pod-projected
+        // (token volume / metadata server) — they cannot exist on this machine.
+        if let Some((wi, _)) = kopiur_api::creds::backend_workload_identity(&target.repo.backend) {
+            return Err(CliError::LocalWorkloadIdentity {
+                repository: target.repo.name.clone(),
+                service_account: wi.service_account_name.clone(),
+            });
+        }
 
         let bin = resolve_kopia_bin(
             kopia_bin_flag,

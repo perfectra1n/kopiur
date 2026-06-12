@@ -3,7 +3,7 @@
 //! referent watches) and external tooling (`kubectl kopiur doctor`), so the
 //! "what credentials does this backend reference" answer cannot fork.
 
-use crate::backend::Backend;
+use crate::backend::{Backend, WorkloadIdentity};
 use crate::common::Encryption;
 
 /// The backend credentials Secret name for an object-store backend, if any.
@@ -24,6 +24,54 @@ pub fn backend_auth_secret_ref(backend: &Backend) -> Option<&crate::common::Secr
         Backend::WebDav(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
         Backend::Rclone(b) => b.config_secret_ref.as_ref(),
         Backend::Filesystem(_) => None,
+    }
+}
+
+/// Which cloud IAM plane a workload-identity backend federates with. Drives the
+/// cloud-specific mover wiring (the Azure pod label; docs/messages naming the
+/// right SA annotation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkloadIdentityCloud {
+    /// AWS: IRSA (web-identity token) or EKS Pod Identity via the minio-go
+    /// credential chain.
+    S3,
+    /// Azure Workload Identity: the azure-workload-identity webhook injects
+    /// `AZURE_TENANT_ID`/`AZURE_CLIENT_ID`/`AZURE_FEDERATED_TOKEN_FILE` into
+    /// pods carrying the opt-in label and running as the federated SA.
+    Azure,
+    /// GKE Workload Identity: ambient ADC via the GKE metadata server.
+    Gcs,
+}
+
+/// The backend's workload-identity binding, if any, with its cloud plane.
+///
+/// Exhaustive over [`Backend`] (ADR §5.5): only S3/Azure/GCS can carry one —
+/// the other backends' auth types make it unrepresentable, and a new backend
+/// cannot compile until its arm is decided here.
+pub fn backend_workload_identity(
+    backend: &Backend,
+) -> Option<(&WorkloadIdentity, WorkloadIdentityCloud)> {
+    match backend {
+        Backend::S3(b) => b
+            .auth
+            .as_ref()
+            .and_then(|a| a.workload_identity.as_ref())
+            .map(|wi| (wi, WorkloadIdentityCloud::S3)),
+        Backend::Azure(b) => b
+            .auth
+            .as_ref()
+            .and_then(|a| a.workload_identity.as_ref())
+            .map(|wi| (wi, WorkloadIdentityCloud::Azure)),
+        Backend::Gcs(b) => b
+            .auth
+            .as_ref()
+            .and_then(|a| a.workload_identity.as_ref())
+            .map(|wi| (wi, WorkloadIdentityCloud::Gcs)),
+        Backend::B2(_)
+        | Backend::Sftp(_)
+        | Backend::WebDav(_)
+        | Backend::Rclone(_)
+        | Backend::Filesystem(_) => None,
     }
 }
 

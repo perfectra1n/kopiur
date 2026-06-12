@@ -554,11 +554,25 @@ async fn bootstrap_cluster_via_mover(
     );
     let creds_secrets = io::mover_creds_secrets(backend, &repo.spec.encryption);
     let owner = io::owner_ref_for(repo, "ClusterRepository")?;
+    // The bootstrap Job runs in the credentials Secret's namespace (`job_ns`).
+    // Resolve its run identity there: the user's workload-identity SA
+    // (preflighted + bound to the mover role), or the minted mover SA +
+    // RoleBinding — it is NOT the operator SA either way (ADR §4.12).
+    let mover_identity = io::ensure_mover_identity(
+        &ctx.client,
+        &job_ns,
+        &[backend],
+        ctx.mover_service_account.as_deref(),
+        &ctx.mover_role_kind,
+        &ctx.mover_clusterrole,
+    )
+    .await?;
     let mut labels = BTreeMap::new();
     labels.insert(
         "kopiur.home-operations.com/cluster-repository".to_string(),
         name.to_string(),
     );
+    mover_identity.decorate_labels(&mut labels);
     // The cluster-repo bootstrap Job inherits the repository's `moverDefaults`
     // (ADR-0004 §1) — same bootstrap-gap fix as the namespaced Repository. The Job
     // lands in `job_ns` (spec.maintenance.namespace or KOPIUR_NAMESPACE); not gated
@@ -606,27 +620,13 @@ async fn bootstrap_cluster_via_mover(
         repo_volume,
         creds_secrets,
         result_configmap: Some(&job_name),
-        service_account: ctx.mover_service_account.as_deref(),
+        service_account: mover_identity.service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
         // Bootstrap is a short connect/create probe: an emptyDir cache suffices.
         cache_volume: Default::default(),
         readiness_exec: None,
     };
-    // The bootstrap Job runs in the credentials Secret's namespace (`job_ns`), where
-    // the Secret is present by construction — but the mover SA must still be minted
-    // there (it is NOT the operator SA). Ensure the mover SA + RoleBinding exist
-    // before launching (ADR §4.12).
-    if let Some(sa) = ctx.mover_service_account.as_deref() {
-        io::ensure_mover_rbac(
-            &ctx.client,
-            &job_ns,
-            sa,
-            &ctx.mover_role_kind,
-            &ctx.mover_clusterrole,
-        )
-        .await?;
-    }
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
     io::apply_mover_objects(&ctx.client, &job_ns, &job_name, &cm, &job).await?;

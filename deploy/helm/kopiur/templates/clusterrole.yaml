@@ -131,10 +131,13 @@ rules:
   # `io::ensure_mover_rbac` mints these via server-side apply (a PATCH), so `patch`
   # (and `update`) are required alongside `create`/`get` — without `patch` the apply
   # is 403'd and the mover SA is never minted, so the mover Job FailedCreates.
+  # `list`/`watch` for workload identity: the repository controllers watch
+  # ServiceAccounts so creating an `auth.workloadIdentity` SA un-sticks a
+  # blocked repository immediately.
   - apiGroups: [""]
     resources:
       - serviceaccounts
-    verbs: [get, create, update, patch]
+    verbs: [get, list, watch, create, update, patch]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources:
       - rolebindings

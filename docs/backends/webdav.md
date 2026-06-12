@@ -77,6 +77,10 @@ Note the spec key is `webDav` (camelCase, capital D).
 | `url`            | yes      | —       | `https://cloud.example.com/remote.php/dav/files/alice/kopia` | The WebDAV collection URL holding the repository — full scheme + path to an **existing, writable** folder.       |
 | `auth.secretRef` | no       | —       | `{ name: webdav-repo-creds }`                                | Names the basic-auth Secret above. Same namespace as the `Repository`; a `ClusterRepository` adds `namespace:`.   |
 
+WebDAV has no cloud-IAM federation, so its `auth` is **Secret-only** — there is
+no `workloadIdentity` here. A stray `auth.workloadIdentity` is silently
+**pruned** by the API server (it's not in the schema), not rejected.
+
 ## Customization — the values you actually change
 
 - **`url`** — the collection URL. Include the full path to the repository folder.

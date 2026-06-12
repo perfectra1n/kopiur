@@ -198,16 +198,27 @@ async fn spawn_replication_job(
         });
     let owner = io::owner_ref_for(repl, "RepositoryReplication")?;
 
-    if let Some(sa) = ctx.mover_service_account.as_deref() {
-        io::ensure_mover_rbac(
-            &ctx.client,
-            namespace,
-            sa,
-            &ctx.mover_role_kind,
-            &ctx.mover_clusterrole,
-        )
-        .await?;
+    // Defensive re-check of the admission rule (one validator, two callers): a
+    // same-kind static/workload-identity auth mix would let the static side's
+    // env leak into the workload-identity side's ambient credential chain.
+    if let Err(e) =
+        kopiur_api::validate::validate_replication_auth(&repo.backend, &repl.spec.destination)
+    {
+        return Err(Error::Validation(e.to_string()));
     }
+    // One replicate pod touches BOTH backends: a workload identity on either
+    // names the SA the pod runs as (admission guarantees a both-WI pair agrees),
+    // and an Azure-WI on either side requires the pod label.
+    let mover_identity = io::ensure_mover_identity(
+        &ctx.client,
+        namespace,
+        &[&repo.backend, &repl.spec.destination],
+        ctx.mover_service_account.as_deref(),
+        &ctx.mover_role_kind,
+        &ctx.mover_clusterrole,
+    )
+    .await?;
+    mover_identity.decorate_labels(&mut labels);
 
     let creds = io::resolve_mover_creds_for(
         &ctx.client,
@@ -271,7 +282,7 @@ async fn spawn_replication_job(
         repo_volume,
         creds_secrets,
         result_configmap: None,
-        service_account: ctx.mover_service_account.as_deref(),
+        service_account: mover_identity.service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations,
         cache_volume: Default::default(),

@@ -376,6 +376,22 @@ pub enum CliError {
         repository: String,
     },
 
+    /// `--local` cannot authenticate a workload-identity repository.
+    #[error(
+        "--local cannot read repository {repository:?}: its backend authenticates via \
+         workload identity (ServiceAccount {service_account:?}), whose federated \
+         credentials only exist inside a pod running as that ServiceAccount — there \
+         is no credential Secret to copy onto this machine. \
+         Fix: drop --local and use the in-cluster session, which runs as the \
+         federated ServiceAccount"
+    )]
+    LocalWorkloadIdentity {
+        /// The repository name.
+        repository: String,
+        /// The federated ServiceAccount the backend names.
+        service_account: String,
+    },
+
     /// Reading the credential Secret for `--local` was refused.
     #[error(
         "forbidden: cannot get Secret {secret:?} in namespace {namespace}: {source}. \

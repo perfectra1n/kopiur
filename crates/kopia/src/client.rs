@@ -93,6 +93,14 @@ pub enum ConnectSpec {
         disable_tls: bool,
         /// Skip TLS certificate verification (`--disable-tls-verification`).
         disable_tls_verification: bool,
+        /// Authenticate via the ambient AWS credential chain (IRSA web-identity,
+        /// EKS Pod Identity, IMDS) instead of static keys — the workload-identity
+        /// path. kopia 0.23 marks `--access-key`/`--secret-access-key` as
+        /// *required* flags (env-bound to `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`),
+        /// but its storage layer skips empty static credentials and falls through
+        /// minio-go's chain — so this renders the flags **explicitly empty**
+        /// (`--access-key=`), which satisfies the parser and engages the chain.
+        ambient_credentials: bool,
     },
     /// Azure Blob Storage backend.
     Azure {
@@ -230,6 +238,7 @@ impl ConnectSpec {
     ///     region: None,
     ///     disable_tls: false,
     ///     disable_tls_verification: false,
+    ///     ambient_credentials: false,
     /// };
     /// assert_eq!(s3.kind_str(), "s3");
     /// ```
@@ -276,6 +285,7 @@ impl ConnectSpec {
                 region,
                 disable_tls,
                 disable_tls_verification,
+                ambient_credentials,
             } => {
                 let mut a = vec!["s3".into(), "--bucket".into(), bucket.clone()];
                 opt(&mut a, "--endpoint", endpoint);
@@ -286,6 +296,16 @@ impl ConnectSpec {
                 }
                 if *disable_tls_verification {
                     a.push("--disable-tls-verification".into());
+                }
+                if *ambient_credentials {
+                    // Single `=`-joined tokens: an empty value as a separate argv
+                    // token (`--access-key ""`) would be consumed as the flag's
+                    // value either way, but the joined form is unambiguous to
+                    // kingpin and to a human reading the Job args. Satisfies the
+                    // Required() flags with empty values so kopia's storage layer
+                    // falls through to the ambient chain (IRSA / Pod Identity / IMDS).
+                    a.push("--access-key=".into());
+                    a.push("--secret-access-key=".into());
                 }
                 a
             }
@@ -1418,8 +1438,38 @@ mod tests {
             region: None,
             disable_tls: false,
             disable_tls_verification: false,
+            ambient_credentials: false,
         };
         assert_eq!(spec.backend_args(), vec!["s3", "--bucket", "b"]);
+    }
+
+    #[test]
+    fn s3_backend_args_ambient_credentials_pass_empty_key_flags() {
+        // Workload identity: kopia 0.23 requires --access-key/--secret-access-key
+        // at flag-parse time, but its storage layer skips empty static creds and
+        // falls through minio-go's ambient chain (IRSA / Pod Identity / IMDS).
+        // The flags must be the exact `=`-joined empty tokens.
+        let spec = ConnectSpec::S3 {
+            bucket: "b".into(),
+            endpoint: None,
+            prefix: None,
+            region: Some("us-east-1".into()),
+            disable_tls: false,
+            disable_tls_verification: false,
+            ambient_credentials: true,
+        };
+        assert_eq!(
+            spec.backend_args(),
+            vec![
+                "s3",
+                "--bucket",
+                "b",
+                "--region",
+                "us-east-1",
+                "--access-key=",
+                "--secret-access-key=",
+            ]
+        );
     }
 
     #[test]
@@ -1431,6 +1481,7 @@ mod tests {
             region: Some("us-east-1".into()),
             disable_tls: false,
             disable_tls_verification: false,
+            ambient_credentials: false,
         };
         assert_eq!(
             spec.backend_args(),
@@ -1458,6 +1509,7 @@ mod tests {
             region: None,
             disable_tls: true,
             disable_tls_verification: true,
+            ambient_credentials: false,
         };
         let args = spec.backend_args();
         assert!(args.contains(&"--disable-tls".to_string()));
@@ -1708,6 +1760,7 @@ mod tests {
                 region: None,
                 disable_tls: false,
                 disable_tls_verification: false,
+                ambient_credentials: false,
             },
             ConnectSpec::Azure {
                 container: "c".into(),
@@ -1840,6 +1893,7 @@ mod tests {
             region: Some("us-east-1".into()),
             disable_tls: false,
             disable_tls_verification: false,
+            ambient_credentials: false,
         };
         assert_eq!(
             sync_to_args(&dest, false),

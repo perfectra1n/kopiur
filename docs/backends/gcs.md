@@ -78,7 +78,12 @@ and points kopia at the path. The secret never lands on kopia's argv.
 | ---------------- | -------- | ----------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `bucket`         | yes      | —           | `my-kopia-backups`         | The GCS bucket holding the repository. The bare name — no `gs://`.                                                |
 | `prefix`         | no       | bucket root | `clusters/prod/`           | Object-name prefix so several repos can share one bucket. End it with `/`.                                        |
-| `auth.secretRef` | no       | —           | `{ name: gcs-repo-creds }` | Names the credential Secret above. Same namespace as the `Repository`; a `ClusterRepository` adds `namespace:`.   |
+| `auth.secretRef` | no¹      | —           | `{ name: gcs-repo-creds }` | Names the credential Secret above. Same namespace as the `Repository`; a `ClusterRepository` adds `namespace:`. Mutually exclusive with `workloadIdentity`. |
+| `auth.workloadIdentity.serviceAccountName` | no¹ | — | `backup-mover`      | Run the mover Jobs as this (user-created, GSA-bound) ServiceAccount instead of a key file — see [Workload identity](#workload-identity-gke). |
+
+¹ Set **exactly one** of `auth.secretRef` or `auth.workloadIdentity`
+(webhook-enforced). `auth` itself may be omitted when `KOPIA_GCS_CREDENTIALS`
+rides the encryption-password Secret.
 
 ## Customization — the values you actually change
 
@@ -86,6 +91,30 @@ and points kopia at the path. The secret never lands on kopia's argv.
 - **`create.enabled`** — initialize the repository if missing. Creation-time
   algorithms are fixed forever — see [creation](../repositories.md#encryption-and-repository-creation).
 - **`moverDefaults.cache`** — mover cache sizing ([movers](../movers.md)).
+
+## Workload identity (GKE) { #workload-identity-gke }
+
+On GKE with Workload Identity Federation, you can drop the service-account key
+JSON entirely: set `auth.workloadIdentity.serviceAccountName` and every mover
+Job runs **as that ServiceAccount**. With no credentials file supplied, kopia
+falls back to Application Default Credentials — which the GKE metadata server
+answers with the bound Google service account's identity. No key to mint,
+rotate, or leak; the only secret left in the cluster is `KOPIA_PASSWORD`.
+
+What you provide:
+
+1. A **Google service account** with `roles/storage.objectAdmin` on the bucket
+   (the [setup above](#provider-prerequisites), minus step 4 — no key).
+2. The **Workload Identity binding**: `roles/iam.workloadIdentityUser` from
+   `PROJECT.svc.id.goog[<namespace>/<sa-name>]` to that GSA, and a Kubernetes
+   ServiceAccount annotated `iam.gke.io/gcp-service-account`, present in every
+   namespace mover Jobs run in.
+3. `auth.workloadIdentity.serviceAccountName` on the backend, instead of
+   `auth.secretRef`.
+
+```yaml
+--8<-- "deploy/examples/backends/gcs-workload-identity.yaml"
+```
 
 ## As a `ClusterRepository`
 

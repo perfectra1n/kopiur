@@ -44,6 +44,22 @@ The names above assume the default Helm release. The chart passes the real names
 
 ///
 
+/// note | Workload identity: your SA instead of the minted one
+
+When a repository's cloud backend sets `auth.workloadIdentity.serviceAccountName`
+([S3](backends/s3.md#workload-identity-irsa--eks-pod-identity) /
+[Azure](backends/azure.md#workload-identity-aks) /
+[GCS](backends/gcs.md#workload-identity-gke)), its mover Jobs run as **your**
+federated ServiceAccount instead of the minted `kopiur-mover`. The controller
+never creates or modifies that SA (its cloud annotations are your federation
+contract) — it preflights its existence (a missing SA surfaces as
+`CredentialsAvailable=False` naming it) and applies one extra RoleBinding,
+`kopiur-mover-wi-<sa>`, tying your SA to the same least-privilege
+`kopiur-mover` role: the mover still patches its own `.status` at runtime,
+whatever SA it runs as.
+
+///
+
 ## The credentials Secret
 
 The mover reads the repository password (and any object-store keys) from a Secret, mounted into the Job with `envFrom`. **`envFrom` is namespace-local** — it can only reference a Secret in the Job's own namespace. So the credential Secret must exist in the **workload** namespace. You have two ways to get it there:

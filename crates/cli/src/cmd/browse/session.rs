@@ -348,6 +348,22 @@ async fn create_session_job(
             read_only: true,
         });
 
+    // Workload identity: the session pod must run as the backend's federated
+    // ServiceAccount (and, for Azure, carry the webhook opt-in label) — there
+    // is no credential Secret to envFrom. Static-Secret repos keep no SA (the
+    // session pod never talks to the kube API; the namespace default suffices).
+    let workload_identity = kopiur_api::creds::backend_workload_identity(&target.repo.backend);
+    let mut labels = labels.clone();
+    if matches!(
+        workload_identity,
+        Some((_, kopiur_api::creds::WorkloadIdentityCloud::Azure))
+    ) {
+        labels.insert(
+            kopiur_api::consts::AZURE_WORKLOAD_IDENTITY_LABEL.to_string(),
+            kopiur_api::consts::AZURE_WORKLOAD_IDENTITY_LABEL_VALUE.to_string(),
+        );
+    }
+
     let inputs = MoverJobInputs {
         name: &name,
         namespace: ns,
@@ -370,14 +386,16 @@ async fn create_session_job(
         node_selector: None,
         tolerations: None,
         affinity: None,
-        labels: labels.clone(),
+        labels,
         source_volume: None,
         repo_volume,
         creds_secrets,
         result_configmap: None,
-        // The session pod never talks to the kube API: no ServiceAccount
-        // (falls back to the namespace default with no extra rights).
-        service_account: None,
+        // The session pod never talks to the kube API: no ServiceAccount for a
+        // static-Secret repo (the namespace default, no extra rights). A
+        // workload-identity repo runs as its federated SA — that's the
+        // credential.
+        service_account: workload_identity.map(|(wi, _)| wi.service_account_name.as_str()),
         passthrough_env: Vec::new(),
         annotations: Default::default(),
         cache_volume: Default::default(),

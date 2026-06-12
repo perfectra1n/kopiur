@@ -195,6 +195,68 @@ create:
     }
 
     #[test]
+    fn repository_workload_identity_roundtrips() {
+        // The cloud-IAM backends accept `auth.workloadIdentity` instead of a
+        // Secret (ADR §4.11); the wire key is camelCase.
+        for (backend_yaml, kind) in [
+            ("s3:\n    bucket: b", "S3"),
+            (
+                "azure:\n    container: c\n    storageAccount: acct",
+                "Azure",
+            ),
+            ("gcs:\n    bucket: b", "Gcs"),
+        ] {
+            let yaml = format!(
+                "backend:\n  {backend_yaml}\n    auth:\n      workloadIdentity:\n        serviceAccountName: backup-mover\nencryption:\n  passwordSecretRef:\n    name: s\n",
+            );
+            let spec: RepositorySpec = from_yaml(&yaml);
+            assert_eq!(spec.backend.kind_str(), kind);
+            let (wi, _) = crate::creds::backend_workload_identity(&spec.backend)
+                .unwrap_or_else(|| panic!("{kind} carries the workload identity"));
+            assert_eq!(wi.service_account_name, "backup-mover");
+            // Round-trip: serialize back and re-parse, assert structural equality.
+            let json = serde_json::to_value(&spec).expect("serialize");
+            let reparsed: RepositorySpec = serde_json::from_value(json).expect("reparse");
+            assert_eq!(spec, reparsed);
+        }
+    }
+
+    #[test]
+    fn workload_identity_is_unrepresentable_on_secret_only_backends() {
+        // B2/SFTP/WebDAV have no cloud IAM plane, so their `auth` is the
+        // Secret-only type and the generated CRD schema must NOT offer
+        // `workloadIdentity` there (the API server prunes it) while the
+        // cloud-IAM backends must.
+        let crd = Repository::crd();
+        let schema = serde_json::to_value(
+            crd.spec.versions[0]
+                .schema
+                .as_ref()
+                .and_then(|s| s.open_api_v3_schema.as_ref())
+                .expect("repository CRD has a schema"),
+        )
+        .expect("schema serializes");
+        let backend = &schema["properties"]["spec"]["properties"]["backend"]["properties"];
+        for cloud in ["s3", "azure", "gcs"] {
+            assert!(
+                !backend[cloud]["properties"]["auth"]["properties"]["workloadIdentity"].is_null(),
+                "{cloud} must offer auth.workloadIdentity"
+            );
+        }
+        for secret_only in ["b2", "sftp", "webDav"] {
+            assert!(
+                backend[secret_only]["properties"]["auth"]["properties"]["workloadIdentity"]
+                    .is_null(),
+                "{secret_only} must NOT offer auth.workloadIdentity"
+            );
+            assert!(
+                !backend[secret_only]["properties"]["auth"]["properties"]["secretRef"].is_null(),
+                "{secret_only} keeps auth.secretRef"
+            );
+        }
+    }
+
+    #[test]
     fn backup_config_nfs_source_roundtrips() {
         use crate::SnapshotPolicySpec;
         let spec: SnapshotPolicySpec = from_yaml(

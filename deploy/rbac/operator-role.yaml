@@ -138,6 +138,8 @@ rules:
   - serviceaccounts
   verbs:
   - get
+  - list
+  - watch
   - create
   - update
   - patch

@@ -269,16 +269,16 @@ async fn spawn_verify_job(
         });
     let owner = io::owner_ref_for(config, "SnapshotPolicy")?;
 
-    if let Some(sa) = ctx.mover_service_account.as_deref() {
-        io::ensure_mover_rbac(
-            &ctx.client,
-            namespace,
-            sa,
-            &ctx.mover_role_kind,
-            &ctx.mover_clusterrole,
-        )
-        .await?;
-    }
+    let mover_identity = io::ensure_mover_identity(
+        &ctx.client,
+        namespace,
+        &[&repo.backend],
+        ctx.mover_service_account.as_deref(),
+        &ctx.mover_role_kind,
+        &ctx.mover_clusterrole,
+    )
+    .await?;
+    mover_identity.decorate_labels(&mut labels);
 
     let creds = io::resolve_mover_creds_for(
         &ctx.client,
@@ -353,7 +353,7 @@ async fn spawn_verify_job(
         repo_volume,
         creds_secrets,
         result_configmap: None,
-        service_account: ctx.mover_service_account.as_deref(),
+        service_account: mover_identity.service_account.as_deref(),
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations,
         cache_volume: Default::default(),

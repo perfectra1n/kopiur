@@ -605,6 +605,12 @@ pub enum RepositoryConnect {
         /// Skip TLS certificate verification (`--disable-tls-verification`).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         disable_tls_verification: bool,
+        /// Authenticate via the ambient AWS credential chain (workload identity:
+        /// IRSA / EKS Pod Identity) instead of static keys from the env. Defaults
+        /// to `false` and is omitted from the wire when false, so work-spec
+        /// ConfigMaps written before this field existed still parse.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ambient_credentials: bool,
     },
     /// Azure Blob Storage backend.
     Azure {
@@ -702,6 +708,7 @@ impl RepositoryConnect {
                 region,
                 disable_tls,
                 disable_tls_verification,
+                ambient_credentials,
             } => ConnectSpec::S3 {
                 bucket: bucket.clone(),
                 endpoint: endpoint.clone(),
@@ -709,6 +716,7 @@ impl RepositoryConnect {
                 region: region.clone(),
                 disable_tls: *disable_tls,
                 disable_tls_verification: *disable_tls_verification,
+                ambient_credentials: *ambient_credentials,
             },
             RepositoryConnect::Azure {
                 container,
@@ -1009,6 +1017,7 @@ mod tests {
                 region: None,
                 disable_tls: false,
                 disable_tls_verification: false,
+                ambient_credentials: false,
             },
             target_ref: TargetRef {
                 kind: "Restore".into(),
@@ -1065,6 +1074,7 @@ mod tests {
                 region: None,
                 disable_tls: true,
                 disable_tls_verification: false,
+                ambient_credentials: false,
             },
             target_ref: TargetRef {
                 kind: "Repository".into(),
@@ -1111,6 +1121,7 @@ mod tests {
                 region: None,
                 disable_tls: true,
                 disable_tls_verification: false,
+                ambient_credentials: false,
             },
             target_ref: TargetRef {
                 kind: "Maintenance".into(),
@@ -1225,6 +1236,7 @@ mod tests {
             region: Some("r".into()),
             disable_tls: false,
             disable_tls_verification: false,
+            ambient_credentials: false,
         };
         assert_eq!(
             s3.to_connect_spec(),
@@ -1235,6 +1247,7 @@ mod tests {
                 region: Some("r".into()),
                 disable_tls: false,
                 disable_tls_verification: false,
+                ambient_credentials: false,
             }
         );
     }
@@ -1356,6 +1369,47 @@ mod tests {
         assert_eq!(v["azure"]["storageAccount"], "acct");
         // prefix omitted when None.
         assert!(v["azure"].get("prefix").is_none());
+    }
+
+    #[test]
+    fn s3_ambient_credentials_roundtrips_and_defaults_false() {
+        // Workload identity travels the wire as `ambientCredentials: true` and
+        // reaches the kopia spec.
+        let wire = RepositoryConnect::S3 {
+            bucket: "b".into(),
+            endpoint: None,
+            prefix: None,
+            region: None,
+            disable_tls: false,
+            disable_tls_verification: false,
+            ambient_credentials: true,
+        };
+        let v: serde_json::Value = serde_json::to_value(&wire).unwrap();
+        assert_eq!(v["s3"]["ambientCredentials"], true);
+        let back: RepositoryConnect = serde_json::from_value(v).unwrap();
+        assert_eq!(back, wire);
+        match back.to_connect_spec() {
+            kopiur_kopia::ConnectSpec::S3 {
+                ambient_credentials,
+                ..
+            } => assert!(ambient_credentials),
+            other => panic!("expected S3, got {other:?}"),
+        }
+
+        // Back-compat: a work-spec ConfigMap written before the field existed
+        // (no `ambientCredentials` key) still parses, defaulting to static keys.
+        let legacy = serde_json::json!({ "s3": { "bucket": "b" } });
+        let parsed: RepositoryConnect = serde_json::from_value(legacy).unwrap();
+        match &parsed {
+            RepositoryConnect::S3 {
+                ambient_credentials,
+                ..
+            } => assert!(!ambient_credentials),
+            other => panic!("expected S3, got {other:?}"),
+        }
+        // And `false` stays off the wire, so legacy movers can read new specs too.
+        let v = serde_json::to_value(&parsed).unwrap();
+        assert!(v["s3"].get("ambientCredentials").is_none());
     }
 
     // --- §13(b)/§13(f) policy-args mapping (api spec → work-spec → kopia args) ---
@@ -1566,6 +1620,7 @@ mod tests {
                 region: None,
                 disable_tls: false,
                 disable_tls_verification: false,
+                ambient_credentials: false,
             },
             target_ref: TargetRef {
                 kind: "SnapshotPolicy".into(),
@@ -1658,6 +1713,7 @@ mod tests {
                     region: Some("us-east-1".into()),
                     disable_tls: false,
                     disable_tls_verification: false,
+                    ambient_credentials: false,
                 },
                 delete_extra: true,
             }),
@@ -1699,6 +1755,7 @@ mod tests {
                     region: Some("us-east-1".into()),
                     disable_tls: false,
                     disable_tls_verification: false,
+                    ambient_credentials: false,
                 }
             );
         } else {
