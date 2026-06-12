@@ -4,17 +4,32 @@
 //!
 //! Gated by `#[cfg(feature = "e2e")]` + `#[ignore]`, skipping gracefully without
 //! a cluster. Driven by `mise run //crates/e2e:test` (which also builds the
-//! plugin binary). Covers M1+M2 of the krew-plugin plan:
+//! plugin binary). Covers the whole plugin surface:
 //!
 //! - `suspend`/`resume schedule` actually control SnapshotSchedule firing
 //!   (resume → a scheduled Snapshot appears; suspend → firing stops), with
 //!   idempotent no-op output on an already-suspended object;
 //! - `snapshots list` shows a real produced snapshot with policy/origin/size,
 //!   and `--policy`/`--origin`/`--repository`/`-o name|json` filters/formats work;
-//! - `snapshot now --wait` runs a policy to Succeeded with real kopia stats,
-//!   exits 1 with the failure block for a deterministically-poisoned policy,
-//!   and `logs snapshot` returns real mover output (or the honest GC fallback);
-//! - a missing object yields a non-zero exit and an actionable what/why/fix error.
+//! - `snapshot now --wait/--logs` runs a policy to Succeeded with real kopia
+//!   stats + streamed mover logs, and exits 1 with the failure block for a
+//!   deterministically-poisoned policy; `logs snapshot` returns real mover
+//!   output (or the honest GC fallback);
+//! - `restore`: snapshotRef×created-PVC byte round-trip (reader pod), fromPolicy
+//!   on a filesystem repo, and the missing-snapshot fail-closed path;
+//! - `status` aggregates real state; `doctor` passes per-check on a healthy
+//!   install (incl. the LIVE dry-run webhook probe) and fails actionably when
+//!   the credentials Secret is deleted;
+//! - `maintenance run` drives REAL quick/full runs (lastRunAt asserted — a
+//!   lease yield must not pass) by name and via --repository;
+//! - `migrate volsync` translates a real ReplicationSource (string `last`!),
+//!   --strict refuses unmappables, --apply'd objects reconcile (proven by a
+//!   snapshot through the translated policy), --resolve-secrets refuses the
+//!   password placeholder;
+//! - `ls`/`cat`/`download` through a read-only session pod (byte-exact,
+//!   mutating exec refused), `session end` GC, and the `--local` transport via
+//!   a port-forwarded MinIO;
+//! - missing objects yield non-zero exits with actionable what/why/fix errors.
 
 #![cfg(all(unix, feature = "e2e"))]
 

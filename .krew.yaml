@@ -1,10 +1,11 @@
 # Krew plugin manifest TEMPLATE for kubectl-kopiur. The release workflow's
 # `krew` job substitutes the double-braced VERSION/REPO/SHA256 placeholders
 # from the uploaded release assets, attaches the rendered `kopiur.yaml` to the
-# GitHub release, and pushes it to the home-operations custom krew index
-# (plugins/kopiur.yaml). Platforms whose asset is missing (best-effort
-# Windows) are dropped at render time; the render fails if any placeholder
-# survives, so this comment must never contain one.
+# GitHub release, and commits it to THIS repo's plugins/ directory — the
+# kopiur repository doubles as its own krew custom index. Platforms whose
+# asset is missing (best-effort Windows) are dropped at render time; the
+# render fails if any placeholder survives, so this comment must never
+# contain one.
 apiVersion: krew.googlecontainertools.github.com/v1alpha2
 kind: Plugin
 metadata:

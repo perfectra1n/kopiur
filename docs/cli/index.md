@@ -21,15 +21,20 @@ the other side uses; keep them on the same release.
 
 ## Install
 
-Via [krew](https://krew.sigs.k8s.io/) from the home-operations custom index
-(the plugin is not yet in the official krew-index — that submission waits for
-kopiur to leave heavy development):
+Via [krew](https://krew.sigs.k8s.io/) — the kopiur repository doubles as its
+own [custom index](https://krew.sigs.k8s.io/docs/developer-guide/custom-indexes/)
+(the `plugins/` directory at the repo root; the plugin is not yet in the
+official krew-index — that submission waits for kopiur to leave heavy
+development):
 
 ```console
-$ kubectl krew index add home-operations https://github.com/home-operations/krew-index.git
-$ kubectl krew install home-operations/kopiur
+$ kubectl krew index add kopiur https://github.com/home-operations/kopiur.git
+$ kubectl krew install kopiur/kopiur
 $ kubectl kopiur --version
 ```
+
+`kubectl krew upgrade` picks up new releases after a `kubectl krew update`
+(which pulls the index).
 
 Without krew: every GitHub release attaches per-platform archives
 (`kopiur-cli_<os>_<arch>.tar.gz` for linux/darwin amd64+arm64,
