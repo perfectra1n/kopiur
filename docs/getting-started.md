@@ -2,7 +2,7 @@
 
 This is the **end-to-end walkthrough**: from a cluster with nothing installed to a verified backup _and_ a verified restore. It hand-holds every step and shows you exactly what to look for so you know each one worked. Budget ~15 minutes.
 
-If you only want the install reference (every Helm value, scopes, cert options), see [Installation](install.md). This page is the guided first run.
+If you only want the install reference (every Helm value, scopes, cert options), see [Installation](install.md). This page is the guided first run. Want the long version — the same journey with the reasoning behind every value, a NAS track, and the `kubectl kopiur` plugin woven in? That's the [Complete walkthrough](walkthrough.md).
 
 /// tip | The mental model — read this first
 

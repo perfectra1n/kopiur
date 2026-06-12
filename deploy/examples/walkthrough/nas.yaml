@@ -1,0 +1,156 @@
+# Complete walkthrough — Filesystem/NFS (NAS) track (docs/walkthrough.md)
+#
+# The full journey from the Complete walkthrough, as one apply-ready bundle:
+# credentials → Repository → SnapshotPolicy → SnapshotSchedule → verification
+# Restore. Stage by stage it is identical to the S3 track (s3.yaml) except for
+# the Repository backend and how the Restore names its source — that's the point.
+#
+# kopia has NO native NFS backend — NFS is reached through the *filesystem*
+# backend by mounting the export at `path`. The operator synthesizes an inline
+# `nfs` volume on every mover Job and mounts it read-write there.
+#
+# The `# --8<-- [start:…]` / `# --8<-- [end:…]` lines are snippet-section markers
+# for docs/walkthrough.md (MkDocs pulls one stage per tab at build time). They are
+# plain YAML comments — the file stays `kubectl apply -f`-able as-is.
+#
+# Field shapes verified against crates/api: externally-tagged backend
+# (`backend.filesystem`) with an externally-tagged `volume` (`volume.nfs`).
+---
+# --8<-- [start:secret]
+apiVersion: v1
+kind: Secret
+metadata:
+  name: walkthrough-creds
+  namespace: demo
+type: Opaque
+stringData:
+  # Filesystem/NFS backends need ONLY the repository encryption password — no
+  # object-store keys. The data sits on your NAS, but kopia still encrypts it,
+  # so a stolen disk or a curious houseguest reads ciphertext.
+  # Generate the password (e.g. `openssl rand -base64 24`) and store it OUTSIDE
+  # the cluster too — lose it and the backups are unrecoverable.
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+# --8<-- [end:secret]
+---
+# --8<-- [start:repository]
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: primary
+  namespace: demo
+spec:
+  backend:
+    filesystem:
+      path: /repo # mount path INSIDE the mover pod where kopia writes the repo
+      volume:
+        nfs:
+          server: nas.lan # NFS server hostname or IP
+          # The export on the server (absolute path). One subdirectory per repo
+          # plays the same isolation role as an S3 prefix.
+          path: /export/kopia/demo
+  encryption:
+    passwordSecretRef:
+      name: walkthrough-creds
+      key: KOPIA_PASSWORD # which key in the Secret holds the password
+  # Initialize a brand-new kopia repository if the directory is empty. Set false
+  # (or omit the block) when adopting a repository that already exists — then a
+  # missing repo is an error, not something to paper over.
+  #
+  # PERMISSIONS: the export must be WRITABLE by the UID the mover runs as
+  # (default 65532). If create/connect fails with "permission denied", the
+  # operator's Warning Event names the exact UID and the `chown -R <uid> <path>`
+  # to run on the NAS. See the Permissions guide.
+  create:
+    enabled: true
+  # Maintenance is default-managed: omit this block entirely and the operator
+  # creates and owns a Maintenance with exactly these values (quick every 6h,
+  # full daily at 03:00). It is spelled out here so you can see the knobs;
+  # `enabled: false` opts out.
+  maintenance:
+    enabled: true
+    schedule:
+      quick: { cron: "0 */6 * * *", jitter: 30m }
+      full: { cron: "0 3 * * *", jitter: 1h }
+# --8<-- [end:repository]
+---
+# --8<-- [start:policy]
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: SnapshotPolicy
+metadata:
+  name: app-data
+  namespace: demo
+spec:
+  # repository.kind defaults to Repository; shown explicitly for clarity.
+  repository:
+    kind: Repository
+    name: primary
+  sources:
+    - pvc:
+        name: app-data # the PVC to back up
+  # Direct (the default, explicit here) reads the live volume — zero CSI
+  # requirements, fine for files that don't rewrite in place. Use `Snapshot`
+  # (CSI VolumeSnapshot) for databases and RWOP volumes, `Clone` where your
+  # driver clones faster than it snapshots. See the copy-methods guide.
+  copyMethod: Direct
+  # GFS retention is the ONLY thing that prunes successful backups. Each tier
+  # answers a different recovery question:
+  retention:
+    keepDaily: 14 # "restore any day from the last two weeks"
+    keepWeekly: 8 # "...any week from the last two months"
+    keepMonthly: 6 # "...any month from the last half year"
+  # What deleting a produced Snapshot CR does to the kopia snapshot behind it.
+  # Delete (the default, explicit here) keeps cluster state and repository in
+  # lock-step. Retain/Orphan keep the data when the CR goes — see the backups
+  # guide before changing this.
+  defaultDeletionPolicy: Delete
+# --8<-- [end:policy]
+---
+# --8<-- [start:schedule]
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: SnapshotSchedule
+metadata:
+  name: app-data-nightly
+  namespace: demo
+spec:
+  # Which recipe (SnapshotPolicy) to invoke each firing.
+  policyRef:
+    name: app-data
+  schedule:
+    # `H` = a deterministic per-schedule minute (hashed from the schedule's UID),
+    # so fifty schedules saying "nightly at 2" don't all fire at 02:00 sharp.
+    cron: "H 2 * * *"
+    # On top of H, spread each firing over a window — kinder to the repository
+    # and the storage backend when many policies share them.
+    jitter: 30m
+    # GitOps-friendly: applying this manifest does NOT take an immediate backup.
+    # Set true if "create schedule" should also mean "back up right now".
+    runOnCreate: false
+    # If last night's backup is somehow still running, skip this firing rather
+    # than stack a second one (the default, explicit here). `Replace` cancels
+    # the old run; `Allow` runs both.
+    concurrencyPolicy: Forbid
+# --8<-- [end:schedule]
+---
+# --8<-- [start:restore]
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Restore
+metadata:
+  name: walkthrough-verify
+  namespace: demo
+spec:
+  source:
+    # The filesystem-backend superpower: resolve "the latest snapshot for this
+    # policy's identity" at restore time — no Snapshot CR name to paste. This
+    # is what powers deploy-or-restore on a fresh cluster (example 05).
+    fromPolicy:
+      name: app-data
+      offset: 0 # 0 = latest, 1 = previous, ...
+  target:
+    # A fresh PVC, so the verification never touches the original volume. The
+    # operator creates it; capacity is REQUIRED — it won't guess a size.
+    pvc:
+      name: app-data-restored
+      capacity: 1Gi
+      accessModes:
+        - ReadWriteOnce
+# --8<-- [end:restore]

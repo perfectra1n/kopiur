@@ -74,6 +74,10 @@ theme:
     - search.highlight
     - content.code.copy
     - content.action.edit
+    # Selecting a tab (e.g. "S3") switches every same-labeled tab group on the
+    # page and persists the choice — how the two-track walkthrough stays on one
+    # track end-to-end. Labels must be byte-identical across groups to link.
+    - content.tabs.link
 
 markdown_extensions:
   # Admonitions use the pymdownx "blocks" syntax (/// note | Title ... ///) rather
@@ -102,6 +106,13 @@ markdown_extensions:
         - example
         - quote
   - pymdownx.blocks.details # collapsible admonitions, if ever needed
+  # Content tabs (the S3/NAS tracks in walkthrough.md) use the blocks syntax
+  # (/// tab | S3 ... ///) for the same oxfmt reason as the admonitions above:
+  # the body stays at column 0. alternate_style is Material's tabbed look (the
+  # legacy style is unmaintained upstream). Same blank-line-before-/// rule, and
+  # never indented option lines (oxfmt strips the indentation).
+  - pymdownx.blocks.tab:
+      alternate_style: true
   - attr_list
   - md_in_html
   - tables
@@ -181,6 +192,7 @@ nav:
           - Operations (status, doctor, maintenance): cli/operations.md
           - Migrating from VolSync: cli/migrate-volsync.md
       - Examples: examples.md
+      - Complete walkthrough: walkthrough.md
       - Troubleshooting: troubleshooting.md
   # Scenarios = end-to-end, problem-driven walkthroughs (one apply-ready bundle
   # each under deploy/examples/scenarios/), as opposed to the per-capability

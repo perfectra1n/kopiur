@@ -20,6 +20,28 @@ For the same NAS mounted as a volume, see [filesystem](filesystem.md).
     nas.lan ssh-ed25519 AAAAC3Nz...
     ```
 
+/// example | Minting a dedicated keypair for the mover
+
+Don't reuse your personal SSH key — generate one that exists only for this
+repository, so it can be rotated or revoked alone:
+
+```console
+# 1. A fresh ed25519 keypair, no passphrase (the mover can't answer a prompt):
+$ ssh-keygen -t ed25519 -N "" -C kopiur-mover -f kopia_sftp
+
+# 2. Authorize the PUBLIC half on the server, for the SFTP account:
+$ ssh-copy-id -i kopia_sftp.pub kopia@nas.lan
+#    (or append kopia_sftp.pub to ~kopia/.ssh/authorized_keys by hand)
+
+# 3. Sanity-check before touching Kubernetes:
+$ sftp -i kopia_sftp kopia@nas.lan
+
+# 4. The PRIVATE half (the file `kopia_sftp`, the whole BEGIN…END block)
+#    goes under KOPIA_SFTP_KEY_DATA in the Secret.
+```
+
+///
+
 ## The Secret shape
 
 SFTP is one of the three **file-delivered** backends, and the most asked-about, so
@@ -66,13 +88,13 @@ so Kopiur uses `KOPIA_SFTP_KEY_DATA` and `KOPIA_SFTP_KNOWN_HOSTS`. You provide t
 
 ## Fields reference (`backend.sftp`)
 
-| Field            | Required | Default | What it controls                                      |
-| ---------------- | -------- | ------- | ----------------------------------------------------- |
-| `host`           | yes      | —       | SFTP server hostname or IP.                           |
-| `path`           | yes      | —       | Remote path on the server that holds the repository.  |
-| `port`           | no       | `22`    | TCP port.                                             |
-| `username`       | no       | —       | SSH user to connect as.                               |
-| `auth.secretRef` | no       | —       | Names the Secret holding the key + known_hosts above. |
+| Field            | Required | Default | Example                     | What it controls                                                                                                |
+| ---------------- | -------- | ------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `host`           | yes      | —       | `nas.lan`                   | SFTP server hostname or IP. Must match the name in the `known_hosts` line (it's how the entry is looked up).     |
+| `path`           | yes      | —       | `/volume1/kopia`            | Remote **absolute** path on the server that holds the repository. The SSH user must be able to write it.         |
+| `port`           | no       | `22`    | `2222`                      | TCP port. A non-22 port changes the `known_hosts` format — see the warning below.                                |
+| `username`       | no       | —       | `kopia`                     | SSH user to connect as — the account whose `authorized_keys` holds the public key.                               |
+| `auth.secretRef` | no       | —       | `{ name: sftp-repo-creds }` | Names the Secret holding the key + known_hosts above. Same namespace as the `Repository`; a `ClusterRepository` adds `namespace:`. |
 
 ## Customization — the values you actually change
 
@@ -104,6 +126,21 @@ If `KOPIA_SFTP_KNOWN_HOSTS` is empty, wrong, or stale (server rebuilt), the
 connection is **rejected** — Kopiur won't trust-on-first-use. Re-run
 `ssh-keyscan -p <port> <host>` and update the Secret. Match the port you actually
 use.
+
+///
+
+/// warning | Non-standard port? The known_hosts format changes
+
+On any port other than 22, the `known_hosts` host field is written
+`[host]:port`, brackets included:
+
+```text
+[nas.lan]:2222 ssh-ed25519 AAAAC3Nz...
+```
+
+`ssh-keyscan -p 2222 nas.lan` emits exactly that form — copy its output verbatim.
+A plain `nas.lan ...` line will not match a port-2222 connection, and the
+failure looks identical to a wrong host key.
 
 ///
 

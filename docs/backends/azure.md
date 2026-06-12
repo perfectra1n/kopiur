@@ -11,6 +11,29 @@ container. Reach for it when your storage is Azure; for an S3-compatible store u
     - the storage-account **access key** (`AZURE_STORAGE_KEY`), or
     - a **SAS token** (`AZURE_STORAGE_SAS_TOKEN`) scoped to the container — least privilege.
 
+/// example | Creating the container and credential with the Azure CLI
+
+```console
+$ az storage container create \
+    --account-name mystorageacct --name kopia-backups
+
+# Option A — the account access key (full-account access):
+$ az storage account keys list \
+    --account-name mystorageacct --query "[0].value" -o tsv
+
+# Option B — a container-scoped SAS token (least privilege; note the expiry):
+$ az storage container generate-sas \
+    --account-name mystorageacct --name kopia-backups \
+    --permissions racwdl --expiry 2027-06-12 -o tsv
+```
+
+The SAS `--permissions` must include **r**ead, **a**dd, **c**reate, **w**rite,
+**d**elete, and **l**ist (`racwdl`) — kopia lists and deletes blobs during
+retention and [maintenance](../maintenance.md), not just at backup time. Paste
+the CLI output as-is: it has no leading `?`.
+
+///
+
 ## The Secret shape
 
 Loaded with `envFrom`; the keys reach kopia as environment variables.
@@ -44,12 +67,12 @@ outside the cluster and back up the Secret. See [Encryption](../repositories.md#
 
 ## Fields reference (`backend.azure`)
 
-| Field            | Required | Default        | What it controls                                                                     |
-| ---------------- | -------- | -------------- | ------------------------------------------------------------------------------------ |
-| `container`      | yes      | —              | The blob container holding the repository.                                           |
-| `prefix`         | no       | container root | Blob-name prefix so several repos can share one container.                           |
-| `storageAccount` | no       | inferred       | Account name; set it when not encoded in the credential (SAS tokens don't carry it). |
-| `auth.secretRef` | no       | —              | Names the credential Secret above.                                                   |
+| Field            | Required | Default        | Example                      | What it controls                                                                                                |
+| ---------------- | -------- | -------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `container`      | yes      | —              | `kopia-backups`              | The blob container holding the repository. The container name only — not a URL, not `account/container`.        |
+| `prefix`         | no       | container root | `prod/`                      | Blob-name prefix so several repos can share one container. End it with `/`.                                     |
+| `storageAccount` | no       | inferred       | `mystorageacct`              | Account name. In practice set it always: SAS tokens don't carry it, and being explicit costs nothing with a key. |
+| `auth.secretRef` | no       | —              | `{ name: azure-repo-creds }` | Names the credential Secret above. Same namespace as the `Repository`; a `ClusterRepository` adds `namespace:`. |
 
 ## Customization — the values you actually change
 
@@ -93,9 +116,24 @@ read/write/list/delete on the container.
 
 ///
 
-- **`AuthenticationFailed`** — wrong key, expired SAS token, or a SAS scoped to the
-  wrong container. Regenerate scoped to _this_ container.
+/// note | SAS tokens expire — and take your backups offline with them
+
+A SAS token carries an expiry (`se=` in the token). When it lapses, every mover
+run starts failing with `AuthenticationFailed` even though nothing in the cluster
+changed. Pick an expiry you'll actually rotate before, put the rotation in your
+calendar, and update the Secret in place — the operator
+[watches the Secret](../repositories.md) and re-verifies the repository without
+you touching the `Repository` object.
+
+///
+
+- **`AuthenticationFailed`** — wrong key, expired SAS token (check the `se=`
+  timestamp inside the token), or a SAS scoped to the wrong container.
+  Regenerate scoped to _this_ container.
 - **`ContainerNotFound`** — create the container first; Kopiur won't.
+- **Works with the key, fails with SAS** — the SAS is missing a permission
+  (needs `racwdl`) or `storageAccount` is unset; a SAS token doesn't encode the
+  account name.
 
 ## See also
 

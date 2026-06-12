@@ -60,6 +60,12 @@ source:
 Whatever the source resolves to is written ONCE to `status.resolved.kopiaSnapshotID` and reused for the rest of the restore's life. New snapshots appearing mid-flight (a schedule firing) cannot change which snapshot this Restore writes.
 ///
 
+/// warning | `fromPolicy` needs a filesystem repository
+
+Resolving "latest / `asOf` / `offset` for a policy" lists snapshots in-process, which requires a repository the controller can mount — **filesystem backends only**. On S3, Azure, GCS, B2, SFTP, WebDAV, and rclone, name the snapshot explicitly: `snapshotRef`, or `identity` with a pinned `snapshotID`. A `fromPolicy` restore against an object-store repository fails loudly with exactly that fix.
+
+///
+
 ### `identity` — a raw kopia identity
 
 For snapshots written by a foreign kopia client, or ones that have aged out of the catalog ([example 13](examples.md#example-13--restore-by-raw-kopia-identity)). You give the raw `username@hostname:path`. This mode **requires** an explicit `spec.repository` (there's no `Snapshot`/`SnapshotPolicy` to infer it from).

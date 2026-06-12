@@ -49,13 +49,13 @@ outside the cluster and back up the Secret. See [Encryption](../repositories.md#
 
 ## Fields reference (`backend.filesystem`)
 
-| Field               | Required | Default | What it controls                                                                                                                |
-| ------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `path`              | yes      | —       | **Mount path inside the mover pod** where kopia writes the repository (e.g. `/repo`).                                           |
-| `volume`            | no       | —       | What backs `path`: **exactly one of** `pvc` or `nfs`. Omit entirely only if `path` already exists on the node/image (hostPath). |
-| `volume.pvc.name`   | —        | —       | The `PersistentVolumeClaim` mounted read-write at `path`.                                                                       |
-| `volume.nfs.server` | —        | —       | NFS server hostname or IP — for an inline NFS export with no PVC (see below).                                                   |
-| `volume.nfs.path`   | —        | —       | The absolute export path on the NFS server.                                                                                     |
+| Field               | Required | Default | Example           | What it controls                                                                                                                |
+| ------------------- | -------- | ------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `path`              | yes      | —       | `/repo`           | **Mount path inside the mover pod** where kopia writes the repository. Not a path on your NAS — the `volume` decides what's behind it. |
+| `volume`            | no       | —       | —                 | What backs `path`: **exactly one of** `pvc` or `nfs`. Omit entirely only if `path` already exists on the node/image (hostPath).  |
+| `volume.pvc.name`   | —        | —       | `nas-repo`        | The `PersistentVolumeClaim` mounted read-write at `path`. Must be `ReadWriteMany` (movers overlap).                              |
+| `volume.nfs.server` | —        | —       | `nas.lan`         | NFS server hostname or IP — for an inline NFS export with no PVC (see below).                                                    |
+| `volume.nfs.path`   | —        | —       | `/export/kopia`   | The absolute export path **on the NFS server** (what `showmount -e nas.lan` lists).                                              |
 
 /// note | `volume` is an "exactly one of" choice
 
@@ -73,6 +73,34 @@ the mover" (a `hostPath`/baked-in mount; mainly the e2e harness).
 - **mover `securityContext`** — set `runAsUser`/`fsGroup` on the consuming
   `SnapshotPolicy` to match the share's ownership; see [Permissions](../permissions.md).
 - **`create.enabled`** — initialize the repository if missing.
+
+### Sizing the PVC
+
+The bundled example requests `500Gi` as a placeholder — size yours to the
+**deduplicated, compressed** repository, not the raw source data. kopia
+content-addresses everything, so N daily snapshots of slowly-changing data cost
+roughly one full copy plus the churn, not N copies. A reasonable starting point
+is 1–1.5× the source data; watch actual usage after the first retention cycle
+and resize (most NAS-backed StorageClasses support volume expansion). Running
+the volume completely full is the failure mode to avoid — kopia maintenance
+needs headroom to rewrite and compact blobs.
+
+### Preparing the export (NFS-side ownership)
+
+The mover runs as UID `65532` by default and is **not root**, so classic
+`root_squash` on the export is irrelevant — what matters is that UID `65532`
+can write the directory:
+
+```console
+# on the NAS / NFS server
+$ mkdir -p /export/kopia
+$ chown -R 65532:65532 /export/kopia
+```
+
+If your NAS forces all clients to one identity (`all_squash` /
+"map all users"), point that mapping (`anonuid`/`anongid`) at the directory
+owner instead — or set the mover's `runAsUser` to whatever UID the NAS expects.
+The full decision table is in [Permissions, UID & GID](../permissions.md).
 
 ## Inline NFS (no PVC) { #inline-nfs-no-pvc }
 

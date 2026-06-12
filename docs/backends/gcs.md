@@ -9,12 +9,34 @@ authenticating with a service-account key. GCS credentials are delivered as a
 - A **GCS bucket** (Kopiur does not create it).
 - A **service account** with object admin on that bucket
   (`roles/storage.objectAdmin`, scoped to the bucket where possible), and a **JSON
-  key** for it. Create one with:
+  key** for it.
 
-    ```console
-    $ gcloud iam service-accounts keys create key.json \
-        --iam-account kopia@PROJECT.iam.gserviceaccount.com
-    ```
+/// example | The full provider-side setup with gcloud
+
+```console
+# 1. The bucket (uniform bucket-level access, so IAM is the only ACL surface):
+$ gcloud storage buckets create gs://my-kopia-backups \
+    --location europe-west4 --uniform-bucket-level-access
+
+# 2. A dedicated service account for the movers:
+$ gcloud iam service-accounts create kopia \
+    --display-name "kopia repository access"
+
+# 3. Object admin on THIS bucket only (not project-wide):
+$ gcloud storage buckets add-iam-policy-binding gs://my-kopia-backups \
+    --member serviceAccount:kopia@PROJECT.iam.gserviceaccount.com \
+    --role roles/storage.objectAdmin
+
+# 4. The JSON key — this file's contents go under KOPIA_GCS_CREDENTIALS:
+$ gcloud iam service-accounts keys create key.json \
+    --iam-account kopia@PROJECT.iam.gserviceaccount.com
+```
+
+`roles/storage.objectAdmin` is the right role: kopia needs to create, read,
+list, **and delete** objects (retention and [maintenance](../maintenance.md)
+delete expired blobs). The read-only and creator roles both break maintenance.
+
+///
 
 ## The Secret shape
 
@@ -52,11 +74,11 @@ and points kopia at the path. The secret never lands on kopia's argv.
 
 ## Fields reference (`backend.gcs`)
 
-| Field            | Required | Default     | What it controls                                          |
-| ---------------- | -------- | ----------- | --------------------------------------------------------- |
-| `bucket`         | yes      | —           | The GCS bucket holding the repository.                    |
-| `prefix`         | no       | bucket root | Object-name prefix so several repos can share one bucket. |
-| `auth.secretRef` | no       | —           | Names the credential Secret above.                        |
+| Field            | Required | Default     | Example                    | What it controls                                                                                                 |
+| ---------------- | -------- | ----------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `bucket`         | yes      | —           | `my-kopia-backups`         | The GCS bucket holding the repository. The bare name — no `gs://`.                                                |
+| `prefix`         | no       | bucket root | `clusters/prod/`           | Object-name prefix so several repos can share one bucket. End it with `/`.                                        |
+| `auth.secretRef` | no       | —           | `{ name: gcs-repo-creds }` | Names the credential Secret above. Same namespace as the `Repository`; a `ClusterRepository` adds `namespace:`.   |
 
 ## Customization — the values you actually change
 
@@ -91,9 +113,15 @@ block). The mover writes that body to the credentials file for you.
 ///
 
 - **`403` / permission denied** — the service account lacks object admin on the
-  bucket. Grant `roles/storage.objectAdmin` scoped to the bucket.
+  bucket. Grant `roles/storage.objectAdmin` scoped to the bucket. If the bucket
+  predates uniform bucket-level access, a legacy object ACL can also deny the SA —
+  prefer turning uniform access on.
 - **Malformed JSON** — a clipped or re-indented key fails to parse; copy the file
-  contents unchanged.
+  contents unchanged. The `private_key` field must keep its embedded `\n` escapes.
+- **Key rejected after rotation** — a disabled or deleted service-account key
+  fails like a wrong key. Mint a new one (`gcloud iam service-accounts keys
+  create`) and update the Secret in place; the operator re-verifies on the
+  Secret change.
 
 ## See also
 

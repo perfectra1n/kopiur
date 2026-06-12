@@ -6,6 +6,8 @@ running maintenance, browsing (and reading files out of) snapshot contents, and
 migrating from VolSync — so you don't have to hand-write CR YAML for routine
 tasks.
 
+To see these commands in the context of a full install-to-restore journey, follow the [Complete walkthrough](../walkthrough.md).
+
 The plugin is a single static binary named `kubectl-kopiur`. kubectl discovers
 plugins by binary name: any executable called `kubectl-kopiur` on your `PATH`
 makes `kubectl kopiur …` work. It talks to the cluster with the **same

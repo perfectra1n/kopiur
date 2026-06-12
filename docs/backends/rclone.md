@@ -22,6 +22,44 @@ fewer moving parts. Use rclone for everything else.
 - The **remote name** in your `remotePath` (`mydrive:` below) must match a section
   header (`[mydrive]`) in that `rclone.conf`.
 
+/// example | Worked example: Google Drive, end to end
+
+```console
+# 1. On your workstation (needs a browser for the OAuth dance):
+$ rclone config
+    n) New remote
+    name> mydrive
+    Storage> drive
+    scope> drive          # full access; kopia needs read+write+delete
+    # accept defaults, complete the browser sign-in
+
+# 2. Confirm the remote works and the target folder path:
+$ rclone mkdir mydrive:backups/kopia
+$ rclone ls mydrive:backups/kopia
+
+# 3. Print the config — THIS goes under KOPIA_RCLONE_CONFIG, verbatim:
+$ rclone config show mydrive
+[mydrive]
+type = drive
+scope = drive
+token = {"access_token":"ya29...","token_type":"Bearer","refresh_token":"1//0g...","expiry":"..."}
+```
+
+Then set `remotePath: mydrive:backups/kopia` in the `Repository`. The
+short-lived `access_token` in the pasted config will be expired by the time a
+mover runs — that's fine; rclone refreshes it from the long-lived
+`refresh_token` on every run. You only need to re-paste the config if the
+refresh token itself is revoked (password reset, OAuth grant removed) — or
+rotated, which some providers do; if backups start failing with auth errors,
+re-run `rclone config reconnect mydrive:` locally and re-paste.
+
+For heavy use, rclone's docs recommend creating your **own Google API
+`client_id`** — the shared default is rate-limited across all rclone users
+worldwide. OneDrive, Dropbox, Box, etc. follow the same recipe: `rclone config`,
+verify with `rclone ls`, paste `rclone config show` output into the Secret.
+
+///
+
 ## The Secret shape
 
 rclone is one of the three **file-delivered** backends. The mover reads the whole
@@ -67,10 +105,10 @@ Unlike the object-store backends, rclone references its config via
 
 ## Fields reference (`backend.rclone`)
 
-| Field             | Required | Default | What it controls                                                                |
-| ----------------- | -------- | ------- | ------------------------------------------------------------------------------- |
-| `remotePath`      | yes      | —       | rclone path in `remote:path` form (e.g. `mydrive:backups/kopia`).               |
-| `configSecretRef` | no¹      | —       | Secret holding the `rclone.conf` (under `KOPIA_RCLONE_CONFIG`). **Not** `auth`. |
+| Field             | Required | Default | Example                   | What it controls                                                                                                          |
+| ----------------- | -------- | ------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `remotePath`      | yes      | —       | `mydrive:backups/kopia`   | rclone path in `remote:path` form. The part before `:` must match a `[section]` in the config; the part after is the folder. |
+| `configSecretRef` | no¹      | —       | `{ name: rclone-config }` | Secret holding the `rclone.conf` (under `KOPIA_RCLONE_CONFIG`). **Not** `auth`. A `ClusterRepository` adds `namespace:`.      |
 
 ¹ Optional in the schema, but in practice required: rclone can't reach a remote
 without its config.

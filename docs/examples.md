@@ -4,7 +4,7 @@ A walkthrough of the manifests in [`deploy/examples/`](https://github.com/home-o
 
 /// tip | Looking for a whole workflow, not one capability?
 
-This page is a ladder of **per-capability** manifests. For end-to-end, problem-driven walkthroughs — protect a database, recover deleted data, disaster recovery, cross-cluster migration, adopting an existing repo, verification drills — see [**Scenarios**](scenarios/index.md).
+This page is a ladder of **per-capability** manifests. For end-to-end, problem-driven walkthroughs — protect a database, recover deleted data, disaster recovery, cross-cluster migration, adopting an existing repo, verification drills — see [**Scenarios**](scenarios/index.md). For the full install-to-restore journey with the reasoning behind every choice (S3 and NAS tracks, CLI included), see the [**Complete walkthrough**](walkthrough.md).
 
 ///
 
