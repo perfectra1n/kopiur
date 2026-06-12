@@ -216,6 +216,8 @@ postgres-verify   Completed    41s
 
 Phases: `Pending` → `Resolving` (pinning the source snapshot) → `Restoring` (mover writing data) → `Completed` / `Failed`. Live byte/file progress is in `status.progress`; the resolved snapshot and target PVC are in `status.resolved` / `status.target`. If it won't progress, `kubectl describe restore <name>` shows the reason on the conditions and as an Event — see [Troubleshooting](troubleshooting.md).
 
+Every phase write also carries the [kstatus](gitops.md) conditions: `Completed` ⇒ `Ready=True`, `Failed` ⇒ `Stalled=True` (a Restore is one-shot — fix the cause and create a new Restore), anything in flight ⇒ `Reconciling=True`. So `kubectl wait --for=condition=Ready restore/<name>` and Flux/Argo health checks gate on a restore the same way they do on every other kopiur kind, and domain conditions (`Resolved`, `MoverPermitted`, `CredentialsAvailable`, `AwaitingClaim`) survive phase transitions alongside them.
+
 ## Credentials in a fresh namespace — `credentialProjection`
 
 A restore mover loads the repository credentials via `envFrom` from a Secret **in its own namespace**. Restoring into a namespace that has never run a backup (disaster recovery, a clone target) won't have one. Set `credentialProjection.enabled: true` and the operator copies the referenced repository's Secret into the mover's namespace for the run — owned by the `Restore`, garbage-collected with it ([example 17](examples.md#example-17--restore-from-a-shared-repo-projection)):

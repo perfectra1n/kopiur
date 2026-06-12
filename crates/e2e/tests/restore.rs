@@ -224,6 +224,15 @@ async fn snapshot_kopia_id(backups: &Api<Snapshot>, name: &str) -> String {
 
 /// A condition's `reason` from a status JSON (empty if absent).
 fn condition_reason(status: &serde_json::Value, type_: &str) -> String {
+    condition_field(status, type_, "reason")
+}
+
+/// A condition's `status` (`"True"`/`"False"`) from a status JSON (empty if absent).
+fn condition_status(status: &serde_json::Value, type_: &str) -> String {
+    condition_field(status, type_, "status")
+}
+
+fn condition_field(status: &serde_json::Value, type_: &str, field: &str) -> String {
     status
         .get("conditions")
         .and_then(|c| c.as_array())
@@ -231,7 +240,7 @@ fn condition_reason(status: &serde_json::Value, type_: &str) -> String {
             a.iter()
                 .find(|c| c.get("type").and_then(|t| t.as_str()) == Some(type_))
         })
-        .and_then(|c| c.get("reason").and_then(|r| r.as_str()))
+        .and_then(|c| c.get(field).and_then(|r| r.as_str()))
         .unwrap_or_default()
         .to_string()
 }
@@ -1027,6 +1036,9 @@ async fn restore_missing_snapshot_fail_vs_continue() {
         "SnapshotNotFound",
         "status: {s}"
     );
+    // kstatus (ADR-0005 §2): a Failed Restore is terminal → Stalled, not Ready.
+    assert_eq!(condition_status(&s, "Stalled"), "True", "status: {s}");
+    assert_eq!(condition_status(&s, "Ready"), "False", "status: {s}");
     cleanup_restore(&restores, fail_name).await;
 
     // A policy with NO snapshots: same repo/source, fresh name → fresh identity.
@@ -1065,6 +1077,8 @@ async fn restore_missing_snapshot_fail_vs_continue() {
         "NoSnapshotContinue",
         "status: {s}"
     );
+    // kstatus: deploy-or-restore completed cleanly → Ready.
+    assert_eq!(condition_status(&s, "Ready"), "True", "status: {s}");
     cleanup_restore(&restores, cont_name).await;
 
     // (c) explicit onMissingSnapshot: Fail overrides the fromPolicy default.
@@ -1086,6 +1100,55 @@ async fn restore_missing_snapshot_fail_vs_continue() {
         .expect("explicit onMissingSnapshot: Fail must override the fromPolicy default");
     cleanup_restore(&restores, strict_name).await;
     let _ = configs.delete(empty_cfg, &DeleteParams::default()).await;
+}
+
+/// kstatus Ready conditions on the job-success path (ADR-0005 §2). Regression:
+/// the job-terminal transition used to patch `phase: Completed` ALONE — no
+/// conditions at all — so `kubectl wait --for=condition=Ready` and Flux/Argo
+/// healthChecks could never gate on a completed Restore (observed live: a
+/// Completed Restore with `conditions: []`).
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test)"]
+async fn restore_completed_reports_kstatus_ready() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Filesystem])
+        .await
+        .expect("fixtures ready");
+    let client = world.client().clone();
+    ensure_seed_backup(&client).await;
+    let restores: Api<Restore> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    let name = "e2e-r-kstatus";
+    cleanup_restore(&restores, name).await;
+    restores
+        .create(
+            &PostParams::default(),
+            &cr(restore_json(name, serde_json::json!({}))),
+        )
+        .await
+        .expect("create Restore");
+    wait_phase(&restores, name, "Completed")
+        .await
+        .expect("restore must complete");
+
+    let s = status_json(&restores, name).await;
+    assert_eq!(condition_status(&s, "Ready"), "True", "status: {s}");
+    assert_eq!(
+        condition_reason(&s, "Ready"),
+        "RestoreSucceeded",
+        "status: {s}"
+    );
+    assert_eq!(condition_status(&s, "Reconciling"), "False", "status: {s}");
+    assert_eq!(condition_status(&s, "Stalled"), "False", "status: {s}");
+    assert_eq!(
+        s.get("observedGeneration").and_then(|g| g.as_i64()),
+        Some(1),
+        "the Completed patch must stamp observedGeneration; status: {s}"
+    );
+    cleanup_restore(&restores, name).await;
 }
 
 /// `policy.waitTimeout` keeps a restore WAITING (not Failed) while the source

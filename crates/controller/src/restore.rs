@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
@@ -97,6 +98,106 @@ pub fn populator_state(target: &RestoreTarget) -> PopulatorState {
     }
 }
 
+/// Map a `Restore` phase to its kstatus [`io::ReadyOutcome`] (ADR-0005 §2), so
+/// `kubectl wait --for=condition=Ready` and Flux/Argo health checks work on a
+/// `Restore` exactly like every other kopiur CRD. Pure + exhaustive: a new phase
+/// cannot compile until its Ready mapping is decided.
+///
+/// - `Completed` → `Ready` (the restore reached its desired state).
+/// - `Failed` → `Stalled` (terminal: a Restore is one-shot; a NEW Restore is how
+///   a retry happens).
+/// - `Pending`/`Resolving`/`Restoring` → `Reconciling` (in flight).
+pub fn restore_ready_outcome(phase: RestorePhase) -> io::ReadyOutcome {
+    match phase {
+        RestorePhase::Completed => io::ReadyOutcome::Ready,
+        RestorePhase::Failed => io::ReadyOutcome::Stalled,
+        RestorePhase::Pending | RestorePhase::Resolving | RestorePhase::Restoring => {
+            io::ReadyOutcome::Reconciling
+        }
+    }
+}
+
+/// Build the `(phase, observedGeneration, conditions)` status JSON for a `Restore`
+/// reaching `phase`, layering the kstatus Ready/Reconciling/Stalled conditions
+/// (via [`restore_ready_outcome`] + [`io::set_ready`]) onto `base` — the caller's
+/// condition set, normally the Restore's existing conditions plus any domain
+/// condition (`Resolved`, `AwaitingClaim`, …) upserted for this transition. Every
+/// status write goes through here so domain conditions survive phase writes (a
+/// bare `conditions: [..]` array replace used to drop them) and every phase
+/// transition carries Ready conditions (the job-success path used to write the
+/// phase alone, so `kubectl wait --for=condition=Ready` and Flux healthChecks
+/// could never gate on a completed Restore). Mirrors `snapshot_ready_status`.
+fn restore_ready_status_on(
+    restore: &Restore,
+    base: &[Condition],
+    phase: RestorePhase,
+    reason: &str,
+    message: &str,
+) -> serde_json::Value {
+    use kopiur_api::common::PhaseLabel;
+    let generation = restore.metadata.generation;
+    let conditions = io::set_ready(
+        base,
+        generation,
+        restore_ready_outcome(phase),
+        reason,
+        message,
+    );
+    serde_json::json!({
+        "phase": phase.label(),
+        "observedGeneration": generation,
+        "conditions": conditions,
+    })
+}
+
+/// [`restore_ready_status_on`] over the Restore's existing conditions unchanged —
+/// the common case where a transition has no domain condition of its own.
+fn restore_ready_status(
+    restore: &Restore,
+    phase: RestorePhase,
+    reason: &str,
+    message: &str,
+) -> serde_json::Value {
+    restore_ready_status_on(
+        restore,
+        &existing_conditions(restore),
+        phase,
+        reason,
+        message,
+    )
+}
+
+/// True when the kstatus trio on `restore` already reflects `phase`'s outcome,
+/// keyed on the one condition that is `True` for that outcome (`Ready` for
+/// Completed, `Stalled` for Failed, `Reconciling` for in-flight). Checking the
+/// distinctive condition suffices because [`io::set_ready`] always writes the
+/// trio together. This is the terminal-gate heal's self-gate: checking the
+/// PHASE alone is not enough, because the mover stamps the terminal phase
+/// without conditions (so the conditions can still say `Reconciling` — or be
+/// absent entirely — while the phase is already `Completed`).
+fn kstatus_settled_for(restore: &Restore, phase: RestorePhase) -> bool {
+    use crate::consts::{READY_CONDITION, RECONCILING_CONDITION, STALLED_CONDITION};
+    let distinctive = match restore_ready_outcome(phase) {
+        io::ReadyOutcome::Ready => READY_CONDITION,
+        io::ReadyOutcome::Stalled => STALLED_CONDITION,
+        io::ReadyOutcome::Reconciling => RECONCILING_CONDITION,
+    };
+    restore.status.as_ref().is_some_and(|s| {
+        s.conditions
+            .iter()
+            .any(|c| c.type_ == distinctive && c.status == "True")
+    })
+}
+
+/// The Restore's current status conditions (empty when no status yet).
+fn existing_conditions(restore: &Restore) -> Vec<Condition> {
+    restore
+        .status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default()
+}
+
 /// Reconcile a `Restore`.
 #[tracing::instrument(skip(restore, ctx), fields(kind = "Restore", namespace = %restore.namespace().unwrap_or_default(), name = %restore.name_any()))]
 pub async fn reconcile(restore: Arc<Restore>, ctx: Arc<Context>) -> Result<Action> {
@@ -148,11 +249,44 @@ async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
     // fresh timestamp, or re-write the phase — each of which would churn status and
     // self-trigger another reconcile (the same hot-loop class as the repo bug).
     // Mirrors the Snapshot reconciler's terminal discipline.
-    if matches!(
-        restore.status.as_ref().and_then(|s| s.phase),
-        Some(RestorePhase::Completed) | Some(RestorePhase::Failed)
-    ) {
-        return Ok(Action::requeue(std::time::Duration::from_secs(600)));
+    match restore.status.as_ref().and_then(|s| s.phase) {
+        Some(phase @ (RestorePhase::Completed | RestorePhase::Failed)) => {
+            // The kstatus conditions come from the controller's transition patch
+            // in `drive_direct_restore` — which the MOVER's own terminal `phase`
+            // stamp races past in the common case (its in-cluster PATCH carries
+            // `phase: Completed`/`Failed` + logTail/failure but no conditions;
+            // the Job-completion reconcile then already sees the terminal phase
+            // and lands HERE, never in the Job branch). Heal once: patch ONLY
+            // phase + observedGeneration + conditions (`restore_ready_status`
+            // carries nothing else, so the merge preserves the mover-written
+            // logTail/failure/progress and the pinned resolution). Self-gated by
+            // `kstatus_settled_for`, so a healed Restore never re-patches.
+            if !kstatus_settled_for(restore, phase) {
+                let (reason, message) = if phase == RestorePhase::Completed {
+                    (
+                        "RestoreSucceeded",
+                        "the restore mover completed; the snapshot data was written \
+                         into the target",
+                    )
+                } else {
+                    (
+                        "MoverJobFailed",
+                        "the restore mover reported a terminal failure; see \
+                         status.failure / status.logTail for the cause, fix it, and \
+                         create a NEW Restore — a Failed Restore is terminal and \
+                         never retries",
+                    )
+                };
+                io::patch_status(
+                    &api,
+                    &name,
+                    restore_ready_status(restore, phase, reason, message),
+                )
+                .await?;
+            }
+            return Ok(Action::requeue(std::time::Duration::from_secs(600)));
+        }
+        None | Some(RestorePhase::Pending | RestorePhase::Resolving | RestorePhase::Restoring) => {}
     }
 
     // §3: pin the resolved source kind to status so the SOURCE printer column shows
@@ -209,12 +343,15 @@ async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
                 if let Some(i) = &res.identity {
                     resolved["identity"] = serde_json::to_value(i)?;
                 }
-                io::patch_status(
-                    &api,
-                    &name,
-                    serde_json::json!({ "phase": "Resolving", "resolved": resolved }),
-                )
-                .await?;
+                let mut status = restore_ready_status(
+                    restore,
+                    RestorePhase::Resolving,
+                    "SourceResolved",
+                    "the restore source resolved to a concrete kopia snapshot \
+                     (pinned to status.resolved)",
+                );
+                status["resolved"] = resolved;
+                io::patch_status(&api, &name, status).await?;
                 res.kopia_snapshot_id
             }
             None => {
@@ -235,30 +372,32 @@ async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
                     .as_ref()
                     .and_then(|p| p.wait_timeout.as_deref());
                 if let Some(remaining) = wait_remaining_secs(created, wait_timeout, now) {
-                    let existing = restore
-                        .status
-                        .as_ref()
-                        .map(|s| s.conditions.clone())
-                        .unwrap_or_default();
                     // Static message (no countdown): an identical re-patch is a
                     // server-side no-op, so polling here cannot churn status.
+                    let msg = format!(
+                        "no snapshot matched the restore source yet; waiting up to \
+                         waitTimeout ({}) from creation for it to appear before \
+                         applying onMissingSnapshot",
+                        wait_timeout.unwrap_or_default()
+                    );
                     let conditions = io::upsert_condition(
-                        &existing,
+                        &existing_conditions(restore),
                         "Resolved",
                         false,
                         "WaitingForSnapshot",
-                        &format!(
-                            "no snapshot matched the restore source yet; waiting up to \
-                             waitTimeout ({}) from creation for it to appear before \
-                             applying onMissingSnapshot",
-                            wait_timeout.unwrap_or_default()
-                        ),
+                        &msg,
                         restore.metadata.generation,
                     );
                     io::patch_status(
                         &api,
                         &name,
-                        serde_json::json!({ "phase": "Pending", "conditions": conditions }),
+                        restore_ready_status_on(
+                            restore,
+                            &conditions,
+                            RestorePhase::Pending,
+                            "WaitingForSnapshot",
+                            &msg,
+                        ),
                     )
                     .await?;
                     return Ok(Action::requeue(std::time::Duration::from_secs(
@@ -268,16 +407,28 @@ async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
                 // Window closed (or none configured): honor the closed enum exhaustively.
                 return match on_missing {
                     OnMissingSnapshot::Fail => {
+                        let msg = "no snapshot matched the restore source within the \
+                                   waitTimeout window; fix spec.source (or create the missing \
+                                   snapshot) and create a NEW Restore — a Failed Restore is \
+                                   terminal and never retries";
+                        let conditions = io::upsert_condition(
+                            &existing_conditions(restore),
+                            "Resolved",
+                            false,
+                            "SnapshotNotFound",
+                            msg,
+                            restore.metadata.generation,
+                        );
                         io::patch_status(
                             &api,
                             &name,
-                            serde_json::json!({
-                                "phase": "Failed",
-                                "conditions": [condition(
-                                    "Resolved", "False", "SnapshotNotFound",
-                                    "no snapshot matched the restore source",
-                                )],
-                            }),
+                            restore_ready_status_on(
+                                restore,
+                                &conditions,
+                                RestorePhase::Failed,
+                                "SnapshotNotFound",
+                                msg,
+                            ),
                         )
                         .await?;
                         Err(Error::MissingDependency(
@@ -286,16 +437,26 @@ async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
                     }
                     OnMissingSnapshot::Continue => {
                         // Deploy-or-restore: nothing to restore, complete cleanly.
+                        let msg = "no snapshot found; continuing without restoring \
+                                   (deploy-or-restore)";
+                        let conditions = io::upsert_condition(
+                            &existing_conditions(restore),
+                            "Resolved",
+                            true,
+                            "NoSnapshotContinue",
+                            msg,
+                            restore.metadata.generation,
+                        );
                         io::patch_status(
                             &api,
                             &name,
-                            serde_json::json!({
-                                "phase": "Completed",
-                                "conditions": [condition(
-                                    "Resolved", "True", "NoSnapshotContinue",
-                                    "no snapshot found; continuing (deploy-or-restore)",
-                                )],
-                            }),
+                            restore_ready_status_on(
+                                restore,
+                                &conditions,
+                                RestorePhase::Completed,
+                                "NoSnapshotContinue",
+                                msg,
+                            ),
                         )
                         .await?;
                         Ok(Action::requeue(std::time::Duration::from_secs(600)))
@@ -316,19 +477,24 @@ async fn reconcile_inner(restore: &Restore, ctx: &Context) -> Result<Action> {
             // here surfaces the awaiting-claim condition and pins the resolved
             // snapshot so a claim can proceed; wiring the prime-PVC dance is the
             // documented residual.
-            io::patch_status(
-                &api,
-                &name,
-                serde_json::json!({
-                    "phase": "Pending",
-                    "conditions": [condition(
-                        "AwaitingClaim", "True", "AwaitingPvcDataSourceRef",
-                        "passive populator: awaiting a PVC dataSourceRef to claim this Restore",
-                    )],
-                    "target": { "pvcPrime": "awaiting-claim" },
-                }),
-            )
-            .await?;
+            let msg = "passive populator: awaiting a PVC dataSourceRef to claim this Restore";
+            let conditions = io::upsert_condition(
+                &existing_conditions(restore),
+                "AwaitingClaim",
+                true,
+                "AwaitingPvcDataSourceRef",
+                msg,
+                restore.metadata.generation,
+            );
+            let mut status = restore_ready_status_on(
+                restore,
+                &conditions,
+                RestorePhase::Pending,
+                "AwaitingPvcDataSourceRef",
+                msg,
+            );
+            status["target"] = serde_json::json!({ "pvcPrime": "awaiting-claim" });
+            io::patch_status(&api, &name, status).await?;
             Ok(Action::requeue(std::time::Duration::from_secs(30)))
         }
     }
@@ -357,21 +523,52 @@ async fn drive_direct_restore(
                     ctx.metrics.set_restore_duration(namespace, name, secs);
                 }
                 if phase != Some(RestorePhase::Completed) {
-                    io::patch_status(api, name, serde_json::json!({ "phase": "Completed" }))
-                        .await?;
+                    io::patch_status(
+                        api,
+                        name,
+                        restore_ready_status(
+                            restore,
+                            RestorePhase::Completed,
+                            "RestoreSucceeded",
+                            "the restore mover Job completed; the snapshot data was \
+                             written into the target",
+                        ),
+                    )
+                    .await?;
                 }
                 Ok(Action::requeue(std::time::Duration::from_secs(600)))
             }
             Some(false) => {
                 if phase != Some(RestorePhase::Failed) {
-                    io::patch_status(api, name, serde_json::json!({ "phase": "Failed" })).await?;
+                    io::patch_status(
+                        api,
+                        name,
+                        restore_ready_status(
+                            restore,
+                            RestorePhase::Failed,
+                            "MoverJobFailed",
+                            "the restore mover Job failed; see the Job/pod logs for the \
+                             cause, fix it, and create a NEW Restore — a Failed Restore \
+                             is terminal and never retries",
+                        ),
+                    )
+                    .await?;
                 }
                 Ok(Action::requeue(std::time::Duration::from_secs(120)))
             }
             None => {
                 if phase != Some(RestorePhase::Restoring) {
-                    io::patch_status(api, name, serde_json::json!({ "phase": "Restoring" }))
-                        .await?;
+                    io::patch_status(
+                        api,
+                        name,
+                        restore_ready_status(
+                            restore,
+                            RestorePhase::Restoring,
+                            "MoverJobRunning",
+                            "the restore mover Job is in flight",
+                        ),
+                    )
+                    .await?;
                 }
                 Ok(Action::requeue(std::time::Duration::from_secs(30)))
             }
@@ -708,7 +905,17 @@ async fn drive_direct_restore(
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
     io::apply_mover_objects(&ctx.client, namespace, name, &cm, &job).await?;
-    io::patch_status(api, name, serde_json::json!({ "phase": "Restoring" })).await?;
+    io::patch_status(
+        api,
+        name,
+        restore_ready_status(
+            restore,
+            RestorePhase::Restoring,
+            "MoverJobCreated",
+            "created the restore mover Job",
+        ),
+    )
+    .await?;
     tracing::info!(restore = %name, %snapshot_id, "created restore Job");
     Ok(Action::requeue(std::time::Duration::from_secs(30)))
 }
@@ -1043,18 +1250,6 @@ fn restore_job_limits(restore: &Restore) -> JobLimits {
     }
 }
 
-/// Build a Kubernetes condition object.
-fn condition(type_: &str, status: &str, reason: &str, message: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": type_,
-        "status": status,
-        "reason": reason,
-        "message": message,
-        "lastTransitionTime": chrono::Utc::now().to_rfc3339(),
-        "observedGeneration": 0,
-    })
-}
-
 /// `error_policy` for the `Restore` controller.
 pub fn error_policy(obj: Arc<Restore>, err: &Error, ctx: Arc<Context>) -> Action {
     error_policy_for("Restore", obj.as_ref(), err, &ctx)
@@ -1257,5 +1452,147 @@ mod tests {
             })),
             PopulatorState::DirectTarget
         );
+    }
+
+    // --- kstatus Ready conditions (ADR-0005 §2) -----------------------------
+    // Regression: the job-terminal transitions used to write the phase ALONE
+    // (no conditions), so `kubectl wait --for=condition=Ready` and Flux
+    // healthChecks could never gate on a Completed Restore; and the
+    // missing-snapshot/awaiting-claim patches replaced the whole conditions
+    // array, dropping domain conditions set earlier.
+
+    #[test]
+    fn ready_outcome_maps_every_phase() {
+        use crate::io::ReadyOutcome;
+        assert_eq!(
+            restore_ready_outcome(RestorePhase::Completed),
+            ReadyOutcome::Ready
+        );
+        assert_eq!(
+            restore_ready_outcome(RestorePhase::Failed),
+            ReadyOutcome::Stalled
+        );
+        for p in [
+            RestorePhase::Pending,
+            RestorePhase::Resolving,
+            RestorePhase::Restoring,
+        ] {
+            assert_eq!(restore_ready_outcome(p), ReadyOutcome::Reconciling, "{p:?}");
+        }
+    }
+
+    /// A minimal Restore with `generation: 3` and one pre-existing condition,
+    /// parsed the cluster's way (JSON → typed).
+    fn restore_with_condition(type_: &str, status: &str) -> Restore {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "kopiur.home-operations.com/v1alpha1",
+            "kind": "Restore",
+            "metadata": { "name": "r", "namespace": "ns", "generation": 3 },
+            "spec": {
+                "source": { "snapshotRef": { "name": "b" } },
+                "target": { "pvcRef": { "name": "t" } }
+            },
+            "status": { "conditions": [{
+                "type": type_, "status": status, "reason": "X", "message": "m",
+                "lastTransitionTime": "2026-01-01T00:00:00Z"
+            }] }
+        }))
+        .expect("valid Restore")
+    }
+
+    fn cond<'a>(v: &'a serde_json::Value, type_: &str) -> &'a serde_json::Value {
+        v["conditions"]
+            .as_array()
+            .expect("conditions array")
+            .iter()
+            .find(|c| c["type"] == type_)
+            .unwrap_or_else(|| panic!("missing condition {type_}"))
+    }
+
+    #[test]
+    fn ready_status_completed_sets_ready_and_preserves_domain_conditions() {
+        let r = restore_with_condition("Resolved", "True");
+        let v = restore_ready_status(&r, RestorePhase::Completed, "RestoreSucceeded", "done");
+        assert_eq!(v["phase"], "Completed");
+        assert_eq!(v["observedGeneration"], 3);
+        assert_eq!(cond(&v, "Ready")["status"], "True");
+        assert_eq!(cond(&v, "Ready")["reason"], "RestoreSucceeded");
+        assert_eq!(cond(&v, "Reconciling")["status"], "False");
+        assert_eq!(cond(&v, "Stalled")["status"], "False");
+        // The pre-existing domain condition survives the phase write (the old
+        // bare-array patches dropped it).
+        assert_eq!(cond(&v, "Resolved")["status"], "True");
+    }
+
+    #[test]
+    fn ready_status_failed_is_stalled_not_ready() {
+        let r = restore_with_condition("MoverPermitted", "True");
+        let v = restore_ready_status(
+            &r,
+            RestorePhase::Failed,
+            "MoverJobFailed",
+            "the restore mover Job failed",
+        );
+        assert_eq!(v["phase"], "Failed");
+        assert_eq!(cond(&v, "Ready")["status"], "False");
+        assert_eq!(cond(&v, "Stalled")["status"], "True");
+        assert_eq!(cond(&v, "Stalled")["reason"], "MoverJobFailed");
+        assert_eq!(cond(&v, "MoverPermitted")["status"], "True");
+    }
+
+    /// The mover-stamp race the e2e caught live: the mover PATCHes
+    /// `phase: Completed` (no conditions) before the controller's Job-terminal
+    /// transition runs, so the object sits terminal with the in-flight trio
+    /// (`Ready=False reason=MoverJobCreated`). The terminal gate must detect
+    /// that as NOT settled and heal; once healed it must read as settled (the
+    /// self-gate that stops re-patching).
+    #[test]
+    fn mover_stamped_terminal_phase_without_ready_is_not_settled() {
+        let mut r = restore_with_condition("Resolved", "True");
+        // In-flight trio, as written by the MoverJobCreated transition.
+        let inflight = io::set_ready(
+            &r.status.as_ref().unwrap().conditions,
+            r.metadata.generation,
+            io::ReadyOutcome::Reconciling,
+            "MoverJobCreated",
+            "created the restore mover Job",
+        );
+        let mut status = r.status.take().unwrap();
+        status.conditions = inflight;
+        status.phase = Some(RestorePhase::Completed); // mover stamp: phase only
+        r.status = Some(status);
+
+        assert!(!kstatus_settled_for(&r, RestorePhase::Completed));
+        assert!(!kstatus_settled_for(&r, RestorePhase::Failed));
+
+        // Heal (what the terminal gate patches), then it must be settled.
+        let healed = restore_ready_status(&r, RestorePhase::Completed, "RestoreSucceeded", "done");
+        let mut status = r.status.take().unwrap();
+        status.conditions = serde_json::from_value(healed["conditions"].clone()).unwrap();
+        r.status = Some(status);
+        assert!(kstatus_settled_for(&r, RestorePhase::Completed));
+        // ...and the domain condition still survives the heal.
+        let conds = &r.status.as_ref().unwrap().conditions;
+        assert!(
+            conds
+                .iter()
+                .any(|c| c.type_ == "Resolved" && c.status == "True")
+        );
+    }
+
+    #[test]
+    fn ready_status_in_flight_is_reconciling() {
+        let r = restore_with_condition("Resolved", "True");
+        let v = restore_ready_status(
+            &r,
+            RestorePhase::Restoring,
+            "MoverJobRunning",
+            "the restore mover Job is in flight",
+        );
+        assert_eq!(v["phase"], "Restoring");
+        assert_eq!(cond(&v, "Ready")["status"], "False");
+        assert_eq!(cond(&v, "Reconciling")["status"], "True");
+        assert_eq!(cond(&v, "Reconciling")["reason"], "MoverJobRunning");
+        assert_eq!(cond(&v, "Stalled")["status"], "False");
     }
 }
