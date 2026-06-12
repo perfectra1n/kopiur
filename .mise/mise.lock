@@ -33,42 +33,42 @@ checksum = "sha256:7db40a864ea299304e3a6c1d9f647fa8f554bb0353e181f63955b21c0dc57
 url = "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.8/cargo-deny-0.19.8-x86_64-pc-windows-msvc.tar.gz"
 
 [[tools."aqua:astral-sh/uv"]]
-version = "0.9.9"
+version = "0.11.21"
 backend = "aqua:astral-sh/uv"
 
 [tools."aqua:astral-sh/uv"."platforms.linux-arm64"]
-checksum = "sha256:84675e9f81c7ec45b11761db4e1f047c64e772d96a7d99201507a10279f7f835"
-url = "https://github.com/astral-sh/uv/releases/download/0.9.9/uv-aarch64-unknown-linux-musl.tar.gz"
+checksum = "sha256:e71badaed2a2c3a404a0a00974b51c7ed5f5bc7be947916846005b739c68a5a2"
+url = "https://github.com/astral-sh/uv/releases/download/0.11.21/uv-aarch64-unknown-linux-musl.tar.gz"
 provenance = "github-attestations"
 
 [tools."aqua:astral-sh/uv"."platforms.linux-arm64-musl"]
-checksum = "sha256:84675e9f81c7ec45b11761db4e1f047c64e772d96a7d99201507a10279f7f835"
-url = "https://github.com/astral-sh/uv/releases/download/0.9.9/uv-aarch64-unknown-linux-musl.tar.gz"
+checksum = "sha256:e71badaed2a2c3a404a0a00974b51c7ed5f5bc7be947916846005b739c68a5a2"
+url = "https://github.com/astral-sh/uv/releases/download/0.11.21/uv-aarch64-unknown-linux-musl.tar.gz"
 provenance = "github-attestations"
 
 [tools."aqua:astral-sh/uv"."platforms.linux-x64"]
-checksum = "sha256:b0e4530c1fed09720d7eb703703047f097fe23d6b266945a98422f0a0e5c74b4"
-url = "https://github.com/astral-sh/uv/releases/download/0.9.9/uv-x86_64-unknown-linux-musl.tar.gz"
+checksum = "sha256:9dadff5b9e7b1d2d011e41852a1cbca713d9d5d88194f2eb6bd240fa4fb0a719"
+url = "https://github.com/astral-sh/uv/releases/download/0.11.21/uv-x86_64-unknown-linux-musl.tar.gz"
 provenance = "github-attestations"
 
 [tools."aqua:astral-sh/uv"."platforms.linux-x64-musl"]
-checksum = "sha256:b0e4530c1fed09720d7eb703703047f097fe23d6b266945a98422f0a0e5c74b4"
-url = "https://github.com/astral-sh/uv/releases/download/0.9.9/uv-x86_64-unknown-linux-musl.tar.gz"
+checksum = "sha256:9dadff5b9e7b1d2d011e41852a1cbca713d9d5d88194f2eb6bd240fa4fb0a719"
+url = "https://github.com/astral-sh/uv/releases/download/0.11.21/uv-x86_64-unknown-linux-musl.tar.gz"
 provenance = "github-attestations"
 
 [tools."aqua:astral-sh/uv"."platforms.macos-arm64"]
-checksum = "sha256:737e1c2c4f97577aa7764141846e27de915eebb3b2a0f467451089a64824d2f7"
-url = "https://github.com/astral-sh/uv/releases/download/0.9.9/uv-aarch64-apple-darwin.tar.gz"
+checksum = "sha256:1f921d491ba5ffeea774eb04d6681ecee379101341cbb1500394993b541bf3f4"
+url = "https://github.com/astral-sh/uv/releases/download/0.11.21/uv-aarch64-apple-darwin.tar.gz"
 provenance = "github-attestations"
 
 [tools."aqua:astral-sh/uv"."platforms.macos-x64"]
-checksum = "sha256:8a755971dbf0b394cb61607c3d21e81affd62a22cfd306351eb518be7a3f0a89"
-url = "https://github.com/astral-sh/uv/releases/download/0.9.9/uv-x86_64-apple-darwin.tar.gz"
+checksum = "sha256:f3c8e5708a84b920c18b691214d54d2b0da6b984789caae95d47c95120cb7765"
+url = "https://github.com/astral-sh/uv/releases/download/0.11.21/uv-x86_64-apple-darwin.tar.gz"
 provenance = "github-attestations"
 
 [tools."aqua:astral-sh/uv"."platforms.windows-x64"]
-checksum = "sha256:b1c5d78c5cb6804e556e07eeafbcdea7378107c2bd5c342dea0cdc05a607d8e5"
-url = "https://github.com/astral-sh/uv/releases/download/0.9.9/uv-x86_64-pc-windows-msvc.zip"
+checksum = "sha256:ace861f360c6de2babedc1607d0f454b6b09a820dbc8182dc15af927e4df9589"
+url = "https://github.com/astral-sh/uv/releases/download/0.11.21/uv-x86_64-pc-windows-msvc.zip"
 provenance = "github-attestations"
 
 [[tools."aqua:dadav/helm-schema"]]
