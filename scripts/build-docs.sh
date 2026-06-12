@@ -26,6 +26,30 @@ SITE_DOMAIN="kopiur.home-operations.com"
 echo "==> cargo doc (workspace, no deps)"
 cargo doc --no-deps --workspace --locked
 
+echo "==> checking snippet SECTION references (--strict only guards file paths)"
+# pymdownx.snippets' check_paths fails the build on a missing FILE, but a
+# `--8<-- "file.yaml:section"` whose section marker was renamed/removed renders
+# as a silently EMPTY code block — exactly the docs/manifest drift the snippet
+# convention exists to prevent. Verify every section reference resolves.
+uv run python - <<'PYEOF'
+import pathlib, re, sys
+
+errors = []
+for md in pathlib.Path("docs").rglob("*.md"):
+    for ref in re.findall(r'--8<--\s+"([^":]+):([^"]+)"', md.read_text()):
+        path, section = pathlib.Path(ref[0]), ref[1]
+        if re.fullmatch(r"\d*(:\d*)?", section):
+            continue  # a LINE-RANGE include (file:5:8), not a named section
+        if not path.is_file():
+            continue  # missing files are check_paths' job; don't double-report
+        if f"--8<-- [start:{section}]" not in path.read_text():
+            errors.append(f"{md}: section '{section}' not found in {path} "
+                          f"(expected a '# --8<-- [start:{section}]' marker)")
+if errors:
+    print("snippet section check FAILED:", *errors, sep="\n  ", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+
 echo "==> mkdocs build (--strict: broken link or missing nav file fails here)"
 # uv run resolves MkDocs + plugins from the committed uv.lock into a managed venv.
 uv run mkdocs build --strict --site-dir "$OUT"
