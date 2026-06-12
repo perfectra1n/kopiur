@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.5](https://github.com/home-operations/kopiur/compare/0.3.4...0.3.5) (2026-06-12)
+
+
+### Features
+
+* **ci:** append a `v` so that krew is happy ([6455a54](https://github.com/home-operations/kopiur/commit/6455a54dbdbf6ac395956627deb31637a23b4be5))
+
+
+### Miscellaneous Chores
+
+* **krew:** kopiur 0.3.4 manifest ([9ee83e5](https://github.com/home-operations/kopiur/commit/9ee83e57971c4a40abb0a5f93ee0aeb81790e981))
+
 ## [0.3.4](https://github.com/home-operations/kopiur/compare/0.3.3...0.3.4) (2026-06-12)
 
 
