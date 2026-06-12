@@ -15,7 +15,7 @@ experimental = true
 config_roots = ["crates/e2e"]
 
 [tools]
-rust = { version = "1.95.0", components = "rustfmt,clippy,llvm-tools-preview" }
+rust = { version = "1.96.0", components = "rustfmt,clippy,llvm-tools-preview" }
 lefthook = "2.1.9"
 oxfmt = "0.54.0"
 zizmor = "1.25.2"
