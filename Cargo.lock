@@ -1425,6 +1425,8 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kopiur-api",
+ "kopiur-kopia",
+ "kopiur-mover",
  "kube",
  "rustls",
  "serde",

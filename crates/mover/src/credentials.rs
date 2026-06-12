@@ -58,30 +58,52 @@ const RCLONE_CONF_FILE: &str = "rclone.conf";
 /// The caller passes a writable directory (in the mover Job this is under the
 /// kopia-cache `emptyDir`); files are created `0600`.
 pub fn materialize(connect: &mut ConnectSpec, staging_dir: &Path) -> Result<()> {
+    materialize_with(connect, staging_dir, &|key| std::env::var(key).ok())
+}
+
+/// [`materialize`] with a caller-supplied credential lookup instead of the
+/// process environment. The `kubectl kopiur browse --local` transport uses this
+/// with the Secret's key/value map directly, so the workstation process never
+/// has to mutate its own environment (and the SFTP/GCS/rclone file-credential
+/// story stays byte-identical between the mover pod and `--local`).
+pub fn materialize_with(
+    connect: &mut ConnectSpec,
+    staging_dir: &Path,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<()> {
     match connect {
         ConnectSpec::Sftp {
             keyfile,
             known_hosts,
             ..
         } => {
-            if let Some(path) = write_env_file(SFTP_KEY_DATA_ENV, staging_dir, SFTP_KEY_FILE)? {
+            if let Some(path) =
+                write_cred_file(SFTP_KEY_DATA_ENV, staging_dir, SFTP_KEY_FILE, lookup)?
+            {
                 *keyfile = Some(path);
             }
-            if let Some(path) =
-                write_env_file(SFTP_KNOWN_HOSTS_ENV, staging_dir, SFTP_KNOWN_HOSTS_FILE)?
-            {
+            if let Some(path) = write_cred_file(
+                SFTP_KNOWN_HOSTS_ENV,
+                staging_dir,
+                SFTP_KNOWN_HOSTS_FILE,
+                lookup,
+            )? {
                 *known_hosts = Some(path);
             }
         }
         ConnectSpec::Gcs {
             credentials_file, ..
         } => {
-            if let Some(path) = write_env_file(GCS_CREDENTIALS_ENV, staging_dir, GCS_CREDS_FILE)? {
+            if let Some(path) =
+                write_cred_file(GCS_CREDENTIALS_ENV, staging_dir, GCS_CREDS_FILE, lookup)?
+            {
                 *credentials_file = Some(path);
             }
         }
         ConnectSpec::Rclone { config_file, .. } => {
-            if let Some(path) = write_env_file(RCLONE_CONFIG_ENV, staging_dir, RCLONE_CONF_FILE)? {
+            if let Some(path) =
+                write_cred_file(RCLONE_CONFIG_ENV, staging_dir, RCLONE_CONF_FILE, lookup)?
+            {
                 *config_file = Some(path);
             }
         }
@@ -99,17 +121,18 @@ pub fn materialize(connect: &mut ConnectSpec, staging_dir: &Path) -> Result<()> 
     Ok(())
 }
 
-/// If `env_key` is set and non-empty, write its value to `staging_dir/file_name`
-/// with mode `0600` and return the file path (as the `String` the connect spec
-/// holds). Returns `Ok(None)` when the env var is unset/empty (the credential
-/// simply isn't provided this way).
-fn write_env_file(
+/// If `lookup(env_key)` yields a non-empty value, write it to
+/// `staging_dir/file_name` with mode `0600` and return the file path (as the
+/// `String` the connect spec holds). Returns `Ok(None)` when the key is
+/// unset/empty (the credential simply isn't provided this way).
+fn write_cred_file(
     env_key: &'static str,
     staging_dir: &Path,
     file_name: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Option<String>> {
-    let value = match std::env::var(env_key) {
-        Ok(v) if !v.is_empty() => v,
+    let value = match lookup(env_key) {
+        Some(v) if !v.is_empty() => v,
         _ => return Ok(None),
     };
     std::fs::create_dir_all(staging_dir).map_err(|source| MoverError::CredentialStagingDir {
@@ -274,6 +297,37 @@ mod tests {
             other => panic!("expected rclone config_file, got {other:?}"),
         }
         unsafe { std::env::remove_var(RCLONE_CONFIG_ENV) };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn materialize_with_reads_a_caller_map_not_the_process_env() {
+        // The --local CLI path passes the Secret's data as a map; the process
+        // env must be irrelevant (no env mutation on a user's workstation).
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var(SFTP_KEY_DATA_ENV);
+            std::env::remove_var(SFTP_KNOWN_HOSTS_ENV);
+        }
+        let dir = tmp();
+        let map = std::collections::BTreeMap::from([(
+            SFTP_KEY_DATA_ENV.to_string(),
+            "MAP-KEY-DATA".to_string(),
+        )]);
+        let mut spec = sftp(None, None);
+        materialize_with(&mut spec, &dir, &|k| map.get(k).cloned()).expect("materialize_with");
+        match &spec {
+            ConnectSpec::Sftp {
+                keyfile: Some(kf),
+                known_hosts: None,
+                ..
+            } => {
+                assert_eq!(std::fs::read_to_string(kf).unwrap(), "MAP-KEY-DATA");
+                let mode = std::fs::metadata(kf).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "credential file must be 0600, got {mode:o}");
+            }
+            other => panic!("expected map-materialized keyfile only, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

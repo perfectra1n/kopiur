@@ -34,5 +34,5 @@ pub const CONFIG_PATH_ENV: &str = "KOPIA_CONFIG_PATH";
 /// `Job` mount an `emptyDir` at, and that the binaries default their kopia
 /// cache/log/config under. Keep this in sync with the `kopia-cache` volume mount
 /// in `deploy/helm/kopiur/templates/deployment.yaml` and in
-/// `kopiur_controller::jobs::build_job`.
+/// `kopiur_mover::jobs::build_job`.
 pub const DEFAULT_CACHE_DIR: &str = "/var/cache/kopia";

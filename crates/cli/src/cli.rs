@@ -82,11 +82,139 @@ pub enum Command {
     /// Run repository maintenance now.
     #[command(subcommand)]
     Maintenance(MaintenanceCommand),
+    /// Translate other tools' backup configs into kopiur objects.
+    #[command(subcommand)]
+    Migrate(MigrateCommand),
     /// One-screen health overview: repositories, policies, schedules, in-flight work.
     Status(StatusArgs),
     /// Diagnose a kopiur installation: CRDs, operator, webhook, repositories,
     /// credentials, stuck work. Exit 1 if anything failed a check.
     Doctor(DoctorArgs),
+    /// List files in a snapshot (read-only, via a warm in-cluster session pod).
+    Ls(LsArgs),
+    /// Print one file from a snapshot to stdout (read-only).
+    Cat(CatArgs),
+    /// Download one file from a snapshot to a local path (read-only).
+    Download(DownloadArgs),
+    /// Interactively browse a snapshot's files (ls/cd/cat/get REPL, read-only).
+    Browse(BrowseArgs),
+    /// Manage browse session pods.
+    #[command(subcommand)]
+    Session(SessionCommand),
+}
+
+/// Flags shared by every snapshot-browsing command (`ls`/`cat`/`download`/
+/// `browse`): which Snapshot to read and which transport to read it through.
+#[derive(clap::Args, Debug)]
+pub struct BrowseCommonArgs {
+    /// The Snapshot object whose kopia snapshot to read.
+    #[arg(value_name = "SNAPSHOT")]
+    pub snapshot: String,
+
+    /// How long the in-cluster session pod stays warm after connecting
+    /// (e.g. 5m, 1h; default 15m). Repeated commands reuse the warm session.
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
+    pub session_ttl: Option<std::time::Duration>,
+
+    /// Read with a LOCAL kopia binary instead of an in-cluster session pod.
+    /// The repository credentials are fetched to this machine (needs `get
+    /// secrets` RBAC) and the backend must be reachable from here.
+    #[arg(long)]
+    pub local: bool,
+
+    /// Path to the local kopia binary (with --local; default: the
+    /// KOPIUR_KOPIA_BINARY env var, then `kopia` on PATH).
+    #[arg(long, value_name = "PATH", requires = "local")]
+    pub kopia_bin: Option<PathBuf>,
+}
+
+impl BrowseCommonArgs {
+    /// The effective session TTL: the flag, or the 15-minute default shared
+    /// with the mover's `BrowseSessionOp` wire default.
+    pub fn ttl(&self) -> std::time::Duration {
+        self.session_ttl
+            .unwrap_or(std::time::Duration::from_secs(900))
+    }
+}
+
+/// Flags for `ls`.
+#[derive(clap::Args, Debug)]
+pub struct LsArgs {
+    /// Snapshot + transport flags.
+    #[command(flatten)]
+    pub common: BrowseCommonArgs,
+    /// Directory to list, relative to the snapshot root (default: the root).
+    #[arg(value_name = "PATH")]
+    pub path: Option<String>,
+}
+
+/// Flags for `cat`.
+#[derive(clap::Args, Debug)]
+pub struct CatArgs {
+    /// Snapshot + transport flags.
+    #[command(flatten)]
+    pub common: BrowseCommonArgs,
+    /// File to print, relative to the snapshot root.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+}
+
+/// Flags for `download`.
+#[derive(clap::Args, Debug)]
+pub struct DownloadArgs {
+    /// Snapshot + transport flags.
+    #[command(flatten)]
+    pub common: BrowseCommonArgs,
+    /// File to download, relative to the snapshot root.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+    /// Local destination (default: the file's own name in the current directory).
+    #[arg(value_name = "DEST")]
+    pub dest: Option<PathBuf>,
+}
+
+/// Flags for `browse`.
+#[derive(clap::Args, Debug)]
+pub struct BrowseArgs {
+    /// Snapshot + transport flags.
+    #[command(flatten)]
+    pub common: BrowseCommonArgs,
+    /// Keep the session pod warm on exit (default: end it). A kept session
+    /// expires after its TTL, or end it with `kubectl kopiur session end`.
+    #[arg(long)]
+    pub keep: bool,
+}
+
+/// `kubectl kopiur session …`
+#[derive(clap::Subcommand, Debug)]
+pub enum SessionCommand {
+    /// End the warm browse session holding a repository open (deletes its
+    /// Job + work-spec ConfigMap). A no-op when no session exists.
+    End(SessionEndArgs),
+}
+
+/// Flags for `session end`: name a Snapshot (the session of its repository is
+/// ended) or the repository directly.
+#[derive(clap::Args, Debug)]
+#[command(group(clap::ArgGroup::new("which").required(true)))]
+pub struct SessionEndArgs {
+    /// End the session of the repository this Snapshot lives in.
+    #[arg(value_name = "SNAPSHOT", group = "which")]
+    pub snapshot: Option<String>,
+
+    /// End the session of this Repository/ClusterRepository directly.
+    #[arg(long, value_name = "NAME", group = "which")]
+    pub repository: Option<String>,
+
+    /// Which repository kind --repository names.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t,
+        value_name = "KIND",
+        requires = "repository"
+    )]
+    pub repository_kind: RepositoryKindArg,
 }
 
 /// `kubectl kopiur maintenance …`
@@ -132,6 +260,59 @@ pub struct MaintenanceRunArgs {
     /// Give up waiting after this long (e.g. 90s, 30m, 1h; default 30m).
     #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
     pub timeout: Option<std::time::Duration>,
+}
+
+/// `kubectl kopiur migrate …`
+#[derive(clap::Subcommand, Debug)]
+pub enum MigrateCommand {
+    /// Translate VolSync restic ReplicationSources/Destinations into kopiur
+    /// SnapshotPolicy/SnapshotSchedule/Restore manifests. CONFIG ONLY — no
+    /// backup data moves; the kopiur repository starts empty.
+    Volsync(MigrateVolsyncArgs),
+}
+
+/// Flags for `migrate volsync`.
+#[derive(clap::Args, Debug)]
+#[command(group(clap::ArgGroup::new("repo_source").required(true)))]
+pub struct MigrateVolsyncArgs {
+    /// Translate only this ReplicationSource (default: all in the namespace).
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// Point the translated policies at this EXISTING kopiur repository.
+    #[arg(long, value_name = "NAME", group = "repo_source")]
+    pub repository: Option<String>,
+
+    /// Which repository kind --repository names.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t,
+        value_name = "KIND",
+        requires = "repository"
+    )]
+    pub repository_kind: RepositoryKindArg,
+
+    /// Read each restic repository Secret and EMIT a kopiur Repository +
+    /// credential Secrets derived from it (the kopia password is a REPLACE_ME
+    /// placeholder you must set).
+    #[arg(long, group = "repo_source")]
+    pub resolve_secrets: bool,
+
+    /// Also translate ReplicationDestinations into deploy-or-restore Restores.
+    #[arg(long)]
+    pub include_destinations: bool,
+
+    /// Exit 1 (emitting nothing) when any field is unmappable. Incompatible
+    /// with --resolve-secrets (its password placeholder is unmappable by
+    /// design).
+    #[arg(long, conflicts_with = "resolve_secrets")]
+    pub strict: bool,
+
+    /// Server-side-apply the translated objects (refused while any REPLACE_ME
+    /// placeholder remains).
+    #[arg(long)]
+    pub apply: bool,
 }
 
 /// Flags for `status`.
@@ -690,6 +871,112 @@ mod tests {
         };
         assert_eq!(args.policy.as_deref(), Some("nightly"));
         assert_eq!(args.origin, Some(OriginFilter::Discovered));
+        assert_eq!(args.repository.as_deref(), Some("nas"));
+        assert_eq!(args.repository_kind, RepositoryKindArg::ClusterRepository);
+    }
+
+    #[test]
+    fn ls_parses_snapshot_path_and_transport_flags() {
+        let cli = parse(&[
+            "ls",
+            "nightly-1",
+            "sub/dir",
+            "--session-ttl",
+            "30m",
+            "-o",
+            "wide",
+        ])
+        .unwrap();
+        let Command::Ls(args) = cli.command else {
+            panic!("expected ls");
+        };
+        assert_eq!(args.common.snapshot, "nightly-1");
+        assert_eq!(args.path.as_deref(), Some("sub/dir"));
+        assert_eq!(
+            args.common.ttl(),
+            std::time::Duration::from_secs(30 * 60),
+            "--session-ttl parses go-style durations"
+        );
+        assert!(!args.common.local);
+    }
+
+    #[test]
+    fn session_ttl_defaults_to_fifteen_minutes() {
+        let cli = parse(&["ls", "nightly-1"]).unwrap();
+        let Command::Ls(args) = cli.command else {
+            panic!("expected ls");
+        };
+        // Must equal the mover BrowseSessionOp wire default (900s).
+        assert_eq!(args.common.ttl().as_secs(), 900);
+        assert_eq!(
+            args.common.ttl().as_secs(),
+            kopiur_mover::workspec::BrowseSessionOp::default().ttl_seconds
+        );
+    }
+
+    #[test]
+    fn kopia_bin_requires_local() {
+        let err = parse(&["cat", "s", "a.txt", "--kopia-bin", "/usr/bin/kopia"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        let ok = parse(&[
+            "cat",
+            "s",
+            "a.txt",
+            "--local",
+            "--kopia-bin",
+            "/usr/bin/kopia",
+        ])
+        .unwrap();
+        let Command::Cat(args) = ok.command else {
+            panic!("expected cat");
+        };
+        assert!(args.common.local);
+        assert_eq!(
+            args.common.kopia_bin.as_deref(),
+            Some(std::path::Path::new("/usr/bin/kopia"))
+        );
+    }
+
+    #[test]
+    fn download_takes_optional_dest_and_browse_takes_keep() {
+        let cli = parse(&["download", "s", "sub/b.txt", "/tmp/b.txt"]).unwrap();
+        let Command::Download(args) = cli.command else {
+            panic!("expected download");
+        };
+        assert_eq!(args.path, "sub/b.txt");
+        assert_eq!(
+            args.dest.as_deref(),
+            Some(std::path::Path::new("/tmp/b.txt"))
+        );
+
+        let cli = parse(&["browse", "s", "--keep"]).unwrap();
+        let Command::Browse(args) = cli.command else {
+            panic!("expected browse");
+        };
+        assert!(args.keep);
+    }
+
+    #[test]
+    fn session_end_requires_exactly_one_of_snapshot_or_repository() {
+        // Neither → required-group error.
+        let err = parse(&["session", "end"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        // Both → conflict.
+        let err = parse(&["session", "end", "snap", "--repository", "nas"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        // Repository + kind alias works.
+        let cli = parse(&[
+            "session",
+            "end",
+            "--repository",
+            "nas",
+            "--repository-kind",
+            "clusterrepo",
+        ])
+        .unwrap();
+        let Command::Session(SessionCommand::End(args)) = cli.command else {
+            panic!("expected session end");
+        };
         assert_eq!(args.repository.as_deref(), Some("nas"));
         assert_eq!(args.repository_kind, RepositoryKindArg::ClusterRepository);
     }

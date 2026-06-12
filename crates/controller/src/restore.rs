@@ -702,6 +702,7 @@ async fn drive_direct_restore(
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
         cache_volume,
+        readiness_exec: None,
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -964,43 +965,11 @@ fn pick_offset(snapshots: Vec<kopiur_kopia::SnapshotListEntry>, offset: i64) -> 
 
 /// Derive the repository a `Snapshot` belongs to, for `Restore.spec.repository`
 /// derivation (the CRD documents `repository` as derived-from-source for
-/// `snapshotRef`): a produced snapshot pins it in `status.resolved.repository`;
-/// a discovered snapshot carries its Repository/ClusterRepository as the
-/// controller ownerReference (it has no `resolved` block). Pure.
-pub(crate) fn repository_ref_from_snapshot(
-    snap: &Snapshot,
-) -> Option<kopiur_api::common::RepositoryRef> {
-    use kopiur_api::common::{RepositoryKind, RepositoryRef};
-    if let Some(rref) = snap
-        .status
-        .as_ref()
-        .and_then(|s| s.resolved.as_ref())
-        .and_then(|r| r.repository.clone())
-    {
-        return Some(rref);
-    }
-    let owners = snap
-        .metadata
-        .owner_references
-        .as_deref()
-        .unwrap_or_default();
-    owners.iter().find_map(|o| {
-        if o.api_version != API_VERSION {
-            return None;
-        }
-        let kind = match o.kind.as_str() {
-            "Repository" => RepositoryKind::Repository,
-            "ClusterRepository" => RepositoryKind::ClusterRepository,
-            _ => return None,
-        };
-        Some(RepositoryRef {
-            kind,
-            name: o.name.clone(),
-            // Absent = resolved relative to the Snapshot's own namespace.
-            namespace: None,
-        })
-    })
-}
+/// `snapshotRef`). The pure rule lives in the api crate
+/// ([`kopiur_api::snapshot::repository_ref_for`], with its tests) because the
+/// `kubectl kopiur` browse data-plane shares it; re-exported here for
+/// controller callers.
+pub(crate) use kopiur_api::snapshot::repository_ref_for as repository_ref_from_snapshot;
 
 /// Resolve the repository a restore targets: explicit `spec.repository`, or
 /// derived from the source — the snapshotRef'd Snapshot's pinned/owning
@@ -1096,77 +1065,8 @@ mod tests {
     use kopiur_api::common::ObjectRef;
     use kopiur_api::restore::{FromPolicy, IdentitySource};
 
-    /// Regression for the inert "derived from source" contract (found by the
-    /// kubectl-plugin e2e): a snapshotRef Restore with no spec.repository was
-    /// refused with "restore requires spec.repository" even though the CRD
-    /// documents derivation. The pure derivation must cover both snapshot
-    /// origins.
-    mod repository_derivation {
-        use super::super::repository_ref_from_snapshot;
-        use kopiur_api::Snapshot;
-        use kopiur_api::common::RepositoryKind;
-
-        fn snap(v: serde_json::Value) -> Snapshot {
-            serde_json::from_value(v).expect("snapshot fixture")
-        }
-
-        #[test]
-        fn produced_snapshot_uses_the_pinned_resolved_repository() {
-            let s = snap(serde_json::json!({
-                "apiVersion": "kopiur.home-operations.com/v1alpha1",
-                "kind": "Snapshot",
-                "metadata": { "name": "s", "namespace": "media" },
-                "spec": { "policyRef": { "name": "pol" } },
-                "status": { "resolved": { "repository": { "kind": "ClusterRepository", "name": "nas" } } }
-            }));
-            let rref = repository_ref_from_snapshot(&s).expect("derived");
-            assert_eq!(rref.kind, RepositoryKind::ClusterRepository);
-            assert_eq!(rref.name, "nas");
-        }
-
-        #[test]
-        fn discovered_snapshot_uses_the_owning_repository() {
-            for (kind_str, kind) in [
-                ("Repository", RepositoryKind::Repository),
-                ("ClusterRepository", RepositoryKind::ClusterRepository),
-            ] {
-                let s = snap(serde_json::json!({
-                    "apiVersion": "kopiur.home-operations.com/v1alpha1",
-                    "kind": "Snapshot",
-                    "metadata": {
-                        "name": "repo-disc-abc", "namespace": "media",
-                        "ownerReferences": [{
-                            "apiVersion": "kopiur.home-operations.com/v1alpha1",
-                            "kind": kind_str, "name": "nas", "uid": "u1", "controller": true
-                        }]
-                    },
-                    "spec": {},
-                    "status": { "phase": "Discovered", "origin": "discovered" }
-                }));
-                let rref = repository_ref_from_snapshot(&s).expect(kind_str);
-                assert_eq!(rref.kind, kind, "{kind_str}");
-                assert_eq!(rref.name, "nas");
-                assert_eq!(rref.namespace, None, "resolved relative to the snapshot ns");
-            }
-        }
-
-        #[test]
-        fn foreign_owners_and_bare_snapshots_derive_nothing() {
-            // A non-kopiur owner (e.g. a Job) must not be mistaken for a repository.
-            let s = snap(serde_json::json!({
-                "apiVersion": "kopiur.home-operations.com/v1alpha1",
-                "kind": "Snapshot",
-                "metadata": {
-                    "name": "s", "namespace": "media",
-                    "ownerReferences": [{
-                        "apiVersion": "batch/v1", "kind": "Job", "name": "j", "uid": "u2"
-                    }]
-                },
-                "spec": {}
-            }));
-            assert!(repository_ref_from_snapshot(&s).is_none());
-        }
-    }
+    // The repository-derivation tests moved to `kopiur_api::snapshot` with the
+    // pure fn (`repository_ref_for`); the browse data-plane shares it.
 
     fn job_with_times(start: Option<&str>, end: Option<&str>) -> k8s_openapi::api::batch::v1::Job {
         use k8s_openapi::api::batch::v1::{Job, JobStatus};

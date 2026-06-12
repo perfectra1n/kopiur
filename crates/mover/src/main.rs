@@ -31,11 +31,24 @@ use kopiur_mover::env::{KOPIA_BINARY, RESULT_CONFIGMAP, WORK_SPEC_PATH};
 use kopiur_mover::error::{KopiaOp, MoverError, Result};
 use kopiur_mover::status::StatusUpdate;
 use kopiur_mover::workspec::{
-    self, BootstrapRepositoryOp, KOPIUR_PIN_NAME, MaintenanceOp, MoverWorkSpec, Operation,
-    ReplicateOp, VerifyOp, VerifyTier,
+    self, BootstrapRepositoryOp, BrowseSessionOp, KOPIUR_PIN_NAME, MaintenanceOp, MoverWorkSpec,
+    Operation, ReplicateOp, VerifyOp, VerifyTier,
 };
 
 fn main() -> std::process::ExitCode {
+    // Readiness-probe mode, BEFORE the work-spec loading path: a browse-session
+    // pod's readinessProbe execs `kopiur-mover ready` (the distroless image has
+    // no shell to `test -f` with), which must exit 0 iff the session marker
+    // exists. Checked first so the probe never tries to parse "ready" as a
+    // work-spec path; the decision itself is the pure `session_ready`.
+    if std::env::args().nth(1).as_deref() == Some("ready") {
+        return if session_ready(std::path::Path::new(kopiur_mover::env::READY_MARKER)) {
+            std::process::ExitCode::SUCCESS
+        } else {
+            std::process::ExitCode::FAILURE
+        };
+    }
+
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     match runtime.block_on(run()) {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -44,6 +57,13 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// Whether the browse-session readiness marker exists — the entire decision the
+/// `kopiur-mover ready` probe mode maps to an exit code. Pure over the path so
+/// it is unit-testable.
+fn session_ready(marker: &std::path::Path) -> bool {
+    marker.exists()
 }
 
 async fn run() -> Result<()> {
@@ -96,6 +116,12 @@ async fn run() -> Result<()> {
             // Replicate connects to the source, then `repository sync-to` the
             // destination; PATCHes the RepositoryReplication `.status` (ADR-0005 §13(d)).
             Operation::Replicate(op) => run_replicate_flow(&client, &spec, op, &connect).await,
+            // BrowseSession owns its own (read-only) connect lifecycle and has
+            // no status to PATCH — its targetRef names nothing the controller
+            // owns; the CLI surfaces failures from the pod logs.
+            Operation::BrowseSession(op) => {
+                run_browse_session_flow(&client, &spec, op, &connect).await
+            }
             _ => {
                 // A best-effort status reporter. If we cannot build a kube client
                 // (e.g. running outside a cluster), we log instead of failing.
@@ -295,6 +321,9 @@ async fn run_operation(client: &KopiaClient, spec: &MoverWorkSpec) -> Result<Sta
         }
         Operation::Replicate(_) => {
             unreachable!("Replicate is handled by run_replicate_flow, not execute()")
+        }
+        Operation::BrowseSession(_) => {
+            unreachable!("BrowseSession is handled by run_browse_session_flow, not execute()")
         }
     }
 }
@@ -948,6 +977,65 @@ async fn patch_replicate_status(target: &workspec::TargetRef, body: &serde_json:
     patch_maintenance_status(target, body).await;
 }
 
+/// Drive a `BrowseSession` run (M7a): connect to the repository **read-only**
+/// (`repository connect --readonly` — the read-only bit persists in the client
+/// config, so nothing this pod later execs can mutate the repo), write the
+/// readiness marker so the pod's `kopiur-mover ready` probe starts passing,
+/// then idle until the TTL elapses and exit cleanly. The CLI drives the actual
+/// reads ([`kopiur_kopia::SessionCmd`]) via pod exec while the pod is Ready.
+///
+/// Unlike maintenance/verify/replicate there is NO status to PATCH: the
+/// session's `targetRef` names nothing the controller owns. A failure here
+/// logs the actionable error (class + message) and exits non-zero so the Job
+/// goes `Failed` and the CLI surfaces the pod logs.
+async fn run_browse_session_flow(
+    client: &KopiaClient,
+    spec: &MoverWorkSpec,
+    op: &BrowseSessionOp,
+    connect: &ConnectSpec,
+) -> Result<()> {
+    info!(
+        backend = spec.repository.kind_str(),
+        ttl_seconds = op.ttl_seconds,
+        session = %spec.target_ref.name,
+        "starting browse session (read-only connect)"
+    );
+    if let Err(e) = client
+        .repository_connect_readonly(connect, spec.cache)
+        .await
+    {
+        // Mirrors the maintenance connect-failure logging (class + message) so
+        // `kubectl logs` on the session pod tells the whole story — minus the
+        // status PATCH, which has no target for a browse session.
+        error!(class = %e.class(), "browse session read-only connect failed");
+        return Err(MoverError::Kopia {
+            op: KopiaOp::BrowseConnect,
+            source: e,
+        });
+    }
+
+    // Signal readiness: the marker flips the pod Ready so the CLI knows the
+    // session is exec-able. A marker that cannot be written would leave the
+    // pod NotReady forever, so it is terminal (non-zero exit), not best-effort.
+    let marker = std::path::Path::new(kopiur_mover::env::READY_MARKER);
+    std::fs::write(marker, b"ready").map_err(|source| MoverError::ReadyMarkerWrite {
+        path: marker.to_path_buf(),
+        source,
+    })?;
+    info!(
+        marker = %marker.display(),
+        ttl_seconds = op.ttl_seconds,
+        "browse session ready; holding the read-only connection until the TTL elapses"
+    );
+
+    tokio::time::sleep(Duration::from_secs(op.ttl_seconds)).await;
+    info!(
+        ttl_seconds = op.ttl_seconds,
+        "browse session TTL elapsed; exiting"
+    );
+    Ok(())
+}
+
 /// `{ "status": ... }` body for a successful maintenance run. A full run also
 /// advances the quick clock (full subsumes quick). `lastContentReclaimedBytes`
 /// is `0`: `kopia maintenance run` emits no JSON, so the precise figure needs a
@@ -1308,5 +1396,24 @@ mod tests {
         assert_eq!(body["status"]["ownership"]["owner"], "other/owner");
         assert_eq!(body["status"]["conditions"][0]["status"], "False");
         assert_eq!(body["status"]["conditions"][0]["type"], "LeaseOwned");
+    }
+
+    // --- `kopiur-mover ready` probe mode: the pure marker decision ---
+
+    #[test]
+    fn session_ready_is_true_iff_the_marker_exists() {
+        let dir = std::env::temp_dir().join(format!("kopiur-ready-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join(".kopiur-session-ready");
+
+        // No marker yet → the probe must fail (pod stays NotReady).
+        assert!(!session_ready(&marker));
+
+        // Marker written (what run_browse_session_flow does after a successful
+        // read-only connect) → the probe passes.
+        std::fs::write(&marker, b"ready").unwrap();
+        assert!(session_ready(&marker));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

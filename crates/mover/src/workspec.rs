@@ -56,6 +56,14 @@ pub enum Operation {
     /// `RepositoryReplication` `.status`. Owns its own connect lifecycle like
     /// maintenance.
     Replicate(ReplicateOp),
+    /// Hold a **read-only** repository connection open for an interactive
+    /// `kubectl kopiur browse` session (M7a). Connects with `--readonly`, writes
+    /// the readiness marker ([`crate::env::READY_MARKER`]) so the pod's
+    /// readinessProbe (`kopiur-mover ready`) passes, then sleeps for
+    /// `ttlSeconds` and exits cleanly. The CLI drives the actual reads
+    /// ([`kopiur_kopia::SessionCmd`]) via pod exec; the mover never PATCHes a
+    /// status (`targetRef` names nothing the controller owns).
+    BrowseSession(BrowseSessionOp),
 }
 
 impl Operation {
@@ -70,6 +78,7 @@ impl Operation {
             Operation::SnapshotPin(_) => "SnapshotPin",
             Operation::Verify(_) => "Verify",
             Operation::Replicate(_) => "Replicate",
+            Operation::BrowseSession(_) => "BrowseSession",
         }
     }
 }
@@ -518,6 +527,32 @@ pub struct ReplicateOp {
     /// (additive sync) — safer, so a misconfigured destination is never emptied.
     #[serde(default)]
     pub delete_extra: bool,
+}
+
+/// Payload for a browse-session run (M7a). The session pod connects read-only,
+/// signals readiness via the marker file, and idles until the TTL elapses — a
+/// hard upper bound so an abandoned `kubectl kopiur browse` can never hold a
+/// repository connection (and a pod) open forever.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseSessionOp {
+    /// How long (seconds) the session pod stays alive after connecting before
+    /// exiting cleanly. Defaults to [`default_browse_ttl`] (15 minutes).
+    #[serde(default = "default_browse_ttl")]
+    pub ttl_seconds: u64,
+}
+
+impl Default for BrowseSessionOp {
+    fn default() -> Self {
+        BrowseSessionOp {
+            ttl_seconds: default_browse_ttl(),
+        }
+    }
+}
+
+/// The default browse-session TTL: 900 seconds (15 minutes).
+fn default_browse_ttl() -> u64 {
+    900
 }
 
 /// The resolved kopia identity (`username@hostname:path`). Pinned by the
@@ -1096,6 +1131,37 @@ mod tests {
             "kopiur/prod/nas-primary"
         );
         assert_eq!(v["operation"]["maintenance"]["takeoverPolicy"], "Force");
+    }
+
+    #[test]
+    fn browse_session_roundtrip_and_wire_shape() {
+        let spec = MoverWorkSpec {
+            version: 1,
+            operation: Operation::BrowseSession(BrowseSessionOp { ttl_seconds: 1800 }),
+            identity: sample_identity(),
+            repository: RepositoryConnect::Filesystem {
+                path: "/repo".into(),
+            },
+            target_ref: sample_target(),
+            hook_plan: HookPlanSummary::default(),
+            options: MoverOptions::default(),
+            cache: Default::default(),
+            throttle: Default::default(),
+        };
+        assert_eq!(roundtrip(&spec), spec);
+        assert_eq!(spec.operation.kind_str(), "BrowseSession");
+        // Externally tagged on the wire: { "browseSession": { "ttlSeconds": 1800 } }.
+        let v: serde_json::Value = serde_json::to_value(&spec).unwrap();
+        assert_eq!(v["operation"]["browseSession"]["ttlSeconds"], 1800);
+    }
+
+    #[test]
+    fn browse_session_ttl_defaults_to_15_minutes() {
+        // An omitted ttlSeconds deserializes to the 900s default — the wire
+        // contract a CLI that sends `{"browseSession": {}}` relies on.
+        let op: BrowseSessionOp = serde_json::from_str("{}").unwrap();
+        assert_eq!(op.ttl_seconds, 900);
+        assert_eq!(BrowseSessionOp::default().ttl_seconds, 900);
     }
 
     #[test]

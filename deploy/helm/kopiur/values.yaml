@@ -93,6 +93,20 @@ secretProjection:
   enabled: false
 
 # =============================================================================
+# Extra RBAC
+# =============================================================================
+rbac:
+  # -- Render an OPT-IN ClusterRole "<release>-browse" carrying exactly what a
+  # human needs to run the `kubectl kopiur ls/cat/download/browse` data-plane:
+  # read snapshots/repositories, create/delete the session Job + ConfigMap, and
+  # exec into the session pod. It deliberately grants NO access to Secrets —
+  # the session pod loads the repository credentials itself, so a browsing user
+  # never reads them (`--local` is the exception and additionally needs `get
+  # secrets`, granted separately). The chart only renders the ClusterRole; bind
+  # it to your users/groups with your own (Cluster)RoleBinding.
+  browseRole: false
+
+# =============================================================================
 # ServiceAccount
 # =============================================================================
 serviceAccount:

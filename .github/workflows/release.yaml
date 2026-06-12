@@ -224,3 +224,173 @@ jobs:
       - name: Sign the published chart with Cosign
         run: |-
           cosign sign --yes "ghcr.io/${{ github.repository_owner }}/charts/kopiur:${VERSION}"
+
+  # The kubectl plugin binaries (kubectl-kopiur). Native runners per target —
+  # no QEMU, no cross-compilation toolchains beyond rustup target add:
+  # GitHub's arm64 Linux runners build the aarch64-musl leg natively, and
+  # macos-14 (arm) builds both darwin targets with the Apple toolchain.
+  # Windows is best-effort (continue-on-error): krew simply omits platforms
+  # whose asset is missing.
+  plugin:
+    name: Plugin (${{ matrix.target }})
+    needs: versions
+    if: ${{ github.event_name == 'release' }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.best-effort }}
+    permissions:
+      contents: write # gh release upload
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            asset: kopiur-cli_linux_amd64.tar.gz
+            best-effort: false
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            asset: kopiur-cli_linux_arm64.tar.gz
+            best-effort: false
+          - target: x86_64-apple-darwin
+            os: macos-14
+            asset: kopiur-cli_darwin_amd64.tar.gz
+            best-effort: false
+          - target: aarch64-apple-darwin
+            os: macos-14
+            asset: kopiur-cli_darwin_arm64.tar.gz
+            best-effort: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            asset: kopiur-cli_windows_amd64.zip
+            best-effort: true
+    env:
+      VERSION: ${{ github.event.release.tag_name }}
+      RUST_VERSION: ${{ needs.versions.outputs.rust-version }}
+      TARGET: ${{ matrix.target }}
+      ASSET: ${{ matrix.asset }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install musl toolchain
+        if: ${{ contains(matrix.target, 'musl') }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "${RUST_VERSION}" --profile minimal
+          rustup default "${RUST_VERSION}"
+          rustup target add "${TARGET}"
+
+      # KOPIUR_VERSION stamps `kubectl kopiur --version` with the release tag
+      # (crates/cli/src/consts.rs option_env!) — the same model as the images'
+      # VERSION build-arg; release-please config stays untouched.
+      - name: Build kubectl-kopiur
+        shell: bash
+        env:
+          KOPIUR_VERSION: ${{ github.event.release.tag_name }}
+        run: cargo build --release --locked --target "${TARGET}" -p kopiur-cli
+
+      - name: Package (tar.gz)
+        if: ${{ !contains(matrix.target, 'windows') }}
+        run: |
+          tar -czf "${ASSET}" -C "target/${TARGET}/release" kubectl-kopiur
+          shasum -a 256 "${ASSET}" > "${ASSET}.sha256" 2>/dev/null \
+            || sha256sum "${ASSET}" > "${ASSET}.sha256"
+
+      - name: Package (zip)
+        if: ${{ contains(matrix.target, 'windows') }}
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/$env:TARGET/release/kubectl-kopiur.exe" -DestinationPath "$env:ASSET"
+          (Get-FileHash -Algorithm SHA256 "$env:ASSET").Hash.ToLower() + "  $env:ASSET" | Out-File -Encoding ascii "$env:ASSET.sha256"
+
+      - name: Upload to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${VERSION}" "${ASSET}" "${ASSET}.sha256" --clobber
+
+  # Render the krew manifest from .krew.yaml (sha256s substituted from the
+  # uploaded assets), attach it to the release, and push it to the
+  # home-operations custom krew index when KREW_INDEX_TOKEN is provisioned.
+  krew:
+    name: Krew manifest
+    needs: plugin
+    if: ${{ github.event_name == 'release' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ github.event.release.tag_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Render the krew manifest
+        run: |
+          set -eu
+          mkdir -p dist && cd dist
+          gh release download "${VERSION}" --pattern 'kopiur-cli_*' --repo "${GITHUB_REPOSITORY}"
+          cd ..
+          cp .krew.yaml kopiur.yaml
+          # Strip a leading v for the krew `version` field convention (vX.Y.Z is fine too,
+          # but keep it identical to the tag for traceability).
+          sed -i "s|{{VERSION}}|${VERSION}|g" kopiur.yaml
+          sed -i "s|{{REPO}}|${GITHUB_REPOSITORY}|g" kopiur.yaml
+          for platform in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64 windows_amd64; do
+            ext=tar.gz; [ "${platform}" = windows_amd64 ] && ext=zip
+            file="dist/kopiur-cli_${platform}.${ext}"
+            if [ -f "${file}" ]; then
+              sum=$(sha256sum "${file}" | cut -d' ' -f1)
+              sed -i "s|{{SHA256_${platform}}}|${sum}|g" kopiur.yaml
+            else
+              # Best-effort platform whose build failed: drop its block so krew
+              # only offers platforms that exist. yq deletes by matching the
+              # unsubstituted placeholder.
+              yq -i "del(.spec.platforms[] | select(.sha256 == \"{{SHA256_${platform}}}\"))" kopiur.yaml
+              echo "note: ${file} missing; dropped ${platform} from the manifest"
+            fi
+          done
+          if grep -q '{{' kopiur.yaml; then
+            echo "unsubstituted placeholders remain:"; grep -n '{{' kopiur.yaml; exit 1
+          fi
+          cat kopiur.yaml
+
+      - name: Attach the manifest to the release
+        run: gh release upload "${VERSION}" kopiur.yaml --clobber
+
+      # Opt-in: pushes plugins/kopiur.yaml to home-operations/krew-index when
+      # the KREW_INDEX_TOKEN secret (a fine-grained PAT with contents:write on
+      # that repo) is provisioned. Without it this step explains and succeeds —
+      # the release-attached manifest still supports
+      # `kubectl krew install --manifest-url`.
+      - name: Push to the custom krew index
+        env:
+          KREW_INDEX_TOKEN: ${{ secrets.KREW_INDEX_TOKEN }}
+        run: |
+          set -eu
+          if [ -z "${KREW_INDEX_TOKEN}" ]; then
+            echo "KREW_INDEX_TOKEN not provisioned; skipping the index push." \
+                 "Users can install via the release-attached manifest:" \
+                 "kubectl krew install --manifest-url <release kopiur.yaml URL>"
+            exit 0
+          fi
+          git clone "https://x-access-token:${KREW_INDEX_TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/krew-index.git" index
+          mkdir -p index/plugins
+          cp kopiur.yaml index/plugins/kopiur.yaml
+          cd index
+          git config user.name "kopiur-release-bot"
+          git config user.email "kopiur-release-bot@users.noreply.github.com"
+          git add plugins/kopiur.yaml
+          git diff --cached --quiet && { echo "manifest unchanged"; exit 0; }
+          git commit -m "kopiur ${VERSION}"
+          git push

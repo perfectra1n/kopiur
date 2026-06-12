@@ -75,3 +75,31 @@ additionally requires the namespace to opt in with the
 shows the effective permissions on a live cluster; diff it against
 `deploy/rbac/operator-clusterrole.yaml` if something looks off.
 ///
+
+## Browsing snapshots (`rbac.browseRole`)
+
+The `kubectl kopiur ls/cat/download/browse` data-plane runs as the **human's**
+kubeconfig identity, not a ServiceAccount. The chart can render an opt-in
+ClusterRole (`rbac.browseRole: true` → `<release>-browse`) carrying exactly
+what browsing needs — you bind it yourself (a namespaced RoleBinding limits a
+user to browsing snapshots in that one namespace):
+
+| API group → resources | Verbs | Why |
+| --- | --- | --- |
+| `kopiur.home-operations.com` → `snapshots`, `repositories` | get, list | Resolve the Snapshot → repository chain. |
+| `kopiur.home-operations.com` → `clusterrepositories` | get | Same chain for cluster-scoped repositories. |
+| `apps` → `deployments` | get, list | Resolve the mover image from the controller Deployment (sessions run exactly what the operator runs). |
+| `batch` → `jobs` | create, get, list, delete | Find-or-create the read-only session Job; `session end`. |
+| core → `configmaps` | create, get, delete | The session's work-spec ConfigMap (owned by the Job). |
+| core → `pods` | get, list, watch | Wait for the session pod to become Ready. |
+| core → `pods/log` | get | Surface the pod's logs when the session fails to start. |
+| core → `pods/exec` | create | The read path: exec the closed kopia read-command set. |
+
+Deliberately **no `secrets` access**: the session pod loads the repository
+credentials itself via `envFrom`, so a browsing user never reads them. Note
+the binding's blast radius honestly: `pods/exec` and `jobs delete` are
+namespace-wide once bound — RBAC cannot scope exec to session pods only, so
+bind this role only where that is acceptable. The
+`--local` flag is the exception — it copies the credentials to the user's
+machine and therefore additionally needs `get` on `secrets`; grant that
+separately and consciously.

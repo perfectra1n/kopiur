@@ -332,6 +332,45 @@ pub struct ResolvedSource {
     pub source_path: Option<String>,
 }
 
+/// Derive the repository a `Snapshot` belongs to: a *produced* snapshot pins it
+/// in `status.resolved.repository`; a *discovered* snapshot carries its
+/// `Repository`/`ClusterRepository` as the controller `ownerReference` (it has
+/// no `resolved` block). Pure. Shared by the `Restore` reconciler
+/// (`spec.repository` derivation for `snapshotRef`) and the `kubectl kopiur`
+/// browse data-plane, so the derivation rule cannot fork.
+pub fn repository_ref_for(snap: &Snapshot) -> Option<RepositoryRef> {
+    use crate::common::RepositoryKind;
+    if let Some(rref) = snap
+        .status
+        .as_ref()
+        .and_then(|s| s.resolved.as_ref())
+        .and_then(|r| r.repository.clone())
+    {
+        return Some(rref);
+    }
+    let owners = snap
+        .metadata
+        .owner_references
+        .as_deref()
+        .unwrap_or_default();
+    owners.iter().find_map(|o| {
+        if o.api_version != crate::consts::API_VERSION {
+            return None;
+        }
+        let kind = match o.kind.as_str() {
+            "Repository" => RepositoryKind::Repository,
+            "ClusterRepository" => RepositoryKind::ClusterRepository,
+            _ => return None,
+        };
+        Some(RepositoryRef {
+            kind,
+            name: o.name.clone(),
+            // Absent = resolved relative to the Snapshot's own namespace.
+            namespace: None,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +403,79 @@ mod tests {
         assert_eq!(sorted.len(), labels.len(), "phase labels must be unique");
         // Default is reachable through ALL.
         assert!(SnapshotPhase::ALL.contains(&SnapshotPhase::default()));
+    }
+
+    /// Regression for the inert "derived from source" contract (found by the
+    /// kubectl-plugin e2e): a snapshotRef Restore with no spec.repository was
+    /// refused with "restore requires spec.repository" even though the CRD
+    /// documents derivation. The pure derivation must cover both snapshot
+    /// origins. (Moved here from the controller when the browse data-plane
+    /// started sharing it.)
+    mod repository_derivation {
+        use super::super::repository_ref_for;
+        use crate::Snapshot;
+        use crate::common::RepositoryKind;
+
+        fn snap(v: serde_json::Value) -> Snapshot {
+            serde_json::from_value(v).expect("snapshot fixture")
+        }
+
+        #[test]
+        fn produced_snapshot_uses_the_pinned_resolved_repository() {
+            let s = snap(serde_json::json!({
+                "apiVersion": "kopiur.home-operations.com/v1alpha1",
+                "kind": "Snapshot",
+                "metadata": { "name": "s", "namespace": "media" },
+                "spec": { "policyRef": { "name": "pol" } },
+                "status": { "resolved": { "repository": { "kind": "ClusterRepository", "name": "nas" } } }
+            }));
+            let rref = repository_ref_for(&s).expect("derived");
+            assert_eq!(rref.kind, RepositoryKind::ClusterRepository);
+            assert_eq!(rref.name, "nas");
+        }
+
+        #[test]
+        fn discovered_snapshot_uses_the_owning_repository() {
+            for (kind_str, kind) in [
+                ("Repository", RepositoryKind::Repository),
+                ("ClusterRepository", RepositoryKind::ClusterRepository),
+            ] {
+                let s = snap(serde_json::json!({
+                    "apiVersion": "kopiur.home-operations.com/v1alpha1",
+                    "kind": "Snapshot",
+                    "metadata": {
+                        "name": "repo-disc-abc", "namespace": "media",
+                        "ownerReferences": [{
+                            "apiVersion": "kopiur.home-operations.com/v1alpha1",
+                            "kind": kind_str, "name": "nas", "uid": "u1", "controller": true
+                        }]
+                    },
+                    "spec": {},
+                    "status": { "phase": "Discovered", "origin": "discovered" }
+                }));
+                let rref = repository_ref_for(&s).expect(kind_str);
+                assert_eq!(rref.kind, kind, "{kind_str}");
+                assert_eq!(rref.name, "nas");
+                assert_eq!(rref.namespace, None, "resolved relative to the snapshot ns");
+            }
+        }
+
+        #[test]
+        fn foreign_owners_and_bare_snapshots_derive_nothing() {
+            // A non-kopiur owner (e.g. a Job) must not be mistaken for a repository.
+            let s = snap(serde_json::json!({
+                "apiVersion": "kopiur.home-operations.com/v1alpha1",
+                "kind": "Snapshot",
+                "metadata": {
+                    "name": "s", "namespace": "media",
+                    "ownerReferences": [{
+                        "apiVersion": "batch/v1", "kind": "Job", "name": "j", "uid": "u2"
+                    }]
+                },
+                "spec": {}
+            }));
+            assert!(repository_ref_for(&s).is_none());
+        }
     }
 
     #[test]

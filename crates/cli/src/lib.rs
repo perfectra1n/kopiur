@@ -22,7 +22,10 @@ pub use error::CliError;
 
 use std::process::ExitCode;
 
-use cli::{Command, LogsCommand, MaintenanceCommand, SnapshotCommand, SnapshotsCommand};
+use cli::{
+    Command, LogsCommand, MaintenanceCommand, MigrateCommand, SessionCommand, SnapshotCommand,
+    SnapshotsCommand,
+};
 
 /// What a command hands back to the dispatcher: text for stdout (streaming
 /// commands write directly and return empty text) and the process exit code.
@@ -79,10 +82,16 @@ pub async fn run(cli: Cli) -> Result<ExitCode, CliError> {
         Command::Maintenance(MaintenanceCommand::Run(args)) => {
             cmd::maintenance::run(&ctx, args, chrono::Utc::now()).await?
         }
+        Command::Migrate(MigrateCommand::Volsync(args)) => cmd::migrate::run(&ctx, args).await?,
         Command::Status(args) => {
             CmdOutput::ok(cmd::status::run(&ctx, args, output, chrono::Utc::now()).await?)
         }
         Command::Doctor(args) => cmd::doctor::run(&ctx, args, output, chrono::Utc::now()).await?,
+        Command::Ls(args) => cmd::browse::ls(&ctx, args, output).await?,
+        Command::Cat(args) => cmd::browse::cat(&ctx, args).await?,
+        Command::Download(args) => cmd::browse::download(&ctx, args).await?,
+        Command::Browse(args) => cmd::browse::browse(&ctx, args).await?,
+        Command::Session(SessionCommand::End(args)) => cmd::browse::session_end(&ctx, args).await?,
     };
     print!("{}", out.text);
     Ok(ExitCode::from(out.exit))

@@ -1020,3 +1020,620 @@ async fn cli_maintenance_run() {
         out.stderr
     );
 }
+
+/// Minimal VolSync CRD (schema-preserving) — enough for the migration e2e to
+/// create/read ReplicationSources without installing VolSync itself.
+fn volsync_crd_json(kind: &str, plural: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "apiextensions.k8s.io/v1",
+        "kind": "CustomResourceDefinition",
+        "metadata": { "name": format!("{plural}.volsync.backube") },
+        "spec": {
+            "group": "volsync.backube",
+            "names": { "kind": kind, "plural": plural, "singular": kind.to_lowercase() },
+            "scope": "Namespaced",
+            "versions": [{
+                "name": "v1alpha1",
+                "served": true,
+                "storage": true,
+                "schema": { "openAPIV3Schema": {
+                    "type": "object",
+                    "x-kubernetes-preserve-unknown-fields": true
+                }}
+            }]
+        }
+    })
+}
+
+/// M6: `migrate volsync` translates a real ReplicationSource into kopiur
+/// objects that RECONCILE (the proof: a snapshot through the translated
+/// policy succeeds), `--strict` refuses unmappable fields, and
+/// `--resolve-secrets --apply` refuses the password placeholder.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
+async fn cli_migrate_volsync() {
+    use k8s_openapi::api::core::v1::Secret;
+    use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
+    use kube::api::{DynamicObject, GroupVersionKind, Patch, PatchParams};
+    use kube::discovery::ApiResource;
+
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Minio, Need::Filesystem])
+        .await
+        .expect("provision MinIO + buckets + source PVC");
+    let client = world.client().clone();
+    ensure_cli_fixtures(&client).await;
+
+    // --- VolSync CRDs (minimal, schema-preserving) + fixtures.
+    let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
+    let params = PatchParams::apply("kopiur-e2e").force();
+    for (kind, plural) in [
+        ("ReplicationSource", "replicationsources"),
+        ("ReplicationDestination", "replicationdestinations"),
+    ] {
+        let crd: CustomResourceDefinition =
+            serde_json::from_value(volsync_crd_json(kind, plural)).unwrap();
+        crds.patch(
+            &format!("{plural}.volsync.backube"),
+            &params,
+            &Patch::Apply(&crd),
+        )
+        .await
+        .expect("apply VolSync CRD");
+    }
+    wait_until(
+        "VolSync CRDs established",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let ok = crds
+                .get_opt("replicationsources.volsync.backube")
+                .await?
+                .and_then(|c| c.status)
+                .map(|s| {
+                    s.conditions
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|c| c.type_ == "Established" && c.status == "True")
+                })
+                .unwrap_or(false);
+            Ok(ok.then_some(()))
+        },
+    )
+    .await
+    .expect("CRDs establish");
+
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let restic_secret: Secret = serde_json::from_value(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": { "name": "volsync-restic", "namespace": E2E_NAMESPACE },
+        "stringData": {
+            "RESTIC_REPOSITORY": "s3:http://minio.kopiur-e2e.svc.cluster.local:9000/kopiur-cli/volsync",
+            "RESTIC_PASSWORD": "old-restic-password",
+            "AWS_ACCESS_KEY_ID": "kopiur",
+            "AWS_SECRET_ACCESS_KEY": "kopiur-secret"
+        }
+    }))
+    .unwrap();
+    let _ = secrets.create(&PostParams::default(), &restic_secret).await;
+
+    let rs_gvk = GroupVersionKind::gvk("volsync.backube", "v1alpha1", "ReplicationSource");
+    let rs_api: Api<DynamicObject> = Api::namespaced_with(
+        client.clone(),
+        E2E_NAMESPACE,
+        &ApiResource::from_gvk(&rs_gvk),
+    );
+    let rs: DynamicObject = serde_json::from_value(serde_json::json!({
+        "apiVersion": "volsync.backube/v1alpha1",
+        "kind": "ReplicationSource",
+        "metadata": { "name": "vs-app", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "sourcePVC": "e2e-src",
+            "trigger": { "schedule": "0 3 * * *" },
+            "restic": {
+                "repository": "volsync-restic",
+                "copyMethod": "Direct",
+                // `last` is a STRING in the real VolSync CRD (pattern ^\d+$) —
+                // the fixture must model the real wire form (regression for the
+                // int-typed model that rejected every real-world object).
+                "retain": { "daily": 7, "last": "3", "within": "3d" },
+                "cacheCapacity": "1Gi",
+                "pruneIntervalDays": 7
+            }
+        }
+    }))
+    .unwrap();
+    let _ = rs_api.create(&PostParams::default(), &rs).await;
+
+    // Rerun hygiene for the objects --apply creates.
+    {
+        let policies: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+        let schedules: Api<SnapshotSchedule> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+        let snapshots: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+        delete_and_wait_gone(&schedules, "vs-app").await;
+        delete_and_wait_gone(&policies, "vs-app").await;
+        delete_and_wait_gone(&snapshots, "vs-app-migrated").await;
+    }
+
+    // --- strict: the `within` field is unmappable → exit 1, nothing emitted.
+    let out = run_cli(&[
+        "-n",
+        E2E_NAMESPACE,
+        "migrate",
+        "volsync",
+        "--repository",
+        REPO,
+        "--strict",
+    ]);
+    assert!(!out.success, "--strict must refuse unmappable fields");
+    assert!(
+        out.stderr.contains("UNMAPPABLE") && out.stderr.contains("retain.within"),
+        "{}",
+        out.stderr
+    );
+
+    // --- translate + apply against the EXISTING repository.
+    let out = run_cli(&[
+        "-n",
+        E2E_NAMESPACE,
+        "migrate",
+        "volsync",
+        "--name",
+        "vs-app",
+        "--repository",
+        REPO,
+        "--apply",
+    ]);
+    assert!(out.success, "migrate --apply failed: {}", out.stderr);
+    assert!(
+        out.stdout.contains("CONFIG TRANSLATION ONLY"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stderr.contains("mapped") && out.stderr.contains("keepLatest"),
+        "accounting on stderr: {}",
+        out.stderr
+    );
+
+    // The translated objects exist and carry the mapped fields.
+    let policies: Api<SnapshotPolicy> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let schedules: Api<SnapshotSchedule> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let policy = policies
+        .get("vs-app")
+        .await
+        .expect("translated policy applied");
+    let pv = serde_json::to_value(&policy).unwrap();
+    assert_eq!(pv["spec"]["sources"][0]["pvc"]["name"], "e2e-src");
+    assert_eq!(pv["spec"]["retention"]["keepLatest"], 3);
+    assert_eq!(pv["spec"]["retention"]["keepDaily"], 7);
+    assert_eq!(pv["spec"]["mover"]["cache"]["capacity"], "1Gi");
+    let schedule = schedules
+        .get("vs-app")
+        .await
+        .expect("translated schedule applied");
+    assert_eq!(schedule.spec.schedule.cron, "0 3 * * *");
+
+    // The PROOF the translation works: a snapshot through the translated
+    // policy reaches Succeeded against the real repository.
+    let out = run_cli(&[
+        "-n",
+        E2E_NAMESPACE,
+        "snapshot",
+        "now",
+        "--policy",
+        "vs-app",
+        "--name",
+        "vs-app-migrated",
+        "--wait",
+        "--timeout",
+        "5m",
+    ]);
+    assert!(
+        out.success,
+        "a snapshot through the translated policy must succeed: {}",
+        out.stderr
+    );
+
+    // --- resolve-secrets: emits Repository + placeholder password; --apply refuses.
+    let out = run_cli(&[
+        "-n",
+        E2E_NAMESPACE,
+        "migrate",
+        "volsync",
+        "--name",
+        "vs-app",
+        "--resolve-secrets",
+    ]);
+    assert!(out.success, "{}", out.stderr);
+    assert!(
+        out.stdout.contains("volsync-restic-kopiur") && out.stdout.contains("REPLACE_ME"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("bucket: kopiur-cli"),
+        "RESTIC_REPOSITORY must parse into the backend: {}",
+        out.stdout
+    );
+    let out = run_cli(&[
+        "-n",
+        E2E_NAMESPACE,
+        "migrate",
+        "volsync",
+        "--name",
+        "vs-app",
+        "--resolve-secrets",
+        "--apply",
+    ]);
+    assert!(!out.success, "--apply must refuse REPLACE_ME placeholders");
+    assert!(out.stderr.contains("REPLACE_ME"), "{}", out.stderr);
+}
+
+/// Kill-on-drop guard for a background `kubectl port-forward`.
+struct PortForward(std::process::Child);
+impl Drop for PortForward {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Spawn `kubectl port-forward` and wait until the local port accepts TCP.
+fn port_forward(namespace: &str, target: &str, local: u16, remote: u16) -> PortForward {
+    let child = std::process::Command::new("kubectl")
+        .args([
+            "-n",
+            namespace,
+            "port-forward",
+            target,
+            &format!("{local}:{remote}"),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn kubectl port-forward (kubectl is on PATH via mise)");
+    let guard = PortForward(child);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if std::net::TcpStream::connect(("127.0.0.1", local)).is_ok() {
+            return guard;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "port-forward to {target} never started accepting on 127.0.0.1:{local}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// M7: the snapshot data-plane — `ls`/`cat`/`download` through a warm
+/// read-only in-cluster session pod, the structural read-only guard, `session
+/// end` cleanup, and the `--local` transport with a workstation kopia binary.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
+async fn cli_browse_session_and_local() {
+    use k8s_openapi::api::batch::v1::Job;
+    use k8s_openapi::api::core::v1::{ConfigMap, Pod};
+    use kube::api::{Patch, PatchParams};
+
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Minio, Need::Filesystem])
+        .await
+        .expect("provision MinIO + buckets + source PVC");
+    let client = world.client().clone();
+    ensure_cli_fixtures(&client).await;
+    let snapshots: Api<Snapshot> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let jobs: Api<Job> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let pods: Api<Pod> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    const SESSION_SELECTOR: &str = "kopiur.home-operations.com/session=browse";
+
+    // --- Rerun hygiene: fixed names + any leftover session Jobs (a previous
+    // killed run leaves a warm session holding an OLD mover image).
+    delete_and_wait_gone(&snapshots, "e2e-cli-browse-src").await;
+    delete_and_wait_gone(&snapshots, "e2e-cli-localview-snap").await;
+    delete_and_wait_gone(&repos, "e2e-cli-localview").await;
+    for job in jobs
+        .list(&ListParams::default().labels(SESSION_SELECTOR))
+        .await
+        .expect("list session jobs")
+    {
+        delete_and_wait_gone(&jobs, &job.metadata.name.clone().unwrap_or_default()).await;
+    }
+    let _ = std::fs::remove_file("/tmp/kopiur-e2e-b.txt");
+
+    // --- a. A real snapshot of the seeded e2e-src content.
+    let out = run_cli(&[
+        "-n",
+        E2E_NAMESPACE,
+        "snapshot",
+        "now",
+        "--policy",
+        POLICY,
+        "--name",
+        "e2e-cli-browse-src",
+        "--wait",
+        "--timeout",
+        "5m",
+    ]);
+    assert!(out.success, "snapshot for browse failed: {}", out.stderr);
+
+    // --- b. `ls` lists the seeded tree through a session pod it spawns itself.
+    let out = run_cli(&["-n", E2E_NAMESPACE, "ls", "e2e-cli-browse-src"]);
+    assert!(
+        out.success,
+        "ls failed: stdout={} stderr={}",
+        out.stdout, out.stderr
+    );
+    assert!(out.stdout.contains("a.txt"), "{}", out.stdout);
+    assert!(out.stdout.contains("sub"), "{}", out.stdout);
+    let session_jobs = jobs
+        .list(&ListParams::default().labels(SESSION_SELECTOR))
+        .await
+        .expect("list session jobs")
+        .items;
+    assert_eq!(
+        session_jobs.len(),
+        1,
+        "ls must have created exactly one session Job"
+    );
+    let session_job = session_jobs[0].metadata.name.clone().unwrap();
+
+    // --- c. Nested ls, exact cat bytes, download with byte-count verification.
+    let out = run_cli(&["-n", E2E_NAMESPACE, "ls", "e2e-cli-browse-src", "sub"]);
+    assert!(out.success, "ls sub failed: {}", out.stderr);
+    assert!(out.stdout.contains("b.txt"), "{}", out.stdout);
+
+    let out = run_cli(&["-n", E2E_NAMESPACE, "cat", "e2e-cli-browse-src", "a.txt"]);
+    assert!(out.success, "cat failed: {}", out.stderr);
+    assert!(
+        out.stdout.contains("hello kopiur e2e"),
+        "cat must stream the exact seeded bytes: {:?}",
+        out.stdout
+    );
+
+    let out = run_cli(&[
+        "-n",
+        E2E_NAMESPACE,
+        "download",
+        "e2e-cli-browse-src",
+        "sub/b.txt",
+        "/tmp/kopiur-e2e-b.txt",
+    ]);
+    assert!(out.success, "download failed: {}", out.stderr);
+    assert!(out.stdout.contains("wrote"), "{}", out.stdout);
+    let downloaded =
+        std::fs::read_to_string("/tmp/kopiur-e2e-b.txt").expect("downloaded file exists");
+    assert!(
+        downloaded.contains("nested data"),
+        "downloaded bytes: {downloaded:?}"
+    );
+
+    // --- d. Read-only guard: a mutating kopia verb exec'd into the session pod
+    // must FAIL — the session connected with `--readonly`, so the repository
+    // config itself refuses writes (an anti-footgun, not the security boundary;
+    // the boundary is the RBAC needed to exec at all).
+    let session_pod = pods
+        .list(&ListParams::default().labels(&format!("batch.kubernetes.io/job-name={session_job}")))
+        .await
+        .expect("list session pods")
+        .items
+        .first()
+        .and_then(|p| p.metadata.name.clone())
+        .expect("the warm session has a pod");
+    // A REAL, grammatically-valid delete of an existing snapshot id (verified
+    // against kopia 0.23: `snapshot delete <id> --delete`; there is no --all
+    // flag) — the readonly connect must refuse it at the storage layer
+    // ("storage is read-only").
+    let kopia_id = snapshots
+        .get("e2e-cli-browse-src")
+        .await
+        .expect("browse-src snapshot")
+        .status
+        .as_ref()
+        .and_then(|s| s.snapshot.as_ref())
+        .map(|i| i.kopia_snapshot_id.clone())
+        .expect("kopia id pinned");
+    let exec = std::process::Command::new("kubectl")
+        .args([
+            "-n",
+            E2E_NAMESPACE,
+            "exec",
+            &session_pod,
+            "--",
+            "/usr/local/bin/kopia",
+            "snapshot",
+            "delete",
+            &kopia_id,
+            "--delete",
+        ])
+        .output()
+        .expect("kubectl exec runs");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&exec.stdout),
+        String::from_utf8_lossy(&exec.stderr)
+    )
+    .to_lowercase();
+    assert!(
+        !exec.status.success(),
+        "a mutating kopia verb must fail in the read-only session: {combined}"
+    );
+    assert!(
+        combined.contains("read-only") || combined.contains("readonly"),
+        "the failure must come from the read-only connect: {combined}"
+    );
+
+    // The read-only failure must not have broken the warm session for reads.
+    let out = run_cli(&["-n", E2E_NAMESPACE, "ls", "e2e-cli-browse-src"]);
+    assert!(out.success, "warm-session ls failed: {}", out.stderr);
+
+    // --- e. `session end` deletes the Job and its work-spec ConfigMap.
+    let out = run_cli(&["-n", E2E_NAMESPACE, "session", "end", "e2e-cli-browse-src"]);
+    assert!(out.success, "session end failed: {}", out.stderr);
+    assert!(out.stdout.contains("ended"), "{}", out.stdout);
+    wait_until(
+        "session Job deleted",
+        default_timeout(),
+        poll_interval(),
+        || async { Ok(jobs.get_opt(&session_job).await?.is_none().then_some(())) },
+    )
+    .await
+    .expect("session Job should be deleted");
+    wait_until(
+        "session ConfigMap deleted",
+        default_timeout(),
+        poll_interval(),
+        || async { Ok(cms.get_opt(&session_job).await?.is_none().then_some(())) },
+    )
+    .await
+    .expect("session ConfigMap should be deleted");
+
+    // Ending an already-ended session is a friendly no-op, exit 0.
+    let out = run_cli(&["-n", E2E_NAMESPACE, "session", "end", "e2e-cli-browse-src"]);
+    assert!(out.success, "no-op session end must exit 0: {}", out.stderr);
+    assert!(out.stdout.contains("nothing to end"), "{}", out.stdout);
+
+    // --- f. The --local transport: a workstation kopia binary (mise pins
+    // kopia on PATH for the harness) reads the SAME bucket through a
+    // port-forward.
+    //
+    // HONEST LIMITATION: the in-cluster operator cannot reach the host-only
+    // `localhost:9100` endpoint, so a Repository pointing at the port-forward
+    // can never bootstrap/scan in-cluster. The "localview" Repository is
+    // therefore created SUSPENDED (never reconciled), and the discovered-style
+    // Snapshot it would have materialized is staged by the test: ownerRef to
+    // the repository + the real kopia id pinned into status — exactly the
+    // shape the catalog scan produces. The CLI's --local path (resolve →
+    // ownerRef repo → fetch Secrets → local read-only connect → walk → cat)
+    // is exercised end-to-end against the real bucket.
+    let _pf = port_forward(E2E_NAMESPACE, "svc/minio", 9100, 9000);
+
+    let localview = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "Repository",
+        "metadata": { "name": "e2e-cli-localview", "namespace": E2E_NAMESPACE },
+        "spec": {
+            "backend": { "s3": {
+                "bucket": BUCKET,
+                "endpoint": "localhost:9100",
+                "region": "us-east-1",
+                "tls": { "disableTls": true },
+                "auth": { "secretRef": { "name": S3_CREDS, "namespace": E2E_NAMESPACE } }
+            }},
+            "encryption": {
+                "passwordSecretRef": { "name": S3_CREDS, "key": "KOPIA_PASSWORD" }
+            },
+            // Adopt the existing repository; never create a second one.
+            "create": { "enabled": false },
+            "suspend": true
+        }
+    });
+    let created_repo = repos
+        .create(&PostParams::default(), &cr(localview))
+        .await
+        .expect("create localview repository");
+    let repo_uid = created_repo.metadata.uid.clone().expect("repo uid");
+
+    // The kopia id + identity the catalog scan would have discovered — taken
+    // from the REAL snapshot of the same bucket.
+    let src = snapshots
+        .get("e2e-cli-browse-src")
+        .await
+        .expect("browse-src snapshot");
+    let src_status = serde_json::to_value(src.status.as_ref().expect("status")).unwrap();
+    let kopia_id = src_status["snapshot"]["kopiaSnapshotID"]
+        .as_str()
+        .expect("kopia id pinned")
+        .to_string();
+
+    let synthetic = serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "Snapshot",
+        "metadata": {
+            "name": "e2e-cli-localview-snap",
+            "namespace": E2E_NAMESPACE,
+            // The discovered origin label keeps the controller in catalog-row
+            // mode (never spawns a Job, deletionPolicy forced Retain — so
+            // deleting this CR can never delete the shared kopia snapshot).
+            "labels": { "kopiur.home-operations.com/origin": "discovered" },
+            "ownerReferences": [{
+                "apiVersion": "kopiur.home-operations.com/v1alpha1",
+                "kind": "Repository",
+                "name": "e2e-cli-localview",
+                "uid": repo_uid,
+                "controller": true
+            }]
+        },
+        "spec": {}
+    });
+    snapshots
+        .create(&PostParams::default(), &cr(synthetic))
+        .await
+        .expect("create synthetic discovered snapshot");
+    snapshots
+        .patch_status(
+            "e2e-cli-localview-snap",
+            &PatchParams::default(),
+            &Patch::Merge(serde_json::json!({
+                "status": {
+                    "origin": "discovered",
+                    "snapshot": {
+                        "kopiaSnapshotID": kopia_id,
+                        "identity": src_status["snapshot"]["identity"]
+                    }
+                }
+            })),
+        )
+        .await
+        .expect("pin the kopia id into the synthetic snapshot's status");
+
+    let out = run_cli(&[
+        "-n",
+        E2E_NAMESPACE,
+        "cat",
+        "e2e-cli-localview-snap",
+        "a.txt",
+        "--local",
+    ]);
+    assert!(
+        out.success,
+        "--local cat failed: stdout={} stderr={}",
+        out.stdout, out.stderr
+    );
+    assert!(
+        out.stdout.contains("hello kopiur e2e"),
+        "--local must stream the exact seeded bytes: {:?}",
+        out.stdout
+    );
+
+    // --local must not have spawned any session Job.
+    let after_local = jobs
+        .list(&ListParams::default().labels(SESSION_SELECTOR))
+        .await
+        .expect("list session jobs")
+        .items;
+    assert!(
+        after_local.is_empty(),
+        "--local must not create session Jobs: {:?}",
+        after_local
+            .iter()
+            .map(|j| j.metadata.name.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // Cleanup: the synthetic snapshot (Retain — never touches the repo) and
+    // the localview repository.
+    delete_and_wait_gone(&snapshots, "e2e-cli-localview-snap").await;
+    delete_and_wait_gone(&repos, "e2e-cli-localview").await;
+}

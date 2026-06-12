@@ -42,6 +42,18 @@ pub const OP_RESTORE: &str = "restore";
 /// [`OP_LABEL`] value for a `Restore`'s operator-created target PVC.
 pub const OP_RESTORE_TARGET: &str = "restore-target";
 
+/// Label marking a mover `Job` as an interactive data-plane *session* pod
+/// (spawned by `kubectl kopiur browse`/`ls`/`cat`/`download`, not by the
+/// operator). Value: [`SESSION_BROWSE`]. Wire-visible: the CLI finds (and
+/// reuses) a warm session by this selector, and `session end` deletes by it.
+pub const SESSION_LABEL: &str = "kopiur.home-operations.com/session";
+/// [`SESSION_LABEL`] value for a read-only browse session.
+pub const SESSION_BROWSE: &str = "browse";
+/// Label keying a session `Job` to the repository it holds open, as
+/// `<kind>-<name>` (e.g. `Repository-nas`). One warm session per repository:
+/// the CLI selects on this so two snapshots in the same repository share a pod.
+pub const SESSION_REPO_LABEL: &str = "kopiur.home-operations.com/session-repo";
+
 /// Annotation requesting an out-of-band `Maintenance` run NOW (Flux-style
 /// reconcile trigger). Value: an RFC3339 timestamp; a NEW timestamp requests a
 /// new run (re-applying the same value is a no-op once handled). Usable from
@@ -103,6 +115,8 @@ mod tests {
             CONFIG_LABEL,
             SCHEDULE_LABEL,
             OP_LABEL,
+            SESSION_LABEL,
+            SESSION_REPO_LABEL,
             RUN_REQUESTED_ANNOTATION,
             RUN_MODE_ANNOTATION,
         ] {

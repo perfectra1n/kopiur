@@ -1,0 +1,51 @@
+# Krew plugin manifest TEMPLATE for kubectl-kopiur. The release workflow's
+# `krew` job substitutes the double-braced VERSION/REPO/SHA256 placeholders
+# from the uploaded release assets, attaches the rendered `kopiur.yaml` to the
+# GitHub release, and pushes it to the home-operations custom krew index
+# (plugins/kopiur.yaml). Platforms whose asset is missing (best-effort
+# Windows) are dropped at render time; the render fails if any placeholder
+# survives, so this comment must never contain one.
+apiVersion: krew.googlecontainertools.github.com/v1alpha2
+kind: Plugin
+metadata:
+  name: kopiur
+spec:
+  version: "{{VERSION}}"
+  homepage: https://kopiur.home-operations.com/cli/
+  shortDescription: Operate the kopiur backup operator
+  description: |
+    kubectl kopiur wraps day-to-day operations of the kopiur Kopia-native
+    backup operator: trigger snapshots and restores, suspend/resume resources,
+    inspect snapshots, run maintenance, browse files INSIDE snapshots through
+    a read-only in-cluster session, diagnose installs with `doctor`, and
+    translate VolSync restic configs with `migrate volsync`.
+  caveats: |
+    The plugin tracks the kopiur v1alpha1 CRDs — keep it on the same release
+    as the operator. Browsing needs the chart's opt-in browse ClusterRole
+    (rbac.browseRole) or equivalent RBAC.
+  platforms:
+    - selector:
+        matchLabels: { os: linux, arch: amd64 }
+      uri: https://github.com/{{REPO}}/releases/download/{{VERSION}}/kopiur-cli_linux_amd64.tar.gz
+      sha256: "{{SHA256_linux_amd64}}"
+      bin: kubectl-kopiur
+    - selector:
+        matchLabels: { os: linux, arch: arm64 }
+      uri: https://github.com/{{REPO}}/releases/download/{{VERSION}}/kopiur-cli_linux_arm64.tar.gz
+      sha256: "{{SHA256_linux_arm64}}"
+      bin: kubectl-kopiur
+    - selector:
+        matchLabels: { os: darwin, arch: amd64 }
+      uri: https://github.com/{{REPO}}/releases/download/{{VERSION}}/kopiur-cli_darwin_amd64.tar.gz
+      sha256: "{{SHA256_darwin_amd64}}"
+      bin: kubectl-kopiur
+    - selector:
+        matchLabels: { os: darwin, arch: arm64 }
+      uri: https://github.com/{{REPO}}/releases/download/{{VERSION}}/kopiur-cli_darwin_arm64.tar.gz
+      sha256: "{{SHA256_darwin_arm64}}"
+      bin: kubectl-kopiur
+    - selector:
+        matchLabels: { os: windows, arch: amd64 }
+      uri: https://github.com/{{REPO}}/releases/download/{{VERSION}}/kopiur-cli_windows_amd64.zip
+      sha256: "{{SHA256_windows_amd64}}"
+      bin: kubectl-kopiur.exe

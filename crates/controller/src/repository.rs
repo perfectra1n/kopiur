@@ -547,6 +547,7 @@ async fn bootstrap_via_mover(
         annotations: Default::default(),
         // Bootstrap is a short connect/create probe: an emptyDir cache suffices.
         cache_volume: Default::default(),
+        readiness_exec: None,
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);

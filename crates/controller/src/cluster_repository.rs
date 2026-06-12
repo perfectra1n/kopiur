@@ -462,6 +462,7 @@ async fn bootstrap_cluster_via_mover(
         annotations: Default::default(),
         // Bootstrap is a short connect/create probe: an emptyDir cache suffices.
         cache_volume: Default::default(),
+        readiness_exec: None,
     };
     // The bootstrap Job runs in the credentials Secret's namespace (`job_ns`), where
     // the Secret is present by construction — but the mover SA must still be minted

@@ -1,7 +1,7 @@
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::Api;
 
-use kopiur_api::backend::{Backend, RepoVolume};
+use kopiur_api::backend::Backend;
 use kopiur_api::cluster_repository::IdentityDefaults;
 use kopiur_api::common::{
     Encryption, MoverDefaults, NamespaceDeletePolicy, RepositoryKind, RepositoryMode, RepositoryRef,
@@ -9,7 +9,6 @@ use kopiur_api::common::{
 use kopiur_api::{ClusterRepository, Repository};
 
 use crate::error::{Error, Result};
-use crate::jobs::MountSource;
 
 /// Default key within the encryption password Secret when unset.
 pub const DEFAULT_PASSWORD_KEY: &str = "KOPIA_PASSWORD";
@@ -320,55 +319,15 @@ pub async fn read_repo_credential(
 
 pub use kopiur_api::creds::backend_auth_secret_ref;
 
-/// The TLS CA-bundle `ConfigMap` name an object-store backend references, if any
-/// (currently only S3 exposes `tls.caBundleRef`). Exhaustive over [`Backend`]
-/// (ADR §5.5): a new backend that adds TLS must decide its CA source here. Used by
-/// the ConfigMap→repo watch so editing a CA bundle re-triggers a connect.
-pub fn backend_tls_ca_configmap(backend: &Backend) -> Option<&str> {
-    match backend {
-        Backend::S3(b) => b
-            .tls
-            .as_ref()
-            .and_then(|t| t.ca_bundle_ref.as_ref())
-            .and_then(|c| c.config_map_name.as_deref()),
-        Backend::Azure(_)
-        | Backend::Gcs(_)
-        | Backend::B2(_)
-        | Backend::Filesystem(_)
-        | Backend::Sftp(_)
-        | Backend::WebDav(_)
-        | Backend::Rclone(_) => None,
-    }
-}
-
 pub use kopiur_api::creds::{CredsSecretRef, mover_creds_secret_refs, mover_creds_secrets};
 
-/// The filesystem repo path for a `Filesystem` backend, or `None` for object
-/// stores. Used to decide whether to mount a repo PVC and run kopia in-process.
-pub fn filesystem_repo_path(backend: &Backend) -> Option<String> {
-    match backend {
-        Backend::Filesystem(f) => Some(f.path.clone()),
-        _ => None,
-    }
-}
-
-/// The repo volume source for a `Filesystem` backend, if any — a PVC or an inline
-/// NFS export the mover mounts at [`filesystem_repo_path`]. `None` for object
-/// stores and for a bare-path filesystem repo (a `hostPath`/baked-in mount).
-pub fn filesystem_repo_mount_source(backend: &Backend) -> Option<MountSource> {
-    match backend {
-        Backend::Filesystem(f) => f.volume.as_ref().map(|v| match v {
-            RepoVolume::Pvc(p) => MountSource::Pvc {
-                claim_name: p.name.clone(),
-            },
-            RepoVolume::Nfs(n) => MountSource::Nfs {
-                server: n.server.clone(),
-                path: n.path.clone(),
-            },
-        }),
-        _ => None,
-    }
-}
+// The pure Backend → mover-shape projections (filesystem path/volume, TLS CA
+// ConfigMap) moved to `kopiur_mover::repo_meta` (next to the work-spec contract)
+// so the kubectl-plugin browse spawner can use them without a controller
+// dependency. Re-exported so controller call sites keep their `io::*` paths.
+pub use kopiur_mover::repo_meta::{
+    backend_tls_ca_configmap, filesystem_repo_mount_source, filesystem_repo_path,
+};
 
 #[cfg(test)]
 mod tests {

@@ -52,6 +52,8 @@ pub enum KopiaOp {
     ReplicateConnect,
     /// `repository sync-to` the replication destination.
     RepositorySyncTo,
+    /// `repository connect --readonly` for a browse session.
+    BrowseConnect,
 }
 
 impl KopiaOp {
@@ -76,6 +78,7 @@ impl KopiaOp {
             KopiaOp::DeepVerifyRestore => "deep verify restore",
             KopiaOp::ReplicateConnect => "replication connect",
             KopiaOp::RepositorySyncTo => "repository sync-to",
+            KopiaOp::BrowseConnect => "browse session connect",
         }
     }
 }
@@ -168,6 +171,21 @@ pub enum MoverError {
         /// The env var the credential came from.
         env_key: &'static str,
         /// The destination file.
+        path: PathBuf,
+        /// The underlying IO error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The browse-session readiness marker could not be written, so the
+    /// session pod would never turn Ready and the CLI would hang waiting.
+    #[error(
+        "failed to write the browse-session readiness marker {}: {source}. The kopia-cache \
+         emptyDir must be mounted at /var/cache/kopia and writable by the mover's UID",
+        .path.display()
+    )]
+    ReadyMarkerWrite {
+        /// The marker path ([`crate::env::READY_MARKER`]).
         path: PathBuf,
         /// The underlying IO error.
         #[source]
@@ -275,6 +293,7 @@ impl MoverError {
             | MoverError::WorkSpecParse { .. }
             | MoverError::CredentialStagingDir { .. }
             | MoverError::CredentialWrite { .. }
+            | MoverError::ReadyMarkerWrite { .. }
             | MoverError::VerifyNoSnapshot { .. }
             | MoverError::SuccessExprFalse { .. }
             | MoverError::SuccessExprEval { .. }
@@ -322,6 +341,7 @@ mod tests {
             KopiaOp::DeepVerifyRestore,
             KopiaOp::ReplicateConnect,
             KopiaOp::RepositorySyncTo,
+            KopiaOp::BrowseConnect,
         ];
         let mut seen = std::collections::BTreeSet::new();
         for op in all {
@@ -435,6 +455,21 @@ mod tests {
         assert!(msg.contains("$KOPIA_GCS_CREDENTIALS"), "{msg}");
         assert!(msg.contains("credentials Secret"), "{msg}");
         assert!(msg.contains("emptyDir is writable"), "{msg}");
+    }
+
+    #[test]
+    fn ready_marker_write_names_the_path_and_the_fix() {
+        let err = MoverError::ReadyMarkerWrite {
+            path: PathBuf::from(crate::env::READY_MARKER),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/var/cache/kopia/.kopiur-session-ready"),
+            "{msg}"
+        );
+        assert!(msg.contains("writable by the mover's UID"), "{msg}");
+        assert_eq!(err.kopia_class(), KopiaErrorClass::Unknown);
     }
 
     #[test]

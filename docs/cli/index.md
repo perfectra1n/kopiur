@@ -1,8 +1,8 @@
 # kubectl plugin (`kubectl kopiur`)
 
 Kopiur ships a kubectl plugin that wraps the day-to-day operations — suspending
-and resuming resources, inspecting snapshots, and (as later milestones land)
-triggering backups, restores, maintenance runs, browsing snapshot contents, and
+and resuming resources, inspecting snapshots, triggering backups and restores,
+running maintenance, browsing (and reading files out of) snapshot contents, and
 migrating from VolSync — so you don't have to hand-write CR YAML for routine
 tasks.
 
@@ -21,17 +21,29 @@ the other side uses; keep them on the same release.
 
 ## Install
 
-Until the first packaged release, build from source (requires the repo and
-[mise](https://mise.jdx.dev/)):
+Via [krew](https://krew.sigs.k8s.io/) from the home-operations custom index
+(the plugin is not yet in the official krew-index — that submission waits for
+kopiur to leave heavy development):
+
+```console
+$ kubectl krew index add home-operations https://github.com/home-operations/krew-index.git
+$ kubectl krew install home-operations/kopiur
+$ kubectl kopiur --version
+```
+
+Without krew: every GitHub release attaches per-platform archives
+(`kopiur-cli_<os>_<arch>.tar.gz` for linux/darwin amd64+arm64,
+`…windows_amd64.zip` best-effort) with `.sha256` files, plus the rendered
+krew manifest `kopiur.yaml` — `kubectl krew install --manifest-url
+<that asset's URL>` also works. Or drop the `kubectl-kopiur` binary anywhere
+on your `PATH`.
+
+From source (requires the repo and [mise](https://mise.jdx.dev/)):
 
 ```console
 $ mise run build
 $ install -m 0755 target/debug/kubectl-kopiur ~/.local/bin/kubectl-kopiur
-$ kubectl kopiur --version
 ```
-
-Krew packaging (a `kubectl krew install` path) is planned and will be
-documented here when the release pipeline publishes binaries.
 
 ## Global flags
 
@@ -222,6 +234,39 @@ $ kubectl kopiur doctor -n media
 Checks the user lacks RBAC for degrade to warnings naming the missing grant —
 doctor never crashes on a restricted kubeconfig.
 
+## `migrate volsync`
+
+Translate VolSync **restic** `ReplicationSource`/`ReplicationDestination`
+objects into kopiur `SnapshotPolicy`/`SnapshotSchedule`/`Restore` manifests
+(printed as apply-ready YAML; `--apply` creates them via server-side apply).
+
+/// danger | Config translation ONLY — no data is migrated
+A VolSync **restic** repository is NOT a kopia repository. The kopiur
+repository the translated policies point at starts **empty** and fills as
+kopiur takes its own snapshots. Keep VolSync (and its repository) running
+until kopiur's retention coverage is sufficient for your recovery needs.
+
+///
+
+```console
+$ kubectl kopiur migrate volsync -n media --repository nas --apply
+```
+
+| Flag | Effect |
+|---|---|
+| `--name NAME` | Translate one ReplicationSource (default: every one in the namespace). |
+| `--repository NAME [--repository-kind …]` | Point the translated policies at an EXISTING kopiur repository. |
+| `--resolve-secrets` | Instead, parse each restic Secret's `RESTIC_REPOSITORY` and EMIT a kopiur `Repository` + credential Secrets. The kopia password is a `REPLACE_ME` placeholder **you must set** (a kopia repo needs its own new password); `--apply` refuses while any placeholder remains. |
+| `--include-destinations` | Also translate ReplicationDestinations into deploy-or-restore `Restore`s (`fromPolicy` + `onMissingSnapshot: Continue`). |
+| `--strict` | Exit 1 (emitting nothing) when any field has no kopiur equivalent. |
+| `--apply` | Server-side-apply the translated objects. |
+
+Every VolSync field the translator reads is accounted for on stderr as
+`mapped` (with the kopiur destination), `UNMAPPABLE` (with why and what to do
+instead — e.g. restic's `retain.within` has no kopia equivalent), or
+`ignored` (with why it isn't needed — e.g. `pruneIntervalDays`: kopiur
+maintenance is default-managed). Nothing is silently dropped.
+
 ## `suspend` / `resume`
 
 Pause and unpause reconciliation declaratively. Suspending a
@@ -275,3 +320,107 @@ Filters (combinable):
 
 `-o wide` adds the kopia identity (`username@hostname:path`), the
 `deletionPolicy`, and the observed pin state.
+
+## `ls` / `cat` / `download` / `browse`
+
+Read a snapshot's **files** without restoring anything — answer "is the file I
+need actually in last night's backup?" in seconds:
+
+```console
+$ kubectl kopiur ls nightly-20260611-030012 -n media
+NAME       TYPE  SIZE     MODIFIED
+config/    dir   1.2 MiB  2026-06-10 21:14:02
+movies.db  file  4.8 GiB  2026-06-11 02:59:31
+
+$ kubectl kopiur ls nightly-20260611-030012 config -n media
+$ kubectl kopiur cat nightly-20260611-030012 config/app.yaml -n media
+$ kubectl kopiur download nightly-20260611-030012 movies.db ./movies.db -n media
+$ kubectl kopiur browse nightly-20260611-030012 -n media   # interactive ls/cd/cat/get
+```
+
+All four take a **Snapshot object name** (scheduled, manual, or discovered —
+anything `snapshots list` shows with a kopia snapshot ID) and an optional path
+**relative to the snapshot root**. `cat` streams the file to stdout
+(binary-safe — pipe it wherever); `download` writes it locally (defaulting to
+the file's own name) and verifies the byte count against the snapshot
+manifest, deleting a partial file rather than leaving a truncated one behind.
+`browse` opens a small read-only REPL (`ls`, `cd`, `cat`, `get`, `pwd`,
+`help`, `quit`). `ls -o wide` adds the kopia object ID column; `ls -o json`
+emits the kopia directory manifest verbatim.
+
+### The session-pod model
+
+The first command against a repository starts a **session pod**: a mover `Job`
+in the snapshot's namespace that connects to the repository **read-only** and
+then idles. That first command takes a few seconds (pod start + connect);
+every further `ls`/`cat`/`download` against the same repository reuses the
+warm session and answers instantly. The session expires on its own after
+`--session-ttl` (default **15m**) and the cluster garbage-collects the
+finished Job a minute later — an abandoned browse can never hold a repository
+connection (or a pod) open forever. `browse` ends its session on exit unless
+you pass `--keep`.
+
+| Flag | Effect |
+|---|---|
+| `--session-ttl DURATION` | How long the session pod stays warm (default `15m`). |
+| `--local` | Skip the session pod; read with a **local kopia binary** (below). |
+| `--kopia-bin PATH` | Which local kopia to run (`--local` only; default `$KOPIUR_KOPIA_BINARY`, then `kopia` on `PATH`). |
+| `--keep` | (`browse` only) keep the session warm on exit. |
+
+There is deliberately **no `--image` flag**: the session pod runs the exact
+mover image the operator's controller Deployment is configured with
+(`KOPIUR_MOVER_IMAGE`), falling back to the release default — what browses
+your repository is always what backs it up.
+
+### The security model
+
+Read-only is enforced twice, but understand what each layer is:
+
+- The session connects with kopia's `--readonly`, and the CLI can only ever
+  exec a **closed, typed set** of kopia read commands (snapshot list, object
+  show) — a mutating verb is structurally impossible in the client, and the
+  read-only connection refuses writes even if someone execs into the pod by
+  hand. This is an **anti-footgun, not a security boundary**.
+- The actual boundary is RBAC: anyone who can create pods that reference the
+  repository's credential `Secret` in that namespace can already read the
+  repository. Browsing needs exactly that power (create the session Job, exec
+  into it) — **and notably does NOT need to read Secrets**: the pod loads the
+  credentials itself; they never pass through the user's hands.
+
+The chart ships an opt-in ClusterRole with exactly the browse permission set —
+set `rbac.browseRole: true` and bind `<release>-browse` to the humans who
+should browse (a namespaced RoleBinding scopes them to one namespace). See the
+[RBAC reference](../rbac.md#browsing-snapshots-rbacbrowserole).
+
+/// warning | `--local` moves the credentials to your machine
+`--local` is for clusters you can't run pods in (or backends only reachable
+from your workstation). It fetches the repository's credential Secret(s) onto
+your machine — which requires `get secrets` RBAC the session path never needs
+— stages them in a private temp dir (removed afterwards), and runs a local
+`kopia` binary (install one, or point `--kopia-bin` at it) with a read-only
+connect. The backend endpoint must be reachable **from your machine**; an
+in-cluster MinIO needs a `kubectl port-forward` and a Repository endpoint
+your workstation can resolve.
+///
+
+/// note | Sessions are shared per repository
+One warm session serves every command against the same repository. Exiting
+`browse` without `--keep` ends that shared session — a second terminal
+mid-read will see its next command fail and start a fresh session.
+
+///
+
+## `session end`
+
+End a warm browse session early (it expires by TTL anyway):
+
+```console
+$ kubectl kopiur session end nightly-20260611-030012 -n media   # via a snapshot in that repo
+$ kubectl kopiur session end --repository nas -n media          # or the repository directly
+session kopiur-browse-nas-1a2b3c4d ended (Job + work-spec ConfigMap deleted)
+```
+
+Deletes the session Job and its work-spec ConfigMap. When no session is open
+it says so and exits 0 — safe to run from cleanup scripts. Sessions are also
+labeled (`kopiur.home-operations.com/session=browse`) so a plain
+`kubectl delete job -l kopiur.home-operations.com/session=browse` works too.

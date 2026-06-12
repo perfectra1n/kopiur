@@ -270,6 +270,68 @@ pub struct SnapshotListEntry {
     pub retention_reason: Vec<String>,
 }
 
+/// One entry of a kopia directory manifest (`kopia show <dir-object-id>`).
+///
+/// Files carry a top-level `size`; directories instead embed an aggregate
+/// [`DirSummaryLite`] under `summ`. All fields beyond name/type/obj are
+/// optional because kopia omits what doesn't apply to the entry type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirEntry {
+    /// Entry name (a single path component, never a path).
+    pub name: String,
+    /// Entry type: `"d"` (directory), `"f"` (file), `"s"` (symlink).
+    #[serde(rename = "type")]
+    pub entry_type: String,
+    /// The kopia object id backing the entry — a directory's `obj` can be
+    /// `kopia show`n for the next manifest level; a file's streams its bytes.
+    pub obj: String,
+    /// File size in bytes (files only; directories report sizes via `summ`).
+    #[serde(default)]
+    pub size: Option<i64>,
+    /// Modification time as kopia rendered it (RFC3339; kept as a string so an
+    /// unusual kopia rendering can never fail the whole manifest parse).
+    #[serde(default)]
+    pub mtime: Option<String>,
+    /// Unix permission bits as an octal string (e.g. `"0755"`).
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Aggregate subtree summary (directories only).
+    #[serde(default)]
+    pub summ: Option<DirSummaryLite>,
+}
+
+/// The aggregate subtree counters under a directory entry's `summ` block —
+/// the subset of [`DirSummary`] a directory listing renders. All optional:
+/// kopia may extend or omit counters across releases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirSummaryLite {
+    /// Total logical size of the subtree in bytes.
+    #[serde(default)]
+    pub size: Option<i64>,
+    /// Number of files in the subtree.
+    #[serde(default)]
+    pub files: Option<i64>,
+    /// Number of directories in the subtree.
+    #[serde(default)]
+    pub dirs: Option<i64>,
+}
+
+/// A kopia directory manifest: what `kopia show <dir-object-id>` emits —
+/// `{"stream":"kopia:directory","entries":[…]}`. (`kopia show` on a *file*
+/// object streams the file's raw bytes instead, so callers must check
+/// [`DirEntry::entry_type`] before showing an object as a directory.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirManifest {
+    /// The manifest stream marker; `"kopia:directory"` for directory objects.
+    pub stream: String,
+    /// The directory's entries, in kopia's on-manifest order.
+    #[serde(default)]
+    pub entries: Vec<DirEntry>,
+}
+
 /// Client identity options reported by `kopia repository status`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -433,5 +495,68 @@ mod tests {
             path: "/p".into(),
         };
         assert_eq!(s.identity(), "u@h:/p");
+    }
+
+    // --- DirManifest: the EXACT `kopia show <dir-oid>` JSON shape, verified
+    // against kopia 0.23. ---
+
+    #[test]
+    fn dir_manifest_parses_the_verified_kopia_show_shape() {
+        let json = r#"{
+            "stream": "kopia:directory",
+            "entries": [
+                {
+                    "name": "sub",
+                    "type": "d",
+                    "mode": "0755",
+                    "mtime": "2026-06-10T12:00:00Z",
+                    "obj": "kdeadbeef",
+                    "summ": {"size": 7, "files": 1, "dirs": 1, "maxTime": "2026-06-10T12:00:00Z"}
+                },
+                {
+                    "name": "a.txt",
+                    "type": "f",
+                    "mode": "0644",
+                    "size": 6,
+                    "mtime": "2026-06-10T11:59:00Z",
+                    "obj": "1f00dcafe"
+                }
+            ],
+            "summary": {"size": 13, "files": 2, "dirs": 2}
+        }"#;
+        let m: DirManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.stream, "kopia:directory");
+        assert_eq!(m.entries.len(), 2);
+
+        // Directory entry: no top-level size, aggregate counters under summ.
+        let dir = &m.entries[0];
+        assert_eq!(dir.name, "sub");
+        assert_eq!(dir.entry_type, "d");
+        assert_eq!(dir.obj, "kdeadbeef");
+        assert_eq!(dir.mode.as_deref(), Some("0755"));
+        assert_eq!(dir.size, None);
+        let summ = dir.summ.as_ref().expect("directory summ");
+        assert_eq!(summ.size, Some(7));
+        assert_eq!(summ.files, Some(1));
+        assert_eq!(summ.dirs, Some(1));
+
+        // File entry: top-level size, no summ.
+        let file = &m.entries[1];
+        assert_eq!(file.name, "a.txt");
+        assert_eq!(file.entry_type, "f");
+        assert_eq!(file.obj, "1f00dcafe");
+        assert_eq!(file.size, Some(6));
+        assert_eq!(file.mtime.as_deref(), Some("2026-06-10T11:59:00Z"));
+        assert!(file.summ.is_none());
+    }
+
+    #[test]
+    fn dir_manifest_tolerates_missing_entries_and_unknown_fields() {
+        // An empty directory manifest has no `entries`; future kopia fields
+        // (and the unmapped top-level `summary`) must not fail the parse.
+        let m: DirManifest =
+            serde_json::from_str(r#"{"stream": "kopia:directory", "futureField": 1}"#).unwrap();
+        assert_eq!(m.stream, "kopia:directory");
+        assert!(m.entries.is_empty());
     }
 }

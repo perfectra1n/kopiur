@@ -620,6 +620,7 @@ async fn spawn_maintenance_job(
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations,
         cache_volume,
+        readiness_exec: None,
     };
 
     let cm = jobs::build_config_map(&inputs)?;
