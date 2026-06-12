@@ -245,6 +245,33 @@ exit 0
     client.snapshot_delete("abc").await.unwrap();
 }
 
+#[tokio::test]
+async fn snapshot_delete_is_idempotent_when_already_absent() {
+    // Regression (retention e2e, 2026-06-12): kopia dedups identical-content
+    // manifests, so multiple Snapshot CRs can pin one kopia id; the SECOND
+    // prune-delete sees `no snapshots matched <id>` (exit 1). That is the GOAL
+    // state — it must be success, or the CR wedges in `Deleting` forever.
+    let s = shim(
+        r#"#!/bin/sh
+echo "error deleting snapshots by root ID abc: no snapshots matched abc" 1>&2
+exit 1
+"#,
+    );
+    let client = client_for(&s);
+    client.snapshot_delete("abc").await.unwrap();
+
+    // Any OTHER delete failure still surfaces (the idempotency match is exact).
+    let s = shim(
+        r#"#!/bin/sh
+echo "error deleting snapshots: access denied" 1>&2
+exit 1
+"#,
+    );
+    let client = client_for(&s);
+    let err = client.snapshot_delete("abc").await.unwrap_err();
+    assert!(matches!(err, KopiaError::NonZeroExit { .. }));
+}
+
 // --- New verb / backend coverage. The shims gate exit 0 on the expected argv,
 // so these double as wiring assertions against the real kopia 0.23 flag names. ---
 

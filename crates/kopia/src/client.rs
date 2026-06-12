@@ -906,6 +906,14 @@ impl KopiaClient {
     /// Delete a single snapshot by manifest id. kopia's `snapshot delete`
     /// requires `--delete` to actually remove (otherwise it dry-runs) and does
     /// not support `--json`; success is signaled by exit code 0.
+    ///
+    /// IDEMPOTENT: an already-absent snapshot (`no snapshots matched <id>` on
+    /// stderr) is success — that IS the goal state. kopia dedups
+    /// identical-content snapshot manifests, so several `Snapshot` CRs can
+    /// legitimately pin the SAME kopia id; when GFS retention prunes more than
+    /// one of them, the first finalizer's delete removes the manifest and the
+    /// rest would otherwise fail terminally, wedging their CRs in `Deleting`
+    /// forever (caught by the retention e2e under suite load).
     pub async fn snapshot_delete(&self, id: &str) -> Result<(), KopiaError> {
         let args = vec![
             "snapshot".into(),
@@ -913,7 +921,16 @@ impl KopiaClient {
             id.to_string(),
             "--delete".into(),
         ];
-        self.run_ok(&args).await.map(|_| ())
+        match self.run_ok(&args).await {
+            Ok(_) => Ok(()),
+            Err(KopiaError::NonZeroExit { stderr_tail, .. })
+                if stderr_tail.contains("no snapshots matched") =>
+            {
+                tracing::debug!(%id, "snapshot already absent; delete is idempotent");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Restore a snapshot's contents to a target directory with kopia's default
