@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.4.0](https://github.com/home-operations/kopiur/compare/0.3.5...0.4.0) (2026-06-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **github-action:** Update action codecov/codecov-action (v6.0.2 → v7.0.0) ([#61](https://github.com/home-operations/kopiur/issues/61))
+
+### Features
+
+* **bootstrap:** of course explicitly own the bootstrap job as well ([7edb295](https://github.com/home-operations/kopiur/commit/7edb2957935e20034372b7249f09edddb715b717))
+* **deps:** update rust crate insta (1.47.2 → 1.48.0) ([#87](https://github.com/home-operations/kopiur/issues/87)) ([592b892](https://github.com/home-operations/kopiur/commit/592b89220b187221d719cdd248603f585055cf80))
+* **reconcile:** resolve issue where resources are reconciled outside of their window ([1d7a82b](https://github.com/home-operations/kopiur/commit/1d7a82b9429345bcbd2dd6d365d54a45001cd304))
+* **src:** add some more documentation around e2e and cli ([d4cbe9c](https://github.com/home-operations/kopiur/commit/d4cbe9c847e281a7c30f8cc8f55f42fdc818f377))
+
+
+### Bug Fixes
+
+* **deps:** update rust crate http (1.4.1 → 1.4.2) ([#69](https://github.com/home-operations/kopiur/issues/69)) ([f7ac524](https://github.com/home-operations/kopiur/commit/f7ac524ab3a2099df33ab41c6d953fe501e74a65))
+* **dev:** try to fix cargo lock ([f093a05](https://github.com/home-operations/kopiur/commit/f093a05910a8df28f67fb574a54eb3e92ae5ce72))
+
+
+### Miscellaneous Chores
+
+* **deps:** lock file maintenance ([#55](https://github.com/home-operations/kopiur/issues/55)) ([15e6338](https://github.com/home-operations/kopiur/commit/15e6338187da320ab6842b54b65ccc7fd975e1bb))
+* **krew:** kopiur 0.3.5 manifest ([be4db12](https://github.com/home-operations/kopiur/commit/be4db1271da71015675186675267187074bebac3))
+
+
+### Continuous Integration
+
+* **github-action:** Update action codecov/codecov-action (v6.0.2 → v7.0.0) ([#61](https://github.com/home-operations/kopiur/issues/61)) ([4629018](https://github.com/home-operations/kopiur/commit/4629018619acb0d4b94e56b3f9893e0d9d105e9d))
+
 ## [0.3.5](https://github.com/home-operations/kopiur/compare/0.3.4...0.3.5) (2026-06-12)
 
 
