@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/home-operations/kopiur/compare/0.3.3...0.3.4) (2026-06-12)
+
+
+### Features
+
+* **docs:** add docs about rwop ([56f6381](https://github.com/home-operations/kopiur/commit/56f63818b6c6381e7dc0928023af5deb15ca03c5))
+
 ## [0.3.3](https://github.com/home-operations/kopiur/compare/0.3.2...0.3.3) (2026-06-11)
 
 
