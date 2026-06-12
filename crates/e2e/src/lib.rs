@@ -7,6 +7,7 @@ use kube::{Client, Error};
 
 pub mod apply;
 pub mod builders;
+pub mod cli;
 pub mod consts;
 pub mod wait;
 pub mod world;
@@ -70,8 +71,15 @@ where
 
 /// Sensible default poll budget for operator-driven state (Jobs scheduling,
 /// images pulling, kopia running): generous enough for a cold kind node.
+///
+/// Must exceed one full kube watch reconnect cycle (the server-side watch
+/// timeout is 290s). On a freshly-started kind apiserver under control-plane
+/// churn, a watch can be black-holed and the controller only sees a CR when
+/// the timeout forces a reconnect and the missed event is replayed — observed
+/// in CI as a Repository bootstrapping exactly controller-start + 290s, blowing
+/// a 180s wait. 290s cycle + Job schedule/run + margin.
 pub fn default_timeout() -> Duration {
-    Duration::from_secs(180)
+    Duration::from_secs(420)
 }
 
 /// Default poll interval.

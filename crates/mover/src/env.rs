@@ -1,4 +1,5 @@
-//! The single place that names every environment variable the mover reads.
+//! The single place that names every environment variable the mover reads
+//! (plus the well-known in-pod paths shared with the Job builder).
 //!
 //! Exposed from the library (not just `main.rs`) because the controller stamps
 //! these onto the mover `Job` it creates — both sides reference the same
@@ -10,6 +11,9 @@
 //! assert_eq!(env::WORK_SPEC_PATH, "KOPIUR_WORK_SPEC_PATH");
 //! assert_eq!(env::KOPIA_BINARY, "KOPIUR_KOPIA_BINARY");
 //! assert_eq!(env::RESULT_CONFIGMAP, "KOPIUR_RESULT_CONFIGMAP");
+//! // The browse-session readiness marker lives under the writable kopia-cache
+//! // mount (the only writable volume on a read-only-root mover pod).
+//! assert!(env::READY_MARKER.starts_with(kopiur_kopia::env::DEFAULT_CACHE_DIR));
 //! ```
 
 /// Path to the mounted work-spec JSON (the controller↔mover contract). The
@@ -24,3 +28,12 @@ pub const KOPIA_BINARY: &str = "KOPIUR_KOPIA_BINARY";
 /// `BootstrapRepository` runs; absent for backup/restore/delete. The controller
 /// reads the result back to drive the `Repository` status + catalog.
 pub const RESULT_CONFIGMAP: &str = "KOPIUR_RESULT_CONFIGMAP";
+
+/// Marker file a `BrowseSession` mover writes once its read-only repository
+/// connect succeeded. The session pod's readinessProbe execs `kopiur-mover
+/// ready`, which exits 0 iff this file exists — the distroless image has no
+/// shell, so the probe re-invokes the mover binary itself. The path sits under
+/// the writable kopia-cache volume mount
+/// ([`kopiur_kopia::env::DEFAULT_CACHE_DIR`], `/var/cache/kopia`) because that
+/// emptyDir is the only writable mount on a read-only-root mover pod.
+pub const READY_MARKER: &str = "/var/cache/kopia/.kopiur-session-ready";

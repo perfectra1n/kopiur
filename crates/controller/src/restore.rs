@@ -692,7 +692,7 @@ async fn drive_direct_restore(
         node_selector: resolved_mover.node_selector.clone(),
         tolerations: mover_tolerations,
         affinity: mover_affinity,
-        labels: io::child_labels(&[("kopiur.home-operations.com/op", "restore")]),
+        labels: io::child_labels(&[(crate::consts::OP_LABEL, crate::consts::OP_RESTORE)]),
         // Restore writes INTO the target PVC, mounted read-write at /restore.
         source_volume: Some(VolumeMountSpec::pvc(target_pvc, target_path, false)),
         repo_volume,
@@ -702,6 +702,7 @@ async fn drive_direct_restore(
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
         cache_volume,
+        readiness_exec: None,
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -755,7 +756,7 @@ async fn ensure_restore_target_pvc(
         "metadata": {
             "name": template.name,
             "namespace": namespace,
-            "labels": io::child_labels(&[("kopiur.home-operations.com/op", "restore-target")]),
+            "labels": io::child_labels(&[(crate::consts::OP_LABEL, crate::consts::OP_RESTORE_TARGET)]),
         },
         "spec": {
             "accessModes": access_modes,
@@ -962,9 +963,18 @@ fn pick_offset(snapshots: Vec<kopiur_kopia::SnapshotListEntry>, offset: i64) -> 
     snapshots.into_iter().nth(idx).map(|e| e.id)
 }
 
-/// Resolve the repository a restore targets (`spec.repository` or, when omitted,
-/// via the snapshotRef'd Snapshot's recipe). Implemented for the explicit-repository
-/// and SnapshotRef paths.
+/// Derive the repository a `Snapshot` belongs to, for `Restore.spec.repository`
+/// derivation (the CRD documents `repository` as derived-from-source for
+/// `snapshotRef`). The pure rule lives in the api crate
+/// ([`kopiur_api::snapshot::repository_ref_for`], with its tests) because the
+/// `kubectl kopiur` browse data-plane shares it; re-exported here for
+/// controller callers.
+pub(crate) use kopiur_api::snapshot::repository_ref_for as repository_ref_from_snapshot;
+
+/// Resolve the repository a restore targets: explicit `spec.repository`, or
+/// derived from the source — the snapshotRef'd Snapshot's pinned/owning
+/// repository, or the fromPolicy policy's repository. Only `source.identity`
+/// has nothing to derive from and requires the explicit field.
 async fn resolve_restore_repository(
     ctx: &Context,
     restore: &Restore,
@@ -974,6 +984,27 @@ async fn resolve_restore_repository(
     // ClusterRepository) via the shared resolver (ADR §5.5).
     if let Some(rref) = &restore.spec.repository {
         return io::resolve_repository_ref(&ctx.client, rref, namespace).await;
+    }
+    // SnapshotRef: derive from the referenced Snapshot (pinned resolved
+    // repository for produced, owning repository for discovered).
+    if let RestoreSource::SnapshotRef(sref) = &restore.spec.source {
+        let snap_ns = sref.namespace.as_deref().unwrap_or(namespace);
+        let snap_api: Api<Snapshot> = Api::namespaced(ctx.client.clone(), snap_ns);
+        let snap = snap_api
+            .get_opt(&sref.name)
+            .await?
+            .ok_or_else(|| Error::MissingDependency(format!("Snapshot {snap_ns}/{}", sref.name)))?;
+        let rref = repository_ref_from_snapshot(&snap).ok_or_else(|| {
+            Error::Validation(format!(
+                "cannot derive the repository from Snapshot {snap_ns}/{}: it has neither a \
+                 pinned status.resolved.repository nor a Repository/ClusterRepository owner; \
+                 set restore.spec.repository explicitly",
+                sref.name
+            ))
+        })?;
+        // Resolved relative to the SNAPSHOT's namespace (an absent ref
+        // namespace means "same as the snapshot", not "same as the restore").
+        return io::resolve_repository_ref(&ctx.client, &rref, snap_ns).await;
     }
     // FromPolicy: resolve via the SnapshotPolicy's repository.
     if let RestoreSource::FromPolicy(c) = &restore.spec.source {
@@ -986,7 +1017,9 @@ async fn resolve_restore_repository(
         return io::resolve_repository_ref(&ctx.client, &config.spec.repository, cfg_ns).await;
     }
     Err(Error::Validation(
-        "restore requires spec.repository (or a fromPolicy source)".into(),
+        "restore with source.identity requires spec.repository (snapshotRef and fromPolicy \
+         sources derive it; a raw identity has nothing to derive from)"
+            .into(),
     ))
 }
 
@@ -1031,6 +1064,9 @@ mod tests {
     use super::*;
     use kopiur_api::common::ObjectRef;
     use kopiur_api::restore::{FromPolicy, IdentitySource};
+
+    // The repository-derivation tests moved to `kopiur_api::snapshot` with the
+    // pure fn (`repository_ref_for`); the browse data-plane shares it.
 
     fn job_with_times(start: Option<&str>, end: Option<&str>) -> k8s_openapi::api::batch::v1::Job {
         use k8s_openapi::api::batch::v1::{Job, JobStatus};

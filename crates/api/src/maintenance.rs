@@ -172,6 +172,108 @@ pub fn lease_action(policy: TakeoverPolicy, held_by_other: bool) -> LeaseAction 
     }
 }
 
+/// The logical maintenance-lease string the operator uses for a repository's
+/// DEFAULT-MANAGED `Maintenance` (ADR §3.7). Single derivation, shared by the
+/// managed-Maintenance projection and the bootstrap mover's initial kopia
+/// owner stamp, so they cannot drift.
+///
+/// ```
+/// use kopiur_api::common::RepositoryKind;
+/// use kopiur_api::maintenance::managed_lease;
+///
+/// assert_eq!(managed_lease(RepositoryKind::Repository, "media", "nas"), "kopiur/media/nas");
+/// assert_eq!(
+///     managed_lease(RepositoryKind::ClusterRepository, "ignored", "shared"),
+///     "kopiur/clusterrepository/shared"
+/// );
+/// ```
+pub fn managed_lease(kind: crate::common::RepositoryKind, namespace: &str, name: &str) -> String {
+    match kind {
+        crate::common::RepositoryKind::Repository => format!("kopiur/{namespace}/{name}"),
+        crate::common::RepositoryKind::ClusterRepository => {
+            format!("kopiur/clusterrepository/{name}")
+        }
+    }
+}
+
+/// The STABLE kopia client identity a maintenance mover assumes for `lease`
+/// (`(username, hostname)`); the mover sets it with `kopia repository
+/// set-client` so kopia's designated-owner check compares something stable —
+/// the pod's own identity is ephemeral (a new hostname every run), which is
+/// why comparing kopia's recorded owner against it can never work.
+///
+/// ```
+/// use kopiur_api::maintenance::kopia_lease_identity;
+///
+/// assert_eq!(
+///     kopia_lease_identity("kopiur/media/nas"),
+///     ("kopiur".to_string(), "kopiur-media-nas".to_string())
+/// );
+/// ```
+pub fn kopia_lease_identity(lease: &str) -> (String, String) {
+    // Hostname-safe: lowercase, [a-z0-9-], everything else collapses to '-',
+    // trimmed and capped at 63 chars (a DNS label).
+    let mut host: String = lease
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    while host.contains("--") {
+        host = host.replace("--", "-");
+    }
+    let host = host.trim_matches('-');
+    let host: String = host.chars().take(63).collect();
+    let host = host.trim_end_matches('-').to_string();
+    ("kopiur".to_string(), host)
+}
+
+/// The full `user@hostname` owner string kopia records for `lease` — what the
+/// mover compares `maintenance info`'s owner against, and what the bootstrap
+/// stamps on a repository it CREATES.
+///
+/// ```
+/// use kopiur_api::maintenance::kopia_owner_for_lease;
+///
+/// assert_eq!(kopia_owner_for_lease("kopiur/media/nas"), "kopiur@kopiur-media-nas");
+/// ```
+pub fn kopia_owner_for_lease(lease: &str) -> String {
+    let (user, host) = kopia_lease_identity(lease);
+    format!("{user}@{host}")
+}
+
+/// Parse the `run-requested`/`run-mode` annotations into a manual-run request.
+/// `Ok(None)` = no request; `Err` = the annotations are present but malformed
+/// (the messages say how to fix). Shared by the admission webhook and the
+/// controller so validation cannot fork (SKILL "one validator, two callers").
+pub fn parse_run_annotations(
+    annotations: Option<&std::collections::BTreeMap<String, String>>,
+) -> Result<Option<(chrono::DateTime<chrono::Utc>, ManualRunMode)>, String> {
+    let Some(raw) = annotations.and_then(|a| a.get(crate::consts::RUN_REQUESTED_ANNOTATION)) else {
+        return Ok(None);
+    };
+    let at = chrono::DateTime::parse_from_rfc3339(raw)
+        .map_err(|e| {
+            format!(
+                "annotation {} must be an RFC3339 timestamp (got {raw:?}): {e}. \
+                 Fix: re-annotate with e.g. $(date -u +%Y-%m-%dT%H:%M:%SZ), or use \
+                 `kubectl kopiur maintenance run`",
+                crate::consts::RUN_REQUESTED_ANNOTATION
+            )
+        })?
+        .with_timezone(&chrono::Utc);
+    let mode = match annotations.and_then(|a| a.get(crate::consts::RUN_MODE_ANNOTATION)) {
+        None => ManualRunMode::Quick,
+        Some(raw_mode) => ManualRunMode::parse(raw_mode).ok_or_else(|| {
+            format!(
+                "annotation {} must be `quick` or `full` (got {raw_mode:?}). \
+                 Fix: re-annotate with a valid mode",
+                crate::consts::RUN_MODE_ANNOTATION
+            )
+        })?,
+    };
+    Ok(Some((at, mode)))
+}
+
 /// Inline maintenance control on a `Repository`/`ClusterRepository`
 /// (`spec.maintenance`). ADR §3.1/§3.7.
 ///
@@ -249,6 +351,83 @@ pub struct MaintenanceStatus {
     /// Standard Kubernetes conditions surfacing maintenance health. ADR §5.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+    /// State of the most recent annotation-requested out-of-band run
+    /// (`kopiur.home-operations.com/run-requested`); absent until one is requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_run: Option<ManualRunStatus>,
+}
+
+/// Which maintenance kind a manual (annotation-requested) run performs. Closed
+/// enum; the wire values are the `run-mode` annotation values.
+///
+/// ```
+/// use kopiur_api::maintenance::ManualRunMode;
+///
+/// assert_eq!(ManualRunMode::default(), ManualRunMode::Quick);
+/// assert_eq!(ManualRunMode::parse("full"), Some(ManualRunMode::Full));
+/// assert_eq!(ManualRunMode::parse("FULL"), None); // exact, lowercase
+/// assert_eq!(serde_json::to_value(ManualRunMode::Quick).unwrap(), "quick");
+/// ```
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ManualRunMode {
+    /// `kopia maintenance run` (quick). The default when `run-mode` is absent.
+    #[default]
+    Quick,
+    /// `kopia maintenance run --full`.
+    Full,
+}
+
+impl ManualRunMode {
+    /// Parse a `run-mode` annotation value. Exact-match, lowercase — the same
+    /// strings serde uses on the wire.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "quick" => Some(Self::Quick),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    /// The stable wire/annotation string.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Full => "full",
+        }
+    }
+}
+
+/// Lifecycle of a manual run. Closed enum.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]
+pub enum ManualRunPhase {
+    /// The mover Job for this request is in flight.
+    Running,
+    /// The run finished successfully (or yielded the lease cleanly — see the
+    /// `LeaseOwned` condition for which).
+    Succeeded,
+    /// The run's Job failed; conditions carry the detail.
+    Failed,
+}
+
+/// Bookkeeping for the most recent annotation-requested run. `requestedAt`
+/// pins WHICH request this status answers, so re-applying the same annotation
+/// value is a no-op and a new timestamp starts a new run.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualRunStatus {
+    /// The `run-requested` annotation value this status reflects (RFC3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at: Option<String>,
+    /// The run kind that was performed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ManualRunMode>,
+    /// Where the run is in its lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<ManualRunPhase>,
+    /// RFC3339 instant the run reached a terminal phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
 }
 
 /// Observed ownership-lease state: who holds it and since when. ADR §3.7.
@@ -287,6 +466,48 @@ mod tests {
     use crate::common::RepositoryKind;
     use crate::testutil::from_yaml;
     use kube::core::CustomResourceExt;
+
+    #[test]
+    fn lease_identity_is_hostname_safe_and_stable() {
+        let (user, host) = kopia_lease_identity("kopiur/media/My_App.x");
+        assert_eq!(user, "kopiur");
+        assert_eq!(host, "kopiur-media-my-app-x");
+        // Long leases cap at a DNS label and never end with '-'.
+        let (_, host) = kopia_lease_identity(&format!("kopiur/{}/x", "n".repeat(100)));
+        assert!(host.len() <= 63, "{host}");
+        assert!(!host.ends_with('-'), "{host}");
+        // Deterministic.
+        assert_eq!(
+            kopia_owner_for_lease("kopiur/media/nas"),
+            kopia_owner_for_lease("kopiur/media/nas")
+        );
+    }
+
+    #[test]
+    fn parse_run_annotations_covers_ok_default_and_garbage() {
+        use std::collections::BTreeMap;
+        assert_eq!(parse_run_annotations(None), Ok(None));
+        let mut a = BTreeMap::new();
+        a.insert(
+            crate::consts::RUN_REQUESTED_ANNOTATION.to_string(),
+            "2026-06-11T12:00:00Z".to_string(),
+        );
+        let (_, mode) = parse_run_annotations(Some(&a)).unwrap().unwrap();
+        assert_eq!(mode, ManualRunMode::Quick, "mode defaults to quick");
+        a.insert(
+            crate::consts::RUN_MODE_ANNOTATION.to_string(),
+            "full".to_string(),
+        );
+        let (_, mode) = parse_run_annotations(Some(&a)).unwrap().unwrap();
+        assert_eq!(mode, ManualRunMode::Full);
+        a.insert(
+            crate::consts::RUN_REQUESTED_ANNOTATION.to_string(),
+            "yesterday".to_string(),
+        );
+        let err = parse_run_annotations(Some(&a)).unwrap_err();
+        assert!(err.contains("must be an RFC3339 timestamp"), "{err}");
+        assert!(err.contains("kubectl kopiur maintenance run"), "{err}");
+    }
 
     #[test]
     fn maintenance_crd_metadata_is_correct() {

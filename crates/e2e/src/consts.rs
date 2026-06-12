@@ -150,6 +150,8 @@ pub const MC_IMAGE: &str = "minio/mc:latest";
 /// Buckets the bucket-creator Pod ensures (idempotent `mc mb --ignore-existing`).
 pub const BUCKETS: &[&str] = &[
     "kopiur",
+    // kubectl-kopiur plugin e2e (crates/e2e/tests/cli.rs).
+    "kopiur-cli",
     "kopiur-guard",
     // Cluster-scoped safe-create guard: initialized once, then a wrong-password
     // ClusterRepository must NOT recreate over it.

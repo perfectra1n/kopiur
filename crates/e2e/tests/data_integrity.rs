@@ -9,15 +9,14 @@
 mod common;
 use common::*;
 
-use std::time::Duration;
-
 use kube::api::{DeleteParams, PostParams};
 use kube::{Api, Client};
 
 use k8s_openapi::api::core::v1::Namespace;
 use kopiur_api::{ClusterRepository, Repository, Snapshot, SnapshotPolicy};
 use kopiur_e2e::{
-    E2E_NAMESPACE, Need, World, apply_secret, ensure_namespace, poll_interval, wait_until,
+    E2E_NAMESPACE, Need, World, apply_secret, default_timeout, ensure_namespace, poll_interval,
+    wait_until,
 };
 
 // ---------------------------------------------------------------------------
@@ -114,7 +113,7 @@ async fn namespace_delete_scenario(
         .expect("delete workload namespace");
     wait_until(
         &format!("namespace {app_ns} fully deleted"),
-        Duration::from_secs(180),
+        default_timeout(),
         poll_interval(),
         || async {
             match nss.get_opt(&app_ns).await? {
@@ -250,7 +249,7 @@ async fn pinned_snapshot_survives_gfs_prune() {
     // the control that proves GFS retention actually ran (not "nothing was pruned").
     wait_until(
         "unpinned oldest Snapshot pruned by GFS retention",
-        Duration::from_secs(180),
+        default_timeout(),
         poll_interval(),
         || async {
             match backups.get_opt("e2e-pin-old").await? {

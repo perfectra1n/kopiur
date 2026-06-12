@@ -132,6 +132,7 @@ impl From<&crate::error::MoverError> for FailureBlock {
             | MoverError::WorkSpecParse { .. }
             | MoverError::CredentialStagingDir { .. }
             | MoverError::CredentialWrite { .. }
+            | MoverError::ReadyMarkerWrite { .. }
             | MoverError::VerifyNoSnapshot { .. }
             | MoverError::SuccessExprFalse { .. }
             | MoverError::SuccessExprEval { .. }

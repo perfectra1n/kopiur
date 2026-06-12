@@ -1,0 +1,40 @@
+[package]
+name = "kopiur-cli"
+description = "kubectl kopiur — the kopiur kubectl plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# kubectl discovers plugins by binary name: `kubectl kopiur` resolves to a
+# `kubectl-kopiur` executable on PATH. The package keeps the kopiur-* naming.
+[[bin]]
+name = "kubectl-kopiur"
+path = "src/main.rs"
+
+[dependencies]
+kopiur-api = { workspace = true }
+# The browse data-plane reuses the mover's pure Job/work-spec builders (the
+# session pod is a byte-identical mover Job) and the kopia client's typed
+# session surface (`SessionCmd`, `DirManifest`) for both transports.
+kopiur-kopia = { workspace = true }
+kopiur-mover = { workspace = true }
+# `runtime` powers the --wait watcher (kube::runtime::watcher); `ws` powers the
+# browse session's pod-exec transport (WebSocket attach).
+kube = { workspace = true, features = ["client", "runtime", "rustls-tls", "ws"] }
+futures = { workspace = true }
+k8s-openapi = { workspace = true, features = ["v1_33"] }
+rustls = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+# Workspace features + io-std (cat/browse stream snapshot bytes to stdout and
+# read REPL lines from stdin) and fs (download writes local files).
+tokio = { workspace = true, features = ["io-std", "fs"] }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

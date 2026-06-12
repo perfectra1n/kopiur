@@ -786,10 +786,25 @@ impl KopiaClient {
         spec: &ConnectSpec,
         cache: CacheTuning,
     ) -> Result<(), KopiaError> {
-        let mut args = vec!["repository".into(), "connect".into()];
-        args.extend(spec.backend_args());
-        args.extend(cache.args());
-        self.run_ok(&args).await.map(|_| ())
+        self.run_ok(&connect_args(spec, cache, false))
+            .await
+            .map(|_| ())
+    }
+
+    /// Connect to an existing repository **read-only** (`kopia repository
+    /// connect <backend> --readonly`). The read-only bit persists in kopia's
+    /// client config, so every subsequent invocation on this connection is
+    /// structurally unable to mutate the repository — the connect mode for
+    /// browse sessions. Every other mover flow stays on the read-write
+    /// [`Self::repository_connect`].
+    pub async fn repository_connect_readonly(
+        &self,
+        spec: &ConnectSpec,
+        cache: CacheTuning,
+    ) -> Result<(), KopiaError> {
+        self.run_ok(&connect_args(spec, cache, true))
+            .await
+            .map(|_| ())
     }
 
     /// Create a new repository (`kopia repository create <backend>`). `cache` sizes
@@ -891,6 +906,14 @@ impl KopiaClient {
     /// Delete a single snapshot by manifest id. kopia's `snapshot delete`
     /// requires `--delete` to actually remove (otherwise it dry-runs) and does
     /// not support `--json`; success is signaled by exit code 0.
+    ///
+    /// IDEMPOTENT: an already-absent snapshot (`no snapshots matched <id>` on
+    /// stderr) is success — that IS the goal state. kopia dedups
+    /// identical-content snapshot manifests, so several `Snapshot` CRs can
+    /// legitimately pin the SAME kopia id; when GFS retention prunes more than
+    /// one of them, the first finalizer's delete removes the manifest and the
+    /// rest would otherwise fail terminally, wedging their CRs in `Deleting`
+    /// forever (caught by the retention e2e under suite load).
     pub async fn snapshot_delete(&self, id: &str) -> Result<(), KopiaError> {
         let args = vec![
             "snapshot".into(),
@@ -898,7 +921,16 @@ impl KopiaClient {
             id.to_string(),
             "--delete".into(),
         ];
-        self.run_ok(&args).await.map(|_| ())
+        match self.run_ok(&args).await {
+            Ok(_) => Ok(()),
+            Err(KopiaError::NonZeroExit { stderr_tail, .. })
+                if stderr_tail.contains("no snapshots matched") =>
+            {
+                tracing::debug!(%id, "snapshot already absent; delete is idempotent");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Restore a snapshot's contents to a target directory with kopia's default
@@ -1050,6 +1082,45 @@ impl KopiaClient {
         self.run_ok(&args).await.map(|_| ())
     }
 
+    /// Set the repository's maintenance owner to an EXPLICIT `user@hostname`
+    /// (`kopia maintenance set --owner <owner>`). Used by the bootstrap mover
+    /// right after `repository create` to stamp the stable, lease-derived
+    /// owner (`kopiur_api::maintenance::kopia_owner_for_lease`) instead of the
+    /// creating pod's ephemeral identity — without this, every later
+    /// maintenance mover sees a foreign owner and `takeoverPolicy: Never`
+    /// yields forever. Verified against kopia 0.23 `maintenance set --help`
+    /// (`--owner=OWNER  Set maintenance owner user@hostname`).
+    pub async fn maintenance_set_owner(&self, owner: &str) -> Result<(), KopiaError> {
+        let args = vec![
+            "maintenance".into(),
+            "set".into(),
+            "--owner".into(),
+            owner.into(),
+        ];
+        self.run_ok(&args).await.map(|_| ())
+    }
+
+    /// Switch the CONNECTED client identity (`kopia repository set-client
+    /// --username … --hostname …`). The maintenance mover assumes the stable
+    /// lease-derived identity this way (kopia 0.23 has no identity override on
+    /// `repository connect`; the OS user@pod-hostname is ephemeral), so
+    /// `maintenance set --owner me` records a stable string and the
+    /// designated-user check passes on every later run. Verified against
+    /// kopia 0.23 `repository set-client --help`.
+    pub async fn repository_set_client_identity(
+        &self,
+        username: &str,
+        hostname: &str,
+    ) -> Result<(), KopiaError> {
+        let args = vec![
+            "repository".into(),
+            "set-client".into(),
+            format!("--username={username}"),
+            format!("--hostname={hostname}"),
+        ];
+        self.run_ok(&args).await.map(|_| ())
+    }
+
     /// Run a maintenance pass. kopia's `maintenance run` does not emit JSON;
     /// success is exit code 0. The caller must already be the designated
     /// maintenance owner (see [`maintenance_set_owner_me`](Self::maintenance_set_owner_me)).
@@ -1060,6 +1131,100 @@ impl KopiaClient {
             MaintenanceMode::Full => args.push("--full".into()),
         }
         self.run_ok(&args).await.map(|_| ())
+    }
+
+    /// Run kopia with `args` and stream stdout **byte-for-byte** into `sink`
+    /// (no line splitting, no UTF-8 assumption), returning the byte count on a
+    /// zero exit. This is the file-content path for `kopia show <file-oid>`
+    /// (the browse data-plane's `cat`/`download`), where stdout is the raw
+    /// object bytes — buffering it whole or splitting it into lines would
+    /// corrupt/clamp arbitrarily large binary files.
+    ///
+    /// stderr is accumulated like every other invocation; a non-zero exit
+    /// yields [`KopiaError::NonZeroExit`] with the stderr tail. NOTE: bytes
+    /// already streamed before a late failure have reached the sink — callers
+    /// writing to a file should verify the count and discard partial output on
+    /// error (kopia's `show` either streams the object or fails up front, so in
+    /// practice a failure produces no payload). Honors `default_timeout`.
+    pub async fn run_raw_streaming(
+        &self,
+        args: &[String],
+        sink: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+    ) -> Result<u64, KopiaError> {
+        let display_args = args.join(" ");
+        let mut cmd = Command::new(&self.binary);
+        for (k, v) in &self.common_env {
+            cmd.env(k, v);
+        }
+        cmd.args(args);
+        cmd.args(&self.common_args);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        // Same bounded transient-errno retry as `run` (ETXTBSY/EAGAIN are
+        // fork/exec races, not bad-binary failures).
+        let mut child = {
+            let mut attempt = 0u32;
+            loop {
+                match cmd.spawn() {
+                    Ok(c) => break c,
+                    Err(e) if matches!(e.raw_os_error(), Some(26) | Some(11)) && attempt < 10 => {
+                        attempt += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                    Err(source) => {
+                        return Err(KopiaError::Spawn {
+                            binary: self.binary.display().to_string(),
+                            source,
+                        });
+                    }
+                }
+            }
+        };
+        let mut stdout_pipe = child.stdout.take().expect("stdout piped");
+        let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+
+        let copy_out = tokio::io::copy(&mut stdout_pipe, sink);
+        let read_err = async {
+            let mut buf = String::new();
+            stderr_pipe.read_to_string(&mut buf).await.map(|_| buf)
+        };
+        let wait_with_io = async {
+            let (copied, err, status) = tokio::join!(copy_out, read_err, child.wait());
+            Ok::<_, std::io::Error>((copied?, err?, status?))
+        };
+
+        let (bytes, stderr, status) = match self.default_timeout {
+            Some(t) => match tokio::time::timeout(t, wait_with_io).await {
+                Ok(res) => res.map_err(|source| KopiaError::Spawn {
+                    binary: self.binary.display().to_string(),
+                    source,
+                })?,
+                Err(_) => {
+                    let _ = child.start_kill();
+                    return Err(KopiaError::Timeout {
+                        args: display_args,
+                        seconds: t.as_secs(),
+                    });
+                }
+            },
+            None => wait_with_io.await.map_err(|source| KopiaError::Spawn {
+                binary: self.binary.display().to_string(),
+                source,
+            })?,
+        };
+
+        if status.code() == Some(0) {
+            Ok(bytes)
+        } else {
+            Err(KopiaError::NonZeroExit {
+                args: display_args,
+                code: status.code(),
+                class: KopiaErrorClass::classify(&stderr),
+                stderr_tail: tail_lines(&stderr),
+            })
+        }
     }
 }
 
@@ -1147,6 +1312,20 @@ fn verify_args(opts: &VerifyOptions) -> Vec<String> {
     if let Some(p) = opts.parallel {
         args.push("--parallel".into());
         args.push(p.to_string());
+    }
+    args
+}
+
+/// Build the args for `kopia repository connect <backend> [flags]`. Pure so the
+/// read-only vs read-write argv split is unit-testable without spawning kopia.
+/// `--readonly` (kopia's persistent read-only client-config bit) is appended
+/// only for read-only (browse) connects.
+fn connect_args(spec: &ConnectSpec, cache: CacheTuning, readonly: bool) -> Vec<String> {
+    let mut args = vec!["repository".into(), "connect".into()];
+    args.extend(spec.backend_args());
+    args.extend(cache.args());
+    if readonly {
+        args.push("--readonly".into());
     }
     args
 }
@@ -1697,6 +1876,45 @@ mod tests {
                 "--delete"
             ]
         );
+    }
+
+    #[test]
+    fn connect_args_appends_readonly_only_for_readonly_connects() {
+        let spec = ConnectSpec::Filesystem {
+            path: PathBuf::from("/repo"),
+        };
+        // Read-write (every mover but browse): NO --readonly anywhere.
+        assert_eq!(
+            connect_args(&spec, CacheTuning::default(), false),
+            vec!["repository", "connect", "filesystem", "--path", "/repo"]
+        );
+        // Read-only (browse sessions): --readonly appended after backend+cache args.
+        assert_eq!(
+            connect_args(&spec, CacheTuning::default(), true),
+            vec![
+                "repository",
+                "connect",
+                "filesystem",
+                "--path",
+                "/repo",
+                "--readonly"
+            ]
+        );
+        // Cache tuning args still precede the flag.
+        let tuned = connect_args(
+            &spec,
+            CacheTuning {
+                content_cache_size_mb: Some(100),
+                metadata_cache_size_mb: None,
+            },
+            true,
+        );
+        assert_eq!(
+            tuned.last().map(String::as_str),
+            Some("--readonly"),
+            "{tuned:?}"
+        );
+        assert!(tuned.iter().any(|a| a == "--content-cache-size-mb"));
     }
 
     #[test]

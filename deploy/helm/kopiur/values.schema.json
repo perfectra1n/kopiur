@@ -575,6 +575,20 @@
       "title": "podSecurityContext",
       "type": "object"
     },
+    "rbac": {
+      "description": "=============================================================================\nExtra RBAC\n=============================================================================",
+      "properties": {
+        "browseRole": {
+          "default": false,
+          "description": "Render an OPT-IN ClusterRole \"\u003crelease\u003e-browse\" carrying exactly what a\nhuman needs to run the `kubectl kopiur ls/cat/download/browse` data-plane:\nread snapshots/repositories, create/delete the session Job + ConfigMap, and\nexec into the session pod. It deliberately grants NO access to Secrets —\nthe session pod loads the repository credentials itself, so a browsing user\nnever reads them (`--local` is the exception and additionally needs `get\nsecrets`, granted separately). The chart only renders the ClusterRole; bind\nit to your users/groups with your own (Cluster)RoleBinding.",
+          "title": "browseRole",
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "title": "rbac",
+      "type": "object"
+    },
     "secretProjection": {
       "description": "=============================================================================\nCredential projection\n=============================================================================\nPer-repository `spec.credentialProjection.enabled` lets the operator copy a\nrepository's credential Secret(s) into each mover Job's namespace, so users with\nmany namespaces don't have to pre-create the Secret everywhere (the chief win is\na shared ClusterRepository whose Secret is pinned to one namespace). That\nrequires the operator to hold cluster-wide `secrets` create/patch.",
       "properties": {

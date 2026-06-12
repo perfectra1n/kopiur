@@ -547,6 +547,7 @@ async fn bootstrap_via_mover(
         annotations: Default::default(),
         // Bootstrap is a short connect/create probe: an emptyDir cache suffices.
         cache_volume: Default::default(),
+        readiness_exec: None,
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -583,6 +584,16 @@ fn bootstrap_work_spec(
             // Create-time format knobs (encryption/splitter/hash/ECC) honored only
             // when the bootstrap creates the repo (ADR-0005 §13(a)).
             create_options: kopiur_mover::workspec::CreateOptionsSpec::from_create(create),
+            // Stamped on CREATE only: the stable owner the managed Maintenance's
+            // movers compare against and claim (never the creating pod's
+            // ephemeral identity).
+            maintenance_owner: Some(kopiur_api::maintenance::kopia_owner_for_lease(
+                &kopiur_api::maintenance::managed_lease(
+                    kopiur_api::common::RepositoryKind::Repository,
+                    namespace,
+                    name,
+                ),
+            )),
         }),
         identity: ResolvedIdentity {
             username: "kopiur-bootstrap".to_string(),

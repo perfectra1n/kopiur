@@ -245,6 +245,33 @@ exit 0
     client.snapshot_delete("abc").await.unwrap();
 }
 
+#[tokio::test]
+async fn snapshot_delete_is_idempotent_when_already_absent() {
+    // Regression (retention e2e, 2026-06-12): kopia dedups identical-content
+    // manifests, so multiple Snapshot CRs can pin one kopia id; the SECOND
+    // prune-delete sees `no snapshots matched <id>` (exit 1). That is the GOAL
+    // state — it must be success, or the CR wedges in `Deleting` forever.
+    let s = shim(
+        r#"#!/bin/sh
+echo "error deleting snapshots by root ID abc: no snapshots matched abc" 1>&2
+exit 1
+"#,
+    );
+    let client = client_for(&s);
+    client.snapshot_delete("abc").await.unwrap();
+
+    // Any OTHER delete failure still surfaces (the idempotency match is exact).
+    let s = shim(
+        r#"#!/bin/sh
+echo "error deleting snapshots: access denied" 1>&2
+exit 1
+"#,
+    );
+    let client = client_for(&s);
+    let err = client.snapshot_delete("abc").await.unwrap_err();
+    assert!(matches!(err, KopiaError::NonZeroExit { .. }));
+}
+
 // --- New verb / backend coverage. The shims gate exit 0 on the expected argv,
 // so these double as wiring assertions against the real kopia 0.23 flag names. ---
 
@@ -391,4 +418,59 @@ exit 0
     let client = client_for(&s);
     let v = client.policy_show("user@host:/d").await.unwrap();
     assert_eq!(v["compression"]["compressorName"], "zstd");
+}
+
+#[tokio::test]
+async fn run_raw_streaming_streams_binary_stdout_verbatim() {
+    // `kopia show <file-oid>` streams raw bytes — including NULs and bytes that
+    // are not valid UTF-8 — so the streaming path must be binary-safe and must
+    // not line-split. The shim emits a deterministic non-UTF-8 byte sequence.
+    let s = shim(
+        r#"#!/bin/sh
+printf 'progress noise' 1>&2
+printf 'head\0\377\376body\nline2-no-trailing-newline'
+exit 0
+"#,
+    );
+    let client = client_for(&s);
+    let mut sink: Vec<u8> = Vec::new();
+    let args = kopiur_kopia::SessionCmd::ShowObject {
+        oid: "kfile".into(),
+    }
+    .argv("ignored-bin");
+    let n = client
+        .run_raw_streaming(&args[1..], &mut sink)
+        .await
+        .expect("streaming success");
+    let want = b"head\0\xff\xfebody\nline2-no-trailing-newline".to_vec();
+    assert_eq!(sink, want, "bytes must arrive verbatim");
+    assert_eq!(n, want.len() as u64, "returned count matches the stream");
+}
+
+#[tokio::test]
+async fn run_raw_streaming_nonzero_exit_carries_stderr_tail() {
+    let s = shim(
+        r#"#!/bin/sh
+printf 'partial' 
+echo 'object not found' 1>&2
+exit 1
+"#,
+    );
+    let client = client_for(&s);
+    let mut sink: Vec<u8> = Vec::new();
+    let err = client
+        .run_raw_streaming(&["show".to_string(), "kmissing".to_string()], &mut sink)
+        .await
+        .expect_err("non-zero exit must error");
+    match err {
+        KopiaError::NonZeroExit {
+            code, stderr_tail, ..
+        } => {
+            assert_eq!(code, Some(1));
+            assert!(stderr_tail.contains("object not found"), "{stderr_tail}");
+        }
+        other => panic!("expected NonZeroExit, got {other:?}"),
+    }
+    // Honest contract: bytes that streamed before the failure reached the sink.
+    assert_eq!(sink, b"partial");
 }

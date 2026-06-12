@@ -5,5 +5,7 @@ pub mod bootstrap;
 pub mod credentials;
 pub mod env;
 pub mod error;
+pub mod jobs;
+pub mod repo_meta;
 pub mod status;
 pub mod workspec;

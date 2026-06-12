@@ -462,6 +462,7 @@ async fn bootstrap_cluster_via_mover(
         annotations: Default::default(),
         // Bootstrap is a short connect/create probe: an emptyDir cache suffices.
         cache_volume: Default::default(),
+        readiness_exec: None,
     };
     // The bootstrap Job runs in the credentials Secret's namespace (`job_ns`), where
     // the Secret is present by construction — but the mover SA must still be minted
@@ -505,6 +506,14 @@ fn cluster_bootstrap_work_spec(
             auto_create,
             scan_catalog: false,
             create_options: kopiur_mover::workspec::CreateOptionsSpec::from_create(create),
+            // Stamped on CREATE only (see the Repository sibling).
+            maintenance_owner: Some(kopiur_api::maintenance::kopia_owner_for_lease(
+                &kopiur_api::maintenance::managed_lease(
+                    kopiur_api::common::RepositoryKind::ClusterRepository,
+                    job_ns,
+                    name,
+                ),
+            )),
         }),
         identity: ResolvedIdentity {
             username: "kopiur-bootstrap".to_string(),

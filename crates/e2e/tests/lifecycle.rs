@@ -328,7 +328,7 @@ async fn backup_restore_delete_lifecycle() {
         .expect("delete Snapshot");
     wait_until(
         "e2e-backup-del removed after finalizer",
-        Duration::from_secs(120),
+        default_timeout(),
         poll_interval(),
         || async {
             match backups.get_opt("e2e-backup-del").await? {
@@ -991,7 +991,7 @@ async fn schedule_creates_backup() {
     // Within ~2 minutes a scheduled Snapshot (origin=scheduled) should appear.
     wait_until(
         "a scheduled Snapshot is created",
-        Duration::from_secs(150),
+        default_timeout(),
         poll_interval(),
         || async {
             let list = backups.list(&Default::default()).await?;
@@ -1082,7 +1082,7 @@ async fn schedule_policy_selector_fans_out_to_matching_policies() {
     };
     wait_until(
         "fan-out creates the two matching Snapshots",
-        Duration::from_secs(120),
+        default_timeout(),
         poll_interval(),
         || async {
             let items = fan_snapshots()

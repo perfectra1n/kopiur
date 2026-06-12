@@ -1133,6 +1133,7 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
         cache_volume,
+        readiness_exec: None,
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);
@@ -1661,6 +1662,7 @@ async fn delete_snapshot_via_job(
         annotations: Default::default(),
         // A one-shot finalizer delete: an ephemeral emptyDir cache is fine.
         cache_volume: Default::default(),
+        readiness_exec: None,
     };
     // Mint the mover SA in the Job's namespace before launching (its credential
     // Secret(s) were resolved/projected above).
@@ -1820,6 +1822,7 @@ async fn reconcile_pin(
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations: Default::default(),
         cache_volume: Default::default(),
+        readiness_exec: None,
     };
     if let Some(sa) = ctx.mover_service_account.as_deref() {
         io::ensure_mover_rbac(
@@ -2138,51 +2141,11 @@ fn repository_connect(repo: &ResolvedRepository) -> Result<RepositoryConnect> {
     Ok(backend_to_repository_connect(&repo.backend))
 }
 
-/// Pure `Backend -> RepositoryConnect` translation (no kube types), so it is
-/// unit-testable and shared by the backup and restore reconcilers.
-pub(crate) fn backend_to_repository_connect(backend: &Backend) -> RepositoryConnect {
-    match backend {
-        Backend::Filesystem(f) => RepositoryConnect::Filesystem {
-            path: f.path.clone(),
-        },
-        Backend::S3(s) => RepositoryConnect::S3 {
-            bucket: s.bucket.clone(),
-            endpoint: s.endpoint.clone(),
-            prefix: s.prefix.clone(),
-            region: s.region.clone(),
-            disable_tls: s.tls.as_ref().map(|t| t.disable_tls).unwrap_or(false),
-            disable_tls_verification: s
-                .tls
-                .as_ref()
-                .map(|t| t.insecure_skip_verify)
-                .unwrap_or(false),
-        },
-        Backend::Azure(a) => RepositoryConnect::Azure {
-            container: a.container.clone(),
-            storage_account: a.storage_account.clone(),
-            prefix: a.prefix.clone(),
-        },
-        Backend::Gcs(g) => RepositoryConnect::Gcs {
-            bucket: g.bucket.clone(),
-            prefix: g.prefix.clone(),
-        },
-        Backend::B2(b) => RepositoryConnect::B2 {
-            bucket: b.bucket.clone(),
-            prefix: b.prefix.clone(),
-        },
-        Backend::Sftp(s) => RepositoryConnect::Sftp {
-            host: s.host.clone(),
-            path: s.path.clone(),
-            port: s.port,
-            username: s.username.clone(),
-            keyfile: None,
-        },
-        Backend::WebDav(w) => RepositoryConnect::WebDav { url: w.url.clone() },
-        Backend::Rclone(r) => RepositoryConnect::Rclone {
-            remote_path: r.remote_path.clone(),
-        },
-    }
-}
+// The pure `Backend -> RepositoryConnect` translation (and its exhaustive
+// every-variant test) moved to `kopiur_mover::repo_meta` so the kubectl-plugin
+// browse spawner can use it without a controller dependency. Re-exported so
+// the sibling reconcilers keep importing it from `crate::snapshot`.
+pub(crate) use kopiur_mover::repo_meta::backend_to_repository_connect;
 
 /// Actionable message for a backup refused because its repository is `ReadOnly`
 /// (§11): what / why / how-to-fix. Pure so the text is unit-asserted.
@@ -2395,73 +2358,8 @@ mod tests {
         )
     }
 
-    // --- backend_to_repository_connect: every CRD Backend variant must map to a
-    // mover RepositoryConnect (no silent reject). A new Backend variant fails to
-    // compile in the mapping until handled. ---
-
-    #[test]
-    fn every_backend_maps_to_a_repository_connect() {
-        use kopiur_api::backend::{
-            AzureBackend, B2Backend, FilesystemBackend, GcsBackend, RcloneBackend, S3Backend,
-            SftpBackend, WebDavBackend,
-        };
-        let cases = vec![
-            Backend::Filesystem(FilesystemBackend {
-                path: "/repo".into(),
-                volume: None,
-            }),
-            Backend::S3(S3Backend {
-                bucket: "b".into(),
-                prefix: None,
-                endpoint: None,
-                region: None,
-                auth: None,
-                tls: None,
-            }),
-            Backend::Azure(AzureBackend {
-                container: "c".into(),
-                prefix: None,
-                storage_account: Some("acct".into()),
-                auth: None,
-            }),
-            Backend::Gcs(GcsBackend {
-                bucket: "b".into(),
-                prefix: None,
-                auth: None,
-            }),
-            Backend::B2(B2Backend {
-                bucket: "b".into(),
-                prefix: None,
-                auth: None,
-            }),
-            Backend::Sftp(SftpBackend {
-                host: "h".into(),
-                path: "/r".into(),
-                port: Some(22),
-                username: Some("u".into()),
-                auth: None,
-            }),
-            Backend::WebDav(WebDavBackend {
-                url: "https://dav".into(),
-                auth: None,
-            }),
-            Backend::Rclone(RcloneBackend {
-                remote_path: "r:bucket".into(),
-                config_secret_ref: None,
-            }),
-        ];
-        // Each maps without panicking and converts cleanly to a kopia ConnectSpec
-        // whose discriminant matches the backend kind.
-        for backend in cases {
-            let rc = backend_to_repository_connect(&backend);
-            let spec = rc.to_connect_spec();
-            let want = match backend.kind_str() {
-                "WebDav" => "webdav",
-                other => &other.to_ascii_lowercase(),
-            };
-            assert_eq!(spec.kind_str(), want, "backend {}", backend.kind_str());
-        }
-    }
+    // backend_to_repository_connect's exhaustive every-variant test moved with
+    // the fn to `kopiur_mover::repo_meta`.
 
     // --- build_backup_run: the source volume (PVC vs inline NFS) glue ----------
 

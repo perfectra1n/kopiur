@@ -20,8 +20,6 @@ use crate::consts::{
     API_VERSION, BOOTSTRAP_JOB_FAILED_REASON, CHECK_BACKEND_ACTION, CHECK_CREDENTIALS_ACTION,
     CHECK_PERMISSIONS_ACTION, PRIVILEGED_MOVERS_ANNOTATION, REPOSITORY_NOT_INITIALIZED_REASON,
 };
-use crate::jobs::MountSource;
-
 use kopiur_api::backend::FilesystemBackend;
 use kopiur_api::common::SecretKeyRef;
 
@@ -334,58 +332,8 @@ fn repo_credentials_honors_explicit_key_and_namespace() {
     assert_eq!(c.namespace.as_deref(), Some("kopia-system"));
 }
 
-#[test]
-fn filesystem_path_and_pvc_extracted() {
-    use kopiur_api::backend::{PvcVolume, RepoVolume};
-    let b = Backend::Filesystem(FilesystemBackend {
-        path: "/repo".into(),
-        volume: Some(RepoVolume::Pvc(PvcVolume {
-            name: "repo-pvc".into(),
-        })),
-    });
-    assert_eq!(filesystem_repo_path(&b).as_deref(), Some("/repo"));
-    assert_eq!(
-        filesystem_repo_mount_source(&b),
-        Some(MountSource::Pvc {
-            claim_name: "repo-pvc".into()
-        })
-    );
-}
-
-#[test]
-fn filesystem_nfs_volume_extracted() {
-    use kopiur_api::backend::{NfsVolume, RepoVolume};
-    let b = Backend::Filesystem(FilesystemBackend {
-        path: "/repo".into(),
-        volume: Some(RepoVolume::Nfs(NfsVolume {
-            server: "nas.lan".into(),
-            path: "/export/kopia".into(),
-        })),
-    });
-    assert_eq!(filesystem_repo_path(&b).as_deref(), Some("/repo"));
-    assert_eq!(
-        filesystem_repo_mount_source(&b),
-        Some(MountSource::Nfs {
-            server: "nas.lan".into(),
-            path: "/export/kopia".into(),
-        })
-    );
-}
-
-#[test]
-fn s3_backend_has_no_filesystem_path() {
-    use kopiur_api::backend::S3Backend;
-    let b = Backend::S3(S3Backend {
-        bucket: "b".into(),
-        prefix: None,
-        endpoint: None,
-        region: None,
-        auth: None,
-        tls: None,
-    });
-    assert_eq!(filesystem_repo_path(&b), None);
-    assert_eq!(filesystem_repo_mount_source(&b), None);
-}
+// The filesystem_repo_path / filesystem_repo_mount_source tests moved with the
+// fns to `kopiur_mover::repo_meta`.
 
 #[test]
 fn backend_auth_secret_for_s3_and_none_for_filesystem() {

@@ -48,6 +48,18 @@ kubectl apply -f deploy/examples/01-single-pvc-scheduled.yaml
 
 Full install guide, prerequisites (k8s >= 1.24, optional cert-manager), install modes, and the CRD-lifecycle caveat: **[docs/install.md](docs/install.md)**.
 
+### kubectl plugin
+
+Day-to-day operations without hand-written YAML — trigger/inspect/restore snapshots, run maintenance, browse files inside snapshots, diagnose installs, migrate from VolSync:
+
+```bash
+kubectl krew index add kopiur https://github.com/home-operations/kopiur.git
+kubectl krew install kopiur/kopiur
+kubectl kopiur status
+```
+
+Full reference: **[docs/cli/index.md](docs/cli/index.md)**.
+
 ## Layout
 
 ```

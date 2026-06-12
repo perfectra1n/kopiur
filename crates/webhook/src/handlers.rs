@@ -36,7 +36,8 @@ use kube::core::admission::{AdmissionRequest, AdmissionResponse, Operation};
 use serde_json::{Value, json};
 
 /// The finalizer that ties a kopia snapshot's lifecycle to its `Snapshot` CR (ADR §4.5).
-pub const SNAPSHOT_CLEANUP_FINALIZER: &str = "kopiur.home-operations.com/snapshot-cleanup";
+/// Single definition shared with the controller via `kopiur-api` so the two can't drift.
+pub use api::consts::SNAPSHOT_CLEANUP_FINALIZER;
 
 /// Dispatch a decoded `AdmissionRequest` to the handler for its `kind`.
 ///
@@ -282,7 +283,7 @@ fn backup_origin(meta: &ObjectMeta, data: &Value) -> Origin {
     let from_label = meta
         .labels
         .as_ref()
-        .and_then(|l| l.get("kopiur.home-operations.com/origin"))
+        .and_then(|l| l.get(api::consts::ORIGIN_LABEL))
         .map(|s| s.as_str());
     let from_status = data
         .get("status")
@@ -369,6 +370,17 @@ async fn handle_maintenance(
     let errs = api::validate::validate_maintenance(&spec);
     if !errs.is_empty() {
         return Err(AdmissionError::Invalid(errs));
+    }
+
+    // The run-now annotations are user input too: refuse garbage at admission
+    // (same shared parser the controller uses) so a typo'd timestamp can't
+    // reach the reconciler. Objects annotated while the webhook was down are
+    // still degraded gracefully controller-side.
+    if let Err(message) = api::maintenance::parse_run_annotations(obj.metadata.annotations.as_ref())
+    {
+        return Err(AdmissionError::Invalid(vec![
+            ValidationError::InvalidRunAnnotation { message },
+        ]));
     }
 
     if let TenancyDecision::Deny(denial) =

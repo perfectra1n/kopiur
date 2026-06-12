@@ -1,7 +1,7 @@
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::Api;
 
-use kopiur_api::backend::{Backend, RepoVolume};
+use kopiur_api::backend::Backend;
 use kopiur_api::cluster_repository::IdentityDefaults;
 use kopiur_api::common::{
     Encryption, MoverDefaults, NamespaceDeletePolicy, RepositoryKind, RepositoryMode, RepositoryRef,
@@ -9,7 +9,6 @@ use kopiur_api::common::{
 use kopiur_api::{ClusterRepository, Repository};
 
 use crate::error::{Error, Result};
-use crate::jobs::MountSource;
 
 /// Default key within the encryption password Secret when unset.
 pub const DEFAULT_PASSWORD_KEY: &str = "KOPIA_PASSWORD";
@@ -318,130 +317,17 @@ pub async fn read_repo_credential(
     Ok((password, version))
 }
 
-/// The backend credentials Secret name for an object-store backend, if any.
-///
-/// Exhaustive over [`Backend`] (ADR §5.5): a new backend cannot compile until its
-/// credential source is decided here. Object stores read keys (e.g.
-/// `AWS_ACCESS_KEY_ID`) from `auth.secretRef`; Rclone reads its config from
-/// `configSecretRef`; Filesystem has no backend credentials. This Secret is
-/// mounted into the mover Job alongside the encryption-password Secret so kopia
-/// can reach the store (the in-process filesystem path never needs it).
-pub fn backend_auth_secret_ref(backend: &Backend) -> Option<&kopiur_api::common::SecretRef> {
-    match backend {
-        Backend::S3(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
-        Backend::Azure(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
-        Backend::Gcs(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
-        Backend::B2(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
-        Backend::Sftp(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
-        Backend::WebDav(b) => b.auth.as_ref().and_then(|a| a.secret_ref.as_ref()),
-        Backend::Rclone(b) => b.config_secret_ref.as_ref(),
-        Backend::Filesystem(_) => None,
-    }
-}
+pub use kopiur_api::creds::backend_auth_secret_ref;
 
-/// The TLS CA-bundle `ConfigMap` name an object-store backend references, if any
-/// (currently only S3 exposes `tls.caBundleRef`). Exhaustive over [`Backend`]
-/// (ADR §5.5): a new backend that adds TLS must decide its CA source here. Used by
-/// the ConfigMap→repo watch so editing a CA bundle re-triggers a connect.
-pub fn backend_tls_ca_configmap(backend: &Backend) -> Option<&str> {
-    match backend {
-        Backend::S3(b) => b
-            .tls
-            .as_ref()
-            .and_then(|t| t.ca_bundle_ref.as_ref())
-            .and_then(|c| c.config_map_name.as_deref()),
-        Backend::Azure(_)
-        | Backend::Gcs(_)
-        | Backend::B2(_)
-        | Backend::Filesystem(_)
-        | Backend::Sftp(_)
-        | Backend::WebDav(_)
-        | Backend::Rclone(_) => None,
-    }
-}
+pub use kopiur_api::creds::{CredsSecretRef, mover_creds_secret_refs, mover_creds_secrets};
 
-/// A credential Secret a mover Job needs, with the namespace it is sourced from.
-/// `namespace` is the resolved *source* namespace (where the operator reads the
-/// Secret when projecting), not the Job's namespace. `None` only when neither the
-/// reference nor the repository carries one — which projection treats as an
-/// actionable error (a `ClusterRepository` reference must pin a namespace).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CredsSecretRef {
-    /// Name of the credential `Secret`.
-    pub name: String,
-    /// Resolved source namespace, if known.
-    pub namespace: Option<String>,
-}
-
-/// The distinct credential Secrets a mover Job for `backend` + `encryption` needs
-/// as `envFrom`, each with its resolved *source* namespace: always the
-/// encryption-password Secret, plus the backend `auth` Secret when present and
-/// differently named. Deduped by name, order-stable (password first).
-///
-/// `repo_namespace` is the referencing repository's own namespace (a namespaced
-/// `Repository`), used as the source-namespace fallback when a reference omits
-/// one; pass `None` for a cluster-scoped `ClusterRepository`, whose references
-/// pin their own namespace. This is the single source of the dedup/order contract
-/// that [`mover_creds_secrets`] (names only) is built on.
-pub fn mover_creds_secret_refs(
-    backend: &Backend,
-    enc: &Encryption,
-    repo_namespace: Option<&str>,
-) -> Vec<CredsSecretRef> {
-    let source_ns = |ns: Option<String>| ns.or_else(|| repo_namespace.map(str::to_string));
-    let mut refs = vec![CredsSecretRef {
-        name: enc.password_secret_ref.name.clone(),
-        namespace: source_ns(enc.password_secret_ref.namespace.clone()),
-    }];
-    if let Some(auth) = backend_auth_secret_ref(backend)
-        && !refs.iter().any(|r| r.name == auth.name)
-    {
-        refs.push(CredsSecretRef {
-            name: auth.name.clone(),
-            namespace: source_ns(auth.namespace.clone()),
-        });
-    }
-    refs
-}
-
-/// The distinct credential Secret names a mover Job for `backend` + `encryption`
-/// needs as `envFrom`: always the encryption-password Secret, plus the backend
-/// `auth` Secret when present and different. Deduped, order-stable (password
-/// first). The common single-secret setup (password + keys in one Secret)
-/// collapses to one entry. Names-only projection of [`mover_creds_secret_refs`].
-pub fn mover_creds_secrets(backend: &Backend, enc: &Encryption) -> Vec<String> {
-    mover_creds_secret_refs(backend, enc, None)
-        .into_iter()
-        .map(|r| r.name)
-        .collect()
-}
-
-/// The filesystem repo path for a `Filesystem` backend, or `None` for object
-/// stores. Used to decide whether to mount a repo PVC and run kopia in-process.
-pub fn filesystem_repo_path(backend: &Backend) -> Option<String> {
-    match backend {
-        Backend::Filesystem(f) => Some(f.path.clone()),
-        _ => None,
-    }
-}
-
-/// The repo volume source for a `Filesystem` backend, if any — a PVC or an inline
-/// NFS export the mover mounts at [`filesystem_repo_path`]. `None` for object
-/// stores and for a bare-path filesystem repo (a `hostPath`/baked-in mount).
-pub fn filesystem_repo_mount_source(backend: &Backend) -> Option<MountSource> {
-    match backend {
-        Backend::Filesystem(f) => f.volume.as_ref().map(|v| match v {
-            RepoVolume::Pvc(p) => MountSource::Pvc {
-                claim_name: p.name.clone(),
-            },
-            RepoVolume::Nfs(n) => MountSource::Nfs {
-                server: n.server.clone(),
-                path: n.path.clone(),
-            },
-        }),
-        _ => None,
-    }
-}
+// The pure Backend → mover-shape projections (filesystem path/volume, TLS CA
+// ConfigMap) moved to `kopiur_mover::repo_meta` (next to the work-spec contract)
+// so the kubectl-plugin browse spawner can use them without a controller
+// dependency. Re-exported so controller call sites keep their `io::*` paths.
+pub use kopiur_mover::repo_meta::{
+    backend_tls_ca_configmap, filesystem_repo_mount_source, filesystem_repo_path,
+};
 
 #[cfg(test)]
 mod tests {

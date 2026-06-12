@@ -357,6 +357,7 @@ async fn spawn_verify_job(
         passthrough_env: ctx.mover_env_passthrough.clone(),
         annotations,
         cache_volume: Default::default(),
+        readiness_exec: None,
     };
     let cm = jobs::build_config_map(&inputs)?;
     let job = jobs::build_job(&inputs);

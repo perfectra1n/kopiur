@@ -1,0 +1,79 @@
+suite: browse clusterrole
+release:
+  name: kopiur
+  namespace: kopiur-system
+templates:
+  - browse-clusterrole.yaml
+tests:
+  - it: is omitted by default (opt-in knob)
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rbac.browseRole renders the browse ClusterRole with the exact verb set and NO secrets
+    set:
+      rbac.browseRole: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: ClusterRole
+      - equal:
+          path: metadata.name
+          value: kopiur-browse
+      - contains:
+          path: rules
+          content:
+            apiGroups: [kopiur.home-operations.com]
+            resources: [snapshots, repositories]
+            verbs: [get, list]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [kopiur.home-operations.com]
+            resources: [clusterrepositories]
+            verbs: [get]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [apps]
+            resources: [deployments]
+            verbs: [get, list]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [batch]
+            resources: [jobs]
+            verbs: [create, get, list, delete]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [configmaps]
+            verbs: [create, get, delete]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [pods]
+            verbs: [get, list, watch]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [pods/log]
+            verbs: [get]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [pods/exec]
+            verbs: [create]
+      # The security model: a browsing user never reads credential Secrets.
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [secrets]
+            verbs: [get]
+        any: true

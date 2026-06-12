@@ -595,6 +595,47 @@ spec:
                     nullable: true
                     type: string
                 type: object
+              manualRun:
+                description: |-
+                  State of the most recent annotation-requested out-of-band run
+                  (`kopiur.home-operations.com/run-requested`); absent until one is requested.
+                nullable: true
+                properties:
+                  completedAt:
+                    description: RFC3339 instant the run reached a terminal phase.
+                    nullable: true
+                    type: string
+                  mode:
+                    description: |-
+                      Which maintenance kind a manual (annotation-requested) run performs. Closed
+                      enum; the wire values are the `run-mode` annotation values.
+
+                      ```
+                      use kopiur_api::maintenance::ManualRunMode;
+
+                      assert_eq!(ManualRunMode::default(), ManualRunMode::Quick);
+                      assert_eq!(ManualRunMode::parse("full"), Some(ManualRunMode::Full));
+                      assert_eq!(ManualRunMode::parse("FULL"), None); // exact, lowercase
+                      assert_eq!(serde_json::to_value(ManualRunMode::Quick).unwrap(), "quick");
+                      ```
+                    enum:
+                    - quick
+                    - full
+                    nullable: true
+                    type: string
+                  phase:
+                    description: Lifecycle of a manual run. Closed enum.
+                    enum:
+                    - Running
+                    - Succeeded
+                    - Failed
+                    nullable: true
+                    type: string
+                  requestedAt:
+                    description: The `run-requested` annotation value this status reflects (RFC3339).
+                    nullable: true
+                    type: string
+                type: object
               observedGeneration:
                 description: The `metadata.generation` this status reflects, for staleness detection.
                 format: int64
