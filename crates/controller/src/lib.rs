@@ -399,6 +399,12 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     let repo_ctrl = Controller::new(repo_api, cfg.clone());
     let repo_store = repo_ctrl.store();
     let repo_ctrl = repo_ctrl
+        // Own the bootstrap Job (carries a controller ownerRef already): its
+        // terminal state arrives as an EVENT instead of hoping a 15s poll lands
+        // inside the Job's ttlSecondsAfterFinished window — a short TTL used to
+        // reap the finished Job between polls, so the result was never read and
+        // the repo churned Initializing + fresh bootstrap Jobs forever.
+        .owns(Api::<Job>::all(client.clone()), cfg.clone())
         .watches(Api::<Secret>::all(client.clone()), cfg.clone(), {
             let store = repo_store.clone();
             move |s: Secret| watch::secret_to_repositories(&store, &s)
@@ -433,6 +439,9 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     let crepo_ctrl = Controller::new(crepo_api, cfg.clone());
     let crepo_store = crepo_ctrl.store();
     let crepo_ctrl = crepo_ctrl
+        // Own the bootstrap Job — same prompt-terminal-observation rationale as
+        // the Repository controller above.
+        .owns(Api::<Job>::all(client.clone()), cfg.clone())
         .watches(Api::<Secret>::all(client.clone()), cfg.clone(), {
             let store = crepo_store.clone();
             move |s: Secret| watch::secret_to_cluster_repositories(&store, &s)
@@ -551,6 +560,11 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     let maint_ctrl = Controller::new(maint_api, cfg.clone());
     let maint_store = maint_ctrl.store();
     let maint_ctrl = maint_ctrl
+        // Own the per-slot maintenance Jobs (controller ownerRef already set):
+        // a yield/run's terminal state must be OBSERVED (it records
+        // `lastHandledAt`) — with only the 30s poll, a short Job TTL could reap
+        // the finished Job between polls and the slot would re-fire unrecorded.
+        .owns(Api::<Job>::all(client.clone()), cfg.clone())
         .watches(Api::<Repository>::all(client.clone()), cfg.clone(), {
             let store = maint_store.clone();
             move |r: Repository| watch::repository_to_maintenances(&store, &r)

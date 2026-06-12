@@ -524,6 +524,27 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
     match run_decision(backup.status.as_ref().and_then(|s| s.phase)) {
         RunDecision::Run => {}
         RunDecision::SucceededSteadyState => {
+            // The MOVER stamps `phase: Succeeded`, so the controller's first look
+            // at a finished run can already be steady-state — the afterSnapshot
+            // hooks (resume/notify) must still run, exactly once. Safe against
+            // the re-run hazard this gate exists for: `run_post_hooks_once`
+            // self-gates on `status.hooks.postCompletedAt`, so once stamped this
+            // is a no-op forever (ADR §4.8).
+            if let Some((failure, policy_name)) =
+                run_post_hooks_once(backup, ctx, &api, &namespace, &name).await?
+            {
+                return fail_for_hook(
+                    ctx,
+                    backup,
+                    &api,
+                    &namespace,
+                    &name,
+                    &failure,
+                    crate::hooks::HookPhase::After,
+                    &policy_name,
+                )
+                .await;
+            }
             // Staged-source reap is normally done at the Succeeded transition;
             // re-issuing here covers a crash between the phase patch and the
             // cleanup (idempotent, no-op for Direct).
@@ -538,7 +559,30 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
             // §13(c): spec.pin stays live after the mover Job is gone.
             return reconcile_pin(backup, ctx, &api, &namespace, &name).await;
         }
-        RunDecision::TerminalFailed => return Ok(Action::await_change()),
+        RunDecision::TerminalFailed => {
+            // Resume hooks run even for a FAILED backup (quiesce/resume pairing —
+            // a database left locked because the backup failed would turn one
+            // incident into two), and the mover may have stamped `Failed` before
+            // the controller saw the terminal Job. Self-gated by the stamp; a
+            // hook failure here is surfaced on the condition but never masks the
+            // primary mover failure.
+            if let Some((failure, policy_name)) =
+                run_post_hooks_once(backup, ctx, &api, &namespace, &name).await?
+            {
+                patch_hook_failure(
+                    ctx,
+                    backup,
+                    &api,
+                    &name,
+                    &failure,
+                    crate::hooks::HookPhase::After,
+                    &policy_name,
+                    false,
+                )
+                .await?;
+            }
+            return Ok(Action::await_change());
+        }
         RunDecision::Wait => return Ok(Action::await_change()),
     }
 
