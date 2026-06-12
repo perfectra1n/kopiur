@@ -1,0 +1,32 @@
+[package]
+name = "kopiur-cli"
+description = "kubectl kopiur — the kopiur kubectl plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# kubectl discovers plugins by binary name: `kubectl kopiur` resolves to a
+# `kubectl-kopiur` executable on PATH. The package keeps the kopiur-* naming.
+[[bin]]
+name = "kubectl-kopiur"
+path = "src/main.rs"
+
+[dependencies]
+kopiur-api = { workspace = true }
+# `runtime` powers the --wait watcher (kube::runtime::watcher).
+kube = { workspace = true, features = ["client", "runtime", "rustls-tls"] }
+futures = { workspace = true }
+k8s-openapi = { workspace = true, features = ["v1_33"] }
+rustls = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

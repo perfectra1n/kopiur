@@ -7,6 +7,7 @@ use kube::{Client, Error};
 
 pub mod apply;
 pub mod builders;
+pub mod cli;
 pub mod consts;
 pub mod wait;
 pub mod world;

@@ -146,10 +146,7 @@ pub fn build_managed_maintenance(
     spec: &RepositoryMaintenanceSpec,
     owner: OwnerReference,
 ) -> Maintenance {
-    let owner_lease = match kind {
-        RepositoryKind::Repository => format!("kopiur/{placement_namespace}/{name}"),
-        RepositoryKind::ClusterRepository => format!("kopiur/clusterrepository/{name}"),
-    };
+    let owner_lease = kopiur_api::maintenance::managed_lease(kind, placement_namespace, name);
     let mut m = Maintenance::new(
         name,
         MaintenanceSpec {

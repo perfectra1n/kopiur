@@ -262,6 +262,10 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "==> e2e tests FAILED (rc=$rc) — du
 # KOPIUR_E2E_TESTFILTER — libtest name-substring filter, kept AFTER `--`.
 BINS=""
 for b in ${KOPIUR_E2E_BINS:-}; do BINS="$BINS --test $b"; done
+# The CLI e2e (tests/cli.rs) runs the compiled kubectl-kopiur plugin binary as a
+# subprocess; build it here so the tests never race a stale/missing binary.
+echo "==> building kubectl-kopiur (CLI e2e subject)"
+cargo build -p kopiur-cli --locked
 echo "==> running e2e tests${KOPIUR_E2E_BINS:+ (binaries:$KOPIUR_E2E_BINS)}"
 cargo test -p kopiur-e2e --features e2e $BINS -- \
   --include-ignored --test-threads=1 --nocapture ${KOPIUR_E2E_TESTFILTER:-}

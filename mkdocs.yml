@@ -167,6 +167,7 @@ nav:
       - Security context: security-context.md
       - Maintenance: maintenance.md
       - GitOps (Flux / Argo): gitops.md
+      - kubectl plugin: cli/index.md
       - Examples: examples.md
       - Troubleshooting: troubleshooting.md
   # Scenarios = end-to-end, problem-driven walkthroughs (one apply-ready bundle

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/api",
+    "crates/cli",
     "crates/kopia",
     "crates/telemetry",
     "crates/webhook",
@@ -75,6 +76,9 @@ url = "2"
 # HTTP client for SnapshotPolicy `httpRequest` hooks (ADR §4.8). rustls-only,
 # matching the kube/webhook TLS stack — never openssl.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# CLI (kubectl plugin) argument parsing
+clap = { version = "4", features = ["derive", "wrap_help"] }
 
 # Scheduling / expressions
 croner = "2"

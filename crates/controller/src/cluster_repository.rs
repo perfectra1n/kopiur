@@ -505,6 +505,14 @@ fn cluster_bootstrap_work_spec(
             auto_create,
             scan_catalog: false,
             create_options: kopiur_mover::workspec::CreateOptionsSpec::from_create(create),
+            // Stamped on CREATE only (see the Repository sibling).
+            maintenance_owner: Some(kopiur_api::maintenance::kopia_owner_for_lease(
+                &kopiur_api::maintenance::managed_lease(
+                    kopiur_api::common::RepositoryKind::ClusterRepository,
+                    job_ns,
+                    name,
+                ),
+            )),
         }),
         identity: ResolvedIdentity {
             username: "kopiur-bootstrap".to_string(),

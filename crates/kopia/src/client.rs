@@ -1050,6 +1050,45 @@ impl KopiaClient {
         self.run_ok(&args).await.map(|_| ())
     }
 
+    /// Set the repository's maintenance owner to an EXPLICIT `user@hostname`
+    /// (`kopia maintenance set --owner <owner>`). Used by the bootstrap mover
+    /// right after `repository create` to stamp the stable, lease-derived
+    /// owner (`kopiur_api::maintenance::kopia_owner_for_lease`) instead of the
+    /// creating pod's ephemeral identity — without this, every later
+    /// maintenance mover sees a foreign owner and `takeoverPolicy: Never`
+    /// yields forever. Verified against kopia 0.23 `maintenance set --help`
+    /// (`--owner=OWNER  Set maintenance owner user@hostname`).
+    pub async fn maintenance_set_owner(&self, owner: &str) -> Result<(), KopiaError> {
+        let args = vec![
+            "maintenance".into(),
+            "set".into(),
+            "--owner".into(),
+            owner.into(),
+        ];
+        self.run_ok(&args).await.map(|_| ())
+    }
+
+    /// Switch the CONNECTED client identity (`kopia repository set-client
+    /// --username … --hostname …`). The maintenance mover assumes the stable
+    /// lease-derived identity this way (kopia 0.23 has no identity override on
+    /// `repository connect`; the OS user@pod-hostname is ephemeral), so
+    /// `maintenance set --owner me` records a stable string and the
+    /// designated-user check passes on every later run. Verified against
+    /// kopia 0.23 `repository set-client --help`.
+    pub async fn repository_set_client_identity(
+        &self,
+        username: &str,
+        hostname: &str,
+    ) -> Result<(), KopiaError> {
+        let args = vec![
+            "repository".into(),
+            "set-client".into(),
+            format!("--username={username}"),
+            format!("--hostname={hostname}"),
+        ];
+        self.run_ok(&args).await.map(|_| ())
+    }
+
     /// Run a maintenance pass. kopia's `maintenance run` does not emit JSON;
     /// success is exit code 0. The caller must already be the designated
     /// maintenance owner (see [`maintenance_set_owner_me`](Self::maintenance_set_owner_me)).

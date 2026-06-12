@@ -108,6 +108,19 @@ pub enum SnapshotPhase {
     Discovered,
 }
 
+impl Origin {
+    /// The stable wire/label value (the serde camelCase encoding), for the
+    /// `kopiur.home-operations.com/origin` label and `status.origin` — single
+    /// definition so producers (controller, kubectl plugin) cannot drift.
+    pub fn label_value(self) -> &'static str {
+        match self {
+            Self::Scheduled => "scheduled",
+            Self::Manual => "manual",
+            Self::Discovered => "discovered",
+        }
+    }
+}
+
 impl crate::common::PhaseLabel for SnapshotPhase {
     const ALL: &'static [Self] = &[
         Self::Pending,
@@ -325,6 +338,17 @@ mod tests {
     use crate::common::PhaseLabel;
     use crate::testutil::from_yaml;
     use kube::core::CustomResourceExt;
+
+    #[test]
+    fn origin_label_value_matches_the_serde_encoding() {
+        for origin in [Origin::Scheduled, Origin::Manual, Origin::Discovered] {
+            assert_eq!(
+                serde_json::to_value(origin).unwrap(),
+                origin.label_value(),
+                "{origin:?}"
+            );
+        }
+    }
 
     #[test]
     fn backup_phase_all_covers_every_variant_uniquely() {

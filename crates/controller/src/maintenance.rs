@@ -137,6 +137,37 @@ async fn reconcile_inner(maint: &Maintenance, ctx: &Context) -> Result<Action> {
     // condition; `set_ready` upserts Ready/Reconciling/Stalled without clobbering it.
     set_ready_if_changed(&api, &name, maint).await?;
 
+    // An annotation-requested manual run takes precedence over waiting for the
+    // next cron slot — but flows through the SAME spawn path (mover, lease,
+    // single-flight), so it can't bypass any guarantee the cron path has.
+    // A MALFORMED annotation must not suspend scheduled maintenance: surface
+    // it as a condition and fall through to the cron flow (degrade-not-crash).
+    match manual_run_request(maint) {
+        Ok(Some((requested, manual_mode))) => {
+            if let Some(action) = handle_manual_run(
+                ctx,
+                &api,
+                &job_api,
+                &namespace,
+                &name,
+                maint,
+                &repo,
+                requested,
+                manual_mode,
+            )
+            .await?
+            {
+                return Ok(action);
+            }
+        }
+        Ok(None) => {}
+        Err(Error::Validation(msg)) => {
+            patch_condition_if_changed(&api, &name, maint, "False", "InvalidRunRequest", &msg)
+                .await?;
+        }
+        Err(e) => return Err(e),
+    }
+
     // Nothing due → sleep until the earliest next slot (capped).
     let Some((mode, slot)) = due_mode(maint, now) else {
         return Ok(Action::requeue(cap(next_wakeup(maint, now, None))));
@@ -186,6 +217,219 @@ async fn reconcile_inner(maint: &Maintenance, ctx: &Context) -> Result<Action> {
             tracing::info!(maint = %name, ?mode, slot = %slot.to_rfc3339(), "spawned maintenance Job");
             Ok(Action::requeue(REQUEUE_RUNNING))
         }
+    }
+}
+
+/// What the run-now annotations ask for, when there is an UNHANDLED request:
+/// the pinned request timestamp + the run kind. Pure (ADR §5.2).
+///
+/// `None` when no annotation is present, or when `status.manualRun` already
+/// answers this exact `requestedAt` (any phase — Running means a Job exists or
+/// existed; the reconcile body resolves that separately). Unparseable values
+/// are validation errors (the annotation is user input).
+pub fn manual_run_request(
+    maint: &Maintenance,
+) -> Result<Option<(DateTime<Utc>, kopiur_api::ManualRunMode)>> {
+    let annotations = maint.metadata.annotations.as_ref();
+    let Some(raw) = annotations.and_then(|a| a.get(crate::consts::RUN_REQUESTED_ANNOTATION)) else {
+        return Ok(None);
+    };
+    // Dedupe BEFORE parsing: a terminally-answered request stays answered even
+    // if someone later scribbles garbage into the mode annotation.
+    let answered = maint.status.as_ref().and_then(|st| st.manual_run.as_ref());
+    if let Some(m) = answered
+        && m.requested_at.as_deref() == Some(raw)
+        && matches!(
+            m.phase,
+            Some(kopiur_api::ManualRunPhase::Succeeded | kopiur_api::ManualRunPhase::Failed)
+        )
+    {
+        return Ok(None);
+    }
+    // Shared parse (also enforced at admission by the webhook) — one
+    // validator, two callers.
+    match kopiur_api::maintenance::parse_run_annotations(annotations) {
+        Ok(request) => Ok(request),
+        Err(msg) => Err(Error::Validation(msg)),
+    }
+}
+
+/// Map the api-level manual mode onto the mover's maintenance mode. Exhaustive.
+fn mover_mode(mode: kopiur_api::ManualRunMode) -> MaintenanceMode {
+    match mode {
+        kopiur_api::ManualRunMode::Quick => MaintenanceMode::Quick,
+        kopiur_api::ManualRunMode::Full => MaintenanceMode::Full,
+    }
+}
+
+/// Patch `status.manualRun` from the TYPED struct (never hand-written field
+/// names — the structural schema silently prunes typos).
+async fn patch_manual_run(
+    api: &Api<Maintenance>,
+    name: &str,
+    manual: kopiur_api::ManualRunStatus,
+) -> Result<()> {
+    io::patch_status(
+        api,
+        name,
+        serde_json::json!({ "manualRun": serde_json::to_value(&manual)? }),
+    )
+    .await
+}
+
+/// Drive an unhandled manual request: observe/spawn its Job, book-keep
+/// `status.manualRun`. Returns `Some(action)` when the reconcile should stop
+/// here (a manual Job is in flight), `None` to continue with the cron flow.
+#[allow(clippy::too_many_arguments)]
+async fn handle_manual_run(
+    ctx: &Context,
+    api: &Api<Maintenance>,
+    job_api: &Api<Job>,
+    namespace: &str,
+    name: &str,
+    maint: &Maintenance,
+    repo: &io::ResolvedRepository,
+    requested: DateTime<Utc>,
+    mode: kopiur_api::ManualRunMode,
+) -> Result<Option<Action>> {
+    let requested_raw = requested.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // The annotation value as the user wrote it (status pins it verbatim).
+    let annotation_value = maint
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(crate::consts::RUN_REQUESTED_ANNOTATION))
+        .cloned()
+        .unwrap_or(requested_raw);
+    let job_name = manual_job_name(name, mode, requested);
+    let already_running = maint
+        .status
+        .as_ref()
+        .and_then(|st| st.manual_run.as_ref())
+        .is_some_and(|m| {
+            m.requested_at.as_deref() == Some(annotation_value.as_str())
+                && m.mode == Some(mode)
+                && m.phase == Some(kopiur_api::ManualRunPhase::Running)
+        });
+    match job_api.get_opt(&job_name).await? {
+        Some(job) => match job_terminal_state(&job) {
+            Some(true) => {
+                patch_manual_run(
+                    api,
+                    name,
+                    kopiur_api::ManualRunStatus {
+                        requested_at: Some(annotation_value),
+                        mode: Some(mode),
+                        phase: Some(kopiur_api::ManualRunPhase::Succeeded),
+                        completed_at: Some(Utc::now().to_rfc3339()),
+                    },
+                )
+                .await?;
+                delete_work_spec_cm(ctx, namespace, &job_name).await;
+                Ok(None)
+            }
+            Some(false) => {
+                patch_manual_run(
+                    api,
+                    name,
+                    kopiur_api::ManualRunStatus {
+                        requested_at: Some(annotation_value),
+                        mode: Some(mode),
+                        phase: Some(kopiur_api::ManualRunPhase::Failed),
+                        completed_at: Some(Utc::now().to_rfc3339()),
+                    },
+                )
+                .await?;
+                patch_condition_if_changed(
+                    api,
+                    name,
+                    maint,
+                    "False",
+                    "MaintenanceFailed",
+                    "manual maintenance Job failed; see the Job/pod logs",
+                )
+                .await?;
+                Ok(None)
+            }
+            None => Ok(Some(Action::requeue(REQUEUE_RUNNING))),
+        },
+        None if already_running => {
+            // The Job was TTL-reaped before its terminal state was observed:
+            // be honest rather than silently re-running side-effectful work.
+            patch_manual_run(
+                api,
+                name,
+                kopiur_api::ManualRunStatus {
+                    requested_at: Some(annotation_value),
+                    mode: Some(mode),
+                    phase: Some(kopiur_api::ManualRunPhase::Failed),
+                    completed_at: Some(Utc::now().to_rfc3339()),
+                },
+            )
+            .await?;
+            patch_condition_if_changed(
+                api,
+                name,
+                maint,
+                "False",
+                "ManualRunOutcomeLost",
+                "the manual maintenance Job disappeared before its outcome was observed \
+                 (TTL-reaped?); re-annotate to run again",
+            )
+            .await?;
+            Ok(None)
+        }
+        None => {
+            // G3 single-flight: never two maintenance Jobs for one repository.
+            if has_active_maintenance_job(job_api, name).await? {
+                return Ok(Some(Action::requeue(REQUEUE_RUNNING)));
+            }
+            spawn_maintenance_job(
+                ctx,
+                namespace,
+                name,
+                &job_name,
+                maint,
+                repo,
+                mover_mode(mode),
+                requested,
+            )
+            .await?;
+            patch_manual_run(
+                api,
+                name,
+                kopiur_api::ManualRunStatus {
+                    requested_at: Some(annotation_value),
+                    mode: Some(mode),
+                    phase: Some(kopiur_api::ManualRunPhase::Running),
+                    completed_at: None,
+                },
+            )
+            .await?;
+            tracing::info!(maint = %name, ?mode, requested = %requested.to_rfc3339(), "spawned MANUAL maintenance Job");
+            Ok(Some(Action::requeue(REQUEUE_RUNNING)))
+        }
+    }
+}
+
+/// Deterministic name for a MANUAL run's Job: same shape as the cron slots but
+/// with distinct `mq`/`mf` tokens, so a manual run at second X can never
+/// collide with a cron slot at second X.
+fn manual_job_name(cr: &str, mode: kopiur_api::ManualRunMode, requested: DateTime<Utc>) -> String {
+    const MAX: usize = 52;
+    let m = match mode {
+        kopiur_api::ManualRunMode::Quick => "mq",
+        kopiur_api::ManualRunMode::Full => "mf",
+    };
+    let suffix = format!("-{m}-{}", requested.timestamp());
+    let budget = MAX.saturating_sub(suffix.len());
+    if cr.len() <= budget {
+        format!("{cr}{suffix}")
+    } else {
+        let hash = short_hash(cr); // 8 hex chars
+        let keep = budget.saturating_sub(hash.len() + 1); // room for "-<hash>"
+        let head: String = cr.chars().take(keep).collect();
+        format!("{head}-{hash}{suffix}")
     }
 }
 
@@ -767,5 +1011,141 @@ mod tests {
         };
         let m = maint_with("0 */6 * * *", "0 3 * * *", Some(status));
         assert!(cap(next_wakeup(&m, now, None)) <= REQUEUE_CAP);
+    }
+
+    // --- manual (annotation-requested) runs -----------------------------------
+
+    fn maint_with_annotations(
+        annotations: &[(&str, &str)],
+        manual_status: Option<kopiur_api::ManualRunStatus>,
+    ) -> Maintenance {
+        let mut m: Maintenance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "kopiur.home-operations.com/v1alpha1",
+            "kind": "Maintenance",
+            "metadata": { "name": "maint", "namespace": "ns" },
+            "spec": {
+                "repository": { "kind": "Repository", "name": "repo" },
+                "schedule": { "quick": { "cron": "0 */6 * * *" }, "full": { "cron": "0 3 * * *" } },
+                "ownership": { "owner": "test" }
+            }
+        }))
+        .expect("maintenance fixture");
+        if !annotations.is_empty() {
+            m.metadata.annotations = Some(
+                annotations
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            );
+        }
+        if let Some(manual) = manual_status {
+            m.status = Some(kopiur_api::MaintenanceStatus {
+                manual_run: Some(manual),
+                ..Default::default()
+            });
+        }
+        m
+    }
+
+    #[test]
+    fn manual_run_request_parses_annotations_and_defaults_to_quick() {
+        use crate::consts::{RUN_MODE_ANNOTATION, RUN_REQUESTED_ANNOTATION};
+        let m = maint_with_annotations(&[(RUN_REQUESTED_ANNOTATION, "2026-06-11T12:00:00Z")], None);
+        let (at, mode) = manual_run_request(&m).expect("ok").expect("requested");
+        assert_eq!(
+            at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "2026-06-11T12:00:00Z"
+        );
+        assert_eq!(
+            mode,
+            kopiur_api::ManualRunMode::Quick,
+            "mode defaults to quick"
+        );
+
+        let m = maint_with_annotations(
+            &[
+                (RUN_REQUESTED_ANNOTATION, "2026-06-11T12:00:00Z"),
+                (RUN_MODE_ANNOTATION, "full"),
+            ],
+            None,
+        );
+        let (_, mode) = manual_run_request(&m).expect("ok").expect("requested");
+        assert_eq!(mode, kopiur_api::ManualRunMode::Full);
+    }
+
+    #[test]
+    fn manual_run_request_dedupes_an_answered_timestamp_but_not_a_new_one() {
+        use crate::consts::RUN_REQUESTED_ANNOTATION;
+        let answered = kopiur_api::ManualRunStatus {
+            requested_at: Some("2026-06-11T12:00:00Z".into()),
+            mode: Some(kopiur_api::ManualRunMode::Quick),
+            phase: Some(kopiur_api::ManualRunPhase::Succeeded),
+            completed_at: Some("2026-06-11T12:01:00Z".into()),
+        };
+        // Same timestamp, terminal phase: handled — a no-op.
+        let m = maint_with_annotations(
+            &[(RUN_REQUESTED_ANNOTATION, "2026-06-11T12:00:00Z")],
+            Some(answered.clone()),
+        );
+        assert!(manual_run_request(&m).expect("ok").is_none());
+
+        // A NEW timestamp re-arms the trigger.
+        let m = maint_with_annotations(
+            &[(RUN_REQUESTED_ANNOTATION, "2026-06-11T13:00:00Z")],
+            Some(answered.clone()),
+        );
+        assert!(manual_run_request(&m).expect("ok").is_some());
+
+        // A Running phase is NOT deduped here (the reconcile body resolves the
+        // in-flight Job / lost-outcome cases).
+        let running = kopiur_api::ManualRunStatus {
+            phase: Some(kopiur_api::ManualRunPhase::Running),
+            completed_at: None,
+            ..answered
+        };
+        let m = maint_with_annotations(
+            &[(RUN_REQUESTED_ANNOTATION, "2026-06-11T12:00:00Z")],
+            Some(running),
+        );
+        assert!(manual_run_request(&m).expect("ok").is_some());
+    }
+
+    #[test]
+    fn manual_run_request_rejects_garbage_with_a_fix() {
+        use crate::consts::{RUN_MODE_ANNOTATION, RUN_REQUESTED_ANNOTATION};
+        let m = maint_with_annotations(&[(RUN_REQUESTED_ANNOTATION, "yesterday")], None);
+        let err = manual_run_request(&m).expect_err("bad timestamp");
+        let msg = err.to_string();
+        assert!(msg.contains("must be an RFC3339 timestamp"), "{msg}");
+        assert!(msg.contains("kubectl kopiur maintenance run"), "{msg}");
+
+        let m = maint_with_annotations(
+            &[
+                (RUN_REQUESTED_ANNOTATION, "2026-06-11T12:00:00Z"),
+                (RUN_MODE_ANNOTATION, "FULL"),
+            ],
+            None,
+        );
+        let msg = manual_run_request(&m).expect_err("bad mode").to_string();
+        assert!(msg.contains("must be `quick` or `full`"), "{msg}");
+    }
+
+    #[test]
+    fn manual_job_names_never_collide_with_cron_slot_names() {
+        let at = DateTime::parse_from_rfc3339("2026-06-11T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let manual_q = manual_job_name("maint", kopiur_api::ManualRunMode::Quick, at);
+        let manual_f = manual_job_name("maint", kopiur_api::ManualRunMode::Full, at);
+        let cron_q = maintenance_job_name("maint", MaintenanceMode::Quick, at);
+        let cron_f = maintenance_job_name("maint", MaintenanceMode::Full, at);
+        let names = [&manual_q, &manual_f, &cron_q, &cron_f];
+        let unique: std::collections::BTreeSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), 4, "{names:?}");
+        assert!(manual_q.contains("-mq-"), "{manual_q}");
+        assert!(manual_f.contains("-mf-"), "{manual_f}");
+        // Long CR names stay within the budget.
+        let long = "m".repeat(80);
+        assert!(manual_job_name(&long, kopiur_api::ManualRunMode::Full, at).len() <= 52);
     }
 }

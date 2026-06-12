@@ -396,6 +396,22 @@ async fn run_bootstrap(
             return BootstrapResult::failed(&ce);
         }
         created = true;
+        // Stamp the stable, lease-derived maintenance owner on a repo we just
+        // CREATED (kopia auto-assigned this pod's ephemeral identity). Without
+        // this, every maintenance mover sees a foreign owner and a
+        // `takeoverPolicy: Never` yields forever. Best-effort: a failed stamp
+        // is recoverable later via takeoverPolicy=Force (degrade-not-crash).
+        if let Some(owner) = &op.maintenance_owner {
+            match client.maintenance_set_owner(owner).await {
+                Ok(()) => info!(%owner, "stamped maintenance owner on created repository"),
+                Err(e) => warn!(
+                    %owner,
+                    class = %e.class(),
+                    "could not stamp maintenance owner on created repository; \
+                     maintenance will need takeoverPolicy=Force once"
+                ),
+            }
+        }
     }
 
     let unique_id = match client.repository_status().await {
@@ -512,6 +528,24 @@ async fn run_maintenance_flow(
         });
     }
 
+    // Assume the STABLE lease-derived client identity before anything else:
+    // this pod's own user@hostname is ephemeral (a fresh pod every run), so
+    // kopia's recorded owner can only ever be compared against — and claimed
+    // as — the stable identity. (kopia 0.23 has no identity override at
+    // connect; `repository set-client` flips it post-connect.)
+    let (lease_user, lease_host) = kopiur_api::maintenance::kopia_lease_identity(&op.owner);
+    if let Err(e) = client
+        .repository_set_client_identity(&lease_user, &lease_host)
+        .await
+    {
+        patch_maintenance_status(&spec.target_ref, &maintenance_failed_body(&e)).await;
+        error!(class = %e.class(), "maintenance set-client identity failed");
+        return Err(MoverError::Kopia {
+            op: KopiaOp::MaintenanceConnect,
+            source: e,
+        });
+    }
+
     // Read the current lease holder and apply the takeover policy.
     let info = match client.maintenance_info().await {
         Ok(i) => i,
@@ -524,7 +558,12 @@ async fn run_maintenance_flow(
             });
         }
     };
-    let held_by_other = !info.owner.is_empty() && info.owner != op.owner;
+    // Held by another when kopia's recorded owner is neither empty nor OUR
+    // stable identity. Comparing against `op.owner` (the logical lease string,
+    // never a kopia user@hostname) was the bug that made every run on a
+    // mover-bootstrapped repo yield forever.
+    let my_owner = kopiur_api::maintenance::kopia_owner_for_lease(&op.owner);
+    let held_by_other = !info.owner.is_empty() && info.owner != my_owner;
     match lease_action(op.takeover_policy, held_by_other) {
         LeaseAction::Yield => {
             patch_maintenance_status(

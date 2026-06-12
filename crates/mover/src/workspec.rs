@@ -306,6 +306,13 @@ pub struct BootstrapRepositoryOp {
     /// instead of silently spawning a second repository.
     #[serde(default)]
     pub auto_create: bool,
+    /// The stable kopia maintenance owner (`user@hostname`, derived from the
+    /// managed lease — `kopiur_api::maintenance::kopia_owner_for_lease`) to
+    /// stamp on a repository this bootstrap CREATES. Adopted repositories are
+    /// never re-stamped (their existing owner is meaningful; takeoverPolicy
+    /// governs). Absent on old work specs (serde default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_owner: Option<String>,
     /// Run `snapshot list` and return the entries so the controller can
     /// materialize `origin: discovered` Snapshot CRs. The snapshot *count* is
     /// always reported; the entries are only returned when this is set (the
@@ -1013,6 +1020,7 @@ mod tests {
                 auto_create: true,
                 scan_catalog: true,
                 create_options: Default::default(),
+                maintenance_owner: Some("kopiur@kopiur-ns-repo".into()),
             }),
             identity: sample_identity(),
             repository: RepositoryConnect::S3 {

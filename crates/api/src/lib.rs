@@ -4,6 +4,7 @@
 pub mod backend;
 pub mod cluster_repository;
 pub mod common;
+pub mod consts;
 pub mod maintenance;
 pub mod repository;
 pub mod repository_replication;
@@ -15,6 +16,7 @@ pub mod snapshot_schedule;
 // Shared pure-logic modules (no controller-runtime deps). The webhook and the
 // controller both import these, so validation/resolution behavior is identical
 // across the two call sites (ADR §5.1, SKILL "one validator, two callers").
+pub mod creds;
 pub mod duration;
 pub mod error;
 pub mod identity;
@@ -35,8 +37,10 @@ pub use common::{
     resolve_mover,
 };
 pub use maintenance::{
-    LeaseAction, Maintenance, MaintenanceSchedule, MaintenanceSpec, MaintenanceStatus, Ownership,
-    RepositoryMaintenanceSpec, TakeoverPolicy, default_maintenance_schedule, lease_action,
+    LeaseAction, Maintenance, MaintenanceSchedule, MaintenanceSpec, MaintenanceStatus,
+    ManualRunMode, ManualRunPhase, ManualRunStatus, Ownership, RepositoryMaintenanceSpec,
+    TakeoverPolicy, default_maintenance_schedule, kopia_lease_identity, kopia_owner_for_lease,
+    lease_action, managed_lease, parse_run_annotations,
 };
 pub use repository::{Repository, RepositoryPhase, RepositorySpec, RepositoryStatus};
 pub use repository_replication::{

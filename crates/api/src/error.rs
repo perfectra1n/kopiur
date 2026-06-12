@@ -36,6 +36,15 @@ use thiserror::Error;
 /// exact variant; messages are written for an end user reading a rejected apply.
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
 pub enum ValidationError {
+    /// The maintenance `run-requested`/`run-mode` annotations are malformed
+    /// (message produced by [`crate::maintenance::parse_run_annotations`],
+    /// already what/why/fix).
+    #[error("invalid maintenance run annotation: {message}")]
+    InvalidRunAnnotation {
+        /// The shared parser's actionable message.
+        message: String,
+    },
+
     /// A `Repository`/`ClusterRepository`'s own credential refs, or a consumer's
     /// `repository.namespace`, set a namespace that the variant forbids.
     /// For `kind: ClusterRepository`, `repository.namespace` MUST be absent

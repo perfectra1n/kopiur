@@ -118,6 +118,41 @@ kopia tracks a single **maintenance owner** per repository. When several cluster
 
 The lease is read inside the maintenance Job (which is the only place with repository access for object stores). If the policy declines to take over, the run is a successful no-op that records why on the resource's conditions.
 
+## Running maintenance on demand
+
+Maintenance normally fires on its quick/full crons, but you can request an
+out-of-band run at any time by stamping two annotations — the operator routes
+it through the **same** mover, ownership-lease, and single-flight path as the
+scheduled slots, so a manual run can never violate the one-job-per-repository
+guarantee:
+
+```console
+$ kubectl annotate maintenance nas-primary -n billing --overwrite \
+    kopiur.home-operations.com/run-requested="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    kopiur.home-operations.com/run-mode=full
+```
+
+- `run-requested` is an RFC3339 timestamp. A **new** timestamp requests a new
+  run; re-applying the same value is a no-op once that request was handled.
+- `run-mode` is `quick` (the default when absent) or `full`.
+
+The outcome lands in `status.manualRun` (`requestedAt`, `mode`, `phase`:
+`Running`/`Succeeded`/`Failed`, `completedAt`). The
+[kubectl plugin](cli/index.md) wraps this as
+`kubectl kopiur maintenance run [NAME | --repository NAME] [--full] [--wait]`.
+
+/// warning | Repositories bootstrapped by kopiur ≤ 0.3.x: claim the lease once
+kopia records the repository CREATOR as the maintenance owner. Older kopiur
+releases left that as the (ephemeral) bootstrap pod's identity, so every
+maintenance run saw a "foreign" owner and `takeoverPolicy: Never` yielded
+forever — maintenance silently never ran. New bootstraps stamp a stable,
+lease-derived owner (`kopiur@kopiur-<ns>-<repo>`); for repositories created
+before that, set `spec.ownership.takeoverPolicy: Force` once (or run
+`kopia maintenance set --owner kopiur@<lease>` by hand) — the next run claims
+the lease and subsequent runs proceed normally.
+
+///
+
 ## Inspecting status
 
 ```console

@@ -1,47 +1,18 @@
-//! Well-known string constants: finalizers, annotations, labels (ADR §4.5).
+//! Controller-internal string constants: event reasons/actions, single-flight
+//! labels, deadlines (ADR §4.5).
+//!
+//! The *wire-contract* strings (finalizer, origin/config/dedup labels,
+//! `managed-by`, kstatus condition types, API version) live in
+//! [`kopiur_api::consts`] so external tooling shares one definition; they are
+//! re-exported here so controller call sites keep their existing import paths.
 
-/// The finalizer every `Snapshot` carries so the operator can run snapshot
-/// cleanup before the CR is removed (ADR §4.5 / SKILL "Snapshot lifecycle =
-/// CR lifecycle").
-pub const SNAPSHOT_CLEANUP_FINALIZER: &str = "kopiur.home-operations.com/snapshot-cleanup";
-
-/// Repo-offline escape hatch: when present, the finalizer is removed *without*
-/// contacting the repository, the snapshot is recorded orphaned, and a
-/// `SnapshotOrphaned` event is emitted (ADR §4.5).
-pub const SKIP_SNAPSHOT_CLEANUP_ANNOTATION: &str =
-    "kopiur.home-operations.com/skip-snapshot-cleanup";
-
-/// Label mirroring a `Snapshot`'s origin (`scheduled`/`manual`/`discovered`).
-pub const ORIGIN_LABEL: &str = "kopiur.home-operations.com/origin";
-/// Label keying a discovered `Snapshot` to its kopia snapshot id (dedup, §2.1).
-pub const SNAPSHOT_ID_LABEL: &str = "kopiur.home-operations.com/snapshot-id";
-/// Label keying a discovered `Snapshot` to the owning Repository UID (dedup).
-pub const REPOSITORY_UID_LABEL: &str = "kopiur.home-operations.com/repository-uid";
-/// Label naming the `SnapshotPolicy` a `Snapshot` was produced from.
-pub const CONFIG_LABEL: &str = "kopiur.home-operations.com/config";
-
-/// The API version string for kopiur CRDs (used in mover `TargetRef`s).
-pub const API_VERSION: &str = "kopiur.home-operations.com/v1alpha1";
-
-/// The standard `app.kubernetes.io/managed-by` label key. Stamped on **every**
-/// operator-created object (mover Jobs, work-spec ConfigMaps, cache PVC, minted
-/// mover SA/RoleBinding, projected credential Secret, CSI VolumeSnapshots) so
-/// Argo/Flux recognize them as controller-owned and neither prune nor report them
-/// `OutOfSync` (ADR-0005 §14(c)).
-pub const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
-/// The [`MANAGED_BY_LABEL`] value identifying kopiur-managed objects.
-pub const MANAGED_BY_VALUE: &str = "kopiur";
-
-/// kstatus-compliant standard condition types (ADR-0005 §2) so `kubectl wait
-/// --for=condition=Ready` and Flux/Argo health checks work natively against every
-/// reconciled kopiur CRD.
-/// The headline readiness condition.
-pub const READY_CONDITION: &str = "Ready";
-/// Set `True` while a reconcile is making progress toward Ready.
-pub const RECONCILING_CONDITION: &str = "Reconciling";
-/// Set `True` when the resource is stuck and won't progress without intervention
-/// (mapped from a terminal `ErrorClass::Terminal` failure).
-pub const STALLED_CONDITION: &str = "Stalled";
+pub use kopiur_api::consts::{
+    API_VERSION, CONFIG_LABEL, MAINTENANCE_CONFIGURED_CONDITION, MANAGED_BY_LABEL,
+    MANAGED_BY_VALUE, OP_LABEL, OP_RESTORE, OP_RESTORE_TARGET, ORIGIN_LABEL, READY_CONDITION,
+    RECONCILING_CONDITION, REPOSITORY_UID_LABEL, RUN_MODE_ANNOTATION, RUN_REQUESTED_ANNOTATION,
+    SCHEDULE_LABEL, SKIP_SNAPSHOT_CLEANUP_ANNOTATION, SNAPSHOT_CLEANUP_FINALIZER,
+    SNAPSHOT_ID_LABEL, STALLED_CONDITION,
+};
 
 /// `Snapshot` condition recording whether its repository accepts writes (§11). Set
 /// `False` (with [`REPOSITORY_READ_ONLY_REASON`]) when a backup is refused because
@@ -88,11 +59,6 @@ pub const REPLICATION_INSTANCE_LABEL: &str = "kopiur.home-operations.com/replica
 /// Annotation on a replication Job recording the scheduled slot it runs (RFC3339).
 pub const REPLICATION_SLOT_ANNOTATION: &str = "kopiur.home-operations.com/replication-slot";
 
-/// Status condition `type` set on a `Repository`/`ClusterRepository` recording
-/// whether a `Maintenance` covers it (ADR §3.7). Maintenance is default-managed:
-/// `True` once the operator manages one (or an external one exists); `False` only
-/// when explicitly disabled or a `ClusterRepository`'s placement is unresolved.
-pub const MAINTENANCE_CONFIGURED_CONDITION: &str = "MaintenanceConfigured";
 /// Condition reason when a `Maintenance` (managed or external) covers the repo.
 pub const MAINTENANCE_CONFIGURED_REASON: &str = "MaintenanceConfigured";
 /// `action` for the maintenance-configuration check Event.
