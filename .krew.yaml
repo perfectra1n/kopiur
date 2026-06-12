@@ -1,5 +1,6 @@
 # Krew plugin manifest TEMPLATE for kubectl-kopiur. The release workflow's
-# `krew` job substitutes the double-braced VERSION/REPO/SHA256 placeholders
+# `krew` job substitutes the double-braced VERSION/KREW_VERSION/REPO/SHA256
+# placeholders
 # from the uploaded release assets, attaches the rendered `kopiur.yaml` to the
 # GitHub release, and commits it to THIS repo's plugins/ directory — the
 # kopiur repository doubles as its own krew custom index. Platforms whose
@@ -11,7 +12,7 @@ kind: Plugin
 metadata:
   name: kopiur
 spec:
-  version: "{{VERSION}}"
+  version: "{{KREW_VERSION}}"
   homepage: https://kopiur.home-operations.com/cli/
   shortDescription: Operate the kopiur backup operator
   description: |

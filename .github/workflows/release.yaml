@@ -349,6 +349,11 @@ jobs:
           gh release download "${VERSION}" --pattern 'kopiur-cli_*' --repo "${GITHUB_REPOSITORY}"
           cd ..
           cp .krew.yaml kopiur.yaml
+          # Krew requires spec.version to start with 'v'; our release tags are
+          # bare (release-please: 0.3.4). Asset URLs keep the real tag, only
+          # the manifest version field gets the prefix.
+          krew_version="v${VERSION#v}"
+          sed -i "s|{{KREW_VERSION}}|${krew_version}|g" kopiur.yaml
           sed -i "s|{{VERSION}}|${VERSION}|g" kopiur.yaml
           sed -i "s|{{REPO}}|${GITHUB_REPOSITORY}|g" kopiur.yaml
           for platform in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64 windows_amd64; do
@@ -368,6 +373,10 @@ jobs:
           if grep -q '{{' kopiur.yaml; then
             echo "unsubstituted placeholders remain:"; grep -n '{{' kopiur.yaml; exit 1
           fi
+          # krew refuses manifests whose version lacks the 'v' prefix.
+          yq -e '.spec.version | test("^v")' kopiur.yaml >/dev/null || {
+            echo "spec.version '$(yq '.spec.version' kopiur.yaml)' must start with 'v'"; exit 1
+          }
           cat kopiur.yaml
 
       - name: Attach the manifest to the release
