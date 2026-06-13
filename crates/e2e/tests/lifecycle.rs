@@ -1217,6 +1217,16 @@ async fn maintenance_claims_lease() {
     )
     .await
     .expect("Maintenance should claim the lease");
+
+    // kstatus consistency guard: once the repository is Ready and the lease is
+    // claimed, the controller heals Maintenance `Ready=True` (set_ready_if_changed,
+    // §2). That heal is a SEPARATE status write from the lease/run bookkeeping, so
+    // gate on the healed condition rather than asserting it right after the lease
+    // claim — same two-pass heal discipline as the restore/snapshot/replication
+    // guards (docs/dev/watch-and-reconcile.md, "Two-pass terminal heal").
+    wait_condition(&maints, "e2e-maint", "Ready", "True")
+        .await
+        .expect("a Maintenance whose repository is Ready must heal kstatus Ready=True");
 }
 
 /// Drive a Snapshot to Succeeded, then assert the controller exposes the expected

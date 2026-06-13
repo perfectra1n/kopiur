@@ -84,3 +84,33 @@ resolution, a discovered snapshot's forced `Retain`). The guiding rule: **an edi
 to a spec or credential must always be able to un-stick a `Failed` object** —
 defensive immutability that forces delete-and-recreate is worse than the bug it
 prevents. Anything resolved-then-pinned lives in `status.resolved.*`, not in spec.
+
+## Two-pass terminal heal (phase precedes derived status)
+
+For the mover-driven kinds (`Snapshot`, `Restore`, `RepositoryReplication`), the
+**mover** stamps the terminal `status.phase` (`Succeeded`/`Completed`) — and only
+that, plus its own outputs (`kopiaSnapshotID`, `lastReplicated`, `logTail`). The
+**controller** then heals the *derived* status in a FOLLOW-UP reconcile: the
+kstatus trio (`Ready`/`Reconciling`/`Stalled`), `status.hooks.*`, and the
+`kopiur_resource_phase` gauge. The terminal gate's self-check keys on the
+distinctive healed condition, not the phase, precisely because the phase lands
+first (`restore.rs::kstatus_settled_for`). The same split applies to controller-
+driven kinds whose Ready heal is a separate write from their primary bookkeeping
+(`Maintenance::set_ready_if_changed`).
+
+Consequence — the heal lags the phase by up to one **debounce window**
+(`spawn_all`'s `ctrl_cfg`, currently 250 ms). That window is a deliberate
+heal-latency floor: small enough to be imperceptible to `kubectl wait
+--for=condition=Ready` and Flux/Argo health gates, large enough to coalesce
+owned-Job event bursts. It was 1 s and was shrunk after it widened this gap enough
+to break e2e assertions — see the commit history and `crates/controller/src/lib.rs`.
+
+**Rule for tests and external consumers:** never gate on `status.phase` and then
+read a *healed* field in the same breath — that races the heal. Gate on the healed
+field itself. In e2e use `common::wait_ready` (or `wait_condition(.., "Ready",
+"True")`) before asserting any kstatus condition / `hooks.*` / phase-gauge metric.
+The guards live in `restore.rs::restore_completed_reports_kstatus_ready`,
+`hooks.rs::http_request_post_hook_hits_in_cluster_receiver`,
+`lifecycle.rs::metrics_reflect_backup_lifecycle` /
+`maintenance_claims_lease`, and
+`replication.rs::repository_replication_mirrors_to_second_filesystem_repo`.

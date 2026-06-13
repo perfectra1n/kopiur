@@ -84,6 +84,16 @@ async fn repository_replication_mirrors_to_second_filesystem_repo() {
     .await
     .expect("the replication should run and stamp status.lastReplicated");
 
+    // kstatus consistency guard (regression: the same two-pass heal bug as
+    // restore/snapshot). The mover stamps `phase: Succeeded` + `lastReplicated`;
+    // the controller heals `Ready=True` in a FOLLOW-UP reconcile. Gate on the
+    // healed condition — `wait_ready`, not the mover-written `lastReplicated` —
+    // so `kubectl wait --for=condition=Ready` / Flux health gates work and a
+    // future heal-latency regression is caught here, not just in CI flake.
+    wait_ready(&repls, name)
+        .await
+        .expect("a replication that recorded a successful run must heal kstatus Ready=True");
+
     // The destination repo must now hold the mirrored snapshot: connect a verifier.
     let count = observed_snapshot_count(&client, "e2e-repl-verify", "repl-dst").await;
     assert!(

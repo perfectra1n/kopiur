@@ -480,7 +480,7 @@ async fn http_request_post_hook_hits_in_cluster_receiver() {
     // after `wait_phase` — that races the post-hook reconcile and sees no `hooks`
     // block at all. Regression: the controller debounce widened the gap until the
     // race was lost every run.
-    let s = wait_until(
+    wait_until(
         "snapshot stamps hooks.postCompletedAt after the post-hook reconcile",
         default_timeout(),
         poll_interval(),
