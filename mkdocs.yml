@@ -156,6 +156,22 @@ nav:
   - User guide:
       - Getting started: getting-started.md
       - Installation: install.md
+      - GitOps (Flux / Argo): gitops.md
+      # NOTE: with `navigation.indexes` on, a page whose source file is named
+      # index.md must be a SECTION index (first child of its own section). Listed
+      # as a bare child of a parent section, Material adopts it as THAT section's
+      # landing page and drops it from the sidebar entirely — which is exactly
+      # what happened when this was `kubectl plugin: cli/index.md` under
+      # "User guide" (the whole guide silently linked to /cli/ and the entry
+      # vanished). Keep cli/index.md first inside its own section.
+      - kubectl plugin:
+          - cli/index.md
+          - Backups, restores & logs: cli/backup-restore.md
+          - Inspecting & browsing snapshots: cli/browse.md
+          - Operations (status, doctor, maintenance): cli/operations.md
+          - Migrating from VolSync: cli/migrate-volsync.md
+      - Examples: examples.md
+      - Complete walkthrough: walkthrough.md
       - Helm chart values: configuration.md
       - Repositories & backends: repositories.md
       - Backend configuration:
@@ -177,22 +193,6 @@ nav:
       - Permissions, UID & GID: permissions.md
       - Security context: security-context.md
       - Maintenance: maintenance.md
-      - GitOps (Flux / Argo): gitops.md
-      # NOTE: with `navigation.indexes` on, a page whose source file is named
-      # index.md must be a SECTION index (first child of its own section). Listed
-      # as a bare child of a parent section, Material adopts it as THAT section's
-      # landing page and drops it from the sidebar entirely — which is exactly
-      # what happened when this was `kubectl plugin: cli/index.md` under
-      # "User guide" (the whole guide silently linked to /cli/ and the entry
-      # vanished). Keep cli/index.md first inside its own section.
-      - kubectl plugin:
-          - cli/index.md
-          - Backups, restores & logs: cli/backup-restore.md
-          - Inspecting & browsing snapshots: cli/browse.md
-          - Operations (status, doctor, maintenance): cli/operations.md
-          - Migrating from VolSync: cli/migrate-volsync.md
-      - Examples: examples.md
-      - Complete walkthrough: walkthrough.md
       - Troubleshooting: troubleshooting.md
   # Scenarios = end-to-end, problem-driven walkthroughs (one apply-ready bundle
   # each under deploy/examples/scenarios/), as opposed to the per-capability
