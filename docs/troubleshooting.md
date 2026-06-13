@@ -204,6 +204,29 @@ the operator claims the lease, then revert to `Never`.
 additionally records slots that were handled by *yielding*). See the
 [Maintenance guide](maintenance.md) for ownership and the schedule model.
 
+## kopia web UI ([`spec.server`](server.md)) won't come up or can't be reached
+
+The server is a `Deployment` + `Service` named `<repo>-kopia-ui`, created once the
+repository is `Ready`. Start at the Deployment and the repository's
+`status.server`:
+
+```console
+$ kubectl get deploy,svc,pods -n <ns> \
+    -l app.kubernetes.io/name=kopiur-server,app.kubernetes.io/instance=<repo>
+$ kubectl get repository <repo> -n <ns> -o jsonpath='{.status.server}'   # endpoint/authMode/...
+```
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| No Deployment/Service ever appears | The repository isn't `Ready` (the server waits for it), or `spec.server` isn't actually set. | `kubectl describe repository <repo>` and fix the repository first; confirm the `spec.server` block is present. |
+| Repository `Failed`: *"requires PVC … to be ReadWriteMany"* | A **filesystem** backend can't run a long-lived server on a `ReadWriteOnce` repo PVC (it would block movers). | Use an RWX StorageClass (or inline NFS) for the repo volume, or run the UI on an object-store repository. |
+| Server pod `CrashLoopBackOff` / not Ready | Repository credentials wrong, or the repo became unreachable. | Check the pod logs (`kubectl logs deploy/<repo>-kopia-ui -n <ns>`); the kopia connect error is actionable. |
+| Can't log in | Wrong credentials, or the wrong auth mode. | For `generate`, read the minted password: `kubectl get secret <repo>-kopia-ui-auth -n <ns> -o jsonpath='{.data.password}' \| base64 -d`. For `secretRef`, verify the keys exist. |
+| Creating the Repository fails at admission: *"acknowledgeInsecure"* | `auth.insecure` was chosen without `acknowledgeInsecure: true`. | Set `insecure: { acknowledgeInsecure: true }`, or use `generate`/`secretRef` instead. |
+| UI unreachable from outside the cluster | `service.type: ClusterIP` (the default) is in-cluster only, and Kopiur never creates an Ingress/HTTPRoute; or a `NetworkPolicy` blocks it. | `kubectl port-forward svc/<repo>-kopia-ui` for a quick look; for ongoing access wire your own Ingress/HTTPRoute at the Service (see [Web UI → Exposing the Service](server.md#exposing-the-service)). |
+
+Full feature guide, including the security model: **[Web UI (kopia server)](server.md)**.
+
 ## Webhook admission fails or the webhook won't start
 
 The admission webhook validates `kopiur.home-operations.com` objects and serves

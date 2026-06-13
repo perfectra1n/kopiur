@@ -269,6 +269,18 @@ This is distinct from a single `kubectl delete snapshot`, which always honors th
 
 `suspend: true` (ADR-0005 §14(e)) pauses connect/bootstrap and maintenance projection declaratively, without deleting the `Repository`. Surfaced via a condition. `suspend` is consistent across `Repository`/`ClusterRepository`/`SnapshotPolicy`/`RepositoryReplication`.
 
+## `server` — the kopia web UI
+
+`spec.server` runs kopia's built-in HTML UI in a `Deployment` behind a `Service`, so you can browse snapshots and policies and do ad-hoc restores. Presence of the block enables it (there is no `enabled` bool), and it defaults to operator-minted credentials on an in-cluster `ClusterIP` Service.
+
+/// warning | The UI has no read-only mode
+
+Anyone who can reach the UI can read, create, and **delete** backups, and the server pod holds the repository decryption key. Treat exposing it like exposing the repository itself.
+
+///
+
+Full guide — auth modes, exposing the Service, the ReadWriteMany requirement for filesystem backends, and status — in **[Web UI (kopia server)](server.md)**.
+
 ## Watching a repository
 
 ```console
