@@ -23,6 +23,16 @@ pub const WORK_SPEC_PATH: &str = "KOPIUR_WORK_SPEC_PATH";
 /// Optional override for the `kopia` binary path (defaults to `kopia` on PATH).
 pub const KOPIA_BINARY: &str = "KOPIUR_KOPIA_BINARY";
 
+/// Path to the mounted server work-spec JSON consumed by the `serve` entrypoint
+/// (the controller↔mover contract for `spec.server`). The controller sets this on
+/// the server `Deployment`; the mover reads it (falling back to `argv[2]`).
+pub const SERVER_SPEC_PATH: &str = "KOPIUR_SERVER_SPEC_PATH";
+
+/// UI password env for the `serve` entrypoint's `ServerAuthMode::Password` mode.
+/// The controller injects it via a `secretKeyRef` (never argv/ConfigMap); the mover
+/// appends it to `kopia server start` at exec time inside the server pod.
+pub const SERVER_PASSWORD: &str = "KOPIA_SERVER_PASSWORD";
+
 /// Name of the `ConfigMap` (in the work spec's `targetRef.namespace`) the mover
 /// writes its bootstrap result into. Set by the controller only for
 /// `BootstrapRepository` runs; absent for backup/restore/delete. The controller

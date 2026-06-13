@@ -545,6 +545,68 @@ impl ThrottleArgs {
     }
 }
 
+/// UI authentication mode for `kopia server start`. Controller-agnostic mirror of
+/// the api crate's `ServerAuth` (this crate has no kube dependency).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerAuthMode {
+    /// Require a UI login. `username` goes on argv; the password is supplied
+    /// separately to [`KopiaClient::server_start`] (it is never baked into the pure
+    /// arg builder, nor into a ConfigMap).
+    Password {
+        /// HTTP basic-auth username for the UI (`--server-username`).
+        username: String,
+    },
+    /// No UI authentication (`--without-password`). kopia requires `--insecure`
+    /// alongside it, which [`server_start_args`] always emits.
+    None,
+}
+
+impl ServerAuthMode {
+    /// Stable discriminant for logging.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            ServerAuthMode::Password { .. } => "password",
+            ServerAuthMode::None => "none",
+        }
+    }
+}
+
+/// A typed description of how to run `kopia server start` (the web UI).
+///
+/// ## Why this is its own non-returning path (not `run_ok`)
+///
+/// `server start` is a long-running process that never exits on success, so the
+/// `run_ok`/`run_json` "spawn, read to EOF, wait for exit code" pattern would hang
+/// forever. [`KopiaClient::server_start`] instead `exec`s the binary so kopia takes
+/// over this PID and receives `SIGTERM` directly from the kubelet on pod shutdown.
+///
+/// ## TLS and auth
+///
+/// The server always runs with `--insecure` (no in-pod TLS): TLS is terminated by
+/// the user's ingress and the Service speaks plain HTTP. `--insecure` is kopia's
+/// *no-TLS* switch — it is required in every mode, and is **not** the no-auth knob
+/// (that is `--without-password`, selected by [`ServerAuthMode::None`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerStartSpec {
+    /// Listen address — must be non-loopback (e.g. `0.0.0.0:51515`) to be reachable
+    /// through a Service.
+    pub address: String,
+    /// UI authentication mode.
+    pub auth: ServerAuthMode,
+    /// Serve the embedded HTML UI (`--ui`). Defaults to enabled.
+    pub ui: bool,
+}
+
+impl Default for ServerStartSpec {
+    fn default() -> Self {
+        Self {
+            address: "0.0.0.0:51515".to_string(),
+            auth: ServerAuthMode::None,
+            ui: true,
+        }
+    }
+}
+
 /// Builder for [`KopiaClient`].
 #[derive(Debug, Clone, Default)]
 pub struct KopiaClientBuilder {
@@ -1246,6 +1308,45 @@ impl KopiaClient {
             })
         }
     }
+
+    /// Run `kopia server start`, **replacing this process** with kopia via `exec`.
+    ///
+    /// On success this never returns (kopia takes over the PID and runs until it is
+    /// signalled). It returns a [`KopiaError`] only if `exec` itself fails (e.g. the
+    /// binary is missing). The repository must already be connected (call
+    /// [`KopiaClient::repository_connect`] first) — the server reads the connected
+    /// repo from the kopia config file.
+    ///
+    /// `password` is the UI password for [`ServerAuthMode::Password`]; it is appended
+    /// to argv **here**, inside the server pod, so it never reaches the controller,
+    /// a ConfigMap, or the pure [`server_start_args`] builder. For
+    /// [`ServerAuthMode::None`] it is ignored.
+    #[cfg(unix)]
+    pub fn server_start(&self, spec: &ServerStartSpec, password: Option<&str>) -> KopiaError {
+        use std::os::unix::process::CommandExt;
+
+        let mut args = server_start_args(spec);
+        if let ServerAuthMode::Password { .. } = &spec.auth
+            && let Some(pw) = password
+        {
+            args.push("--server-password".into());
+            args.push(pw.to_string());
+        }
+
+        let mut cmd = std::process::Command::new(&self.binary);
+        for (k, v) in &self.common_env {
+            cmd.env(k, v);
+        }
+        cmd.args(&args);
+        cmd.args(&self.common_args);
+
+        // exec(2) replaces the current image. It returns ONLY on failure.
+        let source = cmd.exec();
+        KopiaError::Spawn {
+            binary: self.binary.display().to_string(),
+            source,
+        }
+    }
 }
 
 /// Push a kingpin `--[no-]flag` boolean tri-state (`Some(true)` → `--flag`,
@@ -1404,6 +1505,42 @@ fn policy_set_args(target: &str, policy: &PolicyArgs) -> Vec<String> {
         args.push(n.to_string());
     }
     args.extend(policy.extra_args.iter().cloned());
+    args
+}
+
+/// Build the args for `kopia server start` (everything except the secret password,
+/// which [`KopiaClient::server_start`] appends at exec time). Pure and unit-testable.
+///
+/// Always emits `--insecure` (no in-pod TLS; the user's ingress terminates TLS).
+/// [`ServerAuthMode::Password`] emits `--server-username`; [`ServerAuthMode::None`]
+/// emits `--without-password`.
+fn server_start_args(spec: &ServerStartSpec) -> Vec<String> {
+    let mut args = vec![
+        "server".into(),
+        "start".into(),
+        "--address".into(),
+        spec.address.clone(),
+        // No in-pod TLS — this is kopia's *no-TLS* switch, required in every mode.
+        "--insecure".into(),
+    ];
+    if spec.ui {
+        args.push("--ui".into());
+    }
+    match &spec.auth {
+        ServerAuthMode::Password { username } => {
+            args.push("--server-username".into());
+            args.push(username.clone());
+        }
+        ServerAuthMode::None => {
+            args.push("--without-password".into());
+            // kopia 0.23+ refuses to bind a non-loopback address with
+            // `--insecure --without-password` unless this escape hatch is set
+            // (it is exactly the "exposed unauthenticated server" the project gates
+            // behind `acknowledgeInsecure`). We always bind `0.0.0.0` so the Service
+            // can reach the server, so the flag is required here.
+            args.push("--allow-extremely-dangerous-unauthenticated-server-on-the-network".into());
+        }
+    }
     args
 }
 
@@ -2144,5 +2281,76 @@ mod tests {
         assert!(!t.is_empty());
         assert!(ThrottleArgs::default().is_empty());
         assert!(ThrottleArgs::default().args().is_empty());
+    }
+
+    #[test]
+    fn server_start_args_password_mode() {
+        let spec = ServerStartSpec {
+            address: "0.0.0.0:51515".into(),
+            auth: ServerAuthMode::Password {
+                username: "kopia".into(),
+            },
+            ui: true,
+        };
+        assert_eq!(
+            server_start_args(&spec),
+            vec![
+                "server",
+                "start",
+                "--address",
+                "0.0.0.0:51515",
+                "--insecure",
+                "--ui",
+                "--server-username",
+                "kopia",
+            ]
+        );
+        // The password is NEVER in the pure builder output.
+        assert!(
+            !server_start_args(&spec)
+                .iter()
+                .any(|a| a.contains("password"))
+        );
+    }
+
+    #[test]
+    fn server_start_args_no_auth_mode() {
+        let spec = ServerStartSpec {
+            address: "0.0.0.0:8080".into(),
+            auth: ServerAuthMode::None,
+            ui: false,
+        };
+        // No --ui when disabled; no-auth emits --without-password (with --insecure)
+        // plus kopia 0.23's escape hatch for binding a non-loopback address.
+        assert_eq!(
+            server_start_args(&spec),
+            vec![
+                "server",
+                "start",
+                "--address",
+                "0.0.0.0:8080",
+                "--insecure",
+                "--without-password",
+                "--allow-extremely-dangerous-unauthenticated-server-on-the-network",
+            ]
+        );
+    }
+
+    #[test]
+    fn server_start_args_always_insecure() {
+        // --insecure (no-TLS) is required in EVERY mode.
+        for auth in [
+            ServerAuthMode::None,
+            ServerAuthMode::Password {
+                username: "u".into(),
+            },
+        ] {
+            let spec = ServerStartSpec {
+                address: "0.0.0.0:51515".into(),
+                auth,
+                ui: true,
+            };
+            assert!(server_start_args(&spec).iter().any(|a| a == "--insecure"));
+        }
     }
 }

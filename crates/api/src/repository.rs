@@ -6,6 +6,7 @@ use crate::common::{
     RepositoryMode, default_namespace_delete_policy, default_repository_mode,
 };
 use crate::maintenance::RepositoryMaintenanceSpec;
+use crate::server::{ServerSpec, ServerStatus};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -25,6 +26,7 @@ use serde::{Deserialize, Serialize};
     category = "kopiur",
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Backend","type":"string","jsonPath":".status.backend"}"#,
+    printcolumn = r#"{"name":"Server","type":"string","jsonPath":".status.server.endpoint"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 // §7/§15: create-time-immutability transition rules in the CRD schema (apiserver +
@@ -68,6 +70,10 @@ pub struct RepositorySpec {
     /// catalog, keeping etcd footprint sane for large repositories. ADR §3.1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogBounds>,
+    /// Optional kopia web-UI server, exposed via a `Service` in this Repository's
+    /// own namespace. Presence means enabled. ADR §3.1 (server addendum).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<ServerSpec>,
     /// Maintenance control. Default-managed: when absent or `enabled: true`, the
     /// reconciler creates and owns a `Maintenance` CR for this repository in this
     /// namespace. ADR §3.1/§3.7.
@@ -171,6 +177,9 @@ pub struct RepositoryStatus {
     /// Catalog-materialization status (how many discovered `Snapshot`s, last refresh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogStatus>,
+    /// Resolved kopia server endpoint/auth, pinned by the reconciler. ADR §3.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<ServerStatus>,
     /// Standard Kubernetes conditions (e.g. `Connected`, `MaintenanceOwned`). ADR §3.1.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,

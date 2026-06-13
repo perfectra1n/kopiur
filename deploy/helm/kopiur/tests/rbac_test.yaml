@@ -100,9 +100,40 @@ tests:
           count: 0
         template: role.yaml
 
-  # --- credential projection RBAC (secretProjection.enabled) -----------------
+  # --- credential projection + kopia web-UI server RBAC ----------------------
+  #
+  # The kopia web-UI server (spec.server) creates+deletes an operator-owned auth
+  # Secret and a cross-namespace credentials mirror, and manages a Deployment +
+  # Service. Because the feature is presence-driven per-Repository, secrets full
+  # verbs + services + deployments are granted unconditionally (mirrors the
+  # generated deploy/rbac/operator-{clusterrole,role}.yaml), independent of
+  # secretProjection.enabled.
 
-  - it: "secretProjection enabled grants secrets create+patch in the ClusterRole"
+  - it: "ClusterRole grants full secrets verbs + services + deployments (server RBAC)"
+    set:
+      installScope: cluster
+    template: clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [secrets]
+            verbs: [get, list, watch, create, update, patch, delete]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [services]
+            verbs: [get, list, watch, create, update, patch, delete]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [apps]
+            resources: [deployments]
+            verbs: [get, list, watch, create, update, patch, delete]
+
+  - it: "secret writes are independent of secretProjection in the ClusterRole"
     set:
       installScope: cluster
       secretProjection.enabled: true
@@ -113,41 +144,9 @@ tests:
           content:
             apiGroups: [""]
             resources: [secrets]
-            verbs: [get, list, watch, create, patch]
+            verbs: [get, list, watch, create, update, patch, delete]
 
-  - it: "secretProjection disabled (default) keeps secrets read-only in the ClusterRole"
-    set:
-      installScope: cluster
-    template: clusterrole.yaml
-    asserts:
-      - contains:
-          path: rules
-          content:
-            apiGroups: [""]
-            resources: [secrets]
-            verbs: [get, list, watch]
-      - notContains:
-          path: rules
-          content:
-            apiGroups: [""]
-            resources: [secrets]
-            verbs: [get, list, watch, create, patch]
-
-  - it: "secretProjection enabled grants secrets create+patch in the namespaced Role"
-    set:
-      installScope: namespaced
-      webhook.enabled: false
-      secretProjection.enabled: true
-    template: role.yaml
-    asserts:
-      - contains:
-          path: rules
-          content:
-            apiGroups: [""]
-            resources: [secrets]
-            verbs: [get, list, watch, create, patch]
-
-  - it: "secretProjection disabled (default) keeps secrets read-only in the namespaced Role"
+  - it: "namespaced Role grants full secrets verbs + services + deployments (server RBAC)"
     set:
       installScope: namespaced
       webhook.enabled: false
@@ -158,4 +157,16 @@ tests:
           content:
             apiGroups: [""]
             resources: [secrets]
-            verbs: [get, list, watch]
+            verbs: [get, list, watch, create, update, patch, delete]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [services]
+            verbs: [get, list, watch, create, update, patch, delete]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [apps]
+            resources: [deployments]
+            verbs: [get, list, watch, create, update, patch, delete]

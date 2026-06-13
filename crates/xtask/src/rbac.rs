@@ -185,13 +185,19 @@ fn workload_rules() -> Vec<PolicyRule> {
         // the projected name is per-Job, so this is necessarily unscoped. No
         // `delete`: projected copies carry an ownerRef and are reaped by GC. The
         // Helm chart gates create/patch behind `secretProjection.enabled`.
-        rule(
-            &[""],
-            &["secrets".into()],
-            &["get", "list", "watch", "create", "patch"],
-        ),
-        // Mover Jobs.
+        // Secrets: read repository credentials, create+patch the opt-in credential
+        // projection AND the operator-owned kopia web-UI auth Secret (`spec.server`
+        // Generate mode) + the cross-namespace credentials mirror for
+        // ClusterRepository servers, and `delete` them on server teardown / namespace
+        // migration (owner-ref GC can't reach a cluster-scoped owner's children).
+        // FULL_VERBS is a deliberate escalation over the previous read+create+patch
+        // grant (§ server addendum).
+        rule(&[""], &["secrets".into()], FULL_VERBS),
+        // Services exposing the kopia web-UI server (`spec.server`).
+        rule(&[""], &["services".into()], FULL_VERBS),
+        // Mover Jobs and the kopia web-UI server Deployment (`spec.server`).
         rule(&["batch"], &["jobs".into()], FULL_VERBS),
+        rule(&["apps"], &["deployments".into()], FULL_VERBS),
         // CSI volume snapshots used as a consistent source for snapshotting
         // (`copyMethod: Snapshot`/`Clone`, ADR §3.3) — namespaced, so they live here.
         // `patch` backs the server-side apply the controller uses to (idempotently)

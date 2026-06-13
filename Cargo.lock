@@ -1456,6 +1456,7 @@ dependencies = [
  "libc",
  "mimalloc",
  "opentelemetry",
+ "rand",
  "rcgen",
  "reqwest",
  "rustls",

@@ -171,6 +171,10 @@ pub const BUCKETS: &[&str] = &[
     "kopiur-rclone",
     // Repository for the NFS-*source* scenario (the source is NFS; the repo is S3).
     "kopiur-nfssrc",
+    // kopia web-UI server scenario (crates/e2e/tests/lifecycle.rs): an S3-backed
+    // Repository with `spec.server` whose embedded UI is GETted via the apiserver
+    // Service proxy.
+    "kopiur-server-ui",
     // Foreign-repo import scenarios (crates/e2e/tests/import.rs): repositories +
     // snapshots created by RAW kopia (the seeder pod), then adopted by kopiur.
     "kopiur-import",

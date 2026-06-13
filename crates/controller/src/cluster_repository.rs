@@ -29,11 +29,18 @@ use kopiur_mover::workspec::{
 };
 
 use crate::catalog;
-use crate::consts::{API_VERSION, BOOTSTRAP_JOB_DEADLINE_SECS, REPOSITORY_BOOTSTRAPPED_CONDITION};
+use crate::consts::{
+    API_VERSION, BOOTSTRAP_JOB_DEADLINE_SECS, CLUSTER_REPOSITORY_LABEL,
+    CLUSTER_REPOSITORY_UID_LABEL, REPOSITORY_BOOTSTRAPPED_CONDITION, SERVER_CLEANUP_FINALIZER,
+};
 use crate::context::Context;
 use crate::error::{Error, Result, TERMINAL_HEARTBEAT, error_policy_for};
 use crate::io;
 use crate::jobs::{self, JobLimits, MoverJobInputs};
+use crate::server::{
+    ServerReconcileCtx, generated_secret_name, mirrored_creds_secret_name, reconcile_server,
+    server_object_name, server_status_json,
+};
 use crate::snapshot::{backend_to_repository_connect, mover_pull_policy_pub};
 
 /// Where to materialize a discovered `Snapshot` under a `ClusterRepository`
@@ -123,6 +130,19 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
     let name = repo.name_any();
     let api: Api<ClusterRepository> = Api::all(ctx.client.clone());
 
+    // Deletion: a cluster-scoped owner cannot own its namespaced server children,
+    // so owner-ref GC can't reap them — clean up explicitly via the finalizer.
+    if repo.metadata.deletion_timestamp.is_some() {
+        return handle_cluster_deletion(ctx, repo, &name, &api).await;
+    }
+
+    // Ensure the server-cleanup finalizer while a server is configured, so the
+    // deletion path above can run before the CR is removed.
+    let server_enabled = repo.spec.server.is_some();
+    if server_enabled && io::ensure_finalizer(&api, repo, SERVER_CLEANUP_FINALIZER).await? {
+        return Ok(Action::requeue(Duration::from_secs(2)));
+    }
+
     // §14(e): a suspended ClusterRepository skips connect/bootstrap and maintenance
     // projection — a declarative pause surfaced via a condition.
     if repo.spec.suspend {
@@ -147,6 +167,18 @@ async fn reconcile_inner(repo: &ClusterRepository, ctx: &Context) -> Result<Acti
         )
         .await?;
         return Ok(Action::requeue(Duration::from_secs(300)));
+    }
+
+    // The optional kopia web-UI server runs regardless of backend (the server pod
+    // connects to the repository itself). Reconcile it before the backend match
+    // below — whose branches return early — so it is applied/migrated/torn down on
+    // every reconcile. Children live in `spec.server.namespace` (cluster-scoped
+    // owners can't own them); cleanup is via the finalizer + back-reference labels.
+    reconcile_cluster_server(ctx, repo, &name, &api).await?;
+    // Once a server is no longer configured (and any teardown above has run), the
+    // cleanup finalizer is no longer needed.
+    if !server_enabled {
+        io::remove_finalizer(&api, repo, SERVER_CLEANUP_FINALIZER).await?;
     }
 
     // Same connect/create/status lifecycle as Repository. Cluster-scoped secret
@@ -442,6 +474,103 @@ async fn run_cluster_catalog_scan(
     )
     .await?;
     Ok(())
+}
+
+/// Apply / migrate / tear down the optional kopia web-UI server for a
+/// `ClusterRepository`. Children live in `spec.server.namespace` (cluster-scoped
+/// owners can't own them), tracked by back-reference labels for `.watches()` and
+/// finalizer cleanup.
+async fn reconcile_cluster_server(
+    ctx: &Context,
+    repo: &ClusterRepository,
+    name: &str,
+    api: &Api<ClusterRepository>,
+) -> Result<()> {
+    let cluster_server = repo.spec.server.as_ref();
+    let desired_ns = cluster_server.map(|s| s.namespace.clone());
+    let observed_ns = repo
+        .status
+        .as_ref()
+        .and_then(|s| s.server.as_ref())
+        .and_then(|sv| sv.namespace.clone());
+
+    let uid = repo.uid().unwrap_or_default();
+    let extra_labels = BTreeMap::from([
+        (CLUSTER_REPOSITORY_LABEL.to_string(), name.to_string()),
+        (CLUSTER_REPOSITORY_UID_LABEL.to_string(), uid),
+    ]);
+
+    // Cluster-scoped credentials Secret carries an explicit namespace; fall back to
+    // the server namespace if somehow unset.
+    let creds = io::repo_credentials(&repo.spec.encryption);
+    let creds_src_namespace = creds
+        .namespace
+        .clone()
+        .or_else(|| desired_ns.clone())
+        .unwrap_or_default();
+
+    let rc = ServerReconcileCtx {
+        client: &ctx.client,
+        instance: name,
+        backend: &repo.spec.backend,
+        encryption: &repo.spec.encryption,
+        server: cluster_server.map(|s| &s.server),
+        target_namespace: desired_ns,
+        observed_namespace: observed_ns,
+        owner: None,
+        extra_labels,
+        creds_src_namespace,
+        is_cluster: true,
+        image: &ctx.mover_image,
+        image_pull_policy: mover_pull_policy_pub(),
+        service_account: ctx.mover_service_account.as_deref(),
+    };
+
+    let outcome = reconcile_server(&rc).await?;
+    if let Some(status) = server_status_json(&outcome) {
+        io::patch_status(api, name, status).await?;
+    }
+    Ok(())
+}
+
+/// On `ClusterRepository` deletion, tear down the server children in their
+/// namespace (owner-ref GC can't, being cross-scope), then drop the finalizer.
+async fn handle_cluster_deletion(
+    ctx: &Context,
+    repo: &ClusterRepository,
+    name: &str,
+    api: &Api<ClusterRepository>,
+) -> Result<Action> {
+    if !repo
+        .finalizers()
+        .iter()
+        .any(|f| f == SERVER_CLEANUP_FINALIZER)
+    {
+        return Ok(Action::await_change());
+    }
+
+    // The namespace to clean is the last-applied one (pinned to status), falling
+    // back to the spec's target.
+    let ns = repo
+        .status
+        .as_ref()
+        .and_then(|s| s.server.as_ref())
+        .and_then(|sv| sv.namespace.clone())
+        .or_else(|| repo.spec.server.as_ref().map(|s| s.namespace.clone()));
+
+    if let Some(ns) = ns {
+        io::delete_server_objects(
+            &ctx.client,
+            &ns,
+            &server_object_name(name),
+            Some(&generated_secret_name(name)),
+        )
+        .await?;
+        io::delete_secret_if_present(&ctx.client, &ns, &mirrored_creds_secret_name(name)).await?;
+    }
+
+    io::remove_finalizer(api, repo, SERVER_CLEANUP_FINALIZER).await?;
+    Ok(Action::await_change())
 }
 
 /// Drive the mover-Job bootstrap for a `ClusterRepository` whose backend the

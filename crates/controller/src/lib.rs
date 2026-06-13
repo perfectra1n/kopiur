@@ -16,6 +16,7 @@ pub mod metrics;
 pub mod repository;
 pub mod repository_replication;
 pub mod restore;
+pub mod server;
 pub mod snapshot;
 pub mod snapshot_policy;
 pub mod snapshot_schedule;
@@ -27,8 +28,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::{Stream, StreamExt};
+use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret, ServiceAccount};
+use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret, Service, ServiceAccount};
 use kube::core::PartialObjectMeta;
 use kube::runtime::events::{Recorder, Reporter};
 use kube::runtime::reflector::ObjectRef;
@@ -354,6 +356,16 @@ where
         .touched_objects()
 }
 
+/// Map a kopia web-UI server child (Deployment/Service) to its owning
+/// `ClusterRepository` via the back-reference label. Cluster-scoped owners can't be
+/// ownerReferences of a namespaced child, so `.owns()` won't fire — this label
+/// mapping replaces it.
+fn map_to_cluster_repository<K: kube::Resource>(obj: K) -> Option<ObjectRef<ClusterRepository>> {
+    obj.labels()
+        .get(consts::CLUSTER_REPOSITORY_LABEL)
+        .map(|name| ObjectRef::new(name))
+}
+
 /// Spawn all eight controllers and join them. Split out so it can be driven
 /// independently of the metrics server. The shared Maintenance informer that the
 /// repo reconcilers read is set up separately in [`run`].
@@ -480,6 +492,18 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
         // reap the finished Job between polls, so the result was never read and
         // the repo churned Initializing + fresh bootstrap Jobs forever.
         .owns_with(Api::<Job>::all(client.clone()), (), owned_cfg.clone())
+        // Own the optional kopia web-UI server children (`spec.server`): the
+        // Repository owner-refs them in its own namespace, so an edit/delete of the
+        // Deployment/Service/ConfigMap self-heals via owner-ref mapping. Scoped to
+        // the managed-by label (the server builder stamps it) so we don't watch
+        // every Deployment/Service in the cluster.
+        .owns_with(
+            Api::<Deployment>::all(client.clone()),
+            (),
+            owned_cfg.clone(),
+        )
+        .owns_with(Api::<Service>::all(client.clone()), (), owned_cfg.clone())
+        .owns_with(Api::<ConfigMap>::all(client.clone()), (), owned_cfg.clone())
         .watches_stream(referent_meta::<Secret>(&client, &cfg), {
             let store = repo_store.clone();
             move |s: PartialObjectMeta<Secret>| watch::secret_to_repositories(&store, &s)
@@ -525,6 +549,20 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
         // Own the bootstrap Job — same prompt-terminal-observation rationale as
         // the Repository controller above.
         .owns_with(Api::<Job>::all(client.clone()), (), owned_cfg.clone())
+        // The kopia web-UI server children (`spec.server`) are namespaced and cannot
+        // carry an ownerReference to a cluster-scoped owner, so `.owns()` would never
+        // fire. Map child events back to the parent via the back-reference label
+        // instead (scoped to the managed-by label, same as everything else).
+        .watches(
+            Api::<Deployment>::all(client.clone()),
+            owned_cfg.clone(),
+            map_to_cluster_repository,
+        )
+        .watches(
+            Api::<Service>::all(client.clone()),
+            owned_cfg.clone(),
+            map_to_cluster_repository,
+        )
         .watches_stream(referent_meta::<Secret>(&client, &cfg), {
             let store = crepo_store.clone();
             move |s: PartialObjectMeta<Secret>| watch::secret_to_cluster_repositories(&store, &s)

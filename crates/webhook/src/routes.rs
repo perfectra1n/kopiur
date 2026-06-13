@@ -573,6 +573,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_server_insecure_without_ack_denied() {
+        // The no-auth server is a footgun (full read/write/delete of all backups);
+        // it must be explicitly acknowledged at admission.
+        let spec = json!({
+            "backend": { "s3": { "bucket": "b" } },
+            "encryption": { "passwordSecretRef": { "name": "s" } },
+            "server": { "auth": { "insecure": {} } }
+        });
+        let body = review_body("Repository", "billing", "u", spec);
+        let (_s, v) = post_review(body).await;
+        assert_eq!(v["response"]["allowed"], false);
+        let msg = v["response"]["status"]["message"].as_str().unwrap();
+        assert!(msg.contains("acknowledgeInsecure"), "msg was: {msg}");
+    }
+
+    #[tokio::test]
+    async fn repository_server_generate_allowed() {
+        let spec = json!({
+            "backend": { "s3": { "bucket": "b" } },
+            "encryption": { "passwordSecretRef": { "name": "s" } },
+            "server": { "auth": { "generate": {} }, "service": { "type": "ClusterIP" } }
+        });
+        let body = review_body("Repository", "billing", "u", spec);
+        let (_s, v) = post_review(body).await;
+        assert_eq!(v["response"]["allowed"], true);
+    }
+
+    #[tokio::test]
     async fn undecodable_spec_is_denied() {
         // sources should be a list; give a string to force a decode error.
         let spec = json!({ "repository": { "name": "nas" }, "sources": "not-a-list" });

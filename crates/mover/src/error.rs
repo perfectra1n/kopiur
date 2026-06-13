@@ -146,6 +146,42 @@ pub enum MoverError {
         source: serde_json::Error,
     },
 
+    /// No server work-spec path was provided to the `serve` entrypoint.
+    #[error(
+        "no server spec path: pass it after `serve` or set {}",
+        crate::env::SERVER_SPEC_PATH
+    )]
+    ServerSpecPathMissing,
+
+    /// The server work-spec file could not be read.
+    #[error(
+        "failed to read the server spec at {}: {source}. The controller mounts it via the \
+         server work-spec ConfigMap — check the Deployment's volume mount and {}",
+        .path.display(),
+        crate::env::SERVER_SPEC_PATH
+    )]
+    ServerSpecRead {
+        /// The path that could not be read.
+        path: PathBuf,
+        /// The underlying IO error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The server work-spec file is not valid `ServerWorkSpec` JSON.
+    #[error(
+        "failed to parse the server spec at {}: {source}. The controller and mover image versions \
+         may be skewed — redeploy so both run the same kopiur version",
+        .path.display()
+    )]
+    ServerSpecParse {
+        /// The path holding the malformed spec.
+        path: PathBuf,
+        /// The underlying JSON error.
+        #[source]
+        source: serde_json::Error,
+    },
+
     /// The credential staging directory could not be created.
     #[error(
         "failed to create the credential staging dir {}: {source}. The kopia-cache emptyDir must \
@@ -291,6 +327,9 @@ impl MoverError {
             MoverError::WorkSpecPathMissing
             | MoverError::WorkSpecRead { .. }
             | MoverError::WorkSpecParse { .. }
+            | MoverError::ServerSpecPathMissing
+            | MoverError::ServerSpecRead { .. }
+            | MoverError::ServerSpecParse { .. }
             | MoverError::CredentialStagingDir { .. }
             | MoverError::CredentialWrite { .. }
             | MoverError::ReadyMarkerWrite { .. }

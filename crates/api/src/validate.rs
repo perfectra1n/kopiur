@@ -22,6 +22,7 @@ use crate::maintenance::{MaintenanceSpec, RepositoryMaintenanceSpec};
 use crate::repository::RepositorySpec;
 use crate::repository_replication::RepositoryReplicationSpec;
 use crate::restore::{RestoreSource, RestoreSpec, RestoreTarget};
+use crate::server::{ServerAuth, ServerSpec};
 use crate::snapshot::{Origin, SnapshotSpec};
 use crate::snapshot_policy::{Hook, SnapshotPolicySpec, Source};
 use crate::snapshot_schedule::SnapshotScheduleSpec;
@@ -450,7 +451,7 @@ fn diff_immutable_repo_fields(
 /// #         backend: Backend::Filesystem(FilesystemBackend { path: "/r".into(), volume: None }),
 /// #         encryption: Encryption { password_secret_ref: SecretKeyRef { name: "s".into(), namespace: None, key: None } },
 /// #         create: Some(CreateBehavior { enabled: true, encryption: None, splitter: splitter.map(String::from), hash: None, ecc: None }),
-/// #         mover_defaults: None, catalog: None, maintenance: None, on_namespace_delete: Default::default(), mode: Default::default(), suspend: false,
+/// #         mover_defaults: None, catalog: None, server: None, maintenance: None, on_namespace_delete: Default::default(), mode: Default::default(), suspend: false,
 /// #     }
 /// # }
 /// // Unchanged splitter → accepted.
@@ -762,6 +763,32 @@ pub fn validate_repository(spec: &RepositorySpec) -> Vec<ValidationError> {
     }
     if let Some(c) = &spec.catalog {
         errs.extend(validate_catalog_bounds(c, false));
+    }
+    if let Some(server) = &spec.server {
+        errs.extend(validate_server(server));
+    }
+    errs
+}
+
+/// The shared `spec.server` rules the type system can't express (server addendum):
+///   * `auth.insecure` requires `acknowledgeInsecure: true` — a no-auth server exposes
+///     full read/write/delete of the repository, so it must be explicit.
+///   * `service.port` must be non-zero.
+///
+/// Accumulates so a user sees every server problem at once. The PVC `ReadWriteMany`
+/// requirement for filesystem-backend servers is **not** here — it needs a live PVC
+/// read and is enforced at reconcile, not admission.
+pub fn validate_server(server: &ServerSpec) -> Vec<ValidationError> {
+    let mut errs = Vec::new();
+    if let Some(ServerAuth::Insecure(ack)) = &server.auth
+        && !ack.acknowledge_insecure
+    {
+        errs.push(ValidationError::InsecureServerNotAcknowledged);
+    }
+    if let Some(service) = &server.service
+        && service.port == Some(0)
+    {
+        errs.push(ValidationError::InvalidServerPort { port: 0 });
     }
     errs
 }
@@ -1138,6 +1165,12 @@ pub fn validate_cluster_repository(spec: &ClusterRepositorySpec) -> Vec<Validati
     }
     if let Some(c) = &spec.catalog {
         errs.extend(validate_catalog_bounds(c, true));
+    }
+    if let Some(server) = &spec.server {
+        if server.namespace.trim().is_empty() {
+            errs.push(ValidationError::ServerNamespaceRequired);
+        }
+        errs.extend(validate_server(&server.server));
     }
     errs
 }
@@ -2136,6 +2169,7 @@ mod tests {
             create: None,
             mover_defaults: None,
             catalog: None,
+            server: None,
             maintenance: None,
             on_namespace_delete: Default::default(),
             mode: Default::default(),
@@ -2351,6 +2385,7 @@ mod tests {
             create: None,
             mover_defaults: None,
             catalog: None,
+            server: None,
             maintenance: m,
             on_namespace_delete: Default::default(),
             mode: Default::default(),
@@ -2439,6 +2474,7 @@ mod tests {
             create: None,
             mover_defaults: None,
             catalog: None,
+            server: None,
             allowed_namespaces: AllowedNamespaces::All(false),
             identity_defaults: None,
             maintenance: None,
@@ -2470,6 +2506,7 @@ mod tests {
             create: None,
             mover_defaults: None,
             catalog: None,
+            server: None,
             allowed_namespaces: AllowedNamespaces::All(true),
             // `namspace` is an out-of-scope typo → rejected at admission (ADR-0004 §5).
             identity_defaults: Some(IdentityDefaults {
@@ -2521,6 +2558,7 @@ mod tests {
             }),
             mover_defaults: None,
             catalog: None,
+            server: None,
             maintenance: None,
             on_namespace_delete: Default::default(),
             mode: Default::default(),
@@ -2574,6 +2612,7 @@ mod tests {
             }),
             mover_defaults: None,
             catalog: None,
+            server: None,
             allowed_namespaces: AllowedNamespaces::All(true),
             identity_defaults: None,
             maintenance: None,
@@ -2667,6 +2706,7 @@ mod tests {
             }),
             mover_defaults: None,
             catalog: None,
+            server: None,
             allowed_namespaces: AllowedNamespaces::All(true),
             identity_defaults: None,
             maintenance: None,
@@ -3021,5 +3061,88 @@ catalog:
                 .any(|e| e.to_string().contains("catalog.refreshInterval")),
             "{errs:?}"
         );
+    }
+
+    // --- validate_server (spec.server) ---
+
+    use crate::server::{InsecureAuth, ServerAuth, ServerService, ServerSpec, ServiceType};
+
+    #[test]
+    fn server_insecure_without_ack_is_rejected() {
+        let server = ServerSpec {
+            auth: Some(ServerAuth::Insecure(InsecureAuth {
+                acknowledge_insecure: false,
+            })),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_server(&server),
+            vec![ValidationError::InsecureServerNotAcknowledged]
+        );
+    }
+
+    #[test]
+    fn server_insecure_with_ack_is_ok() {
+        let server = ServerSpec {
+            auth: Some(ServerAuth::Insecure(InsecureAuth {
+                acknowledge_insecure: true,
+            })),
+            ..Default::default()
+        };
+        assert!(validate_server(&server).is_empty());
+    }
+
+    #[test]
+    fn server_generate_and_default_are_ok() {
+        assert!(validate_server(&ServerSpec::default()).is_empty());
+        let server = ServerSpec {
+            auth: Some(ServerAuth::Generate(Default::default())),
+            service: Some(ServerService {
+                r#type: ServiceType::NodePort,
+                port: Some(30515),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(validate_server(&server).is_empty());
+    }
+
+    #[test]
+    fn server_port_zero_is_rejected() {
+        let server = ServerSpec {
+            service: Some(ServerService {
+                port: Some(0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_server(&server),
+            vec![ValidationError::InvalidServerPort { port: 0 }]
+        );
+    }
+
+    #[test]
+    fn cluster_repository_server_requires_namespace() {
+        // A blank `server.namespace` on a ClusterRepository is rejected (cluster-scoped
+        // resources have no implicit namespace). Built the cluster's way (YAML → typed)
+        // so the test is robust to unrelated spec fields.
+        let spec: ClusterRepositorySpec = crate::testutil::from_yaml(
+            r#"
+backend:
+  filesystem:
+    path: /r
+encryption:
+  passwordSecretRef:
+    name: s
+    namespace: kopia-system
+allowedNamespaces:
+  all: true
+server:
+  namespace: "  "
+"#,
+        );
+        let errs = validate_cluster_repository(&spec);
+        assert!(errs.contains(&ValidationError::ServerNamespaceRequired));
     }
 }

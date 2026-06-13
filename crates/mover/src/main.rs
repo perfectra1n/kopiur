@@ -29,6 +29,7 @@ use kopiur_mover::bootstrap::{
 use kopiur_mover::credentials;
 use kopiur_mover::env::{KOPIA_BINARY, RESULT_CONFIGMAP, WORK_SPEC_PATH};
 use kopiur_mover::error::{KopiaOp, MoverError, Result};
+use kopiur_mover::serve::ServerWorkSpec;
 use kopiur_mover::status::StatusUpdate;
 use kopiur_mover::workspec::{
     self, BootstrapRepositoryOp, BrowseSessionOp, KOPIUR_PIN_NAME, MaintenanceOp, MoverWorkSpec,
@@ -49,6 +50,13 @@ fn main() -> std::process::ExitCode {
         };
     }
 
+    // `mover serve [path]` runs the long-lived kopia web UI; everything else is a
+    // run-once backup/restore/delete. The serve path connects then `exec`s kopia,
+    // replacing this process, so it never returns on success.
+    if std::env::args().nth(1).as_deref() == Some("serve") {
+        return run_serve();
+    }
+
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     match runtime.block_on(run()) {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -57,6 +65,94 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// The `serve` entrypoint: connect the repository, then `exec` `kopia server start`.
+///
+/// On success `exec` replaces this process with kopia, so this never returns; it
+/// returns a non-zero `ExitCode` only if loading/connecting/exec fails.
+fn run_serve() -> std::process::ExitCode {
+    let _telemetry = match kopiur_telemetry::init_tracing("kopiur-mover") {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("failed to init tracing: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    let spec = match server_spec_path().and_then(|p| load_server_spec(&p)) {
+        Ok(s) => s,
+        Err(e) => {
+            error!(error = %e, "loading server work spec");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    info!(
+        repository = spec.repository.kind_str(),
+        port = spec.listen_port,
+        auth = spec.auth.kind_str(),
+        "loaded server work spec"
+    );
+
+    let client = build_serve_client();
+
+    // Connect to the repository first (short, idempotent) so the server can read
+    // the connected repo from the kopia config file. Cache tuning is inherited from
+    // the pod environment (KOPIA_CACHE_DIRECTORY), so the default is correct here.
+    let cache = kopiur_kopia::CacheTuning::default();
+    if let Err(e) =
+        runtime.block_on(client.repository_connect(&spec.repository.to_connect_spec(), cache))
+    {
+        error!(error = %e, "repository connect failed before server start");
+        return std::process::ExitCode::FAILURE;
+    }
+    // Drop the tokio runtime before exec — kopia takes over this process entirely.
+    drop(runtime);
+
+    let password = std::env::var(kopiur_mover::env::SERVER_PASSWORD).ok();
+    info!("starting kopia server (exec)");
+    // Returns ONLY on exec failure.
+    let err = client.server_start(&spec.to_start_spec(), password.as_deref());
+    error!(error = %err, "exec kopia server start failed");
+    std::process::ExitCode::FAILURE
+}
+
+/// Locate the server work spec: `mover serve <path>` arg, else [`env::SERVER_SPEC_PATH`].
+fn server_spec_path() -> Result<PathBuf> {
+    if let Some(arg) = std::env::args().nth(2) {
+        return Ok(PathBuf::from(arg));
+    }
+    if let Ok(env) = std::env::var(kopiur_mover::env::SERVER_SPEC_PATH) {
+        return Ok(PathBuf::from(env));
+    }
+    Err(MoverError::ServerSpecPathMissing)
+}
+
+fn load_server_spec(path: &PathBuf) -> Result<ServerWorkSpec> {
+    let raw = std::fs::read_to_string(path).map_err(|source| MoverError::ServerSpecRead {
+        path: path.clone(),
+        source,
+    })?;
+    let spec: ServerWorkSpec =
+        serde_json::from_str(&raw).map_err(|source| MoverError::ServerSpecParse {
+            path: path.clone(),
+            source,
+        })?;
+    Ok(spec)
+}
+
+/// Build a kopia client for the serve path. Repository/UI credentials, config and
+/// cache dirs are inherited from the pod environment (mounted Secret + emptyDir
+/// env), so only the binary override and the update-check suppression are set here.
+fn build_serve_client() -> KopiaClient {
+    let mut builder = KopiaClient::builder();
+    if let Ok(bin) = std::env::var(KOPIA_BINARY) {
+        builder = builder.binary(bin);
+    }
+    builder = builder.env("KOPIA_CHECK_FOR_UPDATES", "false");
+    builder.build()
 }
 
 /// Whether the browse-session readiness marker exists — the entire decision the

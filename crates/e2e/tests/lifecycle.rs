@@ -1681,6 +1681,181 @@ async fn wait_managed_maintenance(
     .await
 }
 
+/// A `Repository` with the kopia web-UI server enabled (no-auth `insecure` mode so
+/// the UI is reachable without credentials through the apiserver Service proxy).
+/// Object-store (MinIO) backed: the server connects over the network, so — unlike a
+/// filesystem repo — it needs no ReadWriteMany repo volume (that path is covered by
+/// the controller's reconcile-time RWX check + unit tests).
+fn server_repository_json(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "kopiur.home-operations.com/v1alpha1",
+        "kind": "Repository",
+        "metadata": { "name": name, "namespace": E2E_NAMESPACE },
+        "spec": {
+            "backend": { "s3": {
+                "bucket": "kopiur-server-ui",
+                "endpoint": "minio.kopiur-e2e.svc.cluster.local:9000",
+                "region": "us-east-1",
+                "tls": { "disableTls": true },
+                "auth": { "secretRef": { "name": kopiur_e2e::consts::SECRET_S3_CREDS, "namespace": E2E_NAMESPACE } }
+            }},
+            "encryption": {
+                "passwordSecretRef": { "name": kopiur_e2e::consts::SECRET_S3_CREDS, "key": "KOPIA_PASSWORD" }
+            },
+            "create": { "enabled": true },
+            "server": {
+                "auth": { "insecure": { "acknowledgeInsecure": true } },
+                "service": { "type": "ClusterIP" }
+            }
+        }
+    })
+}
+
+/// Wait until a `Deployment` reports at least one available replica.
+async fn wait_deployment_available(
+    deps: &Api<k8s_openapi::api::apps::v1::Deployment>,
+    name: &str,
+) -> anyhow::Result<()> {
+    wait_until(
+        &format!("deployment {name} available"),
+        default_timeout(),
+        poll_interval(),
+        || async {
+            match deps.get_opt(name).await? {
+                Some(d) => {
+                    let available = d
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.available_replicas)
+                        .unwrap_or(0);
+                    Ok((available >= 1).then_some(()))
+                }
+                None => Ok(None),
+            }
+        },
+    )
+    .await
+}
+
+/// The kopia web-UI server scenario (`spec.server`): enabling it materializes an
+/// owned Deployment + Service, the kopia server comes up serving its embedded UI
+/// (proven by GETting the UI through the apiserver Service proxy), and disabling it
+/// tears the objects back down.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + built images + helm install"]
+async fn server_exposes_repository_ui() {
+    use k8s_openapi::api::apps::v1::Deployment;
+    use k8s_openapi::api::core::v1::Service;
+    use kube::api::{Patch, PatchParams};
+
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    // MinIO provides the S3 backend the server connects to (no RWX volume needed).
+    world
+        .ensure(&[Need::Minio])
+        .await
+        .expect("provision MinIO fixtures");
+    let client = world.client().clone();
+    let repos: Api<Repository> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let deps: Api<Deployment> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+    let svcs: Api<Service> = Api::namespaced(client.clone(), E2E_NAMESPACE);
+
+    let repo_name = "e2e-srv-repo";
+    let object_name = "e2e-srv-repo-kopia-ui";
+
+    // 1. Repository with spec.server becomes Ready and pins status.server.endpoint.
+    repos
+        .create(
+            &PostParams::default(),
+            &cr(server_repository_json(repo_name)),
+        )
+        .await
+        .expect("create server Repository");
+    wait_phase(&repos, repo_name, "Ready")
+        .await
+        .expect("server Repository should reach Ready");
+    wait_until(
+        "status.server.endpoint is pinned",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let s = status_json(&repos, repo_name).await;
+            let ep = s
+                .get("server")
+                .and_then(|sv| sv.get("endpoint"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Ok((!ep.is_empty()).then_some(()))
+        },
+    )
+    .await
+    .expect("controller should pin status.server.endpoint");
+
+    // 2. The owned Service exists and the Deployment becomes Available (the kopia
+    //    server's TCP readiness probe passing proves it bound the listen port).
+    svcs.get(object_name)
+        .await
+        .expect("server Service should exist");
+    wait_deployment_available(&deps, object_name)
+        .await
+        .expect("server Deployment should become Available");
+
+    // 3. The embedded HTML UI actually serves: GET it through the apiserver Service
+    //    proxy (no-auth `insecure` mode). A non-empty 200 with a kopia marker proves
+    //    the mover image's kopia is the UI-embedded build (`server start --ui`).
+    let ui = wait_until(
+        "kopia UI responds via the service proxy",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let path =
+                format!("/api/v1/namespaces/{E2E_NAMESPACE}/services/{object_name}:http/proxy/");
+            let req = http::Request::get(path).body(Vec::new()).unwrap();
+            match client.request_text(req).await {
+                Ok(body) if !body.is_empty() => Ok(Some(body)),
+                // Server may still be warming up; keep polling.
+                Ok(_) => Ok(None),
+                Err(_) => Ok(None),
+            }
+        },
+    )
+    .await
+    .expect("kopia UI should serve over HTTP through the service proxy");
+    let lower = ui.to_lowercase();
+    assert!(
+        lower.contains("kopia") || lower.contains("<!doctype") || lower.contains("<html"),
+        "proxied response should be the kopia web UI, got: {}",
+        &ui.chars().take(200).collect::<String>()
+    );
+
+    // 4. Disable the server (spec.server = null) → owned objects are torn down.
+    repos
+        .patch(
+            repo_name,
+            &PatchParams::default(),
+            &Patch::Merge(serde_json::json!({ "spec": { "server": serde_json::Value::Null } })),
+        )
+        .await
+        .expect("disable server");
+    wait_until(
+        "server Deployment is removed after disable",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            match deps.get_opt(object_name).await? {
+                Some(_) => Ok(None),
+                None => Ok(Some(())),
+            }
+        },
+    )
+    .await
+    .expect("server Deployment should be deleted when spec.server is removed");
+
+    // Cleanup.
+    let _ = repos.delete(repo_name, &DeleteParams::default()).await;
+}
+
 /// Compile-time guard that `Client` is reachable from this crate even when the
 /// `e2e` feature gates the bodies above — keeps the dependency graph honest.
 #[allow(dead_code)]

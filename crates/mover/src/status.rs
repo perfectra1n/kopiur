@@ -130,6 +130,9 @@ impl From<&crate::error::MoverError> for FailureBlock {
             | MoverError::WorkSpecPathMissing
             | MoverError::WorkSpecRead { .. }
             | MoverError::WorkSpecParse { .. }
+            | MoverError::ServerSpecPathMissing
+            | MoverError::ServerSpecRead { .. }
+            | MoverError::ServerSpecParse { .. }
             | MoverError::CredentialStagingDir { .. }
             | MoverError::CredentialWrite { .. }
             | MoverError::ReadyMarkerWrite { .. }

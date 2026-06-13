@@ -9,7 +9,8 @@ pub mod session;
 
 pub use client::{
     CacheTuning, ConnectSpec, CreateOptions, KopiaClient, KopiaClientBuilder, MaintenanceMode,
-    PolicyArgs, RestoreOptions, ThrottleArgs, VerifyOptions, split_policy_scopes,
+    PolicyArgs, RestoreOptions, ServerAuthMode, ServerStartSpec, ThrottleArgs, VerifyOptions,
+    split_policy_scopes,
 };
 pub use error::{KopiaError, KopiaErrorClass};
 pub use model::{
