@@ -301,7 +301,7 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
                 }
             }
 
-            // Status: phase/uniqueID/backend/storageStats.
+            // Status: phase/uniqueId/backend/resolvedCredentialVersion.
             let status = client.repository_status().await?;
             let current = serde_json::to_value(&repo.status).ok();
             io::patch_status_if_changed(

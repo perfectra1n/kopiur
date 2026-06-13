@@ -186,7 +186,7 @@ async fn ready_repository_steady_state_is_quiet() {
     // 2. A watch-event poke (annotation: no generation bump, like any Secret/
     //    ConfigMap/Job event mapping to this repo) must produce ONE reconcile
     //    whose status writes are no-ops — not restart the loop.
-    let baseline = reconciliations_by_kind(
+    let pre_poke = reconciliations_by_kind(
         &scrape_controller_metrics(&client)
             .await
             .expect("scrape /metrics"),
@@ -200,7 +200,16 @@ async fn ready_repository_steady_state_is_quiet() {
         .expect("poke Repository with an annotation");
     let settled_rv = wait_rv_settled(&repos, name).await;
 
-    // 3. Quiet window: byte-stable RV and a bounded reconcile count.
+    // 3. Quiet window: byte-stable RV and a bounded reconcile count. The
+    //    counter baseline is taken AFTER the post-poke settle so the bounded
+    //    window is exactly QUIET_WINDOW — `wait_rv_settled` has its own (long)
+    //    timeout, and folding it into the measured window would let leftover
+    //    scenario CRs' requeue ticks erode the bound's margin as the suite grows.
+    let baseline = reconciliations_by_kind(
+        &scrape_controller_metrics(&client)
+            .await
+            .expect("scrape /metrics"),
+    );
     tokio::time::sleep(QUIET_WINDOW).await;
 
     let final_rv = resource_version(&repos, name).await;
@@ -216,17 +225,23 @@ async fn ready_repository_steady_state_is_quiet() {
             .await
             .expect("scrape /metrics"),
     );
+    let poke_delta = after.get("Repository").copied().unwrap_or(0.0)
+        - pre_poke.get("Repository").copied().unwrap_or(0.0);
+    assert!(
+        poke_delta >= 1.0,
+        "the poke must trigger at least one observable reconcile (got delta {poke_delta}); \
+         if this fires, the metric name/labels changed and this guard went blind"
+    );
     let delta = after.get("Repository").copied().unwrap_or(0.0)
         - baseline.get("Repository").copied().unwrap_or(0.0);
     assert!(
-        delta >= 1.0,
-        "the poke must trigger at least one observable reconcile (got delta {delta}); \
-         if this fires, the metric name/labels changed and this guard went blind"
-    );
-    assert!(
         delta < MAX_RECONCILES_IN_WINDOW,
         "steady-state hot-loop regression: {delta} Repository reconciles in \
-         {QUIET_WINDOW:?} (expected the poked one plus a few requeue ticks, < \
+         {QUIET_WINDOW:?} (expected at most a few requeue ticks, < \
          {MAX_RECONCILES_IN_WINDOW}) — the controller is re-triggering itself"
     );
+
+    // Clean up: this guard is itself sensitive to leftover-CR background noise,
+    // so don't become that noise for later scenarios.
+    let _ = repos.delete(name, &DeleteParams::default()).await;
 }

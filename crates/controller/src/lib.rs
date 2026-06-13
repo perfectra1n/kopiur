@@ -332,11 +332,18 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     // Trailing-edge debounce on every controller: coalesce rapid re-triggers of
     // the same object (own status writes, owned-Job event bursts, referent
     // fan-out) into one reconcile. Belt-and-braces against write-triggered
-    // self-loops — with order-stable conditions and guarded status writes the
-    // steady state emits no events at all, but if a future write churns, this
-    // caps the loop at ~1/s per object instead of reconcile speed (~30/s, a
-    // pegged core). 1s is well under every requeue cadence, so no legitimate
-    // transition is hidden, only deferred a beat.
+    // SELF-loops — with order-stable conditions and guarded status writes the
+    // steady state emits no events at all, but if a future write churns, the
+    // event stream pauses while no reconcile runs, the 1s of quiet always
+    // arrives, and the loop is capped at ~1/s per object instead of reconcile
+    // speed (~30/s, a pegged core). CAVEAT (trailing edge = deadline RESETS on
+    // every event): a sustained EXTERNAL writer churning one object faster than
+    // every 1s would defer its reconcile until the stream quiets, not rate-limit
+    // it — no such writer exists today (the controller is the sole steady-state
+    // status writer; mover stamps are one-shot), so if a reconciler ever looks
+    // starved, look for a new sub-1s event source on its primary. 1s is well
+    // under every requeue cadence, so no legitimate transition is hidden, only
+    // deferred a beat.
     let ctrl_cfg =
         kube::runtime::controller::Config::default().debounce(std::time::Duration::from_secs(1));
 
