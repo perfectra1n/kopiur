@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.2](https://github.com/home-operations/kopiur/compare/0.4.1...0.4.2) (2026-06-13)
+
+
+### Bug Fixes
+
+* **docs:** also reorg docs ([659c5ac](https://github.com/home-operations/kopiur/commit/659c5acf028afae7559958ced7e9d248b12b5a25))
+
+
+### Performance Improvements
+
+* **controller:** cut RAM — mimalloc, capped worker pool, scoped/metadata watches ([aa55b0d](https://github.com/home-operations/kopiur/commit/aa55b0d5ab2202dcfa039085e4d3a267df02bdd4))
+
+
+### Miscellaneous Chores
+
+* **krew:** kopiur 0.4.1 manifest ([fe19db7](https://github.com/home-operations/kopiur/commit/fe19db770d1c35b15edf42154e5cf2c5f522ecd7))
+
 ## [0.4.1](https://github.com/home-operations/kopiur/compare/0.4.0...0.4.1) (2026-06-13)
 
 
