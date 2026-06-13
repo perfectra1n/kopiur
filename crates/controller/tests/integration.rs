@@ -91,6 +91,7 @@ fn sample_repository(name: &str) -> Repository {
             on_namespace_delete: Default::default(),
             mode: Default::default(),
             suspend: false,
+            server: None,
         },
     )
 }
