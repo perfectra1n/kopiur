@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.4.1](https://github.com/home-operations/kopiur/compare/0.4.0...0.4.1) (2026-06-13)
+
+
+### Features
+
+* **credentials:** support the use of a cloud object-store ([776aa3a](https://github.com/home-operations/kopiur/commit/776aa3af8667cbab3798b84b396abbb79187366b))
+* **docs:** add a ton more docs too for walkthroughs ([0e2f134](https://github.com/home-operations/kopiur/commit/0e2f134efa606546814c0e3a74f0e6de981d5b77))
+* **krew:** support more volsync kopia migration using CLI ([24a9bf2](https://github.com/home-operations/kopiur/commit/24a9bf20e22e6390cba7cb18c8d9aacf858531a1))
+* **tests:** also update e2e ([3b2447e](https://github.com/home-operations/kopiur/commit/3b2447ead2323d8d71f849f40b72a8e5498c68e7))
+
+
+### Bug Fixes
+
+* **catalog:** scan on spec change + preserve mover snapshot id in the Ready heal ([064d11a](https://github.com/home-operations/kopiur/commit/064d11aaa8fcad2d67a315206b0d9365bf7ba44c))
+* **dev:** resolve issue with doc build script ([762af2e](https://github.com/home-operations/kopiur/commit/762af2ec161966e5e532499f18dd5f7d0140452d))
+* **reconcile:** continue to not cook CPUs ([0c1e8a7](https://github.com/home-operations/kopiur/commit/0c1e8a72d1df3cd4061dbe6c41c6c6a621265770))
+* **reconcile:** shrink controller debounce so terminal heal isn't sta… ([#98](https://github.com/home-operations/kopiur/issues/98)) ([b4241aa](https://github.com/home-operations/kopiur/commit/b4241aae0f711ff6c422cd39c92678ef6f86d250))
+* **reconcile:** try to stop making clusters toasty ([de0ba00](https://github.com/home-operations/kopiur/commit/de0ba003f5194bb85e923bc0d165681335b05330))
+* **restore:** kstatus Ready conditions on every phase transition + mover-stamp heal ([a43af02](https://github.com/home-operations/kopiur/commit/a43af02f99564a935ee012a4d510c3a6152c4e24))
+
+
+### Miscellaneous Chores
+
+* **krew:** kopiur 0.4.0 manifest ([182a456](https://github.com/home-operations/kopiur/commit/182a45631b538f292e3e139780e8fe8208bb8062))
+
 ## [0.4.0](https://github.com/home-operations/kopiur/compare/0.3.5...0.4.0) (2026-06-12)
 
 
