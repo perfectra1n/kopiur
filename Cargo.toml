@@ -81,7 +81,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 
 # Scheduling / expressions
-croner = "2"
+croner = "3"
 # CEL (Common Expression Language) for identity *Expr fields (ADR-0004 §5) and the
 # broader *Expr convention (ADR-0005 §15). Sync + tokio-free, so it is safe in the
 # api crate (ADR §5.1). Replaces the former Jinja2/tera identity templating.
