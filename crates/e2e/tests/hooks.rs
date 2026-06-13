@@ -474,13 +474,29 @@ async fn http_request_post_hook_hits_in_cluster_receiver() {
     wait_phase(&backups, backup, "Succeeded")
         .await
         .expect("Snapshot with an httpRequest post-hook should succeed");
-    let s = status_json(&backups, backup).await;
-    assert!(
-        s.pointer("/hooks/postCompletedAt")
-            .and_then(|v| v.as_str())
-            .is_some_and(|t| !t.is_empty()),
-        "status.hooks.postCompletedAt must be stamped; got {s}"
-    );
+    // `phase: Succeeded` is the mover's terminal stamp; the post-hook runs in the
+    // controller's FOLLOW-UP reconcile and stamps `hooks.postCompletedAt` a beat
+    // later (debounced). Poll for the stamp rather than reading status once right
+    // after `wait_phase` — that races the post-hook reconcile and sees no `hooks`
+    // block at all. Regression: the controller debounce widened the gap until the
+    // race was lost every run.
+    wait_until(
+        "snapshot stamps hooks.postCompletedAt after the post-hook reconcile",
+        default_timeout(),
+        poll_interval(),
+        || {
+            let backups = backups.clone();
+            async move {
+                let s = status_json(&backups, backup).await;
+                Ok(s.pointer("/hooks/postCompletedAt")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|t| !t.is_empty())
+                    .then_some(s))
+            }
+        },
+    )
+    .await
+    .expect("status.hooks.postCompletedAt must be stamped after a Succeeded post-hook snapshot");
 
     // The receiver got the PUT: read the resource back (busybox wget honors
     // URL userinfo for Basic auth) and check the body.

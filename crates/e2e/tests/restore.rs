@@ -1133,6 +1133,15 @@ async fn restore_completed_reports_kstatus_ready() {
     wait_phase(&restores, name, "Completed")
         .await
         .expect("restore must complete");
+    // `phase: Completed` is stamped by the mover; the kstatus conditions are
+    // healed by the controller's FOLLOW-UP reconcile, which lands a beat after
+    // the phase (debounced). Gate on the healed condition, not just the phase —
+    // asserting `Ready` right after `wait_phase` races the heal and reads the
+    // pre-heal `Ready=False/MoverJobCreated`. Regression: the controller debounce
+    // widened that window until the race was lost every run.
+    wait_condition(&restores, name, "Ready", "True")
+        .await
+        .expect("a Completed restore must heal kstatus Ready=True");
 
     let s = status_json(&restores, name).await;
     assert_eq!(condition_status(&s, "Ready"), "True", "status: {s}");

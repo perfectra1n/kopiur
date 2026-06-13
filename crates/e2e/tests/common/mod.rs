@@ -256,6 +256,27 @@ where
     .await
 }
 
+/// Wait until a CR's kstatus `Ready` condition is `True`, returning the condition.
+///
+/// Prefer this over a bare [`wait_phase`] whenever the next thing you assert is a
+/// controller-HEALED field — a kstatus condition, `status.hooks.*`, a
+/// `kopiur_resource_phase` metric, or anything else written *after* the terminal
+/// phase. Kopiur writes terminal state in two passes: the mover stamps the
+/// terminal `status.phase`, then the controller's FOLLOW-UP reconcile heals the
+/// derived fields a beat later (that reconcile is debounced). Gating on the phase
+/// and reading a healed field immediately races that heal and reads a stale value
+/// — the exact bug behind `restore_completed_reports_kstatus_ready`,
+/// `http_request_post_hook_hits_in_cluster_receiver`, and
+/// `metrics_reflect_backup_lifecycle`. Gating on `Ready=True` waits for the heal.
+/// See `docs/dev/watch-and-reconcile.md` ("Two-pass terminal heal").
+pub async fn wait_ready<K>(api: &Api<K>, name: &str) -> anyhow::Result<serde_json::Value>
+where
+    K: kube::Resource + Clone + DeserializeOwned + Serialize + std::fmt::Debug,
+    <K as kube::Resource>::DynamicType: Default,
+{
+    wait_condition(api, name, "Ready", "True").await
+}
+
 /// Wait until the mover `Job` named `name` (in `ns`) exists, returning it.
 pub async fn wait_for_job(jobs: &Api<Job>, name: &str) -> Job {
     wait_until(
