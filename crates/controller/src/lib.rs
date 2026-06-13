@@ -334,18 +334,32 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     // fan-out) into one reconcile. Belt-and-braces against write-triggered
     // SELF-loops — with order-stable conditions and guarded status writes the
     // steady state emits no events at all, but if a future write churns, the
-    // event stream pauses while no reconcile runs, the 1s of quiet always
-    // arrives, and the loop is capped at ~1/s per object instead of reconcile
-    // speed (~30/s, a pegged core). CAVEAT (trailing edge = deadline RESETS on
-    // every event): a sustained EXTERNAL writer churning one object faster than
-    // every 1s would defer its reconcile until the stream quiets, not rate-limit
-    // it — no such writer exists today (the controller is the sole steady-state
-    // status writer; mover stamps are one-shot), so if a reconciler ever looks
-    // starved, look for a new sub-1s event source on its primary. 1s is well
-    // under every requeue cadence, so no legitimate transition is hidden, only
-    // deferred a beat.
-    let ctrl_cfg =
-        kube::runtime::controller::Config::default().debounce(std::time::Duration::from_secs(1));
+    // event stream pauses while no reconcile runs, the quiet window always
+    // arrives, and the loop is capped at ~1/window per object instead of
+    // reconcile speed (~30/s, a pegged core).
+    //
+    // SIZING — this is a HEAL-LATENCY floor, not just a loop cap. Terminal state
+    // is written in two passes: the mover stamps the terminal `phase`, then the
+    // controller's follow-up reconcile heals the derived fields (kstatus
+    // `Ready=True`, post-hook `hooks.postCompletedAt`, the `kopiur_resource_phase`
+    // gauge). The debounce delays that second pass by its full duration, so a
+    // consumer that gates on `phase` sees the derived fields lag by ~one window.
+    // At 1s this was visible: e2e assertions reading conditions immediately after
+    // `phase: Completed`/`Succeeded` raced the heal and read stale values
+    // (restore_completed_reports_kstatus_ready, http_request_post_hook…,
+    // metrics_reflect_backup_lifecycle). 250ms still coalesces owned-Job event
+    // bursts and caps any residual self-loop at ~4/s (nowhere near a hot core),
+    // while keeping the heal lag imperceptible to `kubectl wait --for=condition`
+    // and Flux/Argo health gates.
+    //
+    // CAVEAT (trailing edge = deadline RESETS on every event): a sustained
+    // EXTERNAL writer churning one object faster than the window would defer its
+    // reconcile until the stream quiets, not rate-limit it — no such writer
+    // exists today (the controller is the sole steady-state status writer; mover
+    // stamps are one-shot), so if a reconciler ever looks starved, look for a new
+    // sub-window event source on its primary.
+    let ctrl_cfg = kube::runtime::controller::Config::default()
+        .debounce(std::time::Duration::from_millis(250));
 
     // Snapshot owns its mover Job + ConfigMap (reaped via owner-ref GC, §4.10), and
     // watches its `SnapshotPolicy` recipe so a policy edit (or a policy whose

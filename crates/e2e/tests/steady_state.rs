@@ -42,8 +42,8 @@ use kopiur_e2e::{
 
 /// How long the repository must stay byte-stable. On the buggy code the
 /// self-trigger loop churned `resourceVersion` ~30×/s, so even a short window
-/// is unambiguous; 45s also comfortably exceeds the controller's 1s debounce
-/// and any transient post-transition writes.
+/// is unambiguous; 45s also comfortably exceeds the controller's debounce
+/// window and any transient post-transition writes.
 const QUIET_WINDOW: Duration = Duration::from_secs(45);
 
 /// Upper bound on `kopiur_controller_reconciliations_total{kind="Repository"}`

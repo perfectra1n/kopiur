@@ -1264,11 +1264,28 @@ async fn metrics_reflect_backup_lifecycle() {
         .await
         .expect("Snapshot should reach Succeeded");
 
+    // True once the per-resource phase gauge `kopiur_resource_phase{…} == 1` is
+    // present. The gauge is recorded by the controller's follow-up reconcile
+    // AFTER the mover stamps the terminal phase, so the poll must gate on this
+    // EXACT series — gating only on the `kopiur_resource_phase` family returns as
+    // soon as any phase series exists (e.g. an earlier Running=1), then races the
+    // Succeeded-recording reconcile. Regression: the controller debounce widened
+    // that gap until the family-only poll lost the race every run.
+    fn phase_gauge_is_one(text: &str, kind: &str, name: &str, phase: &str) -> bool {
+        text.lines().any(|l| {
+            l.starts_with("kopiur_resource_phase{")
+                && l.contains(&format!("kind=\"{kind}\""))
+                && l.contains(&format!("name=\"{name}\""))
+                && l.contains(&format!("phase=\"{phase}\""))
+                && l.trim_end().ends_with(" 1")
+        })
+    }
+
     // The Prometheus exporter publishes a family only after first observation and
     // the controller's own self-reconcile must record the Succeeded phase, so
-    // poll until the key families are present.
+    // poll until the key families AND the specific Succeeded gauge are present.
     let text = wait_until(
-        "controller /metrics exposes kopiur families",
+        "controller /metrics exposes kopiur families with Snapshot Succeeded==1",
         default_timeout(),
         poll_interval(),
         || {
@@ -1277,8 +1294,8 @@ async fn metrics_reflect_backup_lifecycle() {
                 match scrape_controller_metrics(&client).await {
                     Ok(t)
                         if t.contains("kopiur_controller_reconciliations_total")
-                            && t.contains("kopiur_resource_phase")
-                            && t.contains("kopiur_snapshot_size_bytes") =>
+                            && t.contains("kopiur_snapshot_size_bytes")
+                            && phase_gauge_is_one(&t, "Snapshot", "e2e-mx-backup", "Succeeded") =>
                     {
                         Ok(Some(t))
                     }
@@ -1289,7 +1306,7 @@ async fn metrics_reflect_backup_lifecycle() {
         },
     )
     .await
-    .expect("controller should expose the kopiur metric families");
+    .expect("controller should expose the kopiur metric families with Snapshot Succeeded==1");
 
     // Reconcile loop metrics, per kind.
     assert!(
@@ -1302,16 +1319,10 @@ async fn metrics_reflect_backup_lifecycle() {
         text.contains("kopiur_controller_reconcile_duration_seconds_bucket"),
         "missing reconcile duration histogram buckets"
     );
-    // Our backup's phase gauge: Succeeded == 1.
-    let succeeded_series = text.lines().any(|l| {
-        l.starts_with("kopiur_resource_phase{")
-            && l.contains("kind=\"Snapshot\"")
-            && l.contains("name=\"e2e-mx-backup\"")
-            && l.contains("phase=\"Succeeded\"")
-            && l.trim_end().ends_with(" 1")
-    });
+    // Our backup's phase gauge: Succeeded == 1 (guaranteed present — the poll
+    // above gates on exactly this series).
     assert!(
-        succeeded_series,
+        phase_gauge_is_one(&text, "Snapshot", "e2e-mx-backup", "Succeeded"),
         "expected kopiur_resource_phase ...Snapshot...Succeeded == 1:\n{text}"
     );
     // Snapshot stats gauges populated with a positive size.
