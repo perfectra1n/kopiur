@@ -16,8 +16,9 @@
 //! non-matching event (most cluster `Secret`s) yields an empty set and triggers
 //! nothing.
 
-use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret};
+use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret, ServiceAccount};
 use kube::ResourceExt;
+use kube::core::PartialObjectMeta;
 use kube::runtime::reflector::{ObjectRef, Store};
 
 use kopiur_api::backend::Backend;
@@ -102,7 +103,7 @@ where
 /// Repositories that reference the changed `secret` (password or backend auth).
 pub fn secret_to_repositories(
     store: &Store<Repository>,
-    secret: &Secret,
+    secret: &PartialObjectMeta<Secret>,
 ) -> Vec<ObjectRef<Repository>> {
     let (Some(sec_ns), sec_name) = (secret.namespace(), secret.name_any()) else {
         return Vec::new();
@@ -121,7 +122,7 @@ pub fn secret_to_repositories(
 /// ClusterRepositories that reference the changed `secret`.
 pub fn secret_to_cluster_repositories(
     store: &Store<ClusterRepository>,
-    secret: &Secret,
+    secret: &PartialObjectMeta<Secret>,
 ) -> Vec<ObjectRef<ClusterRepository>> {
     let (Some(sec_ns), sec_name) = (secret.namespace(), secret.name_any()) else {
         return Vec::new();
@@ -145,7 +146,7 @@ pub fn secret_to_cluster_repositories(
 /// requeue backoff (the reconcile-on-referent-change rule).
 pub fn serviceaccount_to_repositories(
     store: &Store<Repository>,
-    sa: &k8s_openapi::api::core::v1::ServiceAccount,
+    sa: &PartialObjectMeta<ServiceAccount>,
 ) -> Vec<ObjectRef<Repository>> {
     let (Some(sa_ns), sa_name) = (sa.namespace(), sa.name_any()) else {
         return Vec::new();
@@ -164,7 +165,7 @@ pub fn serviceaccount_to_repositories(
 /// on — a rare spurious re-reconcile is cheap and idempotent.
 pub fn serviceaccount_to_cluster_repositories(
     store: &Store<ClusterRepository>,
-    sa: &k8s_openapi::api::core::v1::ServiceAccount,
+    sa: &PartialObjectMeta<ServiceAccount>,
 ) -> Vec<ObjectRef<ClusterRepository>> {
     let sa_name = sa.name_any();
     select(store, |r: &ClusterRepository| {
@@ -180,7 +181,7 @@ pub fn serviceaccount_to_cluster_repositories(
 /// the source-ref watch ([`repository_to_replications`]).
 pub fn secret_to_replications(
     store: &Store<RepositoryReplication>,
-    secret: &Secret,
+    secret: &PartialObjectMeta<Secret>,
 ) -> Vec<ObjectRef<RepositoryReplication>> {
     let (Some(sec_ns), sec_name) = (secret.namespace(), secret.name_any()) else {
         return Vec::new();
@@ -209,7 +210,7 @@ pub fn secret_to_replications(
 /// to live in the repo's namespace.
 pub fn configmap_to_repositories(
     store: &Store<Repository>,
-    configmap: &ConfigMap,
+    configmap: &PartialObjectMeta<ConfigMap>,
 ) -> Vec<ObjectRef<Repository>> {
     let (Some(cm_ns), cm_name) = (configmap.namespace(), configmap.name_any()) else {
         return Vec::new();
@@ -225,7 +226,7 @@ pub fn configmap_to_repositories(
 /// (an over-trigger at worst re-runs an idempotent reconcile).
 pub fn configmap_to_cluster_repositories(
     store: &Store<ClusterRepository>,
-    configmap: &ConfigMap,
+    configmap: &PartialObjectMeta<ConfigMap>,
 ) -> Vec<ObjectRef<ClusterRepository>> {
     let cm_name = configmap.name_any();
     select(store, |r: &ClusterRepository| {
@@ -397,7 +398,7 @@ fn mover_blocked(conditions: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::C
 /// watch-desync backstop (`Error::BlockedOnGrant`).
 pub fn namespace_to_snapshots(
     store: &Store<Snapshot>,
-    namespace: &Namespace,
+    namespace: &PartialObjectMeta<Namespace>,
 ) -> Vec<ObjectRef<Snapshot>> {
     let ns = namespace.name_any();
     select(store, |s: &Snapshot| {
@@ -412,7 +413,7 @@ pub fn namespace_to_snapshots(
 /// (same contract as [`namespace_to_snapshots`]).
 pub fn namespace_to_restores(
     store: &Store<Restore>,
-    namespace: &Namespace,
+    namespace: &PartialObjectMeta<Namespace>,
 ) -> Vec<ObjectRef<Restore>> {
     let ns = namespace.name_any();
     select(store, |r: &Restore| {

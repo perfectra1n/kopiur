@@ -26,13 +26,14 @@ pub mod webhook_tls;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret};
+use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret, ServiceAccount};
+use kube::core::PartialObjectMeta;
 use kube::runtime::events::{Recorder, Reporter};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher::Config as WatcherConfig;
-use kube::runtime::{Controller, WatchStreamExt, reflector, watcher};
+use kube::runtime::{Controller, WatchStreamExt, metadata_watcher, reflector, watcher};
 use kube::{Api, Client, ResourceExt};
 
 use kopiur_api::common::RepositoryKind;
@@ -324,11 +325,54 @@ fn spawn_webhook_tls_reconcile(client: Client, cfg: webhook_tls::WebhookTlsConfi
     });
 }
 
+/// A metadata-only trigger stream for a cluster-wide external referent `K`
+/// (`Secret`/`ConfigMap`/`ServiceAccount`/`Namespace`). The referent mappers in
+/// [`crate::watch`] need only the changed object's name/namespace — never its
+/// `.data`/`.spec`/`.status` — so `metadata_watcher` keeps those payloads off the
+/// wire entirely (no `Secret` plaintext ever reaches the controller, a memory AND
+/// security win) and we additionally drop `managedFields` + `annotations` (the
+/// largest remaining `ObjectMeta` bytes, unused by every mapper) before the events
+/// fan in. Fed to [`Controller::watches_stream`] in place of a full-object
+/// `.watches(..)`; `touched_objects` is the decode `watches_stream` expects.
+fn referent_meta<K>(
+    client: &Client,
+    cfg: &WatcherConfig,
+) -> impl Stream<Item = Result<PartialObjectMeta<K>, watcher::Error>> + Send + use<K>
+where
+    K: kube::Resource<DynamicType = ()>
+        + Clone
+        + serde::de::DeserializeOwned
+        + std::fmt::Debug
+        + Send
+        + 'static,
+{
+    metadata_watcher(Api::<K>::all(client.clone()), cfg.clone())
+        .modify(|m| {
+            m.metadata.managed_fields = None;
+            m.metadata.annotations = None;
+        })
+        .touched_objects()
+}
+
 /// Spawn all eight controllers and join them. Split out so it can be driven
 /// independently of the metrics server. The shared Maintenance informer that the
 /// repo reconcilers read is set up separately in [`run`].
 async fn spawn_all(client: Client, ctx: Arc<Context>) {
-    let cfg = WatcherConfig::default();
+    let mut cfg = WatcherConfig::default();
+    // Opt-in (off by default for older-apiserver safety): stream the initial list
+    // via the WatchList API to cut peak memory on the cluster-wide resync.
+    if crate::config::streaming_lists_enabled() {
+        cfg = cfg.streaming_lists();
+    }
+    // Owned children (mover Jobs, work-spec ConfigMaps) ALWAYS carry the managed-by
+    // label (io::finalizer::child_labels), so scope their watches server-side to
+    // ours — the controller then lists/watches only kopiur's Jobs/ConfigMaps, not
+    // every one in the cluster. Owner-ref mapping is unaffected by the label filter.
+    let owned_cfg = cfg.clone().labels(&format!(
+        "{}={}",
+        crate::consts::MANAGED_BY_LABEL,
+        crate::consts::MANAGED_BY_VALUE
+    ));
     // Trailing-edge debounce on every controller: coalesce rapid re-triggers of
     // the same object (own status writes, owned-Job event bursts, referent
     // fan-out) into one reconcile. Belt-and-braces against write-triggered
@@ -370,8 +414,8 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     let snapshot_ctrl = Controller::new(snapshot_api, cfg.clone()).with_config(ctrl_cfg.clone());
     let snapshot_store = snapshot_ctrl.store();
     let snapshot_ctrl = snapshot_ctrl
-        .owns(Api::<Job>::all(client.clone()), cfg.clone())
-        .owns(Api::<ConfigMap>::all(client.clone()), cfg.clone())
+        .owns_with(Api::<Job>::all(client.clone()), (), owned_cfg.clone())
+        .owns_with(Api::<ConfigMap>::all(client.clone()), (), owned_cfg.clone())
         .watches(Api::<SnapshotPolicy>::all(client.clone()), cfg.clone(), {
             let store = snapshot_store.clone();
             move |p: SnapshotPolicy| watch::policy_to_snapshots(&store, &p)
@@ -379,9 +423,9 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
         // A Snapshot refused for an elevated mover waits on the namespace's
         // privileged-movers opt-in annotation — deliver that grant the moment it
         // lands instead of leaving the CR to its slow backstop requeue.
-        .watches(Api::<Namespace>::all(client.clone()), cfg.clone(), {
+        .watches_stream(referent_meta::<Namespace>(&client, &cfg), {
             let store = snapshot_store.clone();
-            move |n: Namespace| watch::namespace_to_snapshots(&store, &n)
+            move |n: PartialObjectMeta<Namespace>| watch::namespace_to_snapshots(&store, &n)
         })
         .run(snapshot::reconcile, snapshot::error_policy, snapshot_ctx)
         .for_each(|res| async move {
@@ -435,25 +479,23 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
         // inside the Job's ttlSecondsAfterFinished window — a short TTL used to
         // reap the finished Job between polls, so the result was never read and
         // the repo churned Initializing + fresh bootstrap Jobs forever.
-        .owns(Api::<Job>::all(client.clone()), cfg.clone())
-        .watches(Api::<Secret>::all(client.clone()), cfg.clone(), {
+        .owns_with(Api::<Job>::all(client.clone()), (), owned_cfg.clone())
+        .watches_stream(referent_meta::<Secret>(&client, &cfg), {
             let store = repo_store.clone();
-            move |s: Secret| watch::secret_to_repositories(&store, &s)
+            move |s: PartialObjectMeta<Secret>| watch::secret_to_repositories(&store, &s)
         })
-        .watches(Api::<ConfigMap>::all(client.clone()), cfg.clone(), {
+        .watches_stream(referent_meta::<ConfigMap>(&client, &cfg), {
             let store = repo_store.clone();
-            move |cm: ConfigMap| watch::configmap_to_repositories(&store, &cm)
+            move |cm: PartialObjectMeta<ConfigMap>| watch::configmap_to_repositories(&store, &cm)
         })
         // Workload identity: creating the `auth.workloadIdentity` ServiceAccount
         // un-sticks a repository blocked on the SA preflight immediately.
-        .watches(
-            Api::<k8s_openapi::api::core::v1::ServiceAccount>::all(client.clone()),
-            cfg.clone(),
-            {
-                let store = repo_store.clone();
-                move |sa| watch::serviceaccount_to_repositories(&store, &sa)
-            },
-        )
+        .watches_stream(referent_meta::<ServiceAccount>(&client, &cfg), {
+            let store = repo_store.clone();
+            move |sa: PartialObjectMeta<ServiceAccount>| {
+                watch::serviceaccount_to_repositories(&store, &sa)
+            }
+        })
         .watches(
             Api::<Maintenance>::all(client.clone()),
             cfg.clone(),
@@ -482,25 +524,25 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     let crepo_ctrl = crepo_ctrl
         // Own the bootstrap Job — same prompt-terminal-observation rationale as
         // the Repository controller above.
-        .owns(Api::<Job>::all(client.clone()), cfg.clone())
-        .watches(Api::<Secret>::all(client.clone()), cfg.clone(), {
+        .owns_with(Api::<Job>::all(client.clone()), (), owned_cfg.clone())
+        .watches_stream(referent_meta::<Secret>(&client, &cfg), {
             let store = crepo_store.clone();
-            move |s: Secret| watch::secret_to_cluster_repositories(&store, &s)
+            move |s: PartialObjectMeta<Secret>| watch::secret_to_cluster_repositories(&store, &s)
         })
-        .watches(Api::<ConfigMap>::all(client.clone()), cfg.clone(), {
+        .watches_stream(referent_meta::<ConfigMap>(&client, &cfg), {
             let store = crepo_store.clone();
-            move |cm: ConfigMap| watch::configmap_to_cluster_repositories(&store, &cm)
+            move |cm: PartialObjectMeta<ConfigMap>| {
+                watch::configmap_to_cluster_repositories(&store, &cm)
+            }
         })
         // Workload identity: same SA-preflight un-stick as the Repository
         // controller (name-only match; movers run in many namespaces).
-        .watches(
-            Api::<k8s_openapi::api::core::v1::ServiceAccount>::all(client.clone()),
-            cfg.clone(),
-            {
-                let store = crepo_store.clone();
-                move |sa| watch::serviceaccount_to_cluster_repositories(&store, &sa)
-            },
-        )
+        .watches_stream(referent_meta::<ServiceAccount>(&client, &cfg), {
+            let store = crepo_store.clone();
+            move |sa: PartialObjectMeta<ServiceAccount>| {
+                watch::serviceaccount_to_cluster_repositories(&store, &sa)
+            }
+        })
         .watches(
             Api::<Maintenance>::all(client.clone()),
             cfg.clone(),
@@ -533,8 +575,8 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     let config_ctrl = Controller::new(config_api, cfg.clone()).with_config(ctrl_cfg.clone());
     let config_store = config_ctrl.store();
     let config_ctrl = config_ctrl
-        .owns(Api::<Job>::all(client.clone()), cfg.clone())
-        .owns(Api::<ConfigMap>::all(client.clone()), cfg.clone())
+        .owns_with(Api::<Job>::all(client.clone()), (), owned_cfg.clone())
+        .owns_with(Api::<ConfigMap>::all(client.clone()), (), owned_cfg.clone())
         // A produced `Snapshot` carries its owning policy in the config label. Watch
         // Snapshots so GFS retention (ADR §4.4) reconciles PROMPTLY when one is created
         // or deleted — without this the policy only re-runs on its periodic requeue, so
@@ -594,9 +636,9 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
             },
         )
         // Same privileged-mover opt-in delivery as the Snapshot controller.
-        .watches(Api::<Namespace>::all(client.clone()), cfg.clone(), {
+        .watches_stream(referent_meta::<Namespace>(&client, &cfg), {
             let store = restore_store.clone();
-            move |n: Namespace| watch::namespace_to_restores(&store, &n)
+            move |n: PartialObjectMeta<Namespace>| watch::namespace_to_restores(&store, &n)
         })
         .run(restore::reconcile, restore::error_policy, restore_ctx)
         .for_each(|res| async move {
@@ -615,7 +657,7 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
         // a yield/run's terminal state must be OBSERVED (it records
         // `lastHandledAt`) — with only the 30s poll, a short Job TTL could reap
         // the finished Job between polls and the slot would re-fire unrecorded.
-        .owns(Api::<Job>::all(client.clone()), cfg.clone())
+        .owns_with(Api::<Job>::all(client.clone()), (), owned_cfg.clone())
         .watches(Api::<Repository>::all(client.clone()), cfg.clone(), {
             let store = maint_store.clone();
             move |r: Repository| watch::repository_to_maintenances(&store, &r)
@@ -643,11 +685,11 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     let repl_ctrl = Controller::new(repl_api, cfg.clone()).with_config(ctrl_cfg.clone());
     let repl_store = repl_ctrl.store();
     let repl_ctrl = repl_ctrl
-        .owns(Api::<Job>::all(client.clone()), cfg.clone())
-        .owns(Api::<ConfigMap>::all(client.clone()), cfg.clone())
-        .watches(Api::<Secret>::all(client.clone()), cfg.clone(), {
+        .owns_with(Api::<Job>::all(client.clone()), (), owned_cfg.clone())
+        .owns_with(Api::<ConfigMap>::all(client.clone()), (), owned_cfg.clone())
+        .watches_stream(referent_meta::<Secret>(&client, &cfg), {
             let store = repl_store.clone();
-            move |s: Secret| watch::secret_to_replications(&store, &s)
+            move |s: PartialObjectMeta<Secret>| watch::secret_to_replications(&store, &s)
         })
         .watches(Api::<Repository>::all(client.clone()), cfg.clone(), {
             let store = repl_store.clone();

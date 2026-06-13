@@ -132,12 +132,24 @@
           "title": "resources",
           "type": "object"
         },
+        "streamingLists": {
+          "default": false,
+          "description": "Opt-in: use the Kubernetes WatchList streaming-list API for the controller's\ncluster-wide watches, lowering peak memory during the initial resync by streaming\npages instead of buffering them. Requires apiserver support (WatchList: beta in\n1.32, GA in 1.34); leave off on older clusters.",
+          "title": "streamingLists",
+          "type": "boolean"
+        },
         "tolerations": {
           "items": {
             "required": []
           },
           "title": "tolerations",
           "type": "array"
+        },
+        "workerThreads": {
+          "default": 2,
+          "description": "Tokio worker threads for the controller runtime. The controller is I/O-bound,\nso a small pool is ample; the runtime default sizes to the host core count\n(ignoring the cgroup CPU quota), over-allocating worker threads — each a stack\nplus a malloc arena — on large nodes, inflating RSS for no throughput gain.\nRaise only for a reconcile-heavy deployment.",
+          "title": "workerThreads",
+          "type": "integer"
         }
       },
       "required": [],

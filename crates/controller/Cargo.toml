@@ -14,7 +14,10 @@ kopiur-kopia = { workspace = true }
 kopiur-mover = { workspace = true }
 kopiur-telemetry = { workspace = true }
 # `ws` enables pods/exec (AttachedProcess) for SnapshotPolicy workloadExec hooks (ADR §4.8).
-kube = { workspace = true, features = ["client", "runtime", "derive", "rustls-tls", "ws"] }
+# `unstable-runtime` enables `Controller::watches_stream`, so referent Secret/ConfigMap
+# watches can be fed a `metadata_watcher` stream (no `.data` over the wire) — kube 3.1 has
+# no stable equivalent. Pinned to 3.1; revisit if a stable stream API lands.
+kube = { workspace = true, features = ["client", "runtime", "derive", "rustls-tls", "ws", "unstable-runtime"] }
 reqwest = { workspace = true }
 rustls = { workspace = true }
 k8s-openapi = { workspace = true, features = ["v1_33"] }
@@ -34,6 +37,7 @@ anyhow = { workspace = true }
 libc = { workspace = true }
 rcgen = { workspace = true }
 time = { workspace = true }
+mimalloc = { workspace = true }
 
 [dev-dependencies]
 serial_test = { workspace = true }

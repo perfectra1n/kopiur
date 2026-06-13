@@ -136,6 +136,17 @@ controller:
   extraArgs: []
   # -- Extra environment variables for the controller container.
   extraEnv: []
+  # -- Tokio worker threads for the controller runtime. The controller is I/O-bound,
+  # so a small pool is ample; the runtime default sizes to the host core count
+  # (ignoring the cgroup CPU quota), over-allocating worker threads — each a stack
+  # plus a malloc arena — on large nodes, inflating RSS for no throughput gain.
+  # Raise only for a reconcile-heavy deployment.
+  workerThreads: 2
+  # -- Opt-in: use the Kubernetes WatchList streaming-list API for the controller's
+  # cluster-wide watches, lowering peak memory during the initial resync by streaming
+  # pages instead of buffering them. Requires apiserver support (WatchList: beta in
+  # 1.32, GA in 1.34); leave off on older clusters.
+  streamingLists: false
   # -- Extra volumes on the controller pod. Use this to make a filesystem-backend
   # repository reachable in-process (hostPath/NFS/PVC) so the controller can run
   # short idempotent kopia ops (ADR §5.4). The e2e harness uses a hostPath here.
