@@ -75,6 +75,15 @@ spec:
               value: {{ include "kopiur.moverName" . | quote }}
             - name: KOPIUR_MOVER_ROLE_KIND
               value: {{ eq .Values.installScope "cluster" | ternary "ClusterRole" "Role" | quote }}
+            # Runtime footprint controls (see docs/dev/watch-and-reconcile.md): the
+            # tokio worker-thread cap (the runtime default sizes to host cores,
+            # ignoring the cgroup CPU quota) and the opt-in WatchList streaming list.
+            - name: KOPIUR_WORKER_THREADS
+              value: {{ .Values.controller.workerThreads | quote }}
+            {{- if .Values.controller.streamingLists }}
+            - name: KOPIUR_STREAMING_LISTS
+              value: "true"
+            {{- end }}
             {{- if eq (include "kopiur.webhook.selfManaged" .) "true" }}
             # Self-managed webhook TLS (webhook.tls.mode: self): the controller
             # mints the serving cert into this Secret and injects caBundle into

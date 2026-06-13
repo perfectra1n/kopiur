@@ -114,3 +114,45 @@ The guards live in `restore.rs::restore_completed_reports_kstatus_ready`,
 `lifecycle.rs::metrics_reflect_backup_lifecycle` /
 `maintenance_claims_lease`, and
 `replication.rs::repository_replication_mirrors_to_second_filesystem_repo`.
+
+## Memory footprint
+
+The controller is cluster-scoped and watches several core/v1 kinds across every
+namespace, so its RSS is dominated by what it lists/watches and how the allocator
+and runtime are sized. The levers, all in `spawn_all`/`main.rs`/`config.rs`:
+
+- **Scoped owned watches.** Owned children (mover `Job`s, work-spec `ConfigMap`s)
+  ALWAYS carry `app.kubernetes.io/managed-by=kopiur` (`io::finalizer::child_labels`),
+  so they are watched via `owns_with` + a server-side label selector (`owned_cfg`):
+  the controller lists/watches only *kopiur's* Jobs/ConfigMaps, not every one in the
+  cluster. Owner-ref mapping is unaffected by the filter.
+- **Metadata-only referent watches.** The credential `Secret`, TLS-CA `ConfigMap`,
+  workload-identity `ServiceAccount`, and privileged-opt-in `Namespace` watches feed
+  `Controller::watches_stream` a `metadata_watcher` stream (`referent_meta`), not a
+  full `watcher`. Every referent mapper needs only the changed object's name/namespace
+  (the spec/data it scans lives in the referrer `Store`), so `.data`/`.spec`/`.status`
+  never cross the wire — no `Secret` plaintext is ever pulled into the controller (a
+  memory **and** security win). We additionally drop `managedFields` + `annotations`
+  (the largest remaining `ObjectMeta` bytes, unused by every mapper). Per the
+  [kube.rs optimization guide](https://kube.rs/controllers/optimization/), this is the
+  highest-leverage watch change (metadata_watcher alone ≈ 60% for Pods; field pruning
+  adds ≈ 30%). Requires the kube `unstable-runtime` feature (no stable `watches_stream`
+  in 3.1).
+- **Worker-thread cap.** `main.rs` builds the tokio runtime with
+  `config::worker_threads()` (`KOPIUR_WORKER_THREADS`, default 2) instead of
+  `Runtime::new()`'s default — `available_parallelism()` sizes to the *host* core count,
+  ignoring the cgroup CPU quota, so on a large node it spawns a worker thread (stack +
+  malloc arena) per core for an I/O-bound process.
+- **mimalloc.** `#[global_allocator]` (`mimalloc`). glibc malloc keeps RSS ~30–40%
+  above the working set under many-thread fragmentation and is slow to return memory to
+  the OS; mimalloc stays tight and decays dirty pages. (Chosen over jemalloc because it
+  builds with only a C compiler — no make/autotools — so it compiles in the slim
+  distroless builder image. Supersedes `MALLOC_ARENA_MAX`.)
+- **Streaming lists (opt-in).** `KOPIUR_STREAMING_LISTS` / `controller.streamingLists`
+  enables `Config::streaming_lists()` on the cluster-wide watches to cut peak memory on
+  the initial resync. Off by default — it needs apiserver WatchList support (beta 1.32,
+  GA 1.34).
+
+Observe it: `kopiur_process_resident_memory_bytes` (an observable gauge sampled from
+`/proc/self/statm` at scrape time) exposes the controller's RSS on `/metrics` and
+guards these wins against regressions.

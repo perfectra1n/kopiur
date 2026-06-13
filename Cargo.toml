@@ -102,6 +102,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 # Thin libc shim for the operator's effective UID (geteuid) — used to name the
 # real UID in PermissionDenied remediation hints.
 libc = "0.2"
+# mimalloc as the controller's global allocator: glibc malloc keeps RSS ~30–40%
+# over the working set in long-running multi-threaded servers and is slow to return
+# memory to the OS; mimalloc stays tight and decays pages back. Chosen over jemalloc
+# because it builds with only a C compiler (the `cc` crate) — no make/autotools — so
+# it compiles cleanly in the slim distroless builder image. Controller only (the
+# mover is a short-lived Job).
+mimalloc = "0.1"
 
 # Dev / test
 serial_test = "3"

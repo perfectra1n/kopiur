@@ -1348,6 +1348,21 @@ async fn metrics_reflect_backup_lifecycle() {
         positive_size,
         "expected positive kopiur_snapshot_size_bytes:\n{text}"
     );
+    // Process RSS gauge present and positive — guards the new
+    // `kopiur_process_resident_memory_bytes` observable (and its /proc/self/statm
+    // read) so the controller's footprint stays measurable. The callback observes on
+    // every collect, so the same scrape that carries the series above carries this.
+    let rss_positive = text.lines().any(|l| {
+        l.starts_with("kopiur_process_resident_memory_bytes")
+            && l.rsplit(' ')
+                .next()
+                .and_then(|v| v.parse::<f64>().ok())
+                .is_some_and(|v| v > 0.0)
+    });
+    assert!(
+        rss_positive,
+        "expected positive kopiur_process_resident_memory_bytes:\n{text}"
+    );
     // Valid Prometheus exposition: HELP/TYPE metadata present.
     assert!(
         text.contains("# TYPE kopiur_controller_reconciliations_total counter"),

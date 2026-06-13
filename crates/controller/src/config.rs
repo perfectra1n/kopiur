@@ -51,6 +51,46 @@ pub const KOPIA_CACHE_DIR_ENV: &str = "KOPIUR_KOPIA_CACHE_DIR";
 /// binds to. Matches the chart's `controller.probePort` (8080).
 pub const HTTP_ADDR: &str = "0.0.0.0:8080";
 
+/// Number of tokio worker threads the controller runtime runs. The controller is
+/// I/O-bound — watch streams, debounced reconciles, short idempotent kopia calls —
+/// so a small fixed pool is ample. The std default (`available_parallelism`) sizes
+/// the pool to the HOST core count, NOT the cgroup CPU quota, so on a large node it
+/// spawns dozens of worker threads, each carrying a ~2 MiB stack AND a glibc malloc
+/// arena that retains freed memory — inflating RSS for no throughput gain. The chart
+/// sets this from `controller.workerThreads`; defaults to [`DEFAULT_WORKER_THREADS`].
+pub const WORKER_THREADS_ENV: &str = "KOPIUR_WORKER_THREADS";
+
+/// Fallback worker-thread count when [`WORKER_THREADS_ENV`] is unset/unparseable.
+/// Two covers the controller's concurrency comfortably; raise it via the chart for
+/// a reconcile-heavy deployment.
+pub const DEFAULT_WORKER_THREADS: usize = 2;
+
+/// Resolve the tokio worker-thread count from [`WORKER_THREADS_ENV`], clamped to at
+/// least 1 (tokio's runtime builder panics on 0), falling back to
+/// [`DEFAULT_WORKER_THREADS`] when unset or unparseable.
+pub fn worker_threads() -> usize {
+    std::env::var(WORKER_THREADS_ENV)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|n| n.max(1))
+        .unwrap_or(DEFAULT_WORKER_THREADS)
+}
+
+/// Opt-in: use the Kubernetes WatchList streaming-list API for the controller's
+/// cluster-wide watches, cutting peak memory during the initial list/resync by
+/// streaming pages instead of buffering a full page set. Requires apiserver support
+/// (the `WatchList` feature: beta in 1.32, GA in 1.34), so it is OFF by default —
+/// older clusters are unaffected. The chart exposes it as `controller.streamingLists`.
+pub const STREAMING_LISTS_ENV: &str = "KOPIUR_STREAMING_LISTS";
+
+/// Whether [`STREAMING_LISTS_ENV`] is set truthy (`"true"`/`"1"`).
+pub fn streaming_lists_enabled() -> bool {
+    matches!(
+        std::env::var(STREAMING_LISTS_ENV).ok().as_deref(),
+        Some("true" | "1")
+    )
+}
+
 // --- Self-managed webhook TLS (`webhook.tls.mode: self`) --------------------
 //
 // In `self` mode the controller — not cert-manager — owns the webhook serving

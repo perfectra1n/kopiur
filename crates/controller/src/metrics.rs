@@ -24,6 +24,18 @@ use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use kopiur_api::{PhaseLabel, RepositoryPhase, RestorePhase, SnapshotPhase};
 use kopiur_telemetry::MetricsProvider;
 
+/// Resident set size (RSS) of the current process in bytes, read from Linux
+/// `/proc/self/statm` (field 2 is the resident page count). Returns `None` off
+/// Linux or on any read/parse failure, so the gauge is simply absent rather than
+/// fabricated — telemetry is non-critical.
+fn resident_memory_bytes() -> Option<i64> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let resident_pages: i64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+    // SAFETY: `sysconf` is a pure lookup with no preconditions or side effects.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    (page_size > 0).then(|| resident_pages.saturating_mul(page_size))
+}
+
 /// All controller metrics, sharing one meter provider + Prometheus registry.
 #[derive(Clone)]
 pub struct Metrics {
@@ -92,6 +104,24 @@ impl Metrics {
         let resource_phase = m
             .i64_gauge("kopiur_resource_phase")
             .with_description("1 for a resource's active lifecycle phase, 0 otherwise.")
+            .build();
+
+        // Process RSS, sampled at scrape time. The returned handle is a phantom
+        // marker — the callback is retained by the meter provider — so it is built
+        // and discarded. Surfaces the controller's footprint on `/metrics` and guards
+        // the memory-reduction work (mimalloc, worker-thread cap, scoped/metadata
+        // watches) against regressions. Bytes; absent off Linux.
+        // Bytes are in the name (matching kopiur_snapshot_size_bytes etc.) with no
+        // `with_unit` — the Prometheus exporter appends a unit suffix, which would
+        // otherwise produce a doubled `..._bytes_bytes`.
+        let _ = m
+            .i64_observable_gauge("kopiur_process_resident_memory_bytes")
+            .with_description("Resident set size (RSS) of the controller process, in bytes.")
+            .with_callback(|observer| {
+                if let Some(rss) = resident_memory_bytes() {
+                    observer.observe(rss, &[]);
+                }
+            })
             .build();
 
         let backup_last_success_timestamp = m
