@@ -131,6 +131,16 @@ pub fn child_meta(
 /// `lastTransitionTime` while its `status` is unchanged (the timestamp marks the
 /// last real transition, per the Kubernetes condition convention) and gets a
 /// fresh one on a flip or first set. Other conditions are preserved unchanged.
+///
+/// ORDER-STABLE: an existing condition is replaced **in place**; only a new
+/// `type_` appends. This is load-bearing, not cosmetic: a reconcile that
+/// upserts two conditions in sequence (e.g. `Bootstrapped` then
+/// `MaintenanceConfigured`) must produce a byte-identical array on the next
+/// identical pass, so the status merge-patch is a server-side no-op. The old
+/// filter-out-then-append shape moved the touched condition to the end each
+/// call, so consecutive writes flipped the array order forever — every write
+/// bumped `resourceVersion`, the primary watch re-queued the object, and the
+/// controller hot-looped at reconcile speed (~30/s per repo, a pegged core).
 pub fn upsert_condition(
     existing: &[Condition],
     type_: &str,
@@ -153,12 +163,12 @@ pub fn upsert_condition(
         last_transition_time,
         observed_generation,
     };
-    existing
-        .iter()
-        .filter(|c| c.type_ != type_)
-        .cloned()
-        .chain(std::iter::once(updated))
-        .collect()
+    let mut out: Vec<Condition> = existing.to_vec();
+    match out.iter_mut().find(|c| c.type_ == type_) {
+        Some(slot) => *slot = updated,
+        None => out.push(updated),
+    }
+    out
 }
 
 /// The kstatus outcome a reconcile reports via [`set_ready`] (ADR-0005 §2).

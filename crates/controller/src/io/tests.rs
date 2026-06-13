@@ -575,6 +575,68 @@ fn upsert_condition_bumps_transition_time_on_flip() {
     );
 }
 
+#[test]
+fn upsert_condition_is_order_stable() {
+    // Re-upserting an existing condition must keep its POSITION, not move it to
+    // the end. The old filter-out-then-append shape reordered the array on every
+    // call, so a reconcile upserting `Bootstrapped` then `MaintenanceConfigured`
+    // flipped the order on every pass — each status patch was a real write
+    // (resourceVersion bump → watch event → re-reconcile) and the repository
+    // controllers hot-looped at ~30 reconciles/s per object.
+    let t0 = Time(k8s_openapi::jiff::Timestamp::from_second(1_700_000_000).unwrap());
+    let cond = |type_: &str| Condition {
+        type_: type_.into(),
+        status: "True".into(),
+        reason: "Ok".into(),
+        message: "m".into(),
+        last_transition_time: t0.clone(),
+        observed_generation: Some(1),
+    };
+    let existing = vec![cond("Bootstrapped"), cond("MaintenanceConfigured")];
+    let out = upsert_condition(&existing, "Bootstrapped", true, "Ok", "m", Some(1));
+    assert_eq!(
+        out, existing,
+        "no-op upsert of an existing condition must be byte-identical (incl. order)"
+    );
+
+    // A NEW type still appends.
+    let out = upsert_condition(&existing, "Ready", true, "Ok", "m", Some(1));
+    assert_eq!(
+        out.iter().map(|c| c.type_.as_str()).collect::<Vec<_>>(),
+        ["Bootstrapped", "MaintenanceConfigured", "Ready"]
+    );
+}
+
+#[test]
+fn repeated_bootstrap_then_maintenance_upserts_converge() {
+    // Regression for the ClusterRepository reconcile hot-loop: simulate the real
+    // per-reconcile sequence — upsert `Bootstrapped` (finalize_cluster_bootstrap)
+    // then `MaintenanceConfigured` (ensure_maintenance) — twice over. Pass 2 must
+    // produce exactly pass 1's array, i.e. the status merge-patch is a no-op and
+    // the reconciler does not re-trigger itself.
+    let pass = |base: &[Condition]| {
+        let conds = upsert_condition(base, "Bootstrapped", true, "Bootstrapped", "ok", Some(3));
+        upsert_condition(
+            &conds,
+            "MaintenanceConfigured",
+            true,
+            "MaintenanceConfigured",
+            "managed",
+            Some(3),
+        )
+    };
+    let first = pass(&[]);
+    let second = pass(&first);
+    assert_eq!(second, first, "identical reconcile pass churned conditions");
+    // And the merge-patch predicate agrees: the second pass writes nothing.
+    let current = serde_json::json!({ "conditions": first });
+    let desired = serde_json::json!({ "conditions": second });
+    assert!(
+        status_patch_is_noop(Some(&current), &desired),
+        "steady-state condition patch must be a server-side no-op"
+    );
+}
+
 // --- idempotent status writes (the hot-loop fix) -------------------------
 
 #[test]

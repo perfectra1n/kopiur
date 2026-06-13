@@ -329,6 +329,16 @@ fn spawn_webhook_tls_reconcile(client: Client, cfg: webhook_tls::WebhookTlsConfi
 /// repo reconcilers read is set up separately in [`run`].
 async fn spawn_all(client: Client, ctx: Arc<Context>) {
     let cfg = WatcherConfig::default();
+    // Trailing-edge debounce on every controller: coalesce rapid re-triggers of
+    // the same object (own status writes, owned-Job event bursts, referent
+    // fan-out) into one reconcile. Belt-and-braces against write-triggered
+    // self-loops — with order-stable conditions and guarded status writes the
+    // steady state emits no events at all, but if a future write churns, this
+    // caps the loop at ~1/s per object instead of reconcile speed (~30/s, a
+    // pegged core). 1s is well under every requeue cadence, so no legitimate
+    // transition is hidden, only deferred a beat.
+    let ctrl_cfg =
+        kube::runtime::controller::Config::default().debounce(std::time::Duration::from_secs(1));
 
     // Snapshot owns its mover Job + ConfigMap (reaped via owner-ref GC, §4.10), and
     // watches its `SnapshotPolicy` recipe so a policy edit (or a policy whose
@@ -336,7 +346,7 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     // out its requeue.
     let snapshot_api: Api<Snapshot> = Api::all(client.clone());
     let snapshot_ctx = ctx.clone();
-    let snapshot_ctrl = Controller::new(snapshot_api, cfg.clone());
+    let snapshot_ctrl = Controller::new(snapshot_api, cfg.clone()).with_config(ctrl_cfg.clone());
     let snapshot_store = snapshot_ctrl.store();
     let snapshot_ctrl = snapshot_ctrl
         .owns(Api::<Job>::all(client.clone()), cfg.clone())
@@ -364,7 +374,7 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     // up promptly rather than only on the schedule's periodic re-list.
     let sched_api: Api<SnapshotSchedule> = Api::all(client.clone());
     let sched_ctx = ctx.clone();
-    let sched_ctrl = Controller::new(sched_api, cfg.clone());
+    let sched_ctrl = Controller::new(sched_api, cfg.clone()).with_config(ctrl_cfg.clone());
     let sched_store = sched_ctrl.store();
     let sched_ctrl = sched_ctrl
         .owns(Api::<Snapshot>::all(client.clone()), cfg.clone())
@@ -396,7 +406,7 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     // Secret's `resourceVersion`, would only reopen on the 30-min heartbeat).
     let repo_api: Api<Repository> = Api::all(client.clone());
     let repo_ctx = ctx.clone();
-    let repo_ctrl = Controller::new(repo_api, cfg.clone());
+    let repo_ctrl = Controller::new(repo_api, cfg.clone()).with_config(ctrl_cfg.clone());
     let repo_store = repo_ctrl.store();
     let repo_ctrl = repo_ctrl
         // Own the bootstrap Job (carries a controller ownerRef already): its
@@ -446,7 +456,7 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
 
     let crepo_api: Api<ClusterRepository> = Api::all(client.clone());
     let crepo_ctx = ctx.clone();
-    let crepo_ctrl = Controller::new(crepo_api, cfg.clone());
+    let crepo_ctrl = Controller::new(crepo_api, cfg.clone()).with_config(ctrl_cfg.clone());
     let crepo_store = crepo_ctrl.store();
     let crepo_ctrl = crepo_ctrl
         // Own the bootstrap Job — same prompt-terminal-observation rationale as
@@ -499,7 +509,7 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     // reconcile (the verify scheduler).
     let config_api: Api<SnapshotPolicy> = Api::all(client.clone());
     let config_ctx = ctx.clone();
-    let config_ctrl = Controller::new(config_api, cfg.clone());
+    let config_ctrl = Controller::new(config_api, cfg.clone()).with_config(ctrl_cfg.clone());
     let config_store = config_ctrl.store();
     let config_ctrl = config_ctrl
         .owns(Api::<Job>::all(client.clone()), cfg.clone())
@@ -547,7 +557,7 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     // proceeds the moment the repo connects, rather than on the restore's requeue.
     let restore_api: Api<Restore> = Api::all(client.clone());
     let restore_ctx = ctx.clone();
-    let restore_ctrl = Controller::new(restore_api, cfg.clone());
+    let restore_ctrl = Controller::new(restore_api, cfg.clone()).with_config(ctrl_cfg.clone());
     let restore_store = restore_ctrl.store();
     let restore_ctrl = restore_ctrl
         .watches(Api::<Repository>::all(client.clone()), cfg.clone(), {
@@ -577,7 +587,7 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     // Maintenance watches its repository (same Ready-gate prompting as the others).
     let maint_api: Api<Maintenance> = Api::all(client.clone());
     let maint_ctx = ctx.clone();
-    let maint_ctrl = Controller::new(maint_api, cfg.clone());
+    let maint_ctrl = Controller::new(maint_api, cfg.clone()).with_config(ctrl_cfg.clone());
     let maint_store = maint_ctrl.store();
     let maint_ctrl = maint_ctrl
         // Own the per-slot maintenance Jobs (controller ownerRef already set):
@@ -609,7 +619,7 @@ async fn spawn_all(client: Client, ctx: Arc<Context>) {
     // credential Secret (a dest password/auth fix re-triggers the mirror promptly).
     let repl_api: Api<RepositoryReplication> = Api::all(client.clone());
     let repl_ctx = ctx.clone();
-    let repl_ctrl = Controller::new(repl_api, cfg.clone());
+    let repl_ctrl = Controller::new(repl_api, cfg.clone()).with_config(ctrl_cfg.clone());
     let repl_store = repl_ctrl.store();
     let repl_ctrl = repl_ctrl
         .owns(Api::<Job>::all(client.clone()), cfg.clone())

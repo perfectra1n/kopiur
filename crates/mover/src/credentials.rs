@@ -107,10 +107,30 @@ pub fn materialize_with(
                 *config_file = Some(path);
             }
         }
+        ConnectSpec::S3 {
+            ambient_credentials,
+            ..
+        } => {
+            // Workload identity: nothing to materialize, but warn when the
+            // ambient chain has no env hints — without web-identity/container
+            // credentials, minio-go's last resort is the EC2 metadata service,
+            // and on a non-EC2 node that dial can hang until the Job deadline
+            // with no useful error. The warning makes the misconfiguration
+            // (an SA without its cloud federation) findable in the pod log.
+            if *ambient_credentials && !ambient_aws_hints_present(&|key| lookup(key)) {
+                tracing::warn!(
+                    "auth.workloadIdentity is set but no ambient AWS credential hints are \
+                     present in the environment (none of {}); the credential chain will fall \
+                     back to the EC2 metadata service, which hangs on non-EC2 nodes. If this \
+                     run fails or stalls, check the ServiceAccount's cloud federation \
+                     (eks.amazonaws.com/role-arn annotation or an EKS Pod Identity association)",
+                    AMBIENT_AWS_HINT_ENVS.join(", ")
+                );
+            }
+        }
         // Env-only or credential-free backends: nothing to materialize. Listed
         // explicitly (no `_`) so a new backend forces a decision here.
         ConnectSpec::Filesystem { .. }
-        | ConnectSpec::S3 { .. }
         | ConnectSpec::Azure { .. }
         | ConnectSpec::B2 { .. }
         | ConnectSpec::WebDav { .. }
@@ -119,6 +139,24 @@ pub fn materialize_with(
         | ConnectSpec::Server { .. } => {}
     }
     Ok(())
+}
+
+/// The env vars whose presence means the AWS ambient credential chain has a
+/// fast (non-IMDS) source: the IRSA web-identity token, the ECS/EKS container
+/// credentials endpoint, or EKS Pod Identity. Exactly the hints the cloud's
+/// identity webhooks inject.
+pub const AMBIENT_AWS_HINT_ENVS: &[&str] = &[
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+];
+
+/// Whether any [`AMBIENT_AWS_HINT_ENVS`] is set (non-empty) per `lookup`. Pure
+/// so the warn-on-missing-federation decision is unit-testable.
+pub fn ambient_aws_hints_present(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    AMBIENT_AWS_HINT_ENVS
+        .iter()
+        .any(|k| lookup(k).is_some_and(|v| !v.is_empty()))
 }
 
 /// If `lookup(env_key)` yields a non-empty value, write it to
@@ -347,5 +385,35 @@ mod tests {
         materialize(&mut spec, &dir).expect("materialize s3");
         // No staging dir created for an env-only backend.
         assert!(!dir.exists(), "env-only backend must not create files");
+    }
+
+    #[test]
+    fn ambient_aws_hints_detected_from_any_injected_env() {
+        // Each cloud-webhook hint alone counts; absence (or empty values) does not.
+        for hint in AMBIENT_AWS_HINT_ENVS {
+            let lookup = move |k: &str| (k == *hint).then(|| "/var/run/secrets/token".to_string());
+            assert!(ambient_aws_hints_present(&lookup), "{hint} must count");
+        }
+        assert!(!ambient_aws_hints_present(&|_| None));
+        assert!(!ambient_aws_hints_present(&|_| Some(String::new())));
+    }
+
+    #[test]
+    fn ambient_s3_backend_is_still_a_file_noop() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tmp();
+        let mut spec = ConnectSpec::S3 {
+            bucket: "b".into(),
+            endpoint: None,
+            prefix: None,
+            region: None,
+            disable_tls: false,
+            disable_tls_verification: false,
+            ambient_credentials: true,
+        };
+        // Workload identity warns (no hints in this test env) but materializes
+        // nothing — the credential is ambient, not a file.
+        materialize(&mut spec, &dir).expect("materialize ambient s3");
+        assert!(!dir.exists(), "ambient s3 must not create files");
     }
 }

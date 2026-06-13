@@ -137,9 +137,11 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
             "Suspended",
             "Repository is suspended (spec.suspend); skipping connect and maintenance",
         );
-        io::patch_status(
+        let current = serde_json::to_value(&repo.status).ok();
+        io::patch_status_if_changed(
             &api,
             &name,
+            current.as_ref(),
             serde_json::json!({ "observedGeneration": repo.meta().generation, "conditions": conditions }),
         )
         .await?;
@@ -301,9 +303,11 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
 
             // Status: phase/uniqueID/backend/storageStats.
             let status = client.repository_status().await?;
-            io::patch_status(
+            let current = serde_json::to_value(&repo.status).ok();
+            io::patch_status_if_changed(
                 &api,
                 &name,
+                current.as_ref(),
                 serde_json::json!({
                     "phase": "Ready",
                     "backend": "Filesystem",
@@ -757,9 +761,15 @@ async fn finalize_bootstrap(
             "connected to the existing repository"
         },
     );
-    io::patch_status(
+    // Guarded write: this path re-runs on EVERY reconcile while the finished
+    // bootstrap Job exists, so the steady-state pass must be a true no-op — a
+    // re-write of identical status would bump `resourceVersion` and re-trigger
+    // this reconciler through its own primary watch, in a tight loop.
+    let current = serde_json::to_value(&repo.status).ok();
+    io::patch_status_if_changed(
         api,
         name,
+        current.as_ref(),
         serde_json::json!({
             "phase": "Ready",
             "backend": backend.kind_str(),

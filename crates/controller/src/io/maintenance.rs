@@ -341,6 +341,12 @@ pub async fn ensure_maintenance<K>(
         &message,
         observed_generation,
     );
+    // Skip the write when the upsert changed nothing: this runs on EVERY repo
+    // reconcile, and an identical re-write would bump `resourceVersion` and
+    // re-trigger the repo controller through its own watch (hot-loop).
+    if conditions.as_slice() == existing_conditions {
+        return;
+    }
     if let Err(e) = patch_status(api, name, serde_json::json!({ "conditions": conditions })).await {
         tracing::warn!(error = %e, repo = %name, "failed to patch MaintenanceConfigured condition");
     }

@@ -43,6 +43,23 @@ fn cr<T: DeserializeOwned>(v: serde_json::Value) -> T {
     serde_json::from_value(v).expect("CR JSON deserializes into typed object")
 }
 
+/// Delete `name` (if present) and wait until it is fully gone (finalizers ran).
+async fn delete_and_wait_gone<K>(api: &Api<K>, name: &str)
+where
+    K: kube::Resource + Clone + DeserializeOwned + serde::Serialize + std::fmt::Debug,
+    <K as kube::Resource>::DynamicType: Default,
+{
+    let _ = api.delete(name, &DeleteParams::default()).await;
+    wait_until(
+        &format!("{name} deleted"),
+        default_timeout(),
+        poll_interval(),
+        || async { Ok(api.get_opt(name).await?.is_none().then_some(())) },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("leftover {name} should delete: {e}"));
+}
+
 /// Poll a namespaced CR until `status.phase == want_phase`.
 async fn wait_phase<K>(api: &Api<K>, name: &str, want_phase: &str) -> anyhow::Result<()>
 where
@@ -103,6 +120,16 @@ async fn workload_identity_s3_full_pipeline_without_static_keys() {
     let jobs: Api<Job> = Api::namespaced(client.clone(), E2E_NAMESPACE);
     let bindings: Api<RoleBinding> = Api::namespaced(client.clone(), E2E_NAMESPACE);
 
+    // Rerun hygiene: the scenario uses fixed names; a previous (killed/failed)
+    // run on a reused cluster leaves them behind. Children before the
+    // Repository so finalizers can run.
+    delete_and_wait_gone(&restores, "e2e-wi-restore").await;
+    delete_and_wait_gone(&backups, "e2e-wi-blocked").await;
+    delete_and_wait_gone(&backups, "e2e-wi-backup").await;
+    delete_and_wait_gone(&configs, "e2e-wi-cfg").await;
+    delete_and_wait_gone(&repos, "e2e-wi").await;
+    let _ = secrets.delete(WI_SECRET, &DeleteParams::default()).await;
+
     // 1. The user-side prerequisites: a bare SA and a password-only Secret.
     let _ = sas
         .create(
@@ -121,7 +148,19 @@ async fn workload_identity_s3_full_pipeline_without_static_keys() {
                 "apiVersion": "v1",
                 "kind": "Secret",
                 "metadata": { "name": WI_SECRET, "namespace": E2E_NAMESPACE },
-                "stringData": { "KOPIA_PASSWORD": "wi-e2e-password" },
+                "stringData": {
+                    "KOPIA_PASSWORD": "wi-e2e-password",
+                    // The IRSA-shaped env hints a real EKS identity webhook
+                    // injects — pointing at a token that doesn't exist. This
+                    // routes minio-go's credential chain down its REAL
+                    // web-identity branch (which fails the file read instantly)
+                    // and on to anonymous, instead of the IMDS fallback: in kind
+                    // 169.254.169.254 black-holes, and the timeout-less dial
+                    // would eat the whole bootstrap deadline. No AWS keys here —
+                    // kopia still runs with empty --access-key= flags.
+                    "AWS_WEB_IDENTITY_TOKEN_FILE": "/var/run/secrets/kopiur-e2e/no-such-token",
+                    "AWS_ROLE_ARN": "arn:aws:iam::000000000000:role/kopiur-e2e-fast-fail",
+                },
             })),
         )
         .await;

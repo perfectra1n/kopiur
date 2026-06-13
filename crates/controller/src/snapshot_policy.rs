@@ -156,6 +156,12 @@ async fn reconcile_inner(config: &SnapshotPolicy, ctx: &Context) -> Result<Actio
         .as_ref()
         .map(|s| s.conditions.clone())
         .unwrap_or_default();
+    // Every status write below is guarded against the cached status: this
+    // reconciler re-runs on each referenced-repository event (the
+    // `repository_to_policies` fan-out), so a steady-state pass must issue zero
+    // PATCHes — both to avoid the status-churn self-trigger class and to keep a
+    // repo event storm from multiplying into apiserver writes per policy.
+    let current = serde_json::to_value(&config.status).ok();
 
     // §14(e): a suspended SnapshotPolicy is skipped entirely (no identity re-pin, no
     // retention prune). Surface `Ready=False`/`Reconciling=False` so GitOps sees a
@@ -168,9 +174,10 @@ async fn reconcile_inner(config: &SnapshotPolicy, ctx: &Context) -> Result<Actio
             "Suspended",
             "SnapshotPolicy is suspended (spec.suspend); skipping retention and backups",
         );
-        io::patch_status(
+        io::patch_status_if_changed(
             &api,
             &name,
+            current.as_ref(),
             serde_json::json!({ "observedGeneration": generation, "conditions": conditions }),
         )
         .await?;
@@ -183,7 +190,13 @@ async fn reconcile_inner(config: &SnapshotPolicy, ctx: &Context) -> Result<Actio
     //    the pinned identity is correct from the start (never re-rendered, ADR §4.2).
     let repo = io::resolve_repository_ref(&ctx.client, &config.spec.repository, &namespace).await?;
     let resolved = resolve_config_identity(config, &namespace, repo.identity_defaults.as_ref())?;
-    io::patch_status(&api, &name, serde_json::json!({ "resolved": resolved })).await?;
+    io::patch_status_if_changed(
+        &api,
+        &name,
+        current.as_ref(),
+        serde_json::json!({ "resolved": resolved }),
+    )
+    .await?;
 
     // §2 dependent gating: a SnapshotPolicy should not be Ready (and schedules
     // shouldn't fire it productively) until its Repository is Ready. Read readiness
@@ -197,9 +210,10 @@ async fn reconcile_inner(config: &SnapshotPolicy, ctx: &Context) -> Result<Actio
             "RepositoryNotReady",
             "waiting for the referenced Repository to become Ready before reconciling",
         );
-        io::patch_status(
+        io::patch_status_if_changed(
             &api,
             &name,
+            current.as_ref(),
             serde_json::json!({ "observedGeneration": generation, "conditions": conditions }),
         )
         .await?;
@@ -238,20 +252,36 @@ async fn reconcile_inner(config: &SnapshotPolicy, ctx: &Context) -> Result<Actio
         // Only stamp `lastPruneAt`/`lastPruneDeleted` when a prune actually
         // happened. Writing `now()` on every reconcile made the status differ each
         // pass → resourceVersion bump → watch event → self-triggered reconcile (the
-        // same hot-loop class as the repo bug). The bare count write is
-        // deterministic, so an unchanged value is a no-op patch at the apiserver.
+        // same hot-loop class as the repo bug). Between prunes the PRIOR values are
+        // carried forward (a JSON merge would preserve them anyway), so the desired
+        // object compares equal to the stored one and the guarded write is skipped.
         //
         // Built from the CRD's own `RetentionSummary` so the field names cannot
         // drift from the structural schema: this used to write the pre-rename
         // `activeBackupCount`, which the apiserver SILENTLY PRUNED (the schema
         // field is `activeSnapshotCount`) — caught by the retention e2e.
         let pruned = !to_delete.is_empty();
+        let prior = config.status.as_ref().and_then(|s| s.retention.as_ref());
         let summary = kopiur_api::snapshot_policy::RetentionSummary {
             active_snapshot_count: Some(active as i64),
-            last_prune_at: pruned.then(|| Utc::now().to_rfc3339()),
-            last_prune_deleted: pruned.then_some(to_delete.len() as i64),
+            last_prune_at: if pruned {
+                Some(Utc::now().to_rfc3339())
+            } else {
+                prior.and_then(|r| r.last_prune_at.clone())
+            },
+            last_prune_deleted: if pruned {
+                Some(to_delete.len() as i64)
+            } else {
+                prior.and_then(|r| r.last_prune_deleted)
+            },
         };
-        io::patch_status(&api, &name, serde_json::json!({ "retention": summary })).await?;
+        io::patch_status_if_changed(
+            &api,
+            &name,
+            current.as_ref(),
+            serde_json::json!({ "retention": summary }),
+        )
+        .await?;
     }
 
     // Final status: Ready (the policy is reconciled and its repo is Ready), the
@@ -271,7 +301,7 @@ async fn reconcile_inner(config: &SnapshotPolicy, ctx: &Context) -> Result<Actio
     if let Some(ts) = last_successful {
         status["lastSuccessfulSnapshot"] = serde_json::json!(ts);
     }
-    io::patch_status(&api, &name, status).await?;
+    io::patch_status_if_changed(&api, &name, current.as_ref(), status).await?;
 
     // §4: first-class verification scheduling. When `spec.verification` is set, the
     // policy reconciler doubles as the verify scheduler (mirroring the Maintenance
