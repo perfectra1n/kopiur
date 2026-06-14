@@ -40,7 +40,7 @@ time = { workspace = true }
 mimalloc = { workspace = true }
 # Random UI password generation for `spec.server` Generate auth (written once
 # into an operator-owned Secret).
-rand = "0.9"
+rand = "0.10"
 
 [dev-dependencies]
 serial_test = { workspace = true }
