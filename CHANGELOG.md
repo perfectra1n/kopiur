@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.3](https://github.com/home-operations/kopiur/compare/0.4.2...0.4.3) (2026-06-14)
+
+
+### Features
+
+* **ui:** implement kopia ui...for now ([#100](https://github.com/home-operations/kopiur/issues/100)) ([f70eda5](https://github.com/home-operations/kopiur/commit/f70eda5782d88e7f396f7a5c4dc80427dba0cb39))
+
+
+### Miscellaneous Chores
+
+* **krew:** kopiur 0.4.2 manifest ([89ec6da](https://github.com/home-operations/kopiur/commit/89ec6da4204b5405962fc0a7f1b357ff455a0a78))
+
 ## [0.4.2](https://github.com/home-operations/kopiur/compare/0.4.1...0.4.2) (2026-06-13)
 
 
