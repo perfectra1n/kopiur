@@ -84,6 +84,12 @@ helm install kopiur deploy/helm/kopiur -n kopiur-system --set webhook.enabled=fa
 
 Use **cluster** scope for a shared platform repository (`ClusterRepository`) referenced by many tenant namespaces. See `deploy/examples/02-cluster-repository.yaml`.
 
+/// note | RBAC for the optional web UI
+
+If you use the [web UI](server.md) (`spec.server` on a `Repository`/`ClusterRepository`), the controller manages `Deployments`, `Services`, `ConfigMaps`, and `Secrets` for the kopia server pod. That RBAC ships with the chart in both scopes — nothing extra to grant. The feature is off until you add a `spec.server` block.
+
+///
+
 ## CRD lifecycle
 
 `installCRDs: true` (default) installs the 8 CRDs as Helm **templates**, so the flag is honored and `helm upgrade` re-applies schema changes.

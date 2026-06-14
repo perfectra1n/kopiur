@@ -40,6 +40,7 @@ Short name `kopiarepo`. Print columns: `PHASE`, `BACKEND`, `AGE`.
 | `onNamespaceDelete` | enum(**`Orphan`**\|`Delete`) | `Orphan` | What a consuming-namespace deletion does to snapshots. §5 |
 | `mode` | enum(**`ReadWrite`**\|`ReadOnly`) | `ReadWrite` | `ReadOnly` serves restores only (no backups/maintenance). §11 |
 | `suspend` | bool | `false` | Pause connect/bootstrap + maintenance projection. §14(e) |
+| `server` | [ServerSpec](#serverspec) | — | Optional kopia web-UI server. Presence enables it. §4.14 |
 
 Immutable after creation: `create.splitter`, `create.hash`, `create.encryption`,
 `create.ecc`. The `encryption.passwordSecretRef` *reference* is mutable (rename/repoint
@@ -57,6 +58,7 @@ wrong value surfaces as a connect-time error, not an admission rejection.
 | `storageStats` | {`snapshotCount`,`totalSize`,`lastObservedAt`} | From the last catalog scan. |
 | `catalog` | {`discoveredBackupCount`,`lastRefreshAt`} | Catalog-materialization status. |
 | `conditions` | []Condition | `Ready`/`Reconciling`/`Stalled`, `Connected`, `MaintenanceOwned`, … |
+| `server` | [ServerStatus](#serverspec) | Present when `spec.server` is set: `endpoint` (`<svc>.<ns>.svc:<port>`), `namespace`, `authMode`, `generatedSecretRef`. Cleared when the server is disabled. |
 
 ---
 
@@ -83,6 +85,7 @@ Because it is cluster-scoped, **every** Secret reference in it (`backend.*.auth`
 | `credentialProjection.allowed` | bool | `false` | **Owner gate** for credential projection. §8 |
 | `mode` | enum(**`ReadWrite`**\|`ReadOnly`) | `ReadWrite` | §11 |
 | `suspend` | bool | `false` | §14(e) |
+| `server` | [ServerSpec](#serverspec) (with required `namespace`) | — | Optional kopia web-UI server; `server.namespace` is **required** (where the objects land). §4.14 |
 
 Same immutable set as `Repository` (the `create.*` algorithms only; the
 `encryption.passwordSecretRef` reference is mutable).
@@ -395,6 +398,22 @@ when the identity hostname names no allowed namespace. See
 `{ enabled, schedule?, mover?, failurePolicy?, takeoverPolicy?, namespace? }` —
 `enabled` defaults **`true`** (default-on). `namespace` is ClusterRepository-only
 (where the managed `Maintenance` lands). See [Maintenance](maintenance.md).
+
+### ServerSpec
+
+`{ auth?, service?, resources?, securityContext?, namespace? }` — the optional
+kopia web-UI server (ADR-0003 §4.14). Presence enables it (**no `enabled` bool**).
+`auth` is externally tagged — exactly one of `generate: { username? }` (default
+when `auth` is omitted; operator mints a `<repo>-kopia-ui-auth` Secret),
+`secretRef: { name, usernameKey, passwordKey }`, or `insecure: { acknowledgeInsecure
+}` (no auth; `acknowledgeInsecure: true` is **required**, webhook-enforced).
+`service` is `{ type: enum(`**`ClusterIP`**`|NodePort|LoadBalancer), port?
+(default `51515`), annotations? }`. `namespace` is **`ClusterRepository`-only and
+required** (a cluster-scoped owner has no implicit namespace; on a namespaced
+`Repository` the field is absent). Filesystem backends require the repo PVC to be
+`ReadWriteMany`. `ServerStatus` (`status.server`) pins `endpoint`/`namespace`/
+`authMode`/`generatedSecretRef` and is cleared when the server is disabled. Full
+guide: [Web UI](server.md).
 
 ### AllowedNamespaces
 

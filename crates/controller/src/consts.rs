@@ -221,3 +221,29 @@ pub const CHECK_WEBHOOK_CONFIGURATION_ACTION: &str = "CheckWebhookConfiguration"
 /// ([`crate::webhook_tls`]).
 pub const WEBHOOK_CERT_NOT_AFTER_ANNOTATION: &str =
     "kopiur.home-operations.com/webhook-cert-not-after";
+
+// --- kopia web-UI server (spec.server) -------------------------------------
+
+/// Finalizer on a `ClusterRepository` whose server children (Deployment/Service/
+/// Secret) live in a *different* namespace than the (cluster-scoped) CR. A
+/// cluster-scoped owner cannot own a namespaced object via ownerReferences, so GC
+/// cannot reap them — this finalizer drives explicit, label-targeted cleanup.
+pub const SERVER_CLEANUP_FINALIZER: &str = "kopiur.home-operations.com/server-cleanup";
+
+/// Label identifying an object managed as a kopia server child (value: the kopia
+/// server component name). Used as the `Service` selector and the cleanup selector.
+pub const SERVER_COMPONENT_LABEL: &str = "app.kubernetes.io/component";
+/// Value of [`SERVER_COMPONENT_LABEL`] for kopia server objects.
+pub const SERVER_COMPONENT_VALUE: &str = "kopia-server";
+/// Label back-referencing the owning (cluster-scoped) `ClusterRepository` by name,
+/// so `.watches()` can map a child event to its parent without an ownerReference.
+pub const CLUSTER_REPOSITORY_LABEL: &str = "kopiur.home-operations.com/cluster-repository";
+/// Companion to [`CLUSTER_REPOSITORY_LABEL`]: the parent UID, guarding against a
+/// delete/recreate name collision.
+pub const CLUSTER_REPOSITORY_UID_LABEL: &str = "kopiur.home-operations.com/cluster-repository-uid";
+/// `app.kubernetes.io/instance` label (the owning repository name).
+pub const SERVER_INSTANCE_LABEL: &str = "app.kubernetes.io/instance";
+/// `app.kubernetes.io/name` label for server objects.
+pub const SERVER_NAME_LABEL: &str = "app.kubernetes.io/name";
+/// `app.kubernetes.io/name` value for server objects.
+pub const SERVER_NAME_VALUE: &str = "kopiur-server";

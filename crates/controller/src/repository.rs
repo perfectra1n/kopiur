@@ -148,6 +148,12 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
 
+    // The optional kopia web-UI server runs regardless of backend (the server pod
+    // connects to the repository itself), so reconcile it before the backend match
+    // below — whose object-store/volume branches return early — to ensure it is
+    // applied/migrated/torn down on every (non-suspended) reconcile.
+    reconcile_repository_server(ctx, repo, &namespace, &name).await?;
+
     // The controller may run kopia in-process for the FILESYSTEM backend only
     // (ADR §5.4 permits short idempotent ops; a *bare-path* filesystem repo is
     // reachable from the controller's own filesystem via a hostPath/shared mount,
@@ -385,6 +391,50 @@ async fn reconcile_inner(repo: &Repository, ctx: &Context) -> Result<Action> {
     Ok(Action::requeue(catalog::reconcile_interval(
         repo.spec.catalog.as_ref(),
     )))
+}
+
+/// Apply / migrate / tear down the optional kopia web-UI server for a `Repository`.
+/// The server objects live in the Repository's own namespace and are owned by it
+/// (owner-ref GC reaps them on deletion).
+async fn reconcile_repository_server(
+    ctx: &Context,
+    repo: &Repository,
+    namespace: &str,
+    name: &str,
+) -> Result<()> {
+    use crate::server::{ServerReconcileCtx, reconcile_server, server_status_json};
+
+    let desired_ns = repo.spec.server.as_ref().map(|_| namespace.to_string());
+    let observed_ns = repo
+        .status
+        .as_ref()
+        .and_then(|s| s.server.as_ref())
+        .and_then(|sv| sv.namespace.clone());
+    let owner = Some(io::owner_ref_for(repo, "Repository")?);
+
+    let rc = ServerReconcileCtx {
+        client: &ctx.client,
+        instance: name,
+        backend: &repo.spec.backend,
+        encryption: &repo.spec.encryption,
+        server: repo.spec.server.as_ref(),
+        target_namespace: desired_ns,
+        observed_namespace: observed_ns,
+        owner,
+        extra_labels: Default::default(),
+        creds_src_namespace: namespace.to_string(),
+        is_cluster: false,
+        image: &ctx.mover_image,
+        image_pull_policy: mover_pull_policy_pub(),
+        service_account: ctx.mover_service_account.as_deref(),
+    };
+
+    let outcome = reconcile_server(&rc).await?;
+    if let Some(status) = server_status_json(&outcome) {
+        let api: Api<Repository> = Api::namespaced(ctx.client.clone(), namespace);
+        io::patch_status(&api, name, status).await?;
+    }
+    Ok(())
 }
 
 /// `status.catalog.lastRefreshAt` from the cached object (the refresh-due gate).

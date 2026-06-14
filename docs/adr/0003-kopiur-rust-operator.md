@@ -300,6 +300,17 @@ See ADR-0001 §4.10. Metrics emitted via `prometheus` crate. Controller exports 
 
 Tracing via `tracing` + `tracing-subscriber` with OTLP export. Every reconcile is a single `tracing::Span` keyed by `(kind, namespace, name, generation)`; child spans cover kopia subprocess invocations, webhook calls, and finalizer steps.
 
+### 4.14 Repository web UI (`spec.server`) — server addendum
+
+This subsection amends two earlier decisions. ADR §5.4 (and `crates/kopia`) originally listed running a kopia API server (`server start`) as **deliberately out of scope**. We now admit a **bounded, declarative** server surface: an optional `spec.server` block on `Repository`/`ClusterRepository` that runs `kopia server start` in a Deployment and exposes it via a **Service** so users can browse the repository through Kopia's built-in HTML UI. Only a Service is created — Ingress/HTTPRoute is the user's responsibility (the `service.annotations` field is the seam).
+
+- **Type-safety preserved.** `spec.server.auth` is an externally-tagged enum (`generate` | `secretRef` | `insecure`), matched exhaustively, exactly like `backend`. Presence of `spec.server` means enabled. `service.type` is a closed enum. The cluster-scoped CRD wraps the shared `ServerSpec` with a required `namespace` so the field is structurally unreachable on the namespaced CRD.
+- **Security is the headline caveat.** Kopia's server UI has **no read-only mode** — it is full read/write/**delete**, and the server pod holds the repository decryption key. Therefore: `auth` defaults to `generate` (operator-minted credentials in an owned Secret, pinned to `status.server.generatedSecretRef`), never to no-auth; the `insecure` (no-auth) mode is webhook-rejected unless `acknowledgeInsecure: true`; the Service defaults to `ClusterIP`. TLS is terminated by the user's ingress, so the in-pod server always runs `--insecure` (kopia's *no-TLS* switch — distinct from the no-auth `--without-password`).
+- **Runtime.** A new strongly-typed path, not the run-once mover `Operation`: a typed `ServerStartSpec` + args builder in `crates/kopia`, a `ServerWorkSpec` + `serve` entrypoint in the mover that connects then `exec`s `kopia server start`, and a pure `server.rs` Deployment/Service builder in the controller (`replicas: 1`, `Recreate`, TCP readiness probe, hardened securityContext, emptyDir config+cache).
+- **Lifecycle.** The namespaced `Repository` owns its server children via ownerReferences. A cluster-scoped `ClusterRepository` **cannot** own namespaced children (GC won't honor a cross-scope ownerReference), so its children carry back-reference labels and are cleaned up via a finalizer + a pinned `status.server.namespace` (which also drives toggle-off and namespace-migration teardown that owner-ref GC can't). For object-store ClusterRepositories the credentials Secret is mirrored into the server namespace (envFrom is same-namespace only).
+- **Filesystem constraint.** A long-lived server holding a `ReadWriteOnce` repo PVC would block backup/restore movers, so the repo PVC must be `ReadWriteMany` when `spec.server` is set on a filesystem Repository (enforced at reconcile, since the check needs a live PVC read). Object-store backends connect over the network with no such constraint.
+- **RBAC.** The controller gains `apps/deployments` + core `services` (full) and `secrets` create/delete (previously read-only) — a deliberate escalation. ClusterRepository + server therefore requires the cluster-scoped install.
+
 ---
 
 ## 5. Implementation surface (Rust-specific)
@@ -345,6 +356,8 @@ Reconcile errors return `kube::runtime::controller::Action::requeue(duration)` w
 Subprocess via `tokio::process::Command`. JSON output streamed line-by-line (`tokio::io::BufReader::lines`) and parsed with `serde_json::from_str` into kopia-defined types (`kopia-cli-types` sub-crate; manually maintained against kopia's stable CLI JSON output, regenerated when kopia releases new fields).
 
 Long-running snapshot/restore subprocesses are managed by the mover pod, not the controller. The controller never spawns kopia directly except for short, idempotent operations: `kopia repository connect --json` to validate a `Repository`, `kopia snapshot list --json` to materialize the catalog. These run as short-lived `Job`s, not in-process, so a controller restart doesn't strand a kopia process.
+
+`kopia server start` was originally excluded here as "no place inside a declarative operator." That exclusion is **superseded by §4.14**: it is now wrapped as a bounded, browse-the-repository UI surface, run as a long-lived Deployment (not the controller, not a one-shot Job) via the mover's `serve` entrypoint, which `exec`s kopia so it owns the pod PID and receives SIGTERM directly.
 
 ### 5.5 Why Rust, concretely
 

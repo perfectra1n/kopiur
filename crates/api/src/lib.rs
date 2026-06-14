@@ -9,6 +9,7 @@ pub mod maintenance;
 pub mod repository;
 pub mod repository_replication;
 pub mod restore;
+pub mod server;
 pub mod snapshot;
 pub mod snapshot_policy;
 pub mod snapshot_schedule;
@@ -50,6 +51,9 @@ pub use repository_replication::{
 pub use restore::{
     OnMissingSnapshot, PopulatorTarget, Restore, RestorePhase, RestoreSource, RestoreSpec,
     RestoreStatus, RestoreTarget,
+};
+pub use server::{
+    ClusterServerSpec, ServerAuth, ServerService, ServerSpec, ServerStatus, ServiceType,
 };
 pub use snapshot::{
     Origin, Snapshot, SnapshotPhase, SnapshotSpec, SnapshotStats, SnapshotStatus, SnapshotTiming,

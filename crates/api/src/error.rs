@@ -181,6 +181,29 @@ pub enum ValidationError {
         got: String,
     },
 
+    /// `spec.server.auth.insecure` was selected without `acknowledgeInsecure: true`.
+    /// The no-auth server exposes full read/write/delete of the repository with no
+    /// login, so it must be explicitly acknowledged (server addendum).
+    #[error(
+        "spec.server.auth.insecure requires acknowledgeInsecure: true — a no-auth kopia \
+         server exposes full read/write/delete of every backup with no login"
+    )]
+    InsecureServerNotAcknowledged,
+
+    /// `spec.server.service.port` was set to an invalid value (0).
+    #[error("spec.server.service.port {port} is invalid (must be 1–65535)")]
+    InvalidServerPort {
+        /// The rejected port value (always `0` today).
+        port: u16,
+    },
+
+    /// A `ClusterRepository.spec.server` did not set the required target `namespace`.
+    #[error(
+        "spec.server.namespace is required for a ClusterRepository server (cluster-scoped \
+         resources have no implicit namespace)"
+    )]
+    ServerNamespaceRequired,
+
     /// A label selector was supplied as the tenancy gate but the caller could not
     /// provide the consumer namespace's labels to match against. We fail closed
     /// (deny) rather than guess (ADR §3.2 — the webhook never trusts unfiltered

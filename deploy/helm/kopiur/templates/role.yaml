@@ -66,17 +66,29 @@ rules:
   # create+patch back the opt-in credential projection (spec.credentialProjection),
   # gated by secretProjection.enabled; read-only otherwise. See the ClusterRole for
   # the full rationale.
+  # Secrets: read repository credentials, create+patch the opt-in credential
+  # projection, AND create/patch/delete the operator-owned kopia web-UI auth Secret
+  # (spec.server Generate mode) + the cross-namespace credentials mirror. The server
+  # feature is presence-driven per-Repository, so the write verbs are granted
+  # unconditionally (a deliberate escalation — see the generated operator-role and the
+  # server addendum). Mirrors deploy/rbac/operator-role.yaml.
   - apiGroups: [""]
     resources:
       - secrets
-    {{- if .Values.secretProjection.enabled }}
-    verbs: [get, list, watch, create, patch]
-    {{- else }}
-    verbs: [get, list, watch]
-    {{- end }}
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Services exposing the kopia web-UI server (spec.server).
+  - apiGroups: [""]
+    resources:
+      - services
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Mover Jobs and the kopia web-UI server Deployment (spec.server).
   - apiGroups: [batch]
     resources:
       - jobs
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [apps]
+    resources:
+      - deployments
     verbs: [get, list, watch, create, update, patch, delete]
   # CSI volume snapshots used as a consistent source for snapshotting (copyMethod:
   # Snapshot/Clone). `patch` backs the server-side apply that creates the staged

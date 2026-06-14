@@ -1,0 +1,108 @@
+# Example 25 — Browse a repository with the Kopia web UI (`spec.server`)
+#
+# Setting `spec.server` on a Repository (or ClusterRepository) makes the operator
+# run `kopia server start` in a Deployment and expose it via a Service, so you can
+# browse snapshots/policies through Kopia's built-in HTML UI. Only a Service is
+# created — wiring an Ingress/HTTPRoute is left to you (commented below).
+#
+# ┌─ SECURITY ─────────────────────────────────────────────────────────────────┐
+# │ Kopia's server UI has NO read-only mode. Anyone who can reach it can READ,   │
+# │ CREATE, and DELETE backups, and the server pod holds the repository          │
+# │ DECRYPTION KEY. Treat exposing it exactly like exposing the repository       │
+# │ itself. Defaults here are the safe ones:                                     │
+# │   * `auth: { generate: {} }` — the operator mints random UI credentials into │
+# │     an owned Secret (`<repo>-kopia-ui-auth`) and pins the ref to             │
+# │     `status.server.generatedSecretRef`. Read them with:                      │
+# │       kubectl -n apps get secret nas-primary-kopia-ui-auth \                 │
+# │         -o jsonpath='{.data.password}' | base64 -d                           │
+# │   * `service.type: ClusterIP` — not exposed outside the cluster by default.  │
+# │ The no-auth `insecure` mode exists but requires an explicit                  │
+# │ `acknowledgeInsecure: true` (webhook-rejected otherwise). Strongly consider  │
+# │ a NetworkPolicy restricting who may reach the Service.                       │
+# └─────────────────────────────────────────────────────────────────────────────┘
+#
+# Filesystem backends: a long-lived server holds the repo PVC, so it would block
+# backup/restore movers on a ReadWriteOnce volume — the operator requires the repo
+# PVC to be ReadWriteMany when `spec.server` is set on a filesystem Repository.
+# Object-store backends (shown here) connect over the network and have no such
+# constraint.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nas-primary-creds
+  namespace: apps
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+  KOPIA_PASSWORD: "choose-something-long-and-random"
+---
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata:
+  name: nas-primary
+  namespace: apps
+spec:
+  backend:
+    s3:
+      bucket: my-backups
+      endpoint: s3.us-east-1.amazonaws.com
+      region: us-east-1
+      auth:
+        secretRef:
+          name: nas-primary-creds
+  encryption:
+    passwordSecretRef:
+      name: nas-primary-creds
+      key: KOPIA_PASSWORD
+  # The web UI server. Presence of this block enables it.
+  server:
+    # Default (and recommended): operator-generated credentials.
+    auth:
+      generate:
+        username: kopia # optional; defaults to "kopia"
+    # Alternatives:
+    #   auth: { secretRef: { name: my-ui-creds, usernameKey: username, passwordKey: password } }
+    #   auth: { insecure: { acknowledgeInsecure: true } }   # NO auth — footgun
+    service:
+      type: ClusterIP # ClusterIP (default) | NodePort | LoadBalancer
+      port: 51515
+      annotations: {} # the seam for your ingress/LB controller
+    # resources: { requests: { cpu: 25m, memory: 64Mi } }
+    # securityContext: {}
+---
+# Bring-your-own routing (uncommented as an illustration). Kopiur never creates an
+# Ingress/HTTPRoute — point your own at the Service `nas-primary-kopia-ui:51515`.
+#
+# apiVersion: gateway.networking.k8s.io/v1
+# kind: HTTPRoute
+# metadata:
+#   name: nas-primary-kopia-ui
+#   namespace: apps
+# spec:
+#   parentRefs:
+#     - name: internal
+#       namespace: gateway
+#   hostnames: ["kopia.example.internal"]
+#   rules:
+#     - backendRefs:
+#         - name: nas-primary-kopia-ui
+#           port: 51515
+#
+# And a NetworkPolicy is strongly recommended to restrict who can reach the Service:
+#
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: nas-primary-kopia-ui
+#   namespace: apps
+# spec:
+#   podSelector:
+#     matchLabels:
+#       app.kubernetes.io/name: kopiur-server
+#       app.kubernetes.io/instance: nas-primary
+#   ingress:
+#     - from:
+#         - namespaceSelector:
+#             matchLabels: { kubernetes.io/metadata.name: gateway }

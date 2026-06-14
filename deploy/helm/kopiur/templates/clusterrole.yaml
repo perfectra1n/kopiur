@@ -66,22 +66,34 @@ rules:
   # authorizer can't match a name at create time) and the projected name is per-Job,
   # so the grant is necessarily unscoped — a broader blast radius, hence the toggle.
   # No `delete`: projected copies carry an ownerRef and are reaped by GC.
+  # Secrets: read repository credentials, create+patch the opt-in credential
+  # projection, AND create/patch/delete the operator-owned kopia web-UI auth Secret
+  # (spec.server Generate mode) + the cross-namespace credentials mirror. The server
+  # feature is presence-driven per-Repository, so the write verbs are granted
+  # unconditionally (a deliberate escalation — see the server addendum). Mirrors
+  # deploy/rbac/operator-clusterrole.yaml.
   - apiGroups: [""]
     resources:
       - secrets
-    {{- if .Values.secretProjection.enabled }}
-    verbs: [get, list, watch, create, patch]
-    {{- else }}
-    verbs: [get, list, watch]
-    {{- end }}
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Services exposing the kopia web-UI server (spec.server).
+  - apiGroups: [""]
+    resources:
+      - services
+    verbs: [get, list, watch, create, update, patch, delete]
   # Read Namespaces to check the privileged-movers opt-in annotation (§4.11/§G16).
   - apiGroups: [""]
     resources:
       - namespaces
     verbs: [get, list, watch]
+  # Mover Jobs and the kopia web-UI server Deployment (spec.server).
   - apiGroups: [batch]
     resources:
       - jobs
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [apps]
+    resources:
+      - deployments
     verbs: [get, list, watch, create, update, patch, delete]
   # RWO Multi-Attach avoidance: discover the node a ReadWriteOnce source/destination
   # PVC is attached to so the mover can be pinned there. The bound PV's nodeAffinity
